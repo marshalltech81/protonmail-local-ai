@@ -335,7 +335,12 @@ class TestStatuses:
             (0, f"text with {MARKER}", None),
             (1, "", None),
             (2, None, "extraction failed"),
-            (3, None, "no extractor reads this file type"),
+            (
+                3,
+                None,
+                "no extractor could read this file: its type has no extractor, or the "
+                "extractor declined it (for example an encrypted PDF or a work cap)",
+            ),
             (4, None, "the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)"),
             (5, None, "the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)"),
             (

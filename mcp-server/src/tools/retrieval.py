@@ -553,7 +553,10 @@ _UNAVAILABLE_REASONS = {
     None: "no extraction is recorded for this attachment yet (not run yet, or attachment "
     "extraction is off)",
     "failed": "extraction failed",
-    "unsupported": "no extractor reads this file type",
+    # Every cause the dispatcher records as unsupported (#1343): no extractor
+    # for the type, or one that declined the bytes (an encrypted PDF, a work cap).
+    "unsupported": "no extractor could read this file: its type has no extractor, or the "
+    "extractor declined it (for example an encrypted PDF or a work cap)",
     "too_large": "the file is over the indexer's attachment size limit, so it was not extracted",
     # A success row is read only when it stored text.
     "success": "the extraction succeeded but stored no text",
