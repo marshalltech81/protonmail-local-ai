@@ -1101,7 +1101,9 @@ class TestPptExtractor:
             payload=_OLE2_MAGIC + MARKER.encode(),
         )
         assert (result.status, result.error, result.text) == (STATUS_FAILED, error, None)
-        assert time.monotonic() - started < 20
+        # The case's own timeout plus a margin: the exit and crash cases get
+        # the longer timeout, so a bound of 20 s would cut them off (#1253).
+        assert time.monotonic() - started < timeout + 15
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert len(warnings) == 1
         assert error in warnings[0].getMessage()
