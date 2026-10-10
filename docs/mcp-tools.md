@@ -1660,9 +1660,16 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
   indexer writes and its messages have the corpus's shape, stored in
   Trash so the round's set does not change; it overwrites deleted
   content as the indexer does. `indexer/tests/test_reconcile_bench_fidelity.py`
-  traces the indexer's own commits and checks the writer's sequence and
-  the tables of each commit. The bytes each commit writes are not
-  calibrated against the live indexer, and the pace is a parameter
+  traces the indexer's own commits and checks the writer's sequence, the
+  tables of each commit, and the rows and full-text entries it writes.
+  Two writes are known to differ: a thread body past the indexer's
+  4,000-token cap is cut by the benchmark's own token count (the
+  mcp-server image has no tokenizer), which keeps more of it than the
+  indexer does; and a message whose fresh attachments outrun the
+  indexer's per-pass extraction budget, which the indexer finishes over
+  further passes, is written in one pass. The writer's tables start
+  empty, its bytes are not calibrated against the live indexer, and the
+  pace is a parameter
   ([#1469](https://github.com/marshalltech81/protonmail-local-ai/issues/1469)).
   The writer runs with automatic checkpoints off, so the WAL file's
   size is the WAL's end.

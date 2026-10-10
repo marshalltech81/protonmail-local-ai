@@ -1084,6 +1084,23 @@ def test_writer_indexes_each_batch_into_trash(bench, tmp_path):
         assert [conn.execute(sql, params).fetchone()[0] for sql, params in counts] == before
 
 
+def test_writer_stores_the_extraction_stress_text_as_build_does(bench, tmp_path):
+    # ``--extracted-chars``: every extraction row holds that many
+    # four-byte characters and no attachment chunk is built.
+    db = tmp_path / "stress.db"
+    bench.build(db, 8, 1, "typical", "typical", extracted_chars=5)
+    stop = tmp_path / "stop"
+    timer = _stop_after_ready(stop, 0.3)
+    shape = {"per_message": 1, "extracted_chars": 5}
+    bench.phase_writer(str(db), str(stop), 1, 3600.0, shape=shape)
+    timer.join()
+    with closing(sqlite3.connect(db)) as conn:
+        texts = {r[0] for r in conn.execute("SELECT extracted_text FROM attachment_extractions")}
+        kinds = [r[0] for r in conn.execute("SELECT kind FROM message_chunks WHERE rowid > 8")]
+    assert texts == {bench._WIDE * 5}
+    assert kinds == ["body"]
+
+
 def test_writer_removes_what_an_earlier_writer_added(bench, tmp_path):
     # Each WAL configuration starts from the corpus build wrote.
     db = tmp_path / "again.db"

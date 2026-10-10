@@ -441,6 +441,25 @@ def test_wal_writer_constants_are_the_indexers(bench):
     assert bench.SUM_ENCODING_VERSION == vector_sums.ENCODING_VERSION
     assert bench.PER_MESSAGE_BODY_CAP_CHARS == threader.PER_MESSAGE_BODY_CAP_CHARS
     assert bench.THREAD_BODY_TEXT_MAX_TOKENS == threader.THREAD_BODY_TEXT_MAX_TOKENS
+    assert bench._SUBJECT_PREFIX_RE.pattern == threader._SUBJECT_PREFIX_RE.pattern
+    assert bench._SUBJECT_PREFIX_RE.flags == threader._SUBJECT_PREFIX_RE.flags
+    assert (
+        bench.FTS_REPLY_SUBJECTS_MAX,
+        bench.FTS_REPLY_SUBJECTS_MAX_CHARS,
+        bench.FTS_SUBJECT_SCAN_ROWS,
+        bench.FTS_SUBJECT_SCAN_CHARS,
+    ) == (
+        threader.FTS_REPLY_SUBJECTS_MAX,
+        threader.FTS_REPLY_SUBJECTS_MAX_CHARS,
+        threader.FTS_SUBJECT_SCAN_ROWS,
+        threader.FTS_SUBJECT_SCAN_CHARS,
+    )
+    subjects = ["Re: Fwd:  Hello   World", "AW: hello world", "SV:Other", "", "x" * 600]
+    for subject in subjects:
+        assert bench._normalize_subject(subject) == threader._normalize_subject(subject)
+    assert bench._fts_subject_text("hello world", subjects * 30) == threader.fts_subject_text(
+        "hello world", subjects * 30
+    )
     assert bench.STEADY_STATE_BATCH_SIZE == main.STEADY_STATE_BATCH_SIZE
     assert bench.INITIAL_INDEX_BATCH_SIZE == main.INITIAL_INDEX_BATCH_SIZE
     rng = random.Random(3)
@@ -452,3 +471,146 @@ def test_wal_writer_constants_are_the_indexers(bench):
         assert len(struct.unpack(f"{EMBEDDING_DIM}f", blob)) == EMBEDDING_DIM
     assert bench._encode_sum(total) == vector_sums.encode(total)
     assert bench._encode_sum([0] * EMBEDDING_DIM) == vector_sums.encode([0] * EMBEDDING_DIM)
+
+
+# Values the writer does not reproduce on purpose: the wall clock, the
+# folder (its messages are stored in Trash), the file's mtime, and the
+# vector sums (its vectors are random, the mock embedder's are zero).
+_WRITER_UNCOMPARED = _CLOCK | {"folder", "mtime_ns", "sum"}
+_WRITER_ROWS = {
+    "messages": "claimant_id",
+    "message_participants": "claimant_id, role, address",
+    "message_participant_names": "claimant_id, role, address, name",
+    "entities": "entity_id",
+    "entity_aliases": "entity_id, alias",
+    "message_chunks": "chunk_id",
+    "attachments": "attachment_occurrence_id",
+    "attachment_extractions": "attachment_id, extractor_module",
+    "threads": "thread_id",
+    "message_thread_map": "claimant_id",
+    "indexed_files": "filepath",
+    "thread_vector_sums": "thread_id",
+    "indexing_jobs": "filepath",
+}
+_FTS_WRITES = (
+    "INSERT INTO threads_fts",
+    "DELETE FROM threads_fts",
+    "INSERT INTO message_chunks_fts",
+    "INSERT INTO attachments_fts",
+)
+
+
+def _traced_rows(path: Path, root: str | None) -> dict:
+    with closing(sqlite3.connect(path)) as conn:
+        out = {}
+        for table, order in _WRITER_ROWS.items():
+            rows = _without(_rows(conn, table, order), _WRITER_UNCOMPARED)
+            for row in rows:
+                if root and isinstance(row.get("filepath"), str):
+                    row["filepath"] = row["filepath"].replace(root, "/maildir", 1)
+            out[table] = rows
+        return out
+
+
+@pytest.mark.parametrize("case", ["typical", "ascii998_worst_shallow", "cardinality"])
+def test_wal_writer_writes_the_rows_the_indexer_writes(bench, tmp_path, monkeypatch, case):
+    identity, records, _pm, _c, _w, references, _n = CASES[case]
+    if case.endswith("_shallow"):
+        real_shape = bench._shape
+
+        def shallow(*args):
+            shape = real_shape(*args)
+            if "folder" in shape:
+                shape["folder"] = "/".join(shape["folder"].split("/")[:2])
+            return shape
+
+        monkeypatch.setattr(bench, "_shape", shallow)
+    # The writer's first batch on an empty corpus is numbered from 0, so
+    # it writes the four messages (a thread root and three replies, an
+    # attachment each) the indexer's first index writes here: every row
+    # of every table and every FTS statement (values included; the FTS
+    # tables keep no content to compare) must be the indexer's, so each
+    # commit writes what the indexer's does, not only to the same
+    # tables.
+    maildir = tmp_path / "maildir"
+    vendors: dict[str, str] = {}
+    for i in range(4):
+        path = Path(bench.maildir_path(i, identity, records, str(maildir)))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(
+            bench.render_eml(i, identity, records, references, chunks=1, words=40, per_message=1)
+        )
+        for _, address, _ in bench._shape(i, identity, records, references)["people"]:
+            if bench.authority(address)[0] != "unclassified":
+                vendors[address] = bench.authority(address)[0]
+    statements: list[str] = []
+    real = Database._connect
+
+    def traced(self):
+        conn = real(self)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(Database, "_connect", traced)
+    db = Database(tmp_path / "indexer.db")
+    db.set_authority_rules(AuthorityRules(addresses=vendors))
+    monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+    monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", 4)
+    statements.clear()
+    main.initial_index(
+        db,
+        make_mock_embedder([0.0] * EMBEDDING_DIM),
+        Threader(db),
+        IndexingQueue(db, max_attempts=3),
+    )
+    db.close()
+    expected_fts = [s for s in statements if s.startswith(_FTS_WRITES)]
+    expected = _traced_rows(tmp_path / "indexer.db", str(maildir))
+
+    ours_db = tmp_path / "writer.db"
+    bench.build(ours_db, 0, 1, identity, records)
+    ours_statements: list[str] = []
+    real_connect = bench.sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        conn.set_trace_callback(ours_statements.append)
+        return conn
+
+    monkeypatch.setattr(bench.sqlite3, "connect", traced_connect)
+    stop = tmp_path / "stop"
+    import threading
+    import time
+
+    def stop_after_ready() -> None:
+        ready = Path(str(stop) + ".ready")
+        deadline = time.monotonic() + 120
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.3)
+        stop.touch()
+
+    timer = threading.Thread(target=stop_after_ready)
+    timer.start()
+    shape = {**_SHAPE, "identity": identity, "records": records, "references": references}
+    bench.phase_writer(str(ours_db), str(stop), 4, 3600.0, shape=shape)
+    timer.join()
+    ours = _traced_rows(ours_db, None)
+    # After the writer's setup commit (its first).
+    batch = ours_statements[ours_statements.index("COMMIT") + 1 :]
+    ours_fts = [s for s in batch if s.startswith(_FTS_WRITES)]
+    if case != "typical":
+        # These threads' bodies pass ``THREAD_BODY_TEXT_MAX_TOKENS``,
+        # which the indexer counts with its BPE tokenizer and the writer
+        # with ``token_estimate`` (the mcp-server image has no
+        # tokenizer), exact only for the benchmark's words: the writer
+        # keeps more of the body. Everything else matches.
+        for a, b in zip(ours["threads"], expected["threads"], strict=True):
+            assert len(a.pop("body_text")) > len(b.pop("body_text"))
+        ours_fts = [s for s in ours_fts if not s.startswith("INSERT INTO threads_fts")]
+        expected_fts = [s for s in expected_fts if not s.startswith("INSERT INTO threads_fts")]
+    problems = []
+    for table in _WRITER_ROWS:
+        problems += _differences(table, ours[table], expected[table])
+    assert problems == []
+    assert ours_fts == expected_fts

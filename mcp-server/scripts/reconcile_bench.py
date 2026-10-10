@@ -47,6 +47,7 @@ import json
 import math
 import os
 import random
+import re
 import resource
 import sqlite3
 import statistics
@@ -588,7 +589,8 @@ class _Record:
     entity_addresses: list
     # (pk, attachment_id, kind, chunk_index, text, char_start, char_end).
     chunks: list
-    # (occurrence ID, attachment ID, payload size, extracted text).
+    # (occurrence ID, attachment ID, payload size, extracted text: the
+    # stress text under ``extracted_chars``).
     attachments: list
 
 
@@ -628,7 +630,7 @@ def _record(
         occurrence = hashlib.sha256(
             f"{cid}\0{attachment_id}\0{shape['filename']}\0{k}".encode()
         ).hexdigest()
-        attachments.append((occurrence, attachment_id, len(payload), text))
+        attachments.append((occurrence, attachment_id, len(payload), stress_text or text))
         if not stress_text:
             chunk_rows.append(
                 (f"{cid}::{attachment_id}", attachment_id, "attachment", 0, text, 0, len(text))
@@ -826,7 +828,7 @@ def build(
                     "authority_class, authority_rule) VALUES (?, 'person', ?, ?, ?, ?)",
                     (f"person:{address}", address, f"org:{domain}", *authority(address)),
                 )
-            for occurrence, attachment_id, size, text in rec.attachments:
+            for occurrence, attachment_id, size, extracted in rec.attachments:
                 n_att_fts += 1
                 conn.execute(
                     "INSERT INTO attachments_fts (rowid, filename, content_type) VALUES (?, ?, ?)",
@@ -846,7 +848,7 @@ def build(
                         n_att_fts,
                     ),
                 )
-                conn.execute(_INSERT_EXTRACTION, (attachment_id, stress_text or text, now))
+                conn.execute(_INSERT_EXTRACTION, (attachment_id, extracted, now))
             for pk, attachment_id, kind, c, text, start, end in rec.chunks:
                 tokens = token_estimate(text)
                 if kind == "body":
@@ -1551,6 +1553,16 @@ PER_MESSAGE_BODY_CAP_CHARS = 2000
 THREAD_BODY_TEXT_MAX_TOKENS = 4000
 STEADY_STATE_BATCH_SIZE = 8
 INITIAL_INDEX_BATCH_SIZE = 50
+# indexer/src/threader.py: reply and forward prefixes, and the bounds on
+# the subjects ``fts_subject_text`` writes to a thread's FTS row.
+_SUBJECT_PREFIX_RE = re.compile(
+    r"(?:(?:re|fwd|fw|回复|答复)[\s:\[\]]+|(?:aw|ant|sv|tr)[:\[\]]+)",
+    re.IGNORECASE,
+)
+FTS_REPLY_SUBJECTS_MAX = 20
+FTS_REPLY_SUBJECTS_MAX_CHARS = 2000
+FTS_SUBJECT_SCAN_ROWS = 200
+FTS_SUBJECT_SCAN_CHARS = 500
 # The largest ``--writer-batch``: twenty times a first index's default.
 MAX_WRITER_BATCH = 1000
 # The queue's marker for a message whose step is running
@@ -1594,6 +1606,76 @@ def _encode_sum(total: list[int]) -> bytes:
         varint(n)
         out += m.to_bytes(n, "big", signed=True)
     return bytes(out)
+
+
+def _normalize_subject(subject: str) -> str:
+    """indexer/src/threader.py ``_normalize_subject``: the thread's
+    matching key."""
+    s = subject.lower().strip()
+    pos = 0
+    while match := _SUBJECT_PREFIX_RE.match(s, pos):
+        pos = match.end()
+        while pos < len(s) and s[pos].isspace():
+            pos += 1
+    return re.sub(r"\s+", " ", s[pos:]).strip()
+
+
+def _fts_subject_text(thread_subject: str, subjects: list[str]) -> str:
+    """indexer/src/threader.py ``fts_subject_text``: the thread's FTS
+    subject column, its subject then each changed message subject."""
+    seen = {_normalize_subject(thread_subject[:FTS_SUBJECT_SCAN_CHARS])}
+    parts = [thread_subject]
+    used = 0
+    for subject in subjects[:FTS_SUBJECT_SCAN_ROWS]:
+        if len(parts) > FTS_REPLY_SUBJECTS_MAX:
+            break
+        normalized = _normalize_subject(subject[:FTS_SUBJECT_SCAN_CHARS])
+        if not normalized or normalized in seen:
+            continue
+        if used + len(normalized) > FTS_REPLY_SUBJECTS_MAX_CHARS:
+            break
+        seen.add(normalized)
+        parts.append(normalized)
+        used += len(normalized)
+    return "\n".join(parts)
+
+
+def _addresses(rec: _Record) -> tuple[list[str], list[str]]:
+    """The message's From addresses and all its addresses (authors
+    first, the first of each address kept) as the parser hands them to
+    the threader: the header's mailbox with its decoded name."""
+    people = [*rec.shape["people"], *rec.shape.get("extra_names", [])]
+    authors: list[str] = []
+    everyone: list[str] = []
+    seen: set[str] = set()
+    for role in ("from", "to", "cc"):
+        for r, address, name in people:
+            if r != role:
+                continue
+            mailbox = (
+                f"{name} <{address}>"
+                if name and not name.isascii()
+                else formataddr((name or "", address))
+            )
+            if role == "from":
+                authors.append(mailbox)
+            if address.lower() not in seen:
+                seen.add(address.lower())
+                everyone.append(mailbox)
+    return authors, everyone
+
+
+def _dedupe(mailboxes: list[str]) -> list[str]:
+    """indexer/src/database.py ``_dedupe_by_canonical``: the first
+    mailbox of each address."""
+    seen: set[str] = set()
+    out = []
+    for mailbox in mailboxes:
+        key = mailbox.rpartition("<")[2].rstrip(">").lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(mailbox)
+    return out
 
 
 def _thread_body(text: str) -> str:
@@ -1642,12 +1724,17 @@ class _WriterThread:
     indexer reads it back from ``threads`` and ``thread_vector_sums``)."""
 
     tid: str
+    # The matching key, and the root's own subject (``display_subject``).
     subject: str
+    display_subject: str
     participants: list
     senders: list
     message_ids: list
+    # Each message's subject, oldest first (the FTS subject column's input).
+    subjects: list
     body: str
     date_first: str
+    has_attachments: bool = False
     fts_rowid: int | None = None
     sums: list | None = None
     count: int = 0
@@ -1663,35 +1750,38 @@ def _writer_phase1(
     aliases, the thread's FTS row and seed vector), in the open
     transaction. The message is stored in Trash, so the round's
     unfiltered predicate leaves it out. Returns the thread."""
-    authors = [address for role, address in rec.parts if role == "from"]
-    addresses = list(dict.fromkeys(address for _, address in rec.parts))
-    body = "\n".join(text for _, _, kind, _, text, _, _ in rec.chunks if kind == "body")
-    block = f"From: {authors[0] if authors else ''}\nDate: {rec.at}\n"
-    block += body[:PER_MESSAGE_BODY_CAP_CHARS]
+    authors, addresses = _addresses(rec)
+    sender = authors[0] if authors else ""
+    body = "\n\n".join(text for _, _, kind, _, text, _, _ in rec.chunks if kind == "body")
+    block = f"From: {sender}\nDate: {rec.at}\n{body[:PER_MESSAGE_BODY_CAP_CHARS]}"
     new = thread is None
     if thread is None:
+        subject = _normalize_subject(rec.shape["subject"])
+        # indexer/src/threader.py ``Thread.build_body_text``.
         thread = _WriterThread(
             tid=rec.tid,
-            subject=rec.shape["subject"],
+            subject=subject,
+            display_subject=rec.shape["subject"],
             participants=addresses,
-            senders=authors,
+            senders=[sender] if sender else [],
             message_ids=[rec.cid],
+            subjects=[rec.shape["subject"]],
             body=_thread_body(
                 "\n".join(
-                    [f"Subject: {rec.shape['subject']}", f"Participants: {', '.join(addresses)}"]
+                    [f"Subject: {subject}", f"Participants: {', '.join(addresses)}", "", block, ""]
                 )
-                + "\n\n"
-                + block
-                + "\n"
             ),
             date_first=rec.at,
             sums=[0] * EMBEDDING_DIM,
         )
     else:
-        thread.participants = list(dict.fromkeys([*thread.participants, *addresses]))
-        thread.senders = list(dict.fromkeys([*thread.senders, *authors]))
+        # indexer/src/database.py ``upsert_thread`` and ``_compute_body``.
+        thread.participants = _dedupe(thread.participants + addresses)
+        thread.senders = _dedupe(thread.senders + ([sender] if sender else []))
         thread.message_ids.append(rec.cid)
+        thread.subjects.append(rec.shape["subject"])
         thread.body = _thread_body(thread.body + "\n" + block)
+    thread.has_attachments = thread.has_attachments or bool(rec.attachments)
     participants = json.dumps(thread.participants)
     conn.execute(
         "INSERT INTO threads (thread_id, subject, participants, senders, folder, "
@@ -1704,16 +1794,16 @@ def _writer_phase1(
         "body_text = excluded.body_text, display_subject = excluded.display_subject",
         (
             thread.tid,
-            thread.subject.lower(),
+            thread.subject,
             participants,
             json.dumps(thread.senders),
             thread.date_first,
             rec.at,
             json.dumps(thread.message_ids),
             body[:200].replace("\n", " "),
-            1 if rec.attachments else 0,
+            1 if thread.has_attachments else 0,
             thread.body,
-            thread.subject,
+            thread.display_subject,
         ),
     )
     if new:
@@ -1779,7 +1869,7 @@ def _writer_phase1(
         conn.execute("DELETE FROM threads_fts WHERE rowid = ?", (thread.fts_rowid,))
     thread.fts_rowid = conn.execute(
         "INSERT INTO threads_fts (subject, participants, body) VALUES (?, ?, ?)",
-        (thread.subject, participants, thread.body),
+        (_fts_subject_text(thread.subject, thread.subjects), participants, thread.body),
     ).lastrowid
     conn.execute(
         "UPDATE threads SET fts_rowid = ? WHERE thread_id = ?", (thread.fts_rowid, thread.tid)
@@ -1801,38 +1891,48 @@ def _writer_phase2c(
     conn: sqlite3.Connection, rec: _Record, thread: _WriterThread, rng: random.Random, now: str
 ) -> None:
     """Message ``rec``'s phase 2c writes (indexer/src/main.py
-    ``_phase2c_commit_vectors``: each chunk with its FTS row and vector,
-    the thread's sum, the body's completeness, each occurrence with its
-    FTS row and extraction, the thread's vector), in the open
-    transaction. Vectors are random unit vectors: their bytes, not their
-    values, are what the WAL keeps."""
-    assert thread.sums is not None
+    ``_phase2c_commit_vectors``), in the open transaction and the
+    indexer's order: the body chunks with their FTS rows and vectors and
+    the thread's sum, the body's completeness, then per occurrence its
+    FTS row, row and extraction, its chunks and the sum again, and last
+    the thread's vector. Vectors are random unit vectors: their bytes,
+    not their values, are what the WAL keeps."""
     shape = rec.shape
-    for pk, attachment_id, kind, c, text, start, end in rec.chunks:
-        vector = _unit_vector(rng)
-        fts_rowid = conn.execute(
-            "INSERT INTO message_chunks_fts (text) VALUES (?)", (text,)
-        ).lastrowid
-        values = _chunk_values(rec, pk, attachment_id, kind, c, text, start, end, now, fts_rowid)
+
+    def chunks(attachment_id: str | None) -> None:
+        # indexer/src/database.py ``replace_message_chunks``.
+        assert thread.sums is not None
+        for pk, chunk_attachment, kind, c, text, start, end in rec.chunks:
+            if chunk_attachment != attachment_id:
+                continue
+            vector = _unit_vector(rng)
+            fts_rowid = conn.execute(
+                "INSERT INTO message_chunks_fts (text) VALUES (?)", (text,)
+            ).lastrowid
+            values = _chunk_values(
+                rec, pk, chunk_attachment, kind, c, text, start, end, now, fts_rowid
+            )
+            conn.execute(
+                "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+                (values[0], vector),
+            )
+            conn.execute(_INSERT_CHUNK, values)
+            thread.sums = [a + b for a, b in zip(thread.sums, _vector_units(vector), strict=True)]
+            thread.count += 1
+            # The thread vector is the chunks' mean; any unit vector has its size.
+            thread.vector = vector
         conn.execute(
-            "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
-            (values[0], vector),
+            "INSERT INTO thread_vector_sums (thread_id, count, encoding_version, sum) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET "
+            "count = excluded.count, encoding_version = excluded.encoding_version, "
+            "sum = excluded.sum",
+            (thread.tid, thread.count, SUM_ENCODING_VERSION, _encode_sum(thread.sums)),
         )
-        conn.execute(_INSERT_CHUNK, values)
-        thread.sums = [a + b for a, b in zip(thread.sums, _vector_units(vector), strict=True)]
-        thread.count += 1
-        # The thread vector is the chunks' mean; any unit vector has its size.
-        thread.vector = vector
-    conn.execute(
-        "INSERT INTO thread_vector_sums (thread_id, count, encoding_version, sum) "
-        "VALUES (?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET "
-        "count = excluded.count, encoding_version = excluded.encoding_version, "
-        "sum = excluded.sum",
-        (thread.tid, thread.count, SUM_ENCODING_VERSION, _encode_sum(thread.sums)),
-    )
+
+    chunks(None)
     conn.execute("UPDATE messages SET body_complete = 1 WHERE claimant_id = ?", (rec.cid,))
-    for occurrence, attachment_id, size, text in rec.attachments:
-        conn.execute(_INSERT_EXTRACTION, (attachment_id, text, now))
+    for occurrence, attachment_id, size, extracted in rec.attachments:
+        # indexer/src/attachment_indexing.py ``apply_attachment_writes``.
         fts_rowid = conn.execute(
             "INSERT INTO attachments_fts (filename, content_type) VALUES (?, ?)",
             (shape["filename"], shape["content_type"]),
@@ -1851,6 +1951,8 @@ def _writer_phase2c(
                 fts_rowid,
             ),
         )
+        conn.execute(_INSERT_EXTRACTION, (attachment_id, extracted, now))
+        chunks(attachment_id)
     _write_thread_vector(conn, thread)
 
 
