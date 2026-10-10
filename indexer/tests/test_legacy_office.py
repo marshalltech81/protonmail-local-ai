@@ -751,6 +751,7 @@ class TestXlsExtractor:
         assert "OBSIDIAN-HERON 8812" in (result.text or "")
 
     @linux_only
+    @pytest.mark.serial
     def test_sst_loop_meets_the_address_space_limit(self, monkeypatch):
         """The shared-string loop runs until the child's address space
         runs out: the child reports MemoryError, a bounded failed row. The parent's

@@ -83,6 +83,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
     "real_extractor_child: start the real extractor child process for the OOXML, image and PDF extractors (tests/conftest.py)",
+    "serial: a real extractor child must reach one limit (address space, pages read, a tool started) before another (CPU time, wall clock); CI runs these after the parallel pass, alone on the runner (#1472)",
 ]
 addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90"
 filterwarnings = [

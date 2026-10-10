@@ -899,6 +899,7 @@ class TestRealChild:
 @real_child
 @linux_only
 @requires_tesseract
+@pytest.mark.serial
 class TestLimitsInTheImage:
     """Run on Linux only: the address-space limit is not applied on macOS
     (``_launcher``), and the process checks read ``/proc``."""
