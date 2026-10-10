@@ -2,6 +2,8 @@
 
 All tools are available inside Claude Desktop once the stack is running.
 
+The server retrieves and reports mail. Linking threads and tracking matters are left to the client; see PLAN.md decision 44.
+
 ## Response format
 
 The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
