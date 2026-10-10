@@ -33,7 +33,8 @@ paged run: sizing"). The tables mirror the indexer's ``messages``,
 indexer writes for the messages ``render_eml`` describes
 (indexer/tests/test_reconcile_bench_fidelity.py indexes those files
 with the indexer and compares). Other tables (threads, vectors, the
-queue) are left out because no measured statement reads them.
+queue) are left out because no measured statement reads them; the WAL
+writer (``--wal``) creates them after every other step, for its commits.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ import random
 import resource
 import sqlite3
 import statistics
+import struct
 import subprocess
 import sys
 import time
@@ -208,9 +210,6 @@ CREATE VIRTUAL TABLE attachments_fts USING fts5(
     contentless_delete=1,
     tokenize='porter unicode61'
 );
--- Writer ballast for the WAL phase: stands for the chunk and vector
--- rows an indexer commit writes.
-CREATE TABLE bench_ballast (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
 -- Message and occurrence identities whose records are worst-case
 -- (``--records mixed``), for an upload that leaves exactly those out.
 CREATE TABLE bench_worst (identity TEXT PRIMARY KEY);
@@ -565,6 +564,181 @@ PDF_EXTRACTOR = "pdf-digital@6"
 PDF_IDENTIFIER = "none@2"
 
 
+@dataclass(frozen=True)
+class _Record:
+    """The rows the indexer writes for message ``i`` (``_record``), which
+    ``build`` stores and the WAL writer (``phase_writer``) stores again
+    as the indexer does for a new message."""
+
+    i: int
+    cid: str
+    mid: str
+    tid: str
+    folder: str
+    path: str
+    at: str
+    shape: dict
+    raw: bytes
+    # (role, address) -> its first display name; (role, address, name)
+    # for every distinct name.
+    parts: dict
+    names: dict
+    # The first distinct addresses (authors first), up to the indexer's
+    # per-message entity cap.
+    entity_addresses: list
+    # (pk, attachment_id, kind, chunk_index, text, char_start, char_end).
+    chunks: list
+    # (occurrence ID, attachment ID, payload size, extracted text).
+    attachments: list
+
+
+def _record(
+    i: int,
+    identity: str,
+    records: str,
+    references: int,
+    chunks: int,
+    chunk_tokens: int,
+    per_message: int,
+    stress_text: str | None,
+) -> _Record:
+    """Every value the indexer stores for message ``i`` (``build``'s
+    arguments; ``stress_text`` is the ``extracted_chars`` stress shape:
+    the extraction rows' text, with no attachment chunks)."""
+    shape = _shape(i, identity, records, references)
+    raw = render_eml(i, identity, records, references, chunks, chunk_tokens, per_message)
+    mid = message_id(i, identity)
+    cid = claimant_of(mid, raw)
+    parts: dict[tuple[str, str], str | None] = {}
+    names: dict[tuple[str, str, str], None] = {}
+    for role, address, name in [*shape["people"], *shape.get("extra_names", [])]:
+        parts.setdefault((role, address), name)
+        if name is not None:
+            names.setdefault((role, address, name))
+    paragraphs = [_paragraph(i, c, chunk_tokens) for c in range(chunks)]
+    chunk_rows = [
+        (cid, None, "body", c, text, start, end)
+        for c, (text, start, end) in enumerate(chunk_layout(paragraphs))
+    ]
+    attachments = []
+    for k in range(per_message):
+        text = attachment_text(i, k)
+        payload = pdf_payload(text)
+        attachment_id = hashlib.sha256(payload).hexdigest()
+        occurrence = hashlib.sha256(
+            f"{cid}\0{attachment_id}\0{shape['filename']}\0{k}".encode()
+        ).hexdigest()
+        attachments.append((occurrence, attachment_id, len(payload), text))
+        if not stress_text:
+            chunk_rows.append(
+                (f"{cid}::{attachment_id}", attachment_id, "attachment", 0, text, 0, len(text))
+            )
+    return _Record(
+        i=i,
+        cid=cid,
+        mid=mid,
+        tid=message_id(i - i % 4, identity),
+        folder=shape.get("folder") or _folder(i),
+        path=maildir_path(i, identity, records),
+        at=sent_at(i).isoformat(),
+        shape=shape,
+        raw=raw,
+        parts=parts,
+        names=names,
+        entity_addresses=list(dict.fromkeys(a for _, a in parts))[
+            :MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+        ],
+        chunks=chunk_rows,
+        attachments=attachments,
+    )
+
+
+_INSERT_MESSAGE = (
+    "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
+    "subject, sent_at, sent_at_status, occurred_at, in_reply_to, references_json, "
+    "has_attachments, size_bytes, content_hash, indexed_at, first_indexed_at, "
+    "seen, flagged, replied, sender_ambiguous, participant_names_complete, "
+    "subject_complete, from_addresses_complete, to_addresses_complete, "
+    "cc_addresses_complete, attachments_manifest_complete, body_complete, caps_json) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, "
+    "1, 1, 1, 1, 1, 1, ?, '{}')"
+)
+
+
+def _message_values(
+    rec: _Record, now: str, body_complete: int | None, folder: str | None = None
+) -> tuple:
+    """``_INSERT_MESSAGE``'s values for ``rec`` (stored in ``folder``
+    when given)."""
+    return (
+        rec.cid,
+        rec.mid,
+        rec.tid,
+        rec.path,
+        folder or rec.folder,
+        rec.shape["subject"],
+        rec.at,
+        None if rec.folder == "Sent" else rec.at,
+        rec.shape["in_reply_to"],
+        json.dumps(rec.shape["references"]),
+        1 if rec.attachments else 0,
+        len(rec.raw),
+        hashlib.sha256(rec.raw).hexdigest(),
+        now,
+        now,
+        rec.i % 2,
+        body_complete,
+    )
+
+
+_INSERT_ATTACHMENT = (
+    "INSERT INTO attachments (attachment_occurrence_id, claimant_id, "
+    "attachment_id, thread_id, filename, content_type, size_bytes, seen_at, "
+    "fts_rowid, extractor_module, text_complete, text_extractor) "
+    f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{PDF_MODULE}', 1, '{PDF_EXTRACTOR}')"
+)
+_INSERT_EXTRACTION = (
+    "INSERT INTO attachment_extractions (attachment_id, extractor_module, "
+    "extraction_status, extractor, extracted_text, extracted_at, "
+    "ocr_pages_skipped, text_complete, ocr_pages_cap, digital_pages_cap, "
+    "extracted_chars_cap, identifier) "
+    f"VALUES (?, '{PDF_MODULE}', 'success', '{PDF_EXTRACTOR}', ?, ?, 0, 1, 0, 0, 0, "
+    f"'{PDF_IDENTIFIER}')"
+)
+_INSERT_CHUNK = "INSERT INTO message_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+
+
+def _chunk_values(
+    rec: _Record,
+    pk: str,
+    attachment_id: str | None,
+    kind: str,
+    c: int,
+    text: str,
+    start: int,
+    end: int,
+    now: str,
+    fts_rowid: int,
+) -> tuple:
+    """``_INSERT_CHUNK``'s values: the chunk ID is the indexer's
+    ``sha256(message_pk || index || text)``."""
+    digest = hashlib.sha256(f"{pk}\0{c}\0".encode() + text.encode()).hexdigest()
+    return (
+        digest,
+        rec.cid,
+        rec.tid,
+        c,
+        text,
+        start,
+        end,
+        token_estimate(text),
+        now,
+        fts_rowid,
+        attachment_id,
+        kind,
+    )
+
+
 def build(
     db_path: Path,
     messages: int,
@@ -615,67 +789,28 @@ def build(
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         for n, i in enumerate(order):
-            at = sent_at(i).isoformat()
             now = (indexed + timedelta(milliseconds=50 * n)).isoformat()
-            shape = _shape(i, identity, records, references)
-            raw = render_eml(i, identity, records, references, chunks, chunk_tokens, per_message)
-            mid = message_id(i, identity)
-            cid = claimant_of(mid, raw)
-            tid = message_id(i - i % 4, identity)
-            folder = shape.get("folder") or _folder(i)
-            path = maildir_path(i, identity, records)
-            conn.execute("BEGIN")
-            conn.execute(
-                "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
-                "subject, sent_at, sent_at_status, occurred_at, in_reply_to, references_json, "
-                "has_attachments, size_bytes, content_hash, indexed_at, first_indexed_at, "
-                "seen, flagged, replied, sender_ambiguous, participant_names_complete, "
-                "subject_complete, from_addresses_complete, to_addresses_complete, "
-                "cc_addresses_complete, attachments_manifest_complete, body_complete, caps_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, "
-                "1, 1, 1, 1, 1, 1, 1, '{}')",
-                (
-                    cid,
-                    mid,
-                    tid,
-                    path,
-                    folder,
-                    shape["subject"],
-                    at,
-                    None if folder == "Sent" else at,
-                    shape["in_reply_to"],
-                    json.dumps(shape["references"]),
-                    1 if per_message else 0,
-                    len(raw),
-                    hashlib.sha256(raw).hexdigest(),
-                    now,
-                    now,
-                    i % 2,
-                ),
+            rec = _record(
+                i, identity, records, references, chunks, chunk_tokens, per_message, stress_text
             )
+            cid, tid, shape = rec.cid, rec.tid, rec.shape
+            conn.execute("BEGIN")
+            conn.execute(_INSERT_MESSAGE, _message_values(rec, now, 1))
             # One participant row per (role, address), named by its first
             # display name; every distinct name in the name rows.
-            part_rows: dict[tuple[str, str], str | None] = {}
-            name_rows: dict[tuple[str, str, str], None] = {}
-            for role, address, name in [*shape["people"], *shape.get("extra_names", [])]:
-                part_rows.setdefault((role, address), name)
-                if name is not None:
-                    name_rows.setdefault((role, address, name))
             conn.executemany(
                 "INSERT INTO message_participants VALUES (?, ?, ?, ?)",
-                [(cid, role, address, name) for (role, address), name in part_rows.items()],
+                [(cid, role, address, name) for (role, address), name in rec.parts.items()],
             )
             conn.executemany(
                 "INSERT INTO message_participant_names VALUES (?, ?, ?, ?)",
-                [(cid, *row) for row in name_rows],
+                [(cid, *row) for row in rec.names],
             )
-            n_parts += len(part_rows)
-            n_names += len(name_rows)
+            n_parts += len(rec.parts)
+            n_names += len(rec.names)
             # Person entities for the first distinct addresses (authors
             # first), each with its organization.
-            for address in list(dict.fromkeys(a for _, a in part_rows))[
-                :MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
-            ]:
+            for address in rec.entity_addresses:
                 if address in entities:
                     continue
                 entities.add(address)
@@ -691,28 +826,14 @@ def build(
                     "authority_class, authority_rule) VALUES (?, 'person', ?, ?, ?, ?)",
                     (f"person:{address}", address, f"org:{domain}", *authority(address)),
                 )
-            paragraphs = [_paragraph(i, c, chunk_tokens) for c in range(chunks)]
-            chunk_rows = [
-                (cid, None, "body", c, text, start, end)
-                for c, (text, start, end) in enumerate(chunk_layout(paragraphs))
-            ]
-            for k in range(per_message):
-                text = attachment_text(i, k)
-                payload = pdf_payload(text)
-                attachment_id = hashlib.sha256(payload).hexdigest()
-                occurrence = hashlib.sha256(
-                    f"{cid}\0{attachment_id}\0{shape['filename']}\0{k}".encode()
-                ).hexdigest()
+            for occurrence, attachment_id, size, text in rec.attachments:
                 n_att_fts += 1
                 conn.execute(
                     "INSERT INTO attachments_fts (rowid, filename, content_type) VALUES (?, ?, ?)",
                     (n_att_fts, shape["filename"], shape["content_type"]),
                 )
                 conn.execute(
-                    "INSERT INTO attachments (attachment_occurrence_id, claimant_id, "
-                    "attachment_id, thread_id, filename, content_type, size_bytes, seen_at, "
-                    "fts_rowid, extractor_module, text_complete, text_extractor) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                    _INSERT_ATTACHMENT,
                     (
                         occurrence,
                         cid,
@@ -720,41 +841,13 @@ def build(
                         tid,
                         shape["filename"],
                         shape["content_type"],
-                        len(payload),
+                        size,
                         now,
                         n_att_fts,
-                        PDF_MODULE,
-                        PDF_EXTRACTOR,
                     ),
                 )
-                conn.execute(
-                    "INSERT INTO attachment_extractions (attachment_id, extractor_module, "
-                    "extraction_status, extractor, extracted_text, extracted_at, "
-                    "ocr_pages_skipped, text_complete, ocr_pages_cap, digital_pages_cap, "
-                    "extracted_chars_cap, identifier) "
-                    "VALUES (?, ?, 'success', ?, ?, ?, 0, 1, 0, 0, 0, ?)",
-                    (
-                        attachment_id,
-                        PDF_MODULE,
-                        PDF_EXTRACTOR,
-                        stress_text or text,
-                        now,
-                        PDF_IDENTIFIER,
-                    ),
-                )
-                if not stress_text:
-                    chunk_rows.append(
-                        (
-                            f"{cid}::{attachment_id}",
-                            attachment_id,
-                            "attachment",
-                            0,
-                            text,
-                            0,
-                            len(text),
-                        )
-                    )
-            for index, (pk, attachment_id, kind, c, text, start, end) in enumerate(chunk_rows):
+                conn.execute(_INSERT_EXTRACTION, (attachment_id, stress_text or text, now))
+            for pk, attachment_id, kind, c, text, start, end in rec.chunks:
                 tokens = token_estimate(text)
                 if kind == "body":
                     min_tokens = tokens if min_tokens is None else min(min_tokens, tokens)
@@ -764,23 +857,9 @@ def build(
                 conn.execute(
                     "INSERT INTO message_chunks_fts (rowid, text) VALUES (?, ?)", (n_chunks, text)
                 )
-                digest = hashlib.sha256(f"{pk}\0{c}\0".encode() + text.encode()).hexdigest()
                 conn.execute(
-                    "INSERT INTO message_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        digest,
-                        cid,
-                        tid,
-                        c,
-                        text,
-                        start,
-                        end,
-                        tokens,
-                        now,
-                        n_chunks,
-                        attachment_id,
-                        kind,
-                    ),
+                    _INSERT_CHUNK,
+                    _chunk_values(rec, pk, attachment_id, kind, c, text, start, end, now, n_chunks),
                 )
             if records == "mixed" and _mixed_worst(i):
                 conn.execute("INSERT INTO bench_worst (identity) VALUES (?)", (cid,))
@@ -1048,7 +1127,7 @@ def _sorted_identities(
 def _ordered(order: str) -> Iterator[None]:
     """Hold the WAL measurement's order lock (an exclusive ``flock`` on
     ``order``) for the block; no-op when ``order`` is empty. The writer
-    holds it across ``COMMIT`` and its stamp, the round across its
+    holds it across each transaction and its stamp, the round across its
     snapshot and each clock read that bounds its window, so every commit
     falls wholly before or after each boundary."""
     if not order:
@@ -1349,48 +1428,492 @@ def phase_request_shape(path: str, shape: str) -> dict:
     return {"elements": elements, "parse_s": parse_s, "rss_kib": _rss_kib()}
 
 
-# Ballast rows the writer keeps: each commit adds one and deletes the
-# oldest, standing for the rows an indexer commit replaces.
-BALLAST_ROWS = 64
+# --- the WAL writer -----------------------------------------------------
+
+# The indexer's tables (schema v12) that it writes for every message but
+# no measured statement reads. ``build`` leaves them out, so a measured
+# statement that read one would fail; the WAL writer creates them, after
+# every other step, so its commits write every table the indexer's do.
+# Copies: indexer/tests/test_reconcile_bench_fidelity.py checks them.
+_WRITER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS threads (
+    thread_id       TEXT PRIMARY KEY,
+    subject         TEXT NOT NULL,
+    participants    TEXT NOT NULL,
+    senders         TEXT NOT NULL DEFAULT '[]',
+    folder          TEXT NOT NULL,
+    date_first      TEXT NOT NULL,
+    date_last       TEXT NOT NULL,
+    message_ids     TEXT NOT NULL,
+    snippet         TEXT,
+    has_attachments INTEGER DEFAULT 0,
+    body_text       TEXT,
+    fts_rowid       INTEGER,
+    display_subject TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_threads_fts_rowid ON threads(fts_rowid);
+CREATE INDEX IF NOT EXISTS idx_threads_subject_folder
+    ON threads(subject, folder, date_last, thread_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS threads_fts USING fts5(
+    subject,
+    participants,
+    body,
+    content='',
+    contentless_delete=1,
+    tokenize='porter unicode61'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS threads_vec USING vec0(
+    thread_id TEXT PRIMARY KEY,
+    embedding FLOAT[4096]
+);
+CREATE TABLE IF NOT EXISTS thread_vector_sums (
+    thread_id        TEXT PRIMARY KEY,
+    count            INTEGER NOT NULL CHECK (count >= 0),
+    encoding_version INTEGER NOT NULL,
+    sum              BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS message_thread_map (
+    claimant_id TEXT PRIMARY KEY,
+    message_id  TEXT NOT NULL,
+    thread_id   TEXT NOT NULL,
+    filepath    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_message_thread_map_message ON message_thread_map(message_id);
+CREATE INDEX IF NOT EXISTS idx_message_thread_map_filepath ON message_thread_map(filepath);
+CREATE INDEX IF NOT EXISTS idx_message_thread_map_thread ON message_thread_map(thread_id);
+CREATE TABLE IF NOT EXISTS indexed_files (
+    filepath     TEXT PRIMARY KEY,
+    indexed_at   TEXT NOT NULL,
+    size         INTEGER,
+    mtime_ns     INTEGER,
+    content_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS entity_aliases (
+    entity_id TEXT NOT NULL,
+    alias     TEXT NOT NULL,
+    PRIMARY KEY (entity_id, alias)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS message_chunks_vec USING vec0(
+    chunk_id TEXT PRIMARY KEY,
+    embedding FLOAT[4096]
+);
+CREATE TABLE IF NOT EXISTS indexing_jobs (
+    filepath        TEXT PRIMARY KEY,
+    reason          TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    last_stage      TEXT,
+    last_error_class TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    next_attempt_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_indexing_jobs_status_next
+    ON indexing_jobs(status, next_attempt_at);
+-- The corpus's high-water rowid per table the writer adds rows to,
+-- written once, before the first writer is ready.
+CREATE TABLE IF NOT EXISTS bench_writer_marks (name TEXT PRIMARY KEY, mark INTEGER NOT NULL);
+"""
+WRITER_TABLES = (
+    "threads",
+    "threads_fts",
+    "threads_vec",
+    "thread_vector_sums",
+    "message_thread_map",
+    "indexed_files",
+    "entity_aliases",
+    "message_chunks_vec",
+    "indexing_jobs",
+)
+# Corpus tables the writer adds rows to. Its setup deletes every row
+# above the corpus's mark, so each WAL configuration starts from the
+# corpus ``build`` wrote (the FTS rows go with their chunks and
+# occurrences).
+_MARKED = (
+    "messages",
+    "message_participants",
+    "message_participant_names",
+    "entities",
+    "message_chunks",
+    "attachments",
+    "attachment_extractions",
+)
+
+# Copies of indexer values the writer follows (the fidelity test checks
+# them): the vector width (indexer/src/database.py), the thread-sum
+# encoding (indexer/src/vector_sums.py), the thread body caps
+# (indexer/src/threader.py) and the drain's default batch sizes in
+# steady state and in a first index (indexer/src/main.py).
+EMBEDDING_DIM = 4096
+SUM_ENCODING_VERSION = 1
+PER_MESSAGE_BODY_CAP_CHARS = 2000
+THREAD_BODY_TEXT_MAX_TOKENS = 4000
+STEADY_STATE_BATCH_SIZE = 8
+INITIAL_INDEX_BATCH_SIZE = 50
+# The largest ``--writer-batch``: twenty times a first index's default.
+MAX_WRITER_BATCH = 1000
+# The queue's marker for a message whose step is running
+# (indexer/src/queue.py ``INTERRUPTED_STAGE`` and its error text).
+_INTERRUPTED = ("interrupted", "interrupted mid-processing; charged one attempt")
+
+
+def _unit_vector(rng: random.Random) -> bytes:
+    """A random unit vector as the indexer stores one (float32)."""
+    values = [rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)]
+    norm = math.sqrt(sum(v * v for v in values))
+    return struct.pack(f"{EMBEDDING_DIM}f", *(v / norm for v in values))
+
+
+def _vector_units(blob: bytes) -> list[int]:
+    """indexer/src/vector_sums.py ``vector_units``: each float32 as an
+    integer in units of 2**-149."""
+    return [int(x * 2.0**149) for x in struct.unpack(f"{len(blob) // 4}f", blob)]
+
+
+def _encode_sum(total: list[int]) -> bytes:
+    """indexer/src/vector_sums.py ``encode``: the stored thread sum."""
+    if not any(total):
+        return b""
+    out = bytearray()
+
+    def varint(value: int) -> None:
+        while value >= 0x80:
+            out.append((value & 0x7F) | 0x80)
+            value >>= 7
+        out.append(value)
+
+    for value in total:
+        if not value:
+            out += b"\x00\x00"
+            continue
+        k = (value & -value).bit_length() - 1
+        m = value >> k
+        n = (m.bit_length() + 8) // 8
+        varint(k)
+        varint(n)
+        out += m.to_bytes(n, "big", signed=True)
+    return bytes(out)
+
+
+def _thread_body(text: str) -> str:
+    """``text`` cut to ``THREAD_BODY_TEXT_MAX_TOKENS``, counted with
+    ``token_estimate`` (exact for this benchmark's words)."""
+    words, tokens = text.split(" "), 0
+    for n, word in enumerate(words):
+        tokens += token_estimate(word)
+        if tokens > THREAD_BODY_TEXT_MAX_TOKENS:
+            return " ".join(words[:n])
+    return text
+
+
+def _writer_setup(conn: sqlite3.Connection) -> None:
+    """Create the writer's tables, record the corpus's marks once, and
+    delete every row an earlier writer added, in one transaction."""
+    conn.executescript(_WRITER_SCHEMA)
+    conn.execute("BEGIN IMMEDIATE")
+    for table in _MARKED:
+        conn.execute(
+            f"INSERT OR IGNORE INTO bench_writer_marks (name, mark) "  # nosec B608
+            f"SELECT ?, COALESCE(MAX(rowid), 0) FROM {table}",
+            (table,),
+        )
+    marks = dict(conn.execute("SELECT name, mark FROM bench_writer_marks"))
+    conn.execute(
+        "DELETE FROM message_chunks_fts WHERE rowid IN "
+        "(SELECT fts_rowid FROM message_chunks WHERE rowid > ?)",
+        (marks["message_chunks"],),
+    )
+    conn.execute(
+        "DELETE FROM attachments_fts WHERE rowid IN "
+        "(SELECT fts_rowid FROM attachments WHERE rowid > ?)",
+        (marks["attachments"],),
+    )
+    for table in _MARKED:
+        conn.execute(f"DELETE FROM {table} WHERE rowid > ?", (marks[table],))  # nosec B608
+    for table in WRITER_TABLES:
+        conn.execute(f"DELETE FROM {table}")  # nosec B608
+    conn.execute("COMMIT")
+
+
+@dataclass
+class _WriterThread:
+    """What the writer keeps of the thread it is adding messages to (the
+    indexer reads it back from ``threads`` and ``thread_vector_sums``)."""
+
+    tid: str
+    subject: str
+    participants: list
+    senders: list
+    message_ids: list
+    body: str
+    date_first: str
+    fts_rowid: int | None = None
+    sums: list | None = None
+    count: int = 0
+    vector: bytes = bytes(4 * EMBEDDING_DIM)
+
+
+def _writer_phase1(
+    conn: sqlite3.Connection, rec: _Record, thread: _WriterThread | None, now: str
+) -> _WriterThread:
+    """Message ``rec``'s phase 1 writes (indexer/src/database.py
+    ``upsert_thread``: the thread row, its new sum, the thread map, the
+    indexed file, the message and its participants, entities and
+    aliases, the thread's FTS row and seed vector), in the open
+    transaction. The message is stored in Trash, so the round's
+    unfiltered predicate leaves it out. Returns the thread."""
+    authors = [address for role, address in rec.parts if role == "from"]
+    addresses = list(dict.fromkeys(address for _, address in rec.parts))
+    body = "\n".join(text for _, _, kind, _, text, _, _ in rec.chunks if kind == "body")
+    block = f"From: {authors[0] if authors else ''}\nDate: {rec.at}\n"
+    block += body[:PER_MESSAGE_BODY_CAP_CHARS]
+    new = thread is None
+    if thread is None:
+        thread = _WriterThread(
+            tid=rec.tid,
+            subject=rec.shape["subject"],
+            participants=addresses,
+            senders=authors,
+            message_ids=[rec.cid],
+            body=_thread_body(
+                "\n".join(
+                    [f"Subject: {rec.shape['subject']}", f"Participants: {', '.join(addresses)}"]
+                )
+                + "\n\n"
+                + block
+                + "\n"
+            ),
+            date_first=rec.at,
+            sums=[0] * EMBEDDING_DIM,
+        )
+    else:
+        thread.participants = list(dict.fromkeys([*thread.participants, *addresses]))
+        thread.senders = list(dict.fromkeys([*thread.senders, *authors]))
+        thread.message_ids.append(rec.cid)
+        thread.body = _thread_body(thread.body + "\n" + block)
+    participants = json.dumps(thread.participants)
+    conn.execute(
+        "INSERT INTO threads (thread_id, subject, participants, senders, folder, "
+        "date_first, date_last, message_ids, snippet, has_attachments, body_text, "
+        "display_subject) VALUES (?, ?, ?, ?, 'Trash', ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(thread_id) DO UPDATE SET participants = excluded.participants, "
+        "senders = excluded.senders, date_first = excluded.date_first, "
+        "date_last = excluded.date_last, message_ids = excluded.message_ids, "
+        "snippet = excluded.snippet, has_attachments = excluded.has_attachments, "
+        "body_text = excluded.body_text, display_subject = excluded.display_subject",
+        (
+            thread.tid,
+            thread.subject.lower(),
+            participants,
+            json.dumps(thread.senders),
+            thread.date_first,
+            rec.at,
+            json.dumps(thread.message_ids),
+            body[:200].replace("\n", " "),
+            1 if rec.attachments else 0,
+            thread.body,
+            thread.subject,
+        ),
+    )
+    if new:
+        conn.execute(
+            "INSERT INTO thread_vector_sums (thread_id, count, encoding_version, sum) "
+            "VALUES (?, 0, ?, ?) ON CONFLICT(thread_id) DO NOTHING",
+            (thread.tid, SUM_ENCODING_VERSION, b""),
+        )
+    conn.execute(
+        "INSERT INTO message_thread_map (claimant_id, message_id, thread_id, filepath) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT(claimant_id) DO UPDATE SET "
+        "thread_id = excluded.thread_id, filepath = excluded.filepath",
+        (rec.cid, rec.mid, thread.tid, rec.path),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO indexed_files (filepath, indexed_at, size, mtime_ns, "
+        "content_hash) VALUES (?, ?, ?, ?, ?)",
+        (rec.path, now, len(rec.raw), time.time_ns(), hashlib.sha256(rec.raw).hexdigest()),
+    )
+    conn.execute(_INSERT_MESSAGE, _message_values(rec, now, None, folder="Trash"))
+    conn.execute("DELETE FROM message_participants WHERE claimant_id = ?", (rec.cid,))
+    for (role, address), name in rec.parts.items():
+        conn.execute(
+            "INSERT OR IGNORE INTO message_participants (claimant_id, role, address, name) "
+            "VALUES (?, ?, ?, ?)",
+            (rec.cid, role, address, name),
+        )
+    for address in rec.entity_addresses:
+        domain = address.rpartition("@")[2]
+        conn.execute(
+            "INSERT INTO entities (entity_id, kind, canonical_key, organization_id, "
+            "authority_class, authority_rule) VALUES (?, 'organization', ?, NULL, "
+            "'unclassified', NULL) ON CONFLICT(entity_id) DO UPDATE SET "
+            "authority_class = excluded.authority_class, "
+            "authority_rule = excluded.authority_rule",
+            (f"org:{domain}", domain),
+        )
+        conn.execute(
+            "INSERT INTO entities (entity_id, kind, canonical_key, organization_id, "
+            "authority_class, authority_rule) VALUES (?, 'person', ?, ?, ?, ?) "
+            "ON CONFLICT(entity_id) DO UPDATE SET "
+            "authority_class = excluded.authority_class, "
+            "authority_rule = excluded.authority_rule",
+            (f"person:{address}", address, f"org:{domain}", *authority(address)),
+        )
+    conn.executemany(
+        "INSERT INTO message_participant_names (claimant_id, role, address, name) "
+        "VALUES (?, ?, ?, ?)",
+        [(rec.cid, *row) for row in rec.names],
+    )
+    entity_addresses = set(rec.entity_addresses)
+    conn.executemany(
+        "INSERT OR IGNORE INTO entity_aliases (entity_id, alias) VALUES (?, ?)",
+        [(f"person:{a}", name) for _, a, name in rec.names if a in entity_addresses],
+    )
+    conn.execute(
+        "UPDATE threads SET date_first = COALESCE((SELECT MIN(effective_at) FROM messages "
+        "WHERE thread_id = :t), date_first), date_last = COALESCE((SELECT MAX(effective_at) "
+        "FROM messages WHERE thread_id = :t), date_last) WHERE thread_id = :t",
+        {"t": thread.tid},
+    )
+    if thread.fts_rowid is not None:
+        conn.execute("DELETE FROM threads_fts WHERE rowid = ?", (thread.fts_rowid,))
+    thread.fts_rowid = conn.execute(
+        "INSERT INTO threads_fts (subject, participants, body) VALUES (?, ?, ?)",
+        (thread.subject, participants, thread.body),
+    ).lastrowid
+    conn.execute(
+        "UPDATE threads SET fts_rowid = ? WHERE thread_id = ?", (thread.fts_rowid, thread.tid)
+    )
+    _write_thread_vector(conn, thread)
+    return thread
+
+
+def _write_thread_vector(conn: sqlite3.Connection, thread: _WriterThread) -> None:
+    # vec0 has no upsert: the indexer deletes, then inserts.
+    conn.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.tid,))
+    conn.execute(
+        "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
+        (thread.tid, thread.vector),
+    )
+
+
+def _writer_phase2c(
+    conn: sqlite3.Connection, rec: _Record, thread: _WriterThread, rng: random.Random, now: str
+) -> None:
+    """Message ``rec``'s phase 2c writes (indexer/src/main.py
+    ``_phase2c_commit_vectors``: each chunk with its FTS row and vector,
+    the thread's sum, the body's completeness, each occurrence with its
+    FTS row and extraction, the thread's vector), in the open
+    transaction. Vectors are random unit vectors: their bytes, not their
+    values, are what the WAL keeps."""
+    assert thread.sums is not None
+    shape = rec.shape
+    for pk, attachment_id, kind, c, text, start, end in rec.chunks:
+        vector = _unit_vector(rng)
+        fts_rowid = conn.execute(
+            "INSERT INTO message_chunks_fts (text) VALUES (?)", (text,)
+        ).lastrowid
+        values = _chunk_values(rec, pk, attachment_id, kind, c, text, start, end, now, fts_rowid)
+        conn.execute(
+            "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+            (values[0], vector),
+        )
+        conn.execute(_INSERT_CHUNK, values)
+        thread.sums = [a + b for a, b in zip(thread.sums, _vector_units(vector), strict=True)]
+        thread.count += 1
+        # The thread vector is the chunks' mean; any unit vector has its size.
+        thread.vector = vector
+    conn.execute(
+        "INSERT INTO thread_vector_sums (thread_id, count, encoding_version, sum) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET "
+        "count = excluded.count, encoding_version = excluded.encoding_version, "
+        "sum = excluded.sum",
+        (thread.tid, thread.count, SUM_ENCODING_VERSION, _encode_sum(thread.sums)),
+    )
+    conn.execute("UPDATE messages SET body_complete = 1 WHERE claimant_id = ?", (rec.cid,))
+    for occurrence, attachment_id, size, text in rec.attachments:
+        conn.execute(_INSERT_EXTRACTION, (attachment_id, text, now))
+        fts_rowid = conn.execute(
+            "INSERT INTO attachments_fts (filename, content_type) VALUES (?, ?)",
+            (shape["filename"], shape["content_type"]),
+        ).lastrowid
+        conn.execute(
+            _INSERT_ATTACHMENT,
+            (
+                occurrence,
+                rec.cid,
+                attachment_id,
+                rec.tid,
+                shape["filename"],
+                shape["content_type"],
+                size,
+                now,
+                fts_rowid,
+            ),
+        )
+    _write_thread_vector(conn, thread)
 
 
 def phase_writer(
-    db_path: str, stop: str, commit_bytes: int, interval: float, order: str = ""
+    db_path: str,
+    stop: str,
+    batch: int,
+    interval: float,
+    order: str = "",
+    shape: dict | None = None,
 ) -> dict:
-    """A concurrent writer: until ``stop`` exists, index one message at a
-    time as the indexer does, in two transactions: one flips a random
-    message's ``seen`` (phase 1, the message's rows) and the next
-    appends ``commit_bytes`` of ballast (phase 2c, its chunks and
-    vectors). ``interval`` is the pause between messages; the bytes and
-    the pace are parameters, not the indexer's own figures.
+    """A concurrent writer that commits what the indexer commits while
+    it indexes new mail (indexer/src/main.py ``_drain_queue_batched``),
+    until ``stop`` exists, ``batch`` messages at a time, pausing
+    ``interval`` seconds after each batch. Per batch of B:
 
-    It first replaces the ballast with ``BALLAST_ROWS`` rows of
-    ``commit_bytes``, the steady state in which each commit adds one row
-    and deletes one per message, records that state and creates ``stop + ".ready"``.
+    - B enqueue commits, one job row each (indexer/src/queue.py);
+    - per message: a charge, phase 1 (``_writer_phase1``), a refund;
+    - per message: a charge and a refund around chunking (phase 2a);
+    - a lone message's charge (B = 1), or one commit marking every
+      message interrupted (B > 1);
+    - per message: phase 2c (``_writer_phase2c``), the lone message's
+      refund (B = 1), and the job row's delete.
+
+    The messages have ``shape`` (``build``'s arguments) and continue the
+    corpus's numbering in threads of four; they are stored in Trash.
+    indexer/tests/test_reconcile_bench_fidelity.py traces the indexer's
+    own commits and checks this sequence and the tables of every
+    commit. The pace is a parameter, not the indexer's own, and the
+    phase 2b embed request it waits for is not modelled.
+
+    First, in one transaction, it creates the indexer's tables the
+    corpus lacks (``_WRITER_SCHEMA``), deletes every row an earlier
+    writer added (``_writer_setup``), records that state and creates
+    ``stop + ".ready"``. Like the indexer's connection it overwrites
+    deleted content (``secure_delete``).
 
     After each commit it records the time and the WAL file's size, so a
     window's commit count and its WAL sizes come from the same records:
     only this process writes the WAL, and it runs with automatic
     checkpoints off, so the WAL is never restarted into its allocated
     file and the file's size is the WAL's logical end until the
-    truncating checkpoint ``run_wal`` runs after the round. The delay
-    between messages ends early when ``stop`` appears."""
+    truncating checkpoint ``run_wal`` runs after the round. The pause
+    after a batch ends early when ``stop`` appears."""
+    import sqlite_vec
+
+    shape = shape or {}
+    stress = shape.get("extracted_chars", 0)
     rng = random.Random(7)
     wal = db_path + "-wal"
     commits = 0
     times: list[tuple[float, int]] = []
     with closing(sqlite3.connect(db_path, isolation_level=None, timeout=30)) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute("PRAGMA secure_delete = ON")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA wal_autocheckpoint=0")
-        top = conn.execute("SELECT MAX(rowid) FROM messages").fetchone()[0]
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM bench_ballast")
-        conn.executemany(
-            "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))",
-            [(commit_bytes,)] * BALLAST_ROWS,
-        )
-        conn.execute("COMMIT")
+        _writer_setup(conn)
+        corpus = conn.execute("SELECT mark FROM bench_writer_marks WHERE name = 'messages'")
+        next_i = -(-corpus.fetchone()[0] // 4) * 4
         # The state before any measured commit: it can only be the start.
         times.append((time.monotonic(), os.stat(wal).st_size))
         Path(stop + ".ready").touch()
@@ -1402,27 +1925,95 @@ def phase_writer(
             # window only once it is durable, and every frame it writes
             # (a large one spills dirty pages into the WAL before COMMIT)
             # falls on the same side of each boundary as its stamp.
+            nonlocal commits
             with _ordered(order):
                 conn.execute("BEGIN IMMEDIATE")
                 yield
                 conn.execute("COMMIT")
                 times.append((time.monotonic(), os.stat(wal).st_size))
+            commits += 1
 
-        while not os.path.exists(stop):
+        def charge(path: str) -> None:
+            # indexer/src/database.py ``queue_charge_attempt``.
             with transaction():
-                flipped = conn.execute(
-                    "UPDATE messages SET seen = 1 - seen WHERE rowid = ?", (rng.randint(1, top),)
-                ).rowcount
-                if flipped != 1:
-                    raise RuntimeError(f"writer updated {flipped} messages, not 1")
-            with transaction():
-                cur = conn.execute(
-                    "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
+                conn.execute(
+                    "UPDATE indexing_jobs SET status = 'dead', last_error_class = 'retryable', "
+                    "updated_at = ? WHERE filepath = ? AND status = 'queued' "
+                    "AND last_stage = ? AND attempts >= 3",
+                    (datetime.now(UTC).isoformat(), path, _INTERRUPTED[0]),
                 )
                 conn.execute(
-                    "DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - BALLAST_ROWS,)
+                    "UPDATE indexing_jobs SET attempts = attempts + 1, last_stage = ?, "
+                    "last_error = ? WHERE filepath = ? AND status = 'queued'",
+                    (*_INTERRUPTED, path),
                 )
-            commits += 2
+
+        def refund(path: str) -> None:
+            # indexer/src/database.py ``queue_refund_attempt``.
+            with transaction():
+                conn.execute(
+                    "UPDATE indexing_jobs SET attempts = attempts - 1, last_stage = NULL, "
+                    "last_error = NULL WHERE filepath = ? AND last_stage = ? AND attempts > 0",
+                    (path, _INTERRUPTED[0]),
+                )
+
+        thread: _WriterThread | None = None
+        while not os.path.exists(stop):
+            recs = []
+            for _ in range(batch):
+                recs.append(
+                    _record(
+                        next_i,
+                        shape.get("identity", "typical"),
+                        shape.get("records", "typical"),
+                        shape.get("references", 0),
+                        shape.get("chunks", 1),
+                        shape.get("chunk_tokens", BODY_TOKENS),
+                        shape.get("per_message", 0),
+                        _WIDE * stress if stress else None,
+                    )
+                )
+                next_i += 1
+            for rec in recs:
+                # indexer/src/database.py ``queue_enqueue``.
+                now = datetime.now(UTC).isoformat()
+                with transaction():
+                    conn.execute(
+                        "INSERT OR REPLACE INTO indexing_jobs (filepath, reason, status, "
+                        "attempts, last_error, last_stage, last_error_class, created_at, "
+                        "updated_at, next_attempt_at) "
+                        "VALUES (?, 'on_created', 'queued', 0, NULL, NULL, NULL, ?, ?, ?)",
+                        (rec.path, now, now, now),
+                    )
+            threads = []
+            for rec in recs:
+                charge(rec.path)
+                with transaction():
+                    thread = _writer_phase1(
+                        conn, rec, thread if rec.i % 4 else None, datetime.now(UTC).isoformat()
+                    )
+                threads.append(thread)
+                refund(rec.path)
+            for rec in recs:
+                charge(rec.path)
+                refund(rec.path)
+            if batch == 1:
+                charge(recs[0].path)
+            else:
+                # indexer/src/database.py ``queue_mark_interrupted``.
+                with transaction():
+                    conn.executemany(
+                        "UPDATE indexing_jobs SET last_stage = ?, last_error = ? "
+                        "WHERE filepath = ? AND status = 'queued'",
+                        [(*_INTERRUPTED, rec.path) for rec in recs],
+                    )
+            for rec, rec_thread in zip(recs, threads, strict=True):
+                with transaction():
+                    _writer_phase2c(conn, rec, rec_thread, rng, datetime.now(UTC).isoformat())
+                if batch == 1:
+                    refund(rec.path)
+                with transaction():
+                    conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (rec.path,))
             resume = time.monotonic() + interval
             while not os.path.exists(stop):
                 remaining = resume - time.monotonic()
@@ -1538,15 +2129,17 @@ def run_wal(
     kind: str,
     k: int,
     request: str,
-    commit_bytes: int,
+    batch: int,
     interval: float,
     hold_s: float = 0.0,
     worst_first: bool = False,
     method: str = "stream",
+    shape: dict | None = None,
 ) -> dict:
     """WAL growth while one reconcile round holds its snapshot under a
-    concurrent writer, and whether a TRUNCATE checkpoint then reclaims
-    it. Every size and count comes from the writer's own post-commit
+    concurrent writer that commits as the indexer does at batch size
+    ``batch`` (messages of ``shape``, ``build``'s arguments), and whether
+    a TRUNCATE checkpoint then reclaims it. Every size and count comes from the writer's own post-commit
     records (``phase_writer``), split at the round's window by the same
     timestamps, so no commit is counted without its frames or the
     reverse; the order lock (``_ordered``) keeps every commit wholly on
@@ -1580,9 +2173,10 @@ def run_wal(
                     {
                         "db_path": db_path,
                         "stop": str(stop),
-                        "commit_bytes": commit_bytes,
+                        "batch": batch,
                         "interval": interval,
                         "order": order,
+                        "shape": shape or {},
                     }
                 ),
             ],
@@ -1593,12 +2187,12 @@ def run_wal(
         # this returns or raises: left running, it commits until the disk
         # fills.
         try:
-            # The writer's ballast in its steady state, then three seconds of
-            # commits before the round.
+            # The writer's setup, then three seconds of commits before the
+            # round.
             deadline = time.monotonic() + 600
             while not ready.exists():
                 if writer.poll() is not None or time.monotonic() > deadline:
-                    raise RuntimeError("the WAL writer did not reach its steady state")
+                    raise RuntimeError("the WAL writer did not get ready")
                 time.sleep(0.05)
             time.sleep(3)
             try:
@@ -1641,7 +2235,7 @@ def run_wal(
         busy = keeper.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
         return {
             "k": k,
-            "commit_bytes": commit_bytes,
+            "writer_batch": batch,
             "writer_interval_s": interval,
             "hold_s": hold_s,
             "wal_at_transaction_start_bytes": at_start,
@@ -1766,16 +2360,25 @@ def run(args: argparse.Namespace) -> dict:
                     kind,
                     max(args.k),
                     str(work / f"request-{kind}.json"),
-                    commit_bytes,
+                    batch,
                     interval,
                     args.wal_hold,
                     args.all_extras,
                     method,
+                    {
+                        "identity": args.identity,
+                        "records": args.records,
+                        "references": args.references,
+                        "chunks": args.chunks,
+                        "chunk_tokens": args.chunk_tokens,
+                        "per_message": args.per_message,
+                        "extracted_chars": args.extracted_chars,
+                    },
                 ),
             }
             for kind in ("messages", "occurrences")
             for method in ("stream", "collect")
-            for commit_bytes in args.writer_commit_bytes
+            for batch in args.writer_batch
             for interval in args.writer_interval
         ]
     return report
@@ -1896,11 +2499,6 @@ MAX_ATTACHMENTS = 10_000 - 2
 MAX_EXTRACTED_CHARS = 10_000_000
 # ``message_id`` and ``_wide_digits`` stay unique below this.
 MAX_MESSAGES = 2**30
-# The largest writer commit (``--writer-commit-bytes``): every accepted
-# value runs. SQLite refuses a row at its 1,000,000,000-byte length
-# limit, and the steady ballast holds ``BALLAST_ROWS`` of them; the
-# indexer's file limit keeps that under 3.2 GB.
-MAX_COMMIT_BYTES = PARSE_MAX_BYTES
 # The most digits an upload holds: built in memory (430 MB packed),
 # over 16 times the proposed caps.
 MAX_UPLOAD = 10_000_000
@@ -2038,14 +2636,14 @@ ARGS: tuple[Arg, ...] = (
     ),
     Arg("wal", "flag", False, help="also measure WAL growth under a writer"),
     Arg(
-        "writer_commit_bytes",
+        "writer_batch",
         "ints",
         None,
-        # randomblob() makes at least one byte.
         1,
-        MAX_COMMIT_BYTES,
-        absent="131072 with --wal",
-        help="ballast bytes per message (its second writer commit) (--wal only)",
+        MAX_WRITER_BATCH,
+        absent=f"{STEADY_STATE_BATCH_SIZE},{INITIAL_INDEX_BATCH_SIZE} with --wal "
+        "(the indexer's steady-state and first-index batch sizes)",
+        help="messages per writer batch, as the indexer drains its queue (--wal only)",
     ),
     Arg(
         "writer_interval",
@@ -2053,7 +2651,7 @@ ARGS: tuple[Arg, ...] = (
         None,
         0,
         absent="0,0.1 with --wal",
-        help="seconds between writer messages (--wal only)",
+        help="seconds the writer pauses after each batch (--wal only)",
     ),
     Arg(
         "wal_hold",
@@ -2217,15 +2815,15 @@ _RULES: tuple = (
     ),
     (
         lambda a: not a.wal and a.explicit_wal,
-        lambda a: "--writer-commit-bytes, --writer-interval and --wal-hold need --wal",
+        lambda a: "--writer-batch, --writer-interval and --wal-hold need --wal",
     ),
     (
         lambda a: (
-            len(set(a.writer_commit_bytes)) != len(a.writer_commit_bytes)
+            len(set(a.writer_batch)) != len(a.writer_batch)
             or len(set(a.writer_interval)) != len(a.writer_interval)
         ),
         lambda a: (
-            "--writer-commit-bytes and --writer-interval values must be distinct "
+            "--writer-batch and --writer-interval values must be distinct "
             "(each value is one WAL result)"
         ),
     ),
@@ -2317,7 +2915,7 @@ def check_args(args: argparse.Namespace) -> argparse.Namespace:
     args.explicit_missing = args.missing is not None
     args.explicit_references = args.references is not None
     args.explicit_wal = any(
-        getattr(args, n) is not None for n in ("writer_commit_bytes", "writer_interval", "wal_hold")
+        getattr(args, n) is not None for n in ("writer_batch", "writer_interval", "wal_hold")
     )
     if args.extras is None:
         args.extras = 0 if args.upload_total is not None else 100
@@ -2327,8 +2925,8 @@ def check_args(args: argparse.Namespace) -> argparse.Namespace:
         args.references = 100_000 if args.records.startswith("cardinality") else 0
     if args.repeat is None:
         args.repeat = 6 if args.filtered else 2
-    if args.writer_commit_bytes is None:
-        args.writer_commit_bytes = [128 * 1024]
+    if args.writer_batch is None:
+        args.writer_batch = [STEADY_STATE_BATCH_SIZE, INITIAL_INDEX_BATCH_SIZE]
     if args.writer_interval is None:
         args.writer_interval = [0.0, 0.1]
     if args.wal_hold is None:

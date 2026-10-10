@@ -20,6 +20,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+import sqlite_vec
 from src import main
 from src.database import EMBEDDING_DIM, Database
 from src.entities import AuthorityRules
@@ -32,7 +33,8 @@ _SCRIPT = Path(__file__).resolve().parents[2] / "mcp-server" / "scripts" / "reco
 
 # Tables the benchmark builds. The indexer writes others (threads,
 # vectors, the thread map, the queue); no measured statement reads them,
-# and a statement that did would fail on the benchmark's index.
+# and a statement that did would fail on the benchmark's index. Only the
+# WAL writer creates them (``_WRITER_TABLES``), after every other step.
 _TABLES = (
     "messages",
     "message_participants",
@@ -44,6 +46,22 @@ _TABLES = (
     "attachments_fts",
     "attachment_extractions",
     "pending_deletions",
+)
+
+# Tables the indexer writes for every message that no measured statement
+# reads: only the WAL writer creates them (``_WRITER_SCHEMA``), so its
+# commits touch what the indexer's do. The cadence test checks this list
+# against the tables the indexer's own commits write.
+_WRITER_TABLES = (
+    "threads",
+    "threads_fts",
+    "threads_vec",
+    "thread_vector_sums",
+    "message_thread_map",
+    "indexed_files",
+    "entity_aliases",
+    "message_chunks_vec",
+    "indexing_jobs",
 )
 
 # Values only the wall clock decides: the time the indexer wrote the row.
@@ -236,7 +254,14 @@ def _schema(conn, table: str) -> dict:
     }
 
 
-@pytest.mark.parametrize("table", _TABLES)
+def _with_vec(conn):
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    return conn
+
+
+@pytest.mark.parametrize("table", [*_TABLES, *_WRITER_TABLES])
 def test_benchmark_schema_is_the_indexers(bench, tmp_path, table):
     # Columns (type, NOT NULL, default, key) and indexes (columns,
     # uniqueness, partial condition) as the indexer creates them, so the
@@ -244,8 +269,186 @@ def test_benchmark_schema_is_the_indexers(bench, tmp_path, table):
     # are left out: they act on writes, and the measured statements read.
     Database(tmp_path / "indexer.db").close()
     with (
-        closing(sqlite3.connect(tmp_path / "indexer.db")) as prod,
-        closing(sqlite3.connect(":memory:")) as ours,
+        closing(_with_vec(sqlite3.connect(tmp_path / "indexer.db"))) as prod,
+        closing(_with_vec(sqlite3.connect(":memory:"))) as ours,
     ):
-        ours.executescript(bench._SCHEMA)
+        # The WAL writer's tables (``_WRITER_SCHEMA``) as well: its
+        # commits write them as the indexer does.
+        ours.executescript(bench._SCHEMA + bench._WRITER_SCHEMA)
         assert _schema(ours, table) == _schema(prod, table)
+
+
+# --- the WAL writer's commits (#1476) ----------------------------------
+
+# Every table the indexer writes for a message: the benchmark's, and the
+# ones only the WAL writer creates (``_WRITER_SCHEMA``).
+_WRITTEN = re.compile(
+    r"^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)"
+    r"\s+\"?(\w+)",
+    re.IGNORECASE,
+)
+
+
+def _commits(statements: list[str], tables: set[str]) -> list[tuple[str, ...]]:
+    """The tables of ``tables`` each committed transaction wrote to, in
+    commit order. A transaction that wrote none (a read the indexer
+    commits, such as ``thread_chunk_mean``'s) adds no WAL frame and is
+    left out."""
+    out: list[tuple[str, ...]] = []
+    written: set[str] = set()
+    for statement in statements:
+        match = _WRITTEN.match(statement)
+        if match and match.group(1) in tables:
+            written.add(match.group(1))
+        head = statement.strip().upper()
+        if head.startswith(("COMMIT", "END")):
+            if written:
+                out.append(tuple(sorted(written)))
+            written = set()
+        elif head.startswith("ROLLBACK"):
+            written = set()
+    return out
+
+
+_SHAPE = {
+    "identity": "typical",
+    "records": "typical",
+    "references": 0,
+    "chunks": 1,
+    "chunk_tokens": 40,
+    "per_message": 1,
+    "extracted_chars": 0,
+}
+
+
+def _plain_tables(conn) -> set[str]:
+    """Every table of the indexer's schema but the shadow tables its
+    FTS5 and vec0 tables keep (named after them)."""
+    rows = conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'").fetchall()
+    virtual = [name for name, sql in rows if sql.startswith("CREATE VIRTUAL")]
+    return {name for name, _ in rows if not any(name.startswith(v + "_") for v in virtual)}
+
+
+def _indexer_commits(bench, tmp_path, monkeypatch, n: int, batch: int):
+    """The indexer's own commits for a first index of ``n`` benchmark
+    messages at batch size ``batch``: its walk enqueues each, then its
+    drain indexes them a batch at a time."""
+    maildir = tmp_path / "maildir"
+    for i in range(n):
+        path = Path(bench.maildir_path(i, "typical", "typical", str(maildir)))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(
+            bench.render_eml(i, "typical", "typical", chunks=1, words=40, per_message=1)
+        )
+    statements: list[str] = []
+    real = Database._connect
+
+    def traced(self):
+        conn = real(self)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(Database, "_connect", traced)
+    db = Database(tmp_path / "indexer.db")
+    # The indexer's connection overwrites deleted content (#602); the
+    # writer must too, since a zeroed page is a written page.
+    assert db._conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+    monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+    monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", batch)
+    statements.clear()
+    main.initial_index(
+        db,
+        make_mock_embedder([0.0] * EMBEDDING_DIM),
+        Threader(db),
+        IndexingQueue(db, max_attempts=3),
+    )
+    tables = _plain_tables(db._conn)
+    db.close()
+    return _commits(statements, tables), tables
+
+
+def _writer_commits(bench, tmp_path, monkeypatch, batch: int, tables: set[str]):
+    """The WAL writer's commits for its first batch of ``batch``
+    messages, its setup commit left out."""
+    import threading
+    import time
+
+    tmp_path.mkdir()
+    db = tmp_path / "bench.db"
+    bench.build(db, 8, 1, "typical", "typical")
+    statements: list[str] = []
+    real = bench.sqlite3.connect
+
+    def traced(*args, **kwargs):
+        conn = real(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(bench.sqlite3, "connect", traced)
+    stop = tmp_path / "stop"
+
+    def stop_after_ready() -> None:
+        # The writer checks for ``stop`` between batches and then waits
+        # its hour-long interval, so it writes exactly one batch.
+        ready = Path(str(stop) + ".ready")
+        deadline = time.monotonic() + 120
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.3)
+        stop.touch()
+
+    timer = threading.Thread(target=stop_after_ready)
+    timer.start()
+    bench.phase_writer(str(db), str(stop), batch, 3600.0, shape=_SHAPE)
+    timer.join()
+    assert "PRAGMA secure_delete = ON" in statements
+    commits = _commits(statements, tables | {"bench_writer_marks"})
+    # The setup commit (before the writer is ready) records the corpus
+    # high-water marks; every later commit is the batch.
+    assert "bench_writer_marks" in commits[0]
+    assert not any("bench_writer_marks" in c for c in commits[1:])
+    return commits[1:]
+
+
+@pytest.mark.parametrize("batch", [1, 4])
+def test_wal_writer_commits_what_the_indexer_commits_per_batch(bench, tmp_path, monkeypatch, batch):
+    # One batch of a first index: a lone message (a thread root) at
+    # batch size 1, and a thread root with its three replies at 4, so
+    # both the lone survivor's charge and the several survivors' mark,
+    # and both a new thread and a reply, are compared. The expected
+    # sequence is the indexer's own, traced, never the writer's.
+    expected, tables = _indexer_commits(bench, tmp_path / "indexer", monkeypatch, batch, batch)
+    ours = _writer_commits(bench, tmp_path / "writer", monkeypatch, batch, tables)
+    assert ours == expected
+    # Every table the indexer wrote is one the benchmark builds or the
+    # writer creates, and the writer creates exactly the rest.
+    written = set().union(*expected)
+    assert written - set(_TABLES) == set(_WRITER_TABLES) == set(bench.WRITER_TABLES)
+    # The cadence the docs state: per message one enqueue, then charge,
+    # phase 1 and refund, a charge and refund around chunking, and the
+    # vector commit and the job's delete; per batch a lone survivor's
+    # charge (and its refund) or the survivors' interrupted mark.
+    assert len(expected) == (10 if batch == 1 else 8 * batch + 1)
+
+
+def test_wal_writer_constants_are_the_indexers(bench):
+    import random
+    import struct
+
+    from src import threader, vector_sums
+
+    assert bench.EMBEDDING_DIM == EMBEDDING_DIM
+    assert bench.SUM_ENCODING_VERSION == vector_sums.ENCODING_VERSION
+    assert bench.PER_MESSAGE_BODY_CAP_CHARS == threader.PER_MESSAGE_BODY_CAP_CHARS
+    assert bench.THREAD_BODY_TEXT_MAX_TOKENS == threader.THREAD_BODY_TEXT_MAX_TOKENS
+    assert bench.STEADY_STATE_BATCH_SIZE == main.STEADY_STATE_BATCH_SIZE
+    assert bench.INITIAL_INDEX_BATCH_SIZE == main.INITIAL_INDEX_BATCH_SIZE
+    rng = random.Random(3)
+    blobs = [bench._unit_vector(rng) for _ in range(3)]
+    total = [0] * EMBEDDING_DIM
+    for blob in blobs:
+        assert bench._vector_units(blob) == vector_sums.vector_units(blob)
+        total = vector_sums.add_units(total, vector_sums.vector_units(blob))
+        assert len(struct.unpack(f"{EMBEDDING_DIM}f", blob)) == EMBEDDING_DIM
+    assert bench._encode_sum(total) == vector_sums.encode(total)
+    assert bench._encode_sum([0] * EMBEDDING_DIM) == vector_sums.encode([0] * EMBEDDING_DIM)

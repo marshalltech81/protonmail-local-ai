@@ -68,6 +68,8 @@ def report(bench, tmp_path_factory):
             "--repeat",
             "1",
             "--wal",
+            "--writer-batch",
+            "4",
             "--writer-interval",
             "0.005",
             # Keeps the tiny round's transaction open long enough for
@@ -187,11 +189,11 @@ def test_wal_is_reclaimed_after_the_round(report):
         assert commits > 0
         # Every frame committed while the round held its snapshot stays
         # in the WAL: the growth over the window (not the size, which
-        # holds the warm-up's commits too) is at least the ballast of the
-        # commits inside it. Commits alternate message and ballast, so at
-        # least half carry ballast.
+        # holds the warm-up's commits too) is at least one frame (a page
+        # and its 24-byte header) for each writing commit inside it.
         growth = wal["wal_max_during_transaction_bytes"] - wal["wal_at_transaction_start_bytes"]
-        assert growth >= commits // 2 * wal["commit_bytes"] > 0
+        assert growth >= commits * (4096 + 24) > 0
+        assert wal["writer_batch"] == 4
         assert wal["checkpoint_after"]["busy"] == 0
         assert wal["wal_after_checkpoint_bytes"] == 0
 
@@ -203,14 +205,14 @@ def test_failed_round_stops_the_writer(bench, tmp_path):
     bench.build(db, 20, 1, "typical", "typical")
 
     def commits() -> int:
-        # The ballast rowid grows by one with every writer commit.
+        # Every writer message adds a messages row after the corpus's 20.
         with closing(sqlite3.connect(db)) as conn:
-            return conn.execute("SELECT COALESCE(MAX(id), 0) FROM bench_ballast").fetchone()[0]
+            return conn.execute("SELECT MAX(rowid) FROM messages").fetchone()[0]
 
     with pytest.raises(RuntimeError, match="reconcile round failed"):
-        bench.run_wal(str(db), "messages", 5, str(tmp_path / "missing.json"), 4096, 0.0)
+        bench.run_wal(str(db), "messages", 5, str(tmp_path / "missing.json"), 1, 0.0)
     after = commits()
-    assert after > 0
+    assert after > 20
     time.sleep(0.5)
     assert commits() == after
     assert not (tmp_path / "failed.db.stop").exists()
@@ -630,6 +632,7 @@ def test_report_config_records_every_workload_dimension(bench, report, cardinali
     assert keys == set(report["config"]) - {"sqlite", "python"}
     assert cardinality["config"]["references"] == 1000
     assert report["config"]["writer_interval"] == [0.005]
+    assert report["config"]["writer_batch"] == [4]
 
 
 def test_fts_rowids_follow_insertion_order(bench, tmp_path):
@@ -772,7 +775,7 @@ _WITH = {
             "--k": "1",
         }
     },
-    "writer_commit_bytes": {"*": {"--wal": None}},
+    "writer_batch": {"*": {"--wal": None}},
     "writer_interval": {"*": {"--wal": None}},
     "wal_hold": {"*": {"--wal": None}},
 }
@@ -878,6 +881,9 @@ def test_upload_total_takes_two_values(bench, value):
             0,
         ),
         ({"--wal": None}, "wal_hold", 0.0, 0.0),
+        # The indexer's steady-state and first-index batch sizes.
+        ({"--wal": None}, "writer_batch", [8, 50], None),
+        ({"--wal": None}, "writer_interval", [0.0, 0.1], [0.0]),
         ({}, "extracted_chars", 0, 0),
         ({}, "request_shapes", 0, 0),
     ],
@@ -932,10 +938,10 @@ def test_absent_and_zero_are_resolved_as_the_table_says(bench, changes, name, ab
         ({"--chunks": "2", "--chunk-tokens": "199"}, "one chunk per paragraph"),
         ({"--extracted-chars": "5", "--per-message": "0", "--missing": "0"}, "--per-message"),
         ({"--records": "mixed", "--missing-from": "worst", "--missing": "0"}, "leaves nothing"),
-        ({"--writer-commit-bytes": "5"}, "need --wal"),
+        ({"--writer-batch": "5"}, "need --wal"),
         ({"--writer-interval": "0.5"}, "need --wal"),
         ({"--wal-hold": "1"}, "need --wal"),
-        ({"--wal": None, "--writer-commit-bytes": "16,16"}, "distinct"),
+        ({"--wal": None, "--writer-batch": "4,4"}, "distinct"),
         ({"--wal": None, "--writer-interval": "0,0.0"}, "distinct"),
         ({"--repeat": "3"}, "cannot balance"),
         ({"--repeat": "2", "--filtered": None}, "cannot balance"),
@@ -1041,32 +1047,75 @@ def test_file_size_check_is_exact_for_many_parts(bench):
     )
 
 
-def test_writer_commits_each_message_as_the_indexer_does(bench, tmp_path):
-    # The indexer commits per message, twice: phase 1 (the message's
-    # rows) and phase 2c (its chunks and vectors). The writer alternates
-    # a one-message update with a ballast commit, so its commits are
-    # pairs and each pair flips exactly one message.
-    db = tmp_path / "one.db"
-    bench.build(db, 1, 0, "typical", "typical")
-
-    def state() -> tuple[int, int]:
-        with closing(sqlite3.connect(db)) as conn:
-            seen = conn.execute("SELECT seen FROM messages").fetchone()[0]
-            top = conn.execute("SELECT COALESCE(MAX(id), 0) FROM bench_ballast").fetchone()[0]
-            return seen, top
-
-    built, _ = state()
+def test_writer_indexes_each_batch_into_trash(bench, tmp_path):
+    # One batch of three new messages (the corpus's numbering goes on
+    # in threads of four: a root and two replies), each with a body
+    # chunk and an attachment: the commits the indexer makes for them
+    # (indexer/tests/test_reconcile_bench_fidelity.py compares the
+    # sequence with the indexer's own), and the rows it leaves.
+    db = tmp_path / "batch.db"
+    bench.build(db, 8, 1, "typical", "typical")
+    counts = [bench.scan_sql(kind)[::2] for kind in ("messages", "occurrences")]
+    with closing(sqlite3.connect(db)) as conn:
+        before = [conn.execute(sql, params).fetchone()[0] for sql, params in counts]
     stop = tmp_path / "stop"
-
     timer = _stop_after_ready(stop, 0.3)
-    out = bench.phase_writer(str(db), str(stop), 16, 0.01)
+    out = bench.phase_writer(str(db), str(stop), 3, 3600.0, shape={"per_message": 1})
     timer.join()
-    assert out["commits"] > 0 and out["commits"] % 2 == 0
-    pairs = out["commits"] // 2
-    seen, top = state()
-    assert seen == (1 - built if pairs % 2 else built)
-    # The steady ballast, then one row per pair.
-    assert top == bench.BALLAST_ROWS + pairs
+    # Per message: enqueue, charge, phase 1, refund, charge, refund,
+    # phase 2c, delete; per batch of several: one interrupted mark.
+    assert out["commits"] == 8 * 3 + 1
+    with closing(sqlite3.connect(db)) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        added = conn.execute(
+            "SELECT folder, body_complete, thread_id FROM messages WHERE rowid > 8"
+        ).fetchall()
+        assert [(f, c) for f, c, _ in added] == [("Trash", 1)] * 3
+        assert {t for _, _, t in added} == {bench.message_id(8, "typical")}
+        assert conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 1
+        # A body chunk and an attachment chunk a message, each with its
+        # vector, all in the thread's sum.
+        assert conn.execute("SELECT COUNT(*) FROM message_chunks_vec").fetchone()[0] == 6
+        assert conn.execute("SELECT count FROM thread_vector_sums").fetchone()[0] == 6
+        assert conn.execute("SELECT COUNT(*) FROM attachments WHERE rowid > 8").fetchone()[0] == 3
+        # Trash is left out of the round's sets, so they are unchanged.
+        assert [conn.execute(sql, params).fetchone()[0] for sql, params in counts] == before
+
+
+def test_writer_removes_what_an_earlier_writer_added(bench, tmp_path):
+    # Each WAL configuration starts from the corpus build wrote.
+    db = tmp_path / "again.db"
+    bench.build(db, 8, 1, "typical", "typical")
+    tables = [*bench._MARKED, "pending_deletions"]
+
+    def counts() -> dict:
+        with closing(sqlite3.connect(db)) as conn:
+            found = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+            # The writer's first message's body term and filename.
+            found["fts"] = conn.execute(
+                "SELECT COUNT(*) FROM message_chunks_fts WHERE message_chunks_fts MATCH ?",
+                ("gamma0000000008",),
+            ).fetchone()[0]
+            return found
+
+    built = counts()
+    stop = tmp_path / "stop"
+    timer = _stop_after_ready(stop, 0.3)
+    bench.phase_writer(str(db), str(stop), 1, 3600.0, shape={"per_message": 1})
+    timer.join()
+    assert counts()["messages"] == 9 and counts()["fts"] == 1
+    out = bench.phase_writer(str(db), str(stop), 1, 0.0)  # stop exists: setup only
+    assert out["commits"] == 0 and len(out["commit_times"]) == 1
+    assert (tmp_path / "stop.ready").exists()
+    assert counts() == built
+    with closing(sqlite3.connect(db)) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        for table in bench.WRITER_TABLES:
+            if table != "threads_fts":
+                assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
 
 
 def test_round_transaction_time_starts_at_the_snapshot(bench):
@@ -1185,7 +1234,7 @@ def test_writer_commits_and_stamps_only_under_the_order_lock(bench, tmp_path):
         fcntl.flock(held, fcntl.LOCK_EX)
         writer = threading.Thread(
             target=lambda: out.update(
-                bench.phase_writer(str(db), str(stop), 16, 0.0, order=str(order))
+                bench.phase_writer(str(db), str(stop), 1, 0.0, order=str(order))
             )
         )
         writer.start()
@@ -1223,7 +1272,7 @@ def test_writer_wal_size_is_its_logical_end(bench, tmp_path):
     bench.build(db, 8, 0, "typical", "typical")
     stop = tmp_path / "stop"
     timer = _stop_after_ready(stop, 0.5)
-    out = bench.phase_writer(str(db), str(stop), 262_144, 0.0)
+    out = bench.phase_writer(str(db), str(stop), 1, 0.0)
     timer.join()
     sizes = [size for _, size in out["commit_times"]]
     assert len(sizes) > 4
@@ -1245,7 +1294,7 @@ def test_writer_survives_a_tiny_interval(bench, tmp_path, monkeypatch):
 
     monkeypatch.setattr(bench.time, "sleep", checked)
     timer = _stop_after_ready(stop, 0.3)
-    out = bench.phase_writer(str(db), str(stop), 16, 0.000001)
+    out = bench.phase_writer(str(db), str(stop), 1, 0.000001)
     timer.join()
     assert out["commits"] > 0
 
@@ -1278,24 +1327,11 @@ def test_writer_delay_ends_when_stop_appears(bench, tmp_path):
 
     timer = _stop_after_ready(stop, 0.5)
     started = time.monotonic()
-    out = bench.phase_writer(str(db), str(stop), 16, 3600.0)
+    out = bench.phase_writer(str(db), str(stop), 1, 3600.0)
     timer.join()
     assert time.monotonic() - started < 5
-    # One message: its two commits.
-    assert out["commits"] == 2
-
-
-def test_writer_starts_from_the_steady_ballast(bench, tmp_path):
-    db = tmp_path / "ballast.db"
-    bench.build(db, 8, 0, "typical", "typical")
-    stop = tmp_path / "stop"
-    stop.touch()  # no commit: only the reset runs
-    out = bench.phase_writer(str(db), str(stop), 32, 0.0)
-    assert out["commits"] == 0 and len(out["commit_times"]) == 1
-    assert (tmp_path / "stop.ready").exists()
-    with closing(sqlite3.connect(db)) as conn:
-        rows = conn.execute("SELECT COUNT(*), MIN(length(payload)) FROM bench_ballast").fetchone()
-    assert rows == (bench.BALLAST_ROWS, 32)
+    # One batch of one message: its ten commits.
+    assert out["commits"] == 10
 
 
 def test_writer_waits_only_the_remaining_interval(bench, tmp_path, monkeypatch):
@@ -1312,36 +1348,30 @@ def test_writer_waits_only_the_remaining_interval(bench, tmp_path, monkeypatch):
             stop.touch()
 
     monkeypatch.setattr(bench.time, "sleep", sleep)
-    bench.phase_writer(str(db), str(stop), 16, 0.06)
+    bench.phase_writer(str(db), str(stop), 1, 0.06)
     # Within one 0.06 s delay: 0.05, then at most the 0.01 s left.
     assert all(s <= 0.05 for s in slept)
     assert any(s < 0.0101 for s in slept[1::2])
 
 
-def test_the_largest_writer_commit_is_a_row_sqlite_stores(bench):
-    # Every accepted --writer-commit-bytes runs: SQLite refuses a row at
-    # its length limit (record header included), and the steady ballast
-    # stays bounded.
-    with closing(sqlite3.connect(":memory:")) as conn:
-        assert bench.MAX_COMMIT_BYTES < conn.getlimit(sqlite3.SQLITE_LIMIT_LENGTH)
-        conn.execute("CREATE TABLE b (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)")
-        conn.execute("INSERT INTO b (payload) VALUES (randomblob(?))", (bench.MAX_COMMIT_BYTES,))
-    assert bench.MAX_COMMIT_BYTES * bench.BALLAST_ROWS <= 3_200_000_000
-
-
 def test_a_writer_that_dies_mid_round_fails_the_measurement(bench, tmp_path):
-    # Only the highest message row is left, so the writer's first
-    # one-message update (a seeded random row) finds no row and the
-    # writer exits after its steady state; the round itself succeeds.
+    # A trigger refuses the writer's first enqueue, so the writer exits
+    # after its setup; the round itself succeeds.
     db = tmp_path / "dies.db"
     bench.build(db, 20, 0, "typical", "typical")
     with closing(sqlite3.connect(db)) as conn:
-        conn.execute("DELETE FROM messages WHERE rowid < 20")
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.executescript(bench._WRITER_SCHEMA)
+        conn.execute(
+            "CREATE TRIGGER refuse BEFORE INSERT ON indexing_jobs "
+            "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+        )
         conn.commit()
     request = tmp_path / "request.json"
     request.write_text(json.dumps({"hashes": ""}))
     with pytest.raises(RuntimeError, match="WAL writer exited with status 1"):
-        bench.run_wal(str(db), "messages", 5, str(request), 16, 0.0)
+        bench.run_wal(str(db), "messages", 5, str(request), 1, 0.0)
     assert not (tmp_path / "dies.db.stop").exists()
 
 
@@ -1352,8 +1382,8 @@ def test_wal_results_name_the_round_they_measured(bench, report):
 
 def _stop_after_ready(stop: Path, delay: float):
     """A started thread that creates ``stop`` ``delay`` seconds after
-    the writer reaches its steady state (``stop.ready``), so the delay
-    counts commits, not the ballast reset, however slow the disk."""
+    the writer is ready (``stop.ready``), so the delay counts commits,
+    not the writer's setup, however slow the disk."""
     import threading
 
     def run() -> None:
@@ -1376,8 +1406,12 @@ def test_writer_transactions_run_wholly_under_the_order_lock(bench):
 
     src = inspect.getsource(bench.phase_writer)
     loop = src[src.index("def transaction()") :]
-    assert loop.count('"BEGIN IMMEDIATE"') == 1
+    # The only BEGIN and COMMIT after the writer is ready are these: every
+    # measured commit runs through ``transaction()``.
+    assert src.count('"BEGIN IMMEDIATE"') == src.count('"COMMIT"') == 1
     lock = loop.index("with _ordered(order):")
     assert lock < loop.index('"BEGIN IMMEDIATE"') < loop.index("yield")
     assert loop.index("yield") < loop.index('"COMMIT"') < loop.index("times.append")
-    assert loop.count("with transaction():") == 2
+    for helper in (bench._writer_phase1, bench._writer_phase2c, bench._write_thread_vector):
+        helper_src = inspect.getsource(helper)
+        assert "COMMIT" not in helper_src and "BEGIN" not in helper_src

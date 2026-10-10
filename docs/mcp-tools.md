@@ -1648,12 +1648,24 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
 - with `--wal`, after every other step, WAL growth while a second
   process commits during one round's snapshot (largest K, each kind
   and scan method), and whether a `TRUNCATE` checkpoint then reclaims
-  it. The writer commits per message, twice, as the indexer does: a
-  one-message update, then `--writer-commit-bytes` of ballast standing
-  for the message's chunks and vectors, `--writer-interval` seconds
-  apart. Those bytes and that pace are parameters, not the indexer's
-  own figures. The writer runs with automatic checkpoints off, so the
-  WAL file's size is the WAL's end.
+  it. The writer makes the indexer's commits for new mail, a batch of
+  `--writer-batch` messages at a time (absent: 8 and 50, the indexer's
+  steady-state and first-index batch sizes), pausing
+  `--writer-interval` seconds after each batch. For each message it
+  commits a queue job, a charge, the message's thread and message rows,
+  a refund, a charge and refund around chunking, its chunks, vectors
+  and attachments, and the job's deletion; each batch adds one more
+  commit, the lone message's charge and refund at batch size 1 or one
+  mark on every message at larger sizes. Its tables are the ones the
+  indexer writes and its messages have the corpus's shape, stored in
+  Trash so the round's set does not change; it overwrites deleted
+  content as the indexer does. `indexer/tests/test_reconcile_bench_fidelity.py`
+  traces the indexer's own commits and checks the writer's sequence and
+  the tables of each commit. The bytes each commit writes are not
+  calibrated against the live indexer, and the pace is a parameter
+  ([#1469](https://github.com/marshalltech81/protonmail-local-ai/issues/1469)).
+  The writer runs with automatic checkpoints off, so the WAL file's
+  size is the WAL's end.
 
 Run it inside the mcp-server image so SQLite and Python match the
 server's; `--help` lists every option:
