@@ -1187,6 +1187,61 @@ def test_the_round_takes_its_snapshot_under_the_order_lock(bench):
     assert end < src.index("ended_at = ")
 
 
+def test_writer_wal_size_is_its_logical_end(bench, tmp_path):
+    # An automatic checkpoint would restart the WAL and refill its
+    # allocated file without growing it, hiding retained frames. With
+    # it off, every commit grows the file, so its size is the WAL's end.
+    import threading
+
+    db = tmp_path / "grow.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    timer = threading.Timer(0.5, stop.touch)
+    timer.start()
+    out = bench.phase_writer(str(db), str(stop), 262_144, 0.0)
+    timer.join()
+    sizes = [size for _, size in out["commit_times"]]
+    assert len(sizes) > 4
+    assert all(b > a for a, b in zip(sizes, sizes[1:]))
+
+
+def test_writer_survives_a_tiny_interval(bench, tmp_path, monkeypatch):
+    # The pause is computed from one clock read: a clock that passes
+    # ``resume`` between reads never yields a negative sleep.
+    import threading
+
+    db = tmp_path / "tiny.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    real = time.sleep
+
+    def checked(seconds: float) -> None:
+        assert seconds >= 0
+        real(seconds)
+
+    monkeypatch.setattr(bench.time, "sleep", checked)
+    timer = threading.Timer(0.3, stop.touch)
+    timer.start()
+    out = bench.phase_writer(str(db), str(stop), 16, 0.000001)
+    timer.join()
+    assert out["commits"] > 0
+
+
+def test_the_round_closes_its_transaction_inside_the_end_boundary(bench):
+    import inspect
+
+    src = inspect.getsource(bench.phase_reconcile)
+    end = src.index("with _ordered(order):", src.index("with _ordered(order):") + 1)
+    block = src[end:].split("\n")
+    body = []
+    for line in block[1:]:
+        if line.strip() and not line.startswith(" " * 12):
+            break
+        body.append(line.strip())
+    assert "ended_at = time.monotonic()" in body
+    assert "conn.rollback()" in body
+
+
 def test_writer_delay_ends_when_stop_appears(bench, tmp_path):
     db = tmp_path / "delay.db"
     bench.build(db, 8, 0, "typical", "typical")

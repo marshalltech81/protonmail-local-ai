@@ -1121,10 +1121,11 @@ def phase_reconcile(
         if hold_s:
             time.sleep(hold_s)
         # Still inside the transaction: its frames are retained until the
-        # rollback.
+        # rollback, which runs under the lock too, so no commit lands
+        # between the end stamp and the snapshot's release.
         with _ordered(order):
             ended_at = time.monotonic()
-        conn.rollback()
+            conn.rollback()
     response = {
         "complete": missing_total <= k,
         "snapshot_count": count,
@@ -1338,9 +1339,11 @@ def phase_writer(
 
     After each commit it records the time and the WAL file's size, so a
     window's commit count and its WAL sizes come from the same records:
-    only this process writes the WAL, and the file never shrinks until
-    a truncating checkpoint, which ``run_wal`` runs after the round. The
-    delay between commits ends early when ``stop`` appears."""
+    only this process writes the WAL, and it runs with automatic
+    checkpoints off, so the WAL is never restarted into its allocated
+    file and the file's size is the WAL's logical end until the
+    truncating checkpoint ``run_wal`` runs after the round. The delay
+    between messages ends early when ``stop`` appears."""
     rng = random.Random(7)
     wal = db_path + "-wal"
     commits = 0
@@ -1348,6 +1351,7 @@ def phase_writer(
     with closing(sqlite3.connect(db_path, isolation_level=None, timeout=30)) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
         top = conn.execute("SELECT MAX(rowid) FROM messages").fetchone()[0]
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM bench_ballast")
@@ -1384,8 +1388,11 @@ def phase_writer(
             commit()
             commits += 2
             resume = time.monotonic() + interval
-            while time.monotonic() < resume and not os.path.exists(stop):
-                time.sleep(min(0.05, resume - time.monotonic()))
+            while not os.path.exists(stop):
+                remaining = resume - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
     return {"commits": commits, "commit_times": times}
 
 
