@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 
 import pytest
 from src.extractors import (
@@ -4411,7 +4412,11 @@ class TestMultipageTiffOcrCap:
         seen = self._ocr(monkeypatch)
         seeks = self._count_seeks(monkeypatch)
         result = self._extract(self._corrupt_third_frame(), max_ocr_pages=2)
-        assert result == intact
+        # The same text; only the cap record differs: a higher limit would
+        # only try the unreadable frame, so it records none (#1418).
+        assert intact.ocr_pages_cap == 2
+        assert result.ocr_pages_cap == 0
+        assert result == replace(intact, ocr_pages_cap=0)
         assert seen == ["PAGE_0", "PAGE_1"]
         assert seeks == [1, 2]
         # The unread frames make the text incomplete (#1242).
@@ -6241,6 +6246,8 @@ class TestPptxExtractor:
             text="ATTACHMENTFACT only in the deck",
             error=None,
             text_complete=True,
+            # The dispatcher's character cap did not cut it (#1418).
+            extracted_chars_cap=0,
         )
         assert calls == ["pptx"]
 

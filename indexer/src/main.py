@@ -37,6 +37,7 @@ import threading
 import time
 import urllib.parse
 import warnings
+from collections import Counter
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -2908,7 +2909,16 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     (#693). A ``success`` or ``empty`` row with no completeness record
     (cached before schema v6) is re-extracted on reprocess, so its
     messages are re-queued too, except an ``-ocr`` row while OCR is off
-    (``completeness_unrecorded``, #1285). A message carrying an
+    (``completeness_unrecorded``, #1285). A ``success`` or ``empty``
+    row a configured limit cut (``INDEXER_OCR_MAX_PAGES``,
+    ``INDEXER_PDF_MAX_DIGITAL_PAGES``,
+    ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS``) that has since been
+    raised is re-extracted, so its messages are re-queued, and, once,
+    one cached before the cap record (schema v11) that lost text; while
+    OCR is off, never a row OCR wrote, cut or skipped pages of
+    (``attachment_indexing.cap_raised`` and ``cap_bootstrap_due``,
+    #1418). They get their own INFO line with
+    the three settings and the counts. A message carrying an
     occurrence whose extraction the per-message budget deferred (#1236)
     and no queued job (its continuation was lost: a pass with extraction
     switched off marked it succeeded) is re-queued, so a deferral is
@@ -2969,6 +2979,20 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         assessed,
     )
     filepaths.update(unrecorded)
+    # A cached result a configured limit cut that has since been raised,
+    # and, once, one cached before the cap record that lost text (#1418).
+    # Every message using the row is queued here, before the drain
+    # re-extracts it for any of them, so a shared row is replaced only
+    # once all its messages are durably scheduled.
+    cap_raised_paths, cap_bootstrap_paths = db.find_cap_refresh_attachment_filepaths(
+        ocr_enabled=INDEXER_OCR_ENABLED,
+        max_ocr_pages=INDEXER_OCR_MAX_PAGES,
+        max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES,
+        max_extracted_chars=INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS,
+        assessed=assessed,
+    )
+    cap_paths = cap_raised_paths | cap_bootstrap_paths
+    filepaths.update(cap_paths)
     if INDEXER_OCR_ENABLED:
         filepaths.update(
             db.find_ocr_disabled_attachment_filepaths(_occurrence_reruns_extraction, assessed)
@@ -2984,15 +3008,35 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     re_enqueued = 0
     re_enqueued_unrecorded = 0
     skipped_dead = 0
+    cap_outcomes: Counter[str] = Counter()
     for filepath in sorted(filepaths):
         if queue.has_pending_row(filepath):
+            cap_outcomes["already_queued"] += filepath in cap_paths
             continue
         if queue.is_dead(filepath):
             skipped_dead += 1
+            cap_outcomes["dead"] += filepath in cap_paths
             continue
         queue.enqueue(filepath, REASON_REEXTRACT)
         re_enqueued += 1
         re_enqueued_unrecorded += filepath in unrecorded
+        cap_outcomes["queued"] += filepath in cap_paths
+    if cap_paths:
+        log.info(
+            "cap refresh sweep (INDEXER_OCR_MAX_PAGES=%d INDEXER_PDF_MAX_DIGITAL_PAGES=%d "
+            "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS=%d): %d message(s) with an attachment "
+            "result a since-raised limit cut, %d with one cached before the cap record that "
+            "lost text (bootstrap, once); re-queued %d, already queued %d, skipped %d "
+            "dead-lettered (run make requeue-dead to refresh them).",
+            INDEXER_OCR_MAX_PAGES,
+            INDEXER_PDF_MAX_DIGITAL_PAGES,
+            INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS,
+            len(cap_raised_paths),
+            len(cap_bootstrap_paths),
+            cap_outcomes["queued"],
+            cap_outcomes["already_queued"],
+            cap_outcomes["dead"],
+        )
     if re_enqueued or skipped_dead:
         # A dead-lettered message keeps its stale attachment text (#874).
         log.log(
@@ -3000,7 +3044,8 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
             "re-queued %d message(s) (%d for a missing text-completeness record) whose "
             "attachments were extracted by an older extractor version (%s), skipped "
             "while OCR was off, had no extractor, now fit under "
-            "INDEXER_ATTACHMENT_MAX_BYTES, or were deferred by the per-message extraction "
+            "INDEXER_ATTACHMENT_MAX_BYTES, were cut by a since-raised limit or predate the "
+            "cap record, or were deferred by the per-message extraction "
             "budget; skipped %d dead-lettered "
             "(run make requeue-dead to refresh them).",
             re_enqueued,

@@ -119,8 +119,8 @@ class TestSchema:
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
         v10 (#1356), skipping the migration files."""
-        assert SCHEMA_VERSION == 10
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 10
+        assert SCHEMA_VERSION == 11
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 11
 
     def test_fresh_install_has_a_nullable_ocr_pages_skipped_column(self, db):
         """#891: a count, NULL when unknown, with no default."""
@@ -318,7 +318,7 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]" in caplog.text
+        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -543,9 +543,23 @@ _MESSAGE_INDEXES = (
 )
 
 
+# The columns v11 adds to ``attachment_extractions`` (#1418).
+_V11_COLUMNS = ("ocr_pages_cap", "digital_pages_cap", "extracted_chars_cap")
+
+
+def _v10_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v10 shape: v10 is the current
+    schema without the extraction cap record (#1418)."""
+    for column in _V11_COLUMNS:
+        db._conn.execute(f"ALTER TABLE attachment_extractions DROP COLUMN {column}")
+    db._conn.execute("UPDATE schema_version SET version = 10")
+    db._conn.commit()
+
+
 def _v9_from_fresh(db: Database) -> None:
-    """Turn a fresh database into the v9 shape: v9 is the current schema
+    """Turn a fresh database into the v9 shape: v9 is the v10 schema
     without ``thread_vector_sums`` (#1356)."""
+    _v10_from_fresh(db)
     db._conn.execute("DROP TABLE thread_vector_sums")
     db._conn.execute("UPDATE schema_version SET version = 9")
     db._conn.commit()
@@ -679,7 +693,7 @@ class TestMigrationV6:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [6, 7, 8, 9, 10]" in caplog.text
+        assert "applied migrations: [6, 7, 8, 9, 10, 11]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
     @pytest.mark.parametrize("table, column", [c for c in _V6_COLUMNS if c[1] == "text_complete"])
@@ -914,6 +928,50 @@ class TestUnknownSendDate:
         assert _dates(db, msg.claimant_id)[:2] == (msg.date.isoformat(), None)
 
 
+class TestMigrationV11:
+    """#1418: v10 -> v11 adds the extraction cap record, NULL (unknown)
+    on every existing row, and queues nothing: the startup sweep's
+    bootstrap arm re-queues the incomplete rows once."""
+
+    def test_v10_database_migrates_to_the_fresh_v11_shape(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        db = Database(tmp_path / "v10.db")
+        msg = make_message(message_id="old@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        _store_occurrence(db, claimant_id=msg.claimant_id, occurrence="occ-1", attachment_id="h1")
+        db._conn.commit()
+        _v10_from_fresh(db)
+        db.close()
+        migrated = Database(tmp_path / "v10.db")
+        fresh = Database(tmp_path / "fresh.db")
+        try:
+            assert (
+                migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+                == SCHEMA_VERSION
+                == 11
+            )
+            assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
+            row = migrated.get_attachment_extraction("h1", "text")
+            assert [row[c] for c in _V11_COLUMNS] == [None, None, None]
+            assert row["extracted_text"] == "SYNTHETIC_V6_MARKER"
+            cols = {
+                r["name"]: r
+                for r in migrated._conn.execute("PRAGMA table_info(attachment_extractions)")
+            }
+            for column in _V11_COLUMNS:
+                col = cols[column]
+                assert (col["type"], col["notnull"], col["dflt_value"]) == ("INTEGER", 0, None)
+                with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+                    migrated._conn.execute(f"UPDATE attachment_extractions SET {column} = -1")
+            # Not a parser column: no reparse job.
+            assert migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+        finally:
+            migrated.close()
+            fresh.close()
+        assert "applied migrations: [11]" in caplog.text
+        assert "SYNTHETIC_V6_MARKER" not in caplog.text
+
+
 class TestMigrationV10:
     """#1356: v9 -> v10 adds ``thread_vector_sums`` with no rows and
     queues nothing; the backfill then fills each thread exactly."""
@@ -938,7 +996,7 @@ class TestMigrationV10:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 10
+                == 11
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             assert (
@@ -955,7 +1013,7 @@ class TestMigrationV10:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [10]" in caplog.text
+        assert "applied migrations: [10, 11]" in caplog.text
 
 
 class TestMigrationV9:
@@ -977,7 +1035,7 @@ class TestMigrationV9:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 10
+                == 11
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             assert [
@@ -994,7 +1052,7 @@ class TestMigrationV9:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [9, 10]" in caplog.text
+        assert "applied migrations: [9, 10, 11]" in caplog.text
 
 
 class TestMigrationV8:
@@ -1103,7 +1161,7 @@ class TestMigrationV8:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [8, 9, 10]" in caplog.text
+        assert "applied migrations: [8, 9, 10, 11]" in caplog.text
         assert "SYNTHETIC_V8_MARKER" not in caplog.text
 
     def test_a_failed_rebuild_leaves_v7_intact(self, tmp_path):
@@ -1175,7 +1233,7 @@ class TestMigrationV7:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [7, 8, 9, 10]" in caplog.text
+        assert "applied migrations: [7, 8, 9, 10, 11]" in caplog.text
 
 
 class TestAttachmentTextCompleteness:
@@ -1298,7 +1356,7 @@ class TestMigrationV5:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [5, 6, 7, 8, 9, 10]" in caplog.text
+        assert "applied migrations: [5, 6, 7, 8, 9, 10, 11]" in caplog.text
 
     @pytest.mark.parametrize("column", [c for c in _V5_COLUMNS if c != "caps_json"])
     def test_the_flag_columns_reject_other_values(self, db, column):
@@ -1428,7 +1486,7 @@ class TestMigrationV2:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9, 10]" in caplog.text
+        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
         db = Database(tmp_path / "v1.db")
@@ -1480,7 +1538,7 @@ class TestMigrationV3:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [3, 4, 5, 6, 7, 8, 9, 10]" in caplog.text
+        assert "applied migrations: [3, 4, 5, 6, 7, 8, 9, 10, 11]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path, monkeypatch):

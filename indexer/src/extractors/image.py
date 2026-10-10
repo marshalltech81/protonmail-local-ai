@@ -15,7 +15,9 @@ The child's result crosses the pipe in the runner's framed protocol: a
 ``P`` frame per OCR'd page, passed to the dispatcher's ``on_progress``
 so the heartbeat keeps firing through a long multipage TIFF (#485); a
 ``C`` frame per cap that cut the text, logged and counted here; and the
-text. An error in the child (a decompression bomb, a Tesseract timeout
+text. The frame cap that cut records ``INDEXER_OCR_MAX_PAGES`` on the
+result (#1418); the text budget, a hardcoded limit, records nothing. An
+error in the child (a decompression bomb, a Tesseract timeout
 or failure, the child's own ``MemoryError`` or ``RecursionError`` at
 its limit) is reported by type name and recorded ``failed`` by the
 dispatcher, as is a limit hit, a timeout or output that breaks the
@@ -29,9 +31,11 @@ import shutil
 from collections.abc import Callable
 
 from . import (
+    CAP_OCR_PAGES,
     CHILD_DEGRADATION_KEYS,
     apply_child_degradation,
     note_ocr_capped_image,
+    record_cap_cut,
     warn_extractor_cap,
     warn_rate_limited,
 )
@@ -163,6 +167,10 @@ def extract(
         # frame past it rather than walk the whole frame chain (#885).
         note_ocr_capped_image()
         if cap == CAP_FRAMES:
+            # The limit that cut, so raising it re-extracts (#1418). Not
+            # for an unreadable next frame: a higher limit would only try
+            # to read it, and fail the image.
+            record_cap_cut(CAP_OCR_PAGES, max_ocr_pages)
             warn_rate_limited(
                 log,
                 "image OCR capped at %d of at least %d frames",
