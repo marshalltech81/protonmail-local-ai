@@ -906,10 +906,14 @@ superseded entries keep their number and one line.
     honest counts and completeness. Grouping mail into matters, linking
     threads by a shared identifier (for example a case or order number),
     tracking requests and assigning statuses are the client's job. The
-    client can link threads by searching for the identifier with
-    `search_emails` or `query_messages` `text=`, then grouping the
-    results. Ruled out so far: request reconciliation and lifecycle
-    statuses, and identifier extraction with cross-thread linking.
+    client can search for an identifier with `search_emails` or
+    `query_messages` `text=` and group the results itself. Neither search
+    is exhaustive for an identifier that appears only in subjects or
+    attachments, and neither verifies that the literal identifier occurs
+    in each result, so the precision of any grouping is the client's
+    responsibility. Ruled out so far: request reconciliation and
+    lifecycle statuses, and identifier extraction with cross-thread
+    linking.
 
 ## Notes for Agents
 
