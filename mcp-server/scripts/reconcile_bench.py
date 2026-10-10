@@ -154,8 +154,11 @@ CREATE TABLE attachments (
     fts_rowid                 INTEGER,
     extractor_module          TEXT NOT NULL DEFAULT '',
     text_complete             INTEGER CHECK (text_complete IN (0, 1)),
-    text_extractor            TEXT
+    text_extractor            TEXT,
+    extraction_deferred_at    TEXT
 );
+CREATE INDEX idx_attachments_deferred ON attachments(claimant_id, attachment_id)
+    WHERE extraction_deferred_at IS NOT NULL;
 CREATE INDEX idx_attachments_attachment_id ON attachments(attachment_id);
 CREATE INDEX idx_attachments_thread ON attachments(thread_id);
 CREATE INDEX idx_attachments_claimant ON attachments(claimant_id);
@@ -184,6 +187,9 @@ CREATE TABLE bench_ballast (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
 -- The wall-clock time of each writer commit, to count the commits that
 -- overlap a round's transaction.
 CREATE TABLE bench_commits (at REAL NOT NULL);
+-- Message and occurrence identities whose records are worst-case
+-- (``--records mixed``), for an upload that leaves exactly those out.
+CREATE TABLE bench_worst (identity TEXT PRIMARY KEY);
 """
 
 # Longest Message-ID the indexer accepts (indexer/src/parser.py
@@ -227,9 +233,18 @@ MAX_MESSAGE_ADDRESSES = 10_000
 _WIDE = "\U0001f600"
 
 
+def _mixed_worst(i: int) -> bool:
+    """Whether message ``i`` carries worst-case records under
+    ``--records mixed``: one in fifty, so a large corpus stays buildable
+    while every record a round returns can be worst-case."""
+    return i % 50 == 1
+
+
 def _shape(i: int, identity: str, records: str, references: int) -> dict:
     """The response-record fields of message ``i`` for one ``records``
     shape (``build``)."""
+    if records == "mixed":
+        records = "worst" if _mixed_worst(i) else "typical"
     if records == "worst":
         wide = _WIDE * 501
         people = [
@@ -332,7 +347,7 @@ def build(
         min_tokens = BODY_TOKENS
         for start in range(0, messages, batch):
             msg_rows, part_rows, att_rows, ext_rows = [], [], [], []
-            name_rows, chunk_rows, fts_rows = [], [], []
+            name_rows, chunk_rows, fts_rows, worst_rows = [], [], [], []
             for i in order[start : start + batch]:
                 mid = message_id(i, identity)
                 cid = claimant_of(mid)
@@ -340,6 +355,9 @@ def build(
                 folder = _folder(i)
                 at = f"20{10 + i % 15:02d}-{1 + i % 12:02d}-{1 + i % 28:02d}T{i % 24:02d}:{i % 60:02d}:00+00:00"
                 shape = _shape(i, identity, records, references)
+                worst = records == "mixed" and _mixed_worst(i)
+                if worst:
+                    worst_rows.append((cid,))
                 msg_rows.append(
                     (
                         cid,
@@ -387,6 +405,8 @@ def build(
                         )
                     )
                     ext_rows.append((payload, text, at))
+                    if worst:
+                        worst_rows.append((occurrence,))
             conn.executemany(
                 "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
                 "subject, sent_at, occurred_at, in_reply_to, references_json, has_attachments, "
@@ -402,6 +422,7 @@ def build(
             conn.executemany("INSERT INTO message_participants VALUES (?, ?, ?, ?)", part_rows)
             conn.executemany("INSERT INTO message_participant_names VALUES (?, ?, ?, ?)", name_rows)
             conn.executemany("INSERT INTO message_chunks_fts (rowid, text) VALUES (?, ?)", fts_rows)
+            conn.executemany("INSERT INTO bench_worst (identity) VALUES (?)", worst_rows)
             conn.executemany(
                 "INSERT INTO message_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?)", chunk_rows
             )
@@ -426,8 +447,9 @@ def build(
             "FROM (SELECT DISTINCT address FROM message_participants WHERE role = 'from'))"
         )
         conn.commit()
-        conn.execute("ANALYZE")
-        conn.commit()
+        # No ANALYZE: neither the indexer nor the server runs it (nor
+        # PRAGMA optimize), so a deployed index has no sqlite_stat1 and
+        # the planner works without statistics, as it does here.
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     return {
         "build_s": round(time.perf_counter() - t0, 2),
@@ -445,7 +467,14 @@ def scan_sql(kind: str, filters: dict | None = None) -> tuple[str, str, list]:
     from the server's own predicate compiler, as ``query_messages`` and
     ``query_attachments`` build them."""
     from src.lib.predicates import compile_leaves, query_messages_leaves
-    from src.lib.sqlite import _ATTACHMENT_FROM
+    from src.lib.sqlite import _ATTACHMENT_FROM, _attachment_clauses
+
+    filters = dict(filters or {})
+    # query_attachments' own filters, compiled by its own helper.
+    own = {
+        name: filters.pop(name, None)
+        for name in ("filename", "content_type", "extraction_status", "claimant_id", "thread_id")
+    }
 
     none = dict.fromkeys(
         (
@@ -463,10 +492,15 @@ def scan_sql(kind: str, filters: dict | None = None) -> tuple[str, str, list]:
             "flagged",
         )
     )
-    where_sql, params = compile_leaves(query_messages_leaves(**{**none, **(filters or {})}))
+    where_sql, params = compile_leaves(query_messages_leaves(**{**none, **filters}))
     if kind == "messages":
+        if any(v is not None for v in own.values()):
+            raise ValueError("attachment filters apply to occurrences only")
         frm, ident = "FROM messages m", "m.claimant_id"
     else:
+        _, clauses, clause_params = _attachment_clauses(**own)
+        where_sql = " AND ".join([where_sql, *clauses])
+        params = [*params, *clause_params]
         frm, ident = _ATTACHMENT_FROM, "a.attachment_occurrence_id"
     count = f"SELECT COUNT(*) {frm} WHERE {where_sql}"  # nosec B608
     scan = f"SELECT {ident} {frm} WHERE {where_sql}"  # nosec B608
@@ -739,11 +773,19 @@ MESSAGE_FILTERS: tuple[dict, ...] = (
     {"date_from": "2015-01-01", "date_to": "2015-12-31"},
 )
 # ``query_attachments`` takes the message leaves except subject, body
-# text and authority.
+# text and authority, plus its own: a filename substring (casefolded,
+# over sender-controlled text), MIME type, extraction status, carrying
+# claimant and thread (``thread_id`` is filled in per corpus).
 OCCURRENCE_FILTERS: tuple[dict, ...] = (
     {"participant": "nobody"},
     {"participant": "from0.7"},
     {"date_from": "2015-01-01", "date_to": "2015-12-31"},
+    {"filename": "nomatch"},
+    {"filename": "file"},
+    {"content_type": "application/pdf"},
+    {"extraction_status": "success"},
+    {"extraction_status": "none"},
+    {"thread_id": None},
 )
 
 
@@ -863,18 +905,38 @@ def _median(runs: list[dict], key: str) -> float:
     return round(statistics.median(r[key] for r in runs), 4)
 
 
-def write_request(db_path: str, kind: str, missing: int, extras: int, out: Path) -> dict:
+def write_request(
+    db_path: str,
+    kind: str,
+    missing: int,
+    extras: int,
+    out: Path,
+    missing_from: str = "spread",
+    upload_total: int = 0,
+) -> dict:
     """The client's upload: the SHA-256 of every matching identity but
-    ``missing`` of them (spread evenly), plus ``extras`` hashes the
-    server does not hold. Also sizes the same upload as base64."""
+    ``missing`` of them, plus ``extras`` hashes the server does not
+    hold. ``missing_from`` ``spread`` leaves members out evenly;
+    ``worst`` leaves out worst-case ones (``--records mixed``), so every
+    record a round returns is worst-case. Also sizes the same upload as
+    base64."""
     count_sql, scan, params = scan_sql(kind)
     with closing(_ro(db_path)) as conn:
         conn.execute("BEGIN")
         ids = [row[0].encode() for row in conn.execute(scan + " ORDER BY 1", params)]
         conn.rollback()
-    step = max(1, len(ids) // missing) if missing else 0
-    skip = set(range(0, len(ids), step)[:missing]) if missing else set()
+    if missing_from == "worst":
+        with closing(_ro(db_path)) as conn:
+            worst = {row[0].encode() for row in conn.execute("SELECT identity FROM bench_worst")}
+        skip = set([n for n, b in enumerate(ids) if b in worst][:missing])
+    else:
+        step = max(1, len(ids) // missing) if missing else 0
+        skip = set(range(0, len(ids), step)[:missing]) if missing else set()
     held = [identity_hash(b) for n, b in enumerate(ids) if n not in skip]
+    if upload_total:
+        # Fill the upload to ``upload_total`` digests (a set cap) with
+        # extras, the largest request the cap accepts.
+        extras = max(0, upload_total - len(held))
     held += [hashlib.sha256(f"extra:{n}".encode()).digest() for n in range(extras)]
     hex_body = json.dumps({"hashes": [h.hex() for h in held]}, separators=(",", ":")).encode()
     b64 = json.dumps(
@@ -1072,7 +1134,11 @@ def run(args: argparse.Namespace) -> dict:
         report["filtered"] = {
             kind: [
                 {"filters": f, **_filtered_runs(db, kind, f, args.repeat)}
-                for f in (MESSAGE_FILTERS if kind == "messages" else OCCURRENCE_FILTERS)
+                for f in (
+                    MESSAGE_FILTERS
+                    if kind == "messages"
+                    else [_fill_thread(f, args.identity) for f in OCCURRENCE_FILTERS]
+                )
             ]
             for kind in ("messages", "occurrences")
         }
@@ -1081,7 +1147,15 @@ def run(args: argparse.Namespace) -> dict:
     report["reconcile"] = {}
     for kind in ("messages", "occurrences"):
         request = work / f"request-{kind}.json"
-        req = write_request(db, kind, args.missing, args.extras, request)
+        req = write_request(
+            db,
+            kind,
+            args.missing,
+            args.extras,
+            request,
+            args.missing_from,
+            args.upload_total[0 if kind == "messages" else 1] if args.upload_total else 0,
+        )
         report["reconcile"][kind] = {"request": req}
         for method in ("stream", "collect"):
             report["reconcile"][kind][method] = _reconcile_runs(
@@ -1106,6 +1180,14 @@ def run(args: argparse.Namespace) -> dict:
             for interval in args.writer_interval
         ]
     return report
+
+
+def _fill_thread(filters: dict, identity: str) -> dict:
+    """``filters`` with a ``thread_id`` placeholder set to the corpus's
+    first thread (message 0's root)."""
+    if "thread_id" in filters and filters["thread_id"] is None:
+        return {"thread_id": message_id(0, identity)}
+    return filters
 
 
 def _filtered_runs(db: str, kind: str, filters: dict, repeat: int) -> dict:
@@ -1183,7 +1265,21 @@ def main(argv: list[str] | None = None) -> dict:
     p.add_argument("--messages", type=int, default=50_000)
     p.add_argument("--per-message", type=int, default=3, help="attachment occurrences per message")
     p.add_argument("--identity", choices=("typical", "ascii998", "utf8x4"), default="typical")
-    p.add_argument("--records", choices=("typical", "worst", "cardinality"), default="typical")
+    p.add_argument(
+        "--records", choices=("typical", "worst", "mixed", "cardinality"), default="typical"
+    )
+    p.add_argument(
+        "--upload-total",
+        type=lambda s: [int(x) for x in s.split(",")],
+        default=None,
+        help="messages,occurrences: fill each upload to this many digests with extras",
+    )
+    p.add_argument(
+        "--missing-from",
+        choices=("spread", "worst"),
+        default="spread",
+        help="which members the upload leaves out (worst: the mixed corpus's worst records)",
+    )
     p.add_argument(
         "--references",
         type=int,

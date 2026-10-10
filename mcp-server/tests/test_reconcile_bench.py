@@ -275,3 +275,71 @@ def test_benchmark_schema_carries_the_readers_columns(bench, table):
     expected = _columns(_build_schema, table)
     assert expected, table
     assert expected <= _columns(lambda conn: conn.executescript(bench._SCHEMA), table)
+
+
+@pytest.fixture(scope="module")
+def mixed(bench, tmp_path_factory):
+    work = tmp_path_factory.mktemp("mixed")
+    return bench.main(
+        [
+            "--workdir",
+            str(work),
+            "--messages",
+            "300",
+            "--per-message",
+            "2",
+            "--identity",
+            "utf8x4",
+            "--records",
+            "mixed",
+            "--missing-from",
+            "worst",
+            "--k",
+            "3",
+            "--missing",
+            "6",
+            "--extras",
+            "500",
+            "--repeat",
+            "1",
+        ]
+    )
+
+
+def test_combined_round_returns_only_worst_records_with_many_extras(mixed):
+    # Every record the combined round returns is a worst-case one, next
+    # to many extras and four-byte IDs, so its peak covers them together.
+    for kind, floor in (("messages", 33 * 2 * 500 * 4), ("occurrences", 2 * 500 * 4)):
+        for method in ("stream", "collect"):
+            round_ = mixed["reconcile"][kind][method]["3"]
+            assert round_["returned"] == 3
+            assert round_["extras"] == 500
+            assert round_["record_bytes_max"] > floor
+            assert round_["response_bytes"] > 3 * floor + 66 * 500
+
+
+def test_attachment_filters_reach_the_occurrence_certificate(report):
+    rows = {json_key(r["filters"]): r for r in report["filtered"]["occurrences"]}
+    assert rows["filename=nomatch"]["count"] == 0
+    assert rows["extraction_status=none"]["count"] == 0
+    assert rows["extraction_status=success"]["count"] > 0
+    thread = next(v for k, v in rows.items() if k.startswith("thread_id="))
+    assert thread["count"] > 0
+
+
+def json_key(filters: dict) -> str:
+    return ",".join(f"{k}={v}" for k, v in sorted(filters.items()))
+
+
+def test_build_leaves_no_planner_statistics(bench, tmp_path):
+    # Neither the indexer nor the server runs ANALYZE, so a deployed
+    # index has no sqlite_stat1; the benchmark plans without it too.
+    db = tmp_path / "plain.db"
+    bench.build(db, 20, 1, "typical", "typical")
+    with closing(sqlite3.connect(db)) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'sqlite_stat1'"
+            ).fetchone()[0]
+            == 0
+        )
