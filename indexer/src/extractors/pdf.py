@@ -116,6 +116,31 @@ _MAX_OUTPUT_BYTES = 4 * _MAX_TEXT_CHARS + 1024 * 1024
 # largest; the OCR path needs an eighth of it.
 CHILD_MAX_ADDRESS_SPACE_BYTES = 2048 * 1024 * 1024
 
+# The OCR phase's address space (#1450): before it starts the first
+# Poppler or Tesseract process, the child lowers its own limit, soft and
+# hard, and each tool inherits it, so the child and one tool never hold
+# two full parsing limits at once. The limit is the larger of the
+# child's mapped address space at that point plus ``_OCR_CHILD_HEADROOM_BYTES``
+# for what it still allocates (one decoded page, pytesseract's PNG) and
+# ``_OCR_TOOL_ADDRESS_SPACE_BYTES``, the tools' measured need with a
+# margin. Plainly measured in the indexer image: Tesseract needs 240 MiB
+# on a page of noise at the 10,000,000-pixel render budget (208 MiB of
+# text), ``pdftoppm`` 80 MiB and ``pdfinfo`` 48 MiB; the child maps at
+# most 274 MiB when OCR starts, after the heaviest digital page (71 MiB
+# of path operators, 1,829 MiB at its peak, released by then), and grows
+# by at most 17 MiB while it OCRs. A child that maps more than
+# ``_OCR_MAX_ADDRESS_SPACE_BYTES`` less the headroom when OCR would start
+# does not start it (``pdf_child.PdfOcrMemoryBudgetError``), so the
+# child and one tool together stay under twice that limit.
+_OCR_TOOL_ADDRESS_SPACE_BYTES = 768 * 1024 * 1024
+_OCR_CHILD_HEADROOM_BYTES = 256 * 1024 * 1024
+_OCR_MAX_ADDRESS_SPACE_BYTES = 1280 * 1024 * 1024
+
+# Pages one Poppler call renders, and so the most rendered pages (up to
+# about 30 MB each at the page-pixel budget) the scratch directory holds
+# at once, whatever ``INDEXER_OCR_MAX_PAGES`` is (#1450).
+_PAGES_PER_RENDER = 5
+
 # Wall-clock seconds the child may take per page of the digital walk: a
 # kerned page took 0.03 s and a dense one 0.003 s in the image, and the
 # heaviest page measured (the 71 MiB of path operators above) 14.5 s, so

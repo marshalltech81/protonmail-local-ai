@@ -7738,6 +7738,11 @@ _UNREPORTED_CAPS = {
         "ToolExitError when the child cannot report it): a failed row with its rate-limited "
         "WARNING, counted as failed="
     ),
+    "src.extractors.pdf:_OCR_MAX_ADDRESS_SPACE_BYTES": (
+        "a child mapping more when OCR would start fails its OCR fallback "
+        "(PdfOcrMemoryBudgetError): a mixed PDF keeps its digital text and logs PDF OCR "
+        "fallback failed, a scanned one is a failed row, counted as failed="
+    ),
     "src.extractors.pdf:_MAX_OPTION_INT": (
         "the top of the child's page-cap arguments, far past any page count: no setting cuts at it"
     ),

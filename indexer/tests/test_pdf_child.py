@@ -556,6 +556,257 @@ class TestChildSide:
 
 
 # ---------------------------------------------------------------------------
+# The text ceiling (owner exception, 2026-10-10 on #1293)
+# ---------------------------------------------------------------------------
+
+_CEILING = 10_000_000
+_DEFAULT_CHARS = 2_000_000
+# A stripped text whose whitespace run of 10,000,000 less the setting
+# (and 10 more) ends exactly at the child's cut.
+_WHITESPACE_RUN = "a" * (_DEFAULT_CHARS - 10) + " " * (_CEILING - _DEFAULT_CHARS + 10) + "b" * 50
+_OVER_CEILING = "x" * (_CEILING + 2_000_000)
+
+
+def _row(result) -> dict:
+    from src.extractors import CAP_DIGITAL_PAGES, CAP_EXTRACTED_CHARS, CAP_OCR_PAGES
+
+    return {
+        "extraction_status": result.status,
+        "extractor": result.extractor,
+        "ocr_pages_skipped": result.ocr_pages_skipped,
+        CAP_OCR_PAGES: result.ocr_pages_cap,
+        CAP_DIGITAL_PAGES: result.digital_pages_cap,
+        CAP_EXTRACTED_CHARS: result.extracted_chars_cap,
+    }
+
+
+def _refreshed_at(result, max_extracted_chars: int) -> bool:
+    from src.attachment_indexing import cap_raised
+
+    return cap_raised(
+        _row(result),
+        ocr_enabled=True,
+        max_ocr_pages=20,
+        max_pdf_pages=500,
+        max_extracted_chars=max_extracted_chars,
+    )
+
+
+class TestTextCeiling:
+    """The child cuts the stripped text at 10,000,000 characters with no
+    ``pdf`` version bump (owner exception, 2026-10-10 on #1293, as for
+    images on #1325). Stored results change only with the character cap
+    off or above 10,000,000 (a longer text is stored cut and incomplete,
+    and the hardcoded cut records no configured cap, so raising a
+    setting does not refresh it), and for one crafted shape, a whitespace
+    run ending at the cut (its trailing whitespace and the configured-cap
+    record differ). The in-process extractor stored the expected values
+    noted beside each case."""
+
+    @pytest.mark.parametrize(
+        ("text", "setting", "stored", "cap", "refresh_setting", "refreshed"),
+        [
+            # Cap off: the in-process extractor stored all 12,000,000.
+            pytest.param(_OVER_CEILING, None, _OVER_CEILING[:_CEILING], 0, 0, False, id="off"),
+            # Above the ceiling: in process, all 12,000,000 (under 15M).
+            pytest.param(
+                _OVER_CEILING,
+                15_000_000,
+                _OVER_CEILING[:_CEILING],
+                0,
+                20_000_000,
+                False,
+                id="above-ceiling",
+            ),
+            # Default: as in process, cut at the setting and refreshable.
+            pytest.param(
+                _OVER_CEILING,
+                _DEFAULT_CHARS,
+                _OVER_CEILING[:_DEFAULT_CHARS],
+                _DEFAULT_CHARS,
+                3_000_000,
+                True,
+                id="default",
+            ),
+            # The whitespace shape: in process, 1,999,990 a's then 10
+            # spaces, cap 2,000,000 and refreshable; through the child the
+            # run is stripped and no configured cap is recorded.
+            pytest.param(
+                _WHITESPACE_RUN,
+                _DEFAULT_CHARS,
+                "a" * (_DEFAULT_CHARS - 10),
+                0,
+                3_000_000,
+                False,
+                id="whitespace-run-at-the-cut",
+            ),
+        ],
+    )
+    def test_the_stored_result(
+        self, text, setting, stored, cap, refresh_setting, refreshed, monkeypatch, caplog
+    ):
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(pdf_child, "extract", lambda *_a, **_k: (text, "pdf-digital"))
+        result = _extract(b"%PDF-1.7", max_extracted_chars=setting)
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@6")
+        assert result.text == stored
+        assert result.text_complete is False
+        assert result.extracted_chars_cap == cap
+        assert _refreshed_at(result, refresh_setting) is refreshed
+        # The hardcoded cut is reported as its own extractor cap.
+        assert "extractor cap pdf_text_chars" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The OCR phase's address-space limit (#1450)
+# ---------------------------------------------------------------------------
+
+MiB = 1024 * 1024
+
+
+class _Limits:
+    """A fake ``resource`` limit for ``RLIMIT_AS``."""
+
+    def __init__(self, hard):
+        self.value = (hard, hard)
+        self.set: list[tuple[int, int]] = []
+
+    def getrlimit(self, _which):
+        return self.value
+
+    def setrlimit(self, _which, value):
+        self.set.append(value)
+        self.value = value
+
+
+def _fake_limits(monkeypatch, *, hard, mapped):
+    limits = _Limits(hard)
+    monkeypatch.setattr(pdf_child.resource, "getrlimit", limits.getrlimit)
+    monkeypatch.setattr(pdf_child.resource, "setrlimit", limits.setrlimit)
+    monkeypatch.setattr(pdf_child, "_mapped_bytes", lambda: mapped)
+    return limits
+
+
+class TestOcrPhaseLimit:
+    @pytest.mark.parametrize(
+        ("mapped", "expected"),
+        [
+            # The tools' need is the floor.
+            (100 * MiB, 768 * MiB),
+            (512 * MiB, 768 * MiB),
+            # Above it, what the child maps plus its headroom.
+            (700 * MiB, 956 * MiB),
+            (1024 * MiB, 1280 * MiB),
+        ],
+    )
+    def test_the_limit_is_the_larger_of_the_child_and_the_tools_need(
+        self, mapped, expected, monkeypatch
+    ):
+        limits = _fake_limits(monkeypatch, hard=2048 * MiB, mapped=mapped)
+        pdf_child._limit_for_ocr()
+        assert limits.set == [(expected, expected)]
+
+    def test_a_child_over_the_budget_starts_no_tool(self, monkeypatch):
+        limits = _fake_limits(monkeypatch, hard=2048 * MiB, mapped=1025 * MiB)
+        with pytest.raises(pdf_child.PdfOcrMemoryBudgetError) as info:
+            pdf_child._limit_for_ocr()
+        assert str(info.value) == "pdf child over the OCR-phase address-space budget"
+        assert limits.set == []
+
+    def test_a_lower_limit_is_kept(self, monkeypatch):
+        limits = _fake_limits(monkeypatch, hard=512 * MiB, mapped=100 * MiB)
+        pdf_child._limit_for_ocr()
+        assert limits.set == [(512 * MiB, 512 * MiB)]
+
+    def test_with_no_limit_nothing_changes(self, monkeypatch):
+        """In a test that runs the child in process, and on macOS."""
+        import resource
+
+        limits = _fake_limits(monkeypatch, hard=resource.RLIM_INFINITY, mapped=0)
+        monkeypatch.setattr(pdf_child, "_mapped_bytes", lambda: pytest.fail("read"))
+        pdf_child._limit_for_ocr()
+        assert limits.set == []
+
+    def test_the_mapped_size_is_this_processes(self):
+        if not Path("/proc/self/statm").exists():
+            pytest.skip("no /proc")
+        assert 10 * MiB < pdf_child._mapped_bytes() < 64 * 1024 * MiB
+
+    def test_the_limit_is_set_after_the_parse_and_before_any_tool(self, monkeypatch):
+        from PIL import Image
+
+        events: list[str] = []
+        real_dpi = pdf_child._ocr_dpi
+        monkeypatch.setattr(pdf_child, "_ocr_dpi", lambda *a: events.append("dpi") or real_dpi(*a))
+        monkeypatch.setattr(pdf_child, "_limit_for_ocr", lambda: events.append("limit"))
+        monkeypatch.setattr(
+            "pdf2image.pdfinfo_from_bytes", lambda *_a, **_k: events.append("pdfinfo") or {}
+        )
+        monkeypatch.setattr(
+            "pdf2image.convert_from_bytes",
+            lambda *_a, **_k: events.append("render") or [Image.new("RGB", (4, 4))],
+        )
+        monkeypatch.setattr(
+            "pytesseract.image_to_string", lambda *_a, **_k: events.append("ocr") or "t"
+        )
+        pdf_child._extract_ocr(_pdf("s"), pages=[0], ocr_timeout_seconds=60)
+        assert events == ["dpi", "limit", "pdfinfo", "render", "ocr"]
+
+    @pytest.mark.parametrize(
+        ("layout", "status", "extractor", "error"),
+        [
+            # A mixed PDF keeps its digital text, as on any OCR failure.
+            ("ds", STATUS_SUCCESS, "pdf-digital@6", None),
+            ("ss", STATUS_FAILED, "pdf@6", "PdfOcrMemoryBudgetError"),
+        ],
+    )
+    def test_over_the_budget_the_ocr_fallback_fails_without_a_tool(
+        self, layout, status, extractor, error, monkeypatch, caplog
+    ):
+        caplog.set_level("DEBUG")
+        _fake_limits(monkeypatch, hard=2048 * MiB, mapped=1100 * MiB)
+        for target in (
+            "pdf2image.pdfinfo_from_bytes",
+            "pdf2image.convert_from_bytes",
+            "pytesseract.image_to_string",
+        ):
+            monkeypatch.setattr(target, lambda *_a, **_k: pytest.fail("a tool ran"))
+        result = _extract(_pdf(layout), ocr_timeout_seconds=60)
+        assert (result.status, result.extractor, result.error) == (status, extractor, error)
+        assert result.text_complete is False
+        assert "PDF OCR fallback failed: PdfOcrMemoryBudgetError" in caplog.text
+
+
+class TestRenderCalls:
+    def test_a_long_run_is_rendered_a_few_pages_at_a_time(self, monkeypatch):
+        """At most ``_PAGES_PER_RENDER`` pages per Poppler call, each in
+        its own scratch directory, removed before the next call (#1450)."""
+        from PIL import Image
+
+        calls: list[tuple[int, int, str, bool]] = []
+
+        def convert(_payload, **kwargs):
+            earlier_left = any(Path(folder).exists() for *_r, folder, _e in calls)
+            calls.append(
+                (kwargs["first_page"], kwargs["last_page"], kwargs["output_folder"], earlier_left)
+            )
+            return [
+                Image.new("RGB", (4, 4))
+                for _ in range(kwargs["first_page"], kwargs["last_page"] + 1)
+            ]
+
+        monkeypatch.setattr("pdf2image.convert_from_bytes", convert)
+        monkeypatch.setattr("pdf2image.pdfinfo_from_bytes", lambda *_a, **_k: {})
+        monkeypatch.setattr("pytesseract.image_to_string", lambda *_a, **_k: "t")
+        texts = pdf_child._extract_ocr(_pdf("s" * 12), pages=list(range(12)))
+        assert texts == dict.fromkeys(range(12), "t")
+        assert [(first, last) for first, last, *_ in calls] == [(1, 5), (6, 10), (11, 12)]
+        assert len({folder for _f, _l, folder, _e in calls}) == 3
+        assert not any(left for *_rest, left in calls)
+        assert not any(Path(folder).exists() for _f, _l, folder, _e in calls)
+
+
+# ---------------------------------------------------------------------------
 # The real child process
 # ---------------------------------------------------------------------------
 
@@ -733,13 +984,53 @@ class TestLimitsInTheImage:
         assert (result.status, result.error) == (STATUS_FAILED, "ToolTimeoutError")
         tools = {name for name, _limits in seen.values()}
         assert "tesseract" in tools and tools & {"pdftoppm", "pdfinfo"}
-        address_space = pdf.CHILD_MAX_ADDRESS_SPACE_BYTES
+        # The OCR phase's limit (#1450): this scan-only PDF leaves the
+        # child mapping far less than the tools' floor less the headroom.
+        address_space = pdf._OCR_TOOL_ADDRESS_SPACE_BYTES
         cpu = pdf.child_cpu_seconds(500, 60)
         for _name, limits in seen.values():
             assert _limit(limits, "Max address space") == (address_space, address_space)
             assert _limit(limits, "Max cpu time") == (cpu, cpu + 1)
         assert _tools_under(scratch_root) == {}
         assert list(scratch_root.iterdir()) == []
+
+    @requires_ocr_tools
+    def test_a_heavy_digital_page_then_scans_run_under_the_ocr_phase_limit(self):
+        """#1450: a 16 MiB page of path operators (pypdf's walk peaks
+        around 430 MiB) then scanned pages, end to end. The child's limit
+        is 2 GiB for the parse and the OCR phase's once OCR starts; each
+        Poppler and Tesseract process runs under the OCR phase's."""
+        payload = _mixed_pdf(16.0, 2)
+        seen: dict[int, tuple[str, str]] = {}
+        child_limits: set[tuple[int, int]] = set()
+        done = threading.Event()
+
+        def watch():
+            while not done.is_set():
+                for pid, found in _tools_under(Path(_runner._TMP_DIR)).items():
+                    seen.setdefault(pid, found)
+                for limits in _pdf_children():
+                    child_limits.add(_limit(limits, "Max address space"))
+                time.sleep(0.005)
+
+        watcher = threading.Thread(target=watch)
+        watcher.start()
+        try:
+            result, _counts, progress = _observe(payload, ocr_timeout_seconds=60)
+        finally:
+            done.set()
+            watcher.join()
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-ocr@6")
+        assert "synthetic" in (result.text or "").lower()
+        assert progress == 3 + 2
+        tools = {name for name, _limits in seen.values()}
+        assert {"tesseract", "pdftoppm", "pdfinfo"} <= tools
+        ocr_phase = pdf._OCR_TOOL_ADDRESS_SPACE_BYTES
+        for _name, limits in seen.values():
+            assert _limit(limits, "Max address space") == (ocr_phase, ocr_phase)
+        parse = pdf.CHILD_MAX_ADDRESS_SPACE_BYTES
+        assert child_limits <= {(parse, parse), (ocr_phase, ocr_phase)}
+        assert (ocr_phase, ocr_phase) in child_limits
 
 
 def _tools_under(root: Path) -> dict[int, tuple[str, str]]:
@@ -891,4 +1182,72 @@ def _scanned_text_pages(count: int) -> bytes:
         )
         kids.append(b"%d 0 R" % page)
     objects[1] = b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(kids), count)
+    return _build(objects)
+
+
+def _pdf_children() -> list[str]:
+    """The ``/proc`` limits of every PDF extractor child running."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+            limits = (entry / "limits").read_text()
+        except OSError:
+            continue
+        if any(a.endswith(b"extractor_child.py") for a in argv) and b"pdf" in argv:
+            found.append(limits)
+    return found
+
+
+def _mixed_pdf(mb: float, scans: int) -> bytes:
+    """A first page of ``mb`` MiB of path operators with a line of text,
+    then ``scans`` scanned letter pages of text at 200 dpi."""
+    import random
+
+    from PIL import Image, ImageDraw
+
+    rnd = random.Random(1)
+    ops = [b"BT /F1 12 Tf 72 720 Td (Synthetic heavy page with enough text to count) Tj ET\n"]
+    size = 0
+    while size < mb * 2**20:
+        op = b"%d.%d %d.%d m %d.%d %d.%d l S\n" % tuple(rnd.randrange(600) for _ in range(8))
+        ops.append(op)
+        size += len(op)
+    heavy = zlib.compress(b"".join(ops), 6)
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources " + _FONT + b" >>",
+        b"<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(heavy) + heavy + b"\nendstream",
+    ]
+    kids = [b"3 0 R"]
+    for n in range(scans):
+        img = Image.new("RGB", (1700, 2200), "white")
+        draw = ImageDraw.Draw(img)
+        for y in range(60, 2100, 48):
+            draw.text(
+                (80, y), f"Synthetic scanned statement line {n} {y}", fill="black", font_size=30
+            )
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=75)
+        jpeg = buf.getvalue()
+        page = len(objects) + 1
+        content = b"q 612 0 0 792 0 0 cm /Im0 Do Q"
+        objects.append(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents %d 0 R "
+            b"/Resources << /XObject << /Im0 %d 0 R >> >> >>" % (page + 1, page + 2)
+        )
+        objects.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
+        objects.append(
+            b"<< /Type /XObject /Subtype /Image /Width 1700 /Height 2200 /ColorSpace /DeviceRGB "
+            b"/BitsPerComponent 8 /Filter /DCTDecode /Length %d >>\nstream\n"
+            % len(jpeg)
+            + jpeg
+            + b"\nendstream"
+        )
+        kids.append(b"%d 0 R" % page)
+    objects[1] = b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(kids), len(kids))
     return _build(objects)

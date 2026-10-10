@@ -753,6 +753,20 @@ class ExtractionResult:
 # pdf 6: pypdf 6.20 changes stream decoding limits and malformed page-tree
 # recovery. Re-run cached PDF results once so those changes reach existing
 # attachments, preserving the usual OCR-disabled and dead-letter rules.
+# pdf 6 still: moved to the limited extractor child (#1293) with a
+# hardcoded 10,000,000-character cut applied after stripping, under an
+# owner exception (2026-10-10, as for ``image`` on #1325): no bump. A
+# result stored through the child differs from the in-process one only
+# (a) with ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`` set to 0 or above
+# 10,000,000, where a PDF whose stripped text passes 10,000,000
+# characters is stored cut there and marked incomplete, and (b) for a
+# stripped text whose whitespace run reaches the cut from below the
+# configured cap, whose trailing whitespace is dropped and whose
+# configured-cap record is 0 (text_complete 0) where in process it was
+# the setting. The hardcoded cut records no configured cap, so raising a
+# setting does not refresh such a row; cached ``pdf@6`` rows over
+# 10,000,000 characters keep their fuller text. On the live index then,
+# 3,438 cached PDFs, the largest 1.58M characters, none cut at 2M.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,

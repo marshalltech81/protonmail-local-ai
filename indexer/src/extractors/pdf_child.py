@@ -68,6 +68,7 @@ from __future__ import annotations
 import io
 import math
 import os
+import resource
 import tempfile
 import time
 from collections.abc import Callable, Sequence
@@ -86,6 +87,10 @@ from . import (
 )
 from .pdf import (
     _MAX_TEXT_CHARS,
+    _OCR_CHILD_HEADROOM_BYTES,
+    _OCR_MAX_ADDRESS_SPACE_BYTES,
+    _OCR_TOOL_ADDRESS_SPACE_BYTES,
+    _PAGES_PER_RENDER,
     CAP_DIGITAL,
     CAP_OCR,
     CAP_TEXT,
@@ -112,6 +117,17 @@ _MIN_DIGITAL_CHARS = 40
 # size check can run).
 _OCR_DPI = OCR_DPI
 _MAX_OCR_PAGE_PIXELS = 10_000_000
+
+
+class PdfOcrMemoryBudgetError(Exception):
+    """The child maps too much when OCR would start for the OCR-phase
+    address-space limit to hold it and its headroom (#1450). Raised
+    before any Poppler or Tesseract process starts, so the OCR fallback
+    fails as on any OCR error: a mixed PDF keeps its digital text. Fixed
+    text."""
+
+    def __init__(self) -> None:
+        super().__init__("pdf child over the OCR-phase address-space budget")
 
 
 class PdfChildOptionsError(Exception):
@@ -381,15 +397,21 @@ def _extract_ocr(
     """Render ``pages`` (ascending 0-based indexes) to images and OCR
     them via Tesseract; returns each page's stripped text by index.
 
-    Each run of consecutive pages is one Poppler call, so no page outside
-    ``pages`` is rendered. The render timeout is one budget shared by
+    Each run of consecutive pages is rendered by Poppler calls of at most
+    ``pdf._PAGES_PER_RENDER`` pages, so no page outside ``pages`` is
+    rendered. The render timeout is one budget shared by
     the runs, counting only time spent in Poppler, so the whole render
     stays bounded as when it was one call; Tesseract time is bounded per
     page by its own timeout. pdf2image's own page count before each
     render takes no timeout; see the comment at the page-count guard.
-    Each run is OCR'd before the next is rendered, and each page's image
-    is closed once it is OCR'd, so the child holds at most one decoded
-    page at a time, whatever ``max_ocr_pages`` is.
+    Each call's pages are OCR'd before the next call renders, and each
+    page's image is closed once it is OCR'd, so the child holds at most
+    one decoded page, and the scratch directory one call's pages, at a
+    time, whatever ``max_ocr_pages`` is (#1450).
+
+    Before the first Poppler process starts, the child lowers its
+    address-space limit to the OCR phase's (``_limit_for_ocr``), which
+    every Poppler and Tesseract process inherits.
 
     Uses ``pdf2image`` (Poppler) for rendering and ``pytesseract`` for
     OCR. Both are imported lazily so a missing system dep surfaces here
@@ -400,8 +422,8 @@ def _extract_ocr(
     (``TMPDIR``, on the ``/tmp`` tmpfs), as are pdf2image's copies of the
     payload. ``pdf2image`` writes one PPM per rendered page (a US-letter
     page at 200 dpi is ~6 MB), and the tmpfs counts against the
-    container's memory, so the directory is removed as each call ends,
-    on success and exception; the runner removes the scratch directory
+    container's memory, so the directory is removed once the call's
+    pages are OCR'd, on success and exception; the runner removes the scratch directory
     whatever is left in it once the child's process group is dead, a
     killed child included.
     """
@@ -409,9 +431,12 @@ def _extract_ocr(
     from pdf2image import convert_from_bytes, pdfinfo_from_bytes
 
     dpi = _ocr_dpi(payload, pages)
+    # The child's parse is done: from here on the child and the tool it
+    # runs share the OCR phase's limit (#1450).
+    _limit_for_ocr()
     runs: list[list[int]] = []
     for index in pages:
-        if runs and index == runs[-1][-1] + 1:
+        if runs and index == runs[-1][-1] + 1 and len(runs[-1]) < _PAGES_PER_RENDER:
             runs[-1].append(index)
         else:
             runs.append([index])
@@ -448,12 +473,13 @@ def _extract_ocr(
             raise TimeoutError("PDF OCR render budget exhausted")
         render_budget -= page_count_seconds
 
-    # In the scratch directory (``TMPDIR``). ``TemporaryDirectory``
-    # removes the dir and its contents on context exit, including the
-    # exception path — so a leaked PPM cannot survive the OCR call.
-    with tempfile.TemporaryDirectory() as tmpdir:
-        texts: dict[int, str] = {}
-        for run in runs:
+    texts: dict[int, str] = {}
+    for run in runs:
+        # In the scratch directory (``TMPDIR``), one per Poppler call.
+        # ``TemporaryDirectory`` removes the dir and its contents on
+        # context exit, including the exception path — so a leaked PPM
+        # cannot survive the call's OCR.
+        with tempfile.TemporaryDirectory() as tmpdir:
             convert_kwargs: dict[str, object] = {
                 "dpi": dpi,
                 "first_page": run[0] + 1,
@@ -489,7 +515,37 @@ def _extract_ocr(
                 texts[index] = (text or "").strip()
                 if on_progress is not None:
                     on_progress()
-        return texts
+    return texts
+
+
+def _limit_for_ocr() -> None:
+    """Lower this process's address-space limit, soft and hard, to the
+    OCR phase's, which every Poppler and Tesseract process it starts
+    inherits (#1450): the larger of what it maps now plus the headroom
+    for what it still allocates, and the tools' own need (``pdf.py``).
+    Raises ``PdfOcrMemoryBudgetError`` when that is over
+    ``pdf._OCR_MAX_ADDRESS_SPACE_BYTES``, before any tool starts.
+
+    Only under a finite limit, which the launcher sets for the child:
+    in a test that runs the child in process (no limit) and on macOS
+    (which refuses to set one, ``_launcher``) nothing is changed. A
+    limit already lower is kept."""
+    _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    if hard == resource.RLIM_INFINITY:
+        return
+    limit = max(_mapped_bytes() + _OCR_CHILD_HEADROOM_BYTES, _OCR_TOOL_ADDRESS_SPACE_BYTES)
+    if limit > _OCR_MAX_ADDRESS_SPACE_BYTES:
+        raise PdfOcrMemoryBudgetError
+    limit = min(limit, hard)
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+
+def _mapped_bytes() -> int:
+    """The address space this process maps now (``/proc/self/statm``'s
+    first field, in pages), which is what ``RLIMIT_AS`` counts."""
+    with open("/proc/self/statm") as statm:
+        pages = int(statm.read().split()[0])
+    return pages * os.sysconf("SC_PAGE_SIZE")
 
 
 def _ocr_dpi(payload: bytes, pages: list[int]) -> int:
