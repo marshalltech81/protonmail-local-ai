@@ -2095,8 +2095,7 @@ def _phase2c_commit_vectors(
     db: Database,
     vectors: list[list[float]],
     queue: IndexingQueue,
-    batch_extractions: set[tuple[str, str]],
-    purge_later: set[tuple[str, str]],
+    purged_extractions: dict[tuple[str, str], sqlite3.Row],
 ) -> tuple[bool, str | None]:
     """Phase 2c: per-message DB transaction for body + attachments + thread vec.
 
@@ -2144,13 +2143,14 @@ def _phase2c_commit_vectors(
                     claimant_id=msg.claimant_id,
                     thread_id=thread.thread_id,
                     db=db,
+                    purged_extractions=purged_extractions,
                 )
             # After the parse's own occurrence writes, so a stale
             # occurrence's payload slice goes only when no parsed
             # occurrence carries it, and before the thread vector is
             # derived from the sums the deletion updates (#1375).
             dropped, dropped_slices = db.delete_attachment_occurrences(
-                msg.claimant_id, state.stale_occurrences, batch_extractions, purge_later
+                msg.claimant_id, state.stale_occurrences, purged_extractions
             )
             # Replace the Phase 1 seed thread vector. Three cases
             # mirror the old ``_seed_thread_embedding`` logic:
@@ -2668,21 +2668,12 @@ def _drain_queue_batched(
         per_msg_embed_ms = embed_ms / max(1, len(survivors))
 
         # ---- Phase 2c: per-message vector commits ----
-        # Cached extractions the batch's messages prepared against: a
-        # stale drop in one message does not purge a row another needs.
-        batch_cache_rows = {
-            (plan.attachment.content_hash, extraction_cache_module(plan.attachment))
-            for entry in survivors
-            for plan in entry.attach_plans
-        }
-        # Rows a drop left for the end of the batch, purged once every
-        # peer's commit is known, failures included.
-        purge_later: set[tuple[str, str]] = set()
+        # Cached extraction rows a stale drop purged in this batch, for a
+        # later message that prepared against one to restore (#1375).
+        purged_extractions: dict[tuple[str, str], sqlite3.Row] = {}
         for entry in survivors:
             t0 = time.perf_counter()
-            ok, err = _phase2c_commit_vectors(
-                entry, db, vectors, queue, batch_cache_rows, purge_later
-            )
+            ok, err = _phase2c_commit_vectors(entry, db, vectors, queue, purged_extractions)
             db_write_ms = (time.perf_counter() - t0) * 1000
             if ok:
                 # A message with deferred attachments was continued in
@@ -2712,8 +2703,6 @@ def _drain_queue_batched(
             else:
                 queue.mark_failed(entry.row["filepath"], stage="db_write", error=err or "")
             touch_health_file()
-
-        db.purge_orphan_extractions(purge_later)
 
         if paused:
             # Messages embedded before the pause were committed above;

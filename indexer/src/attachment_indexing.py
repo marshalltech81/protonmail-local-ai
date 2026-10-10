@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import sqlite3
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -855,6 +856,7 @@ def apply_attachment_writes(
     claimant_id: str,
     thread_id: str,
     db: Database,
+    purged_extractions: dict[tuple[str, str], sqlite3.Row] | None = None,
 ) -> None:
     """Persist a prepared attachment plan. DB writes only.
 
@@ -881,14 +883,25 @@ def apply_attachment_writes(
         # Deferred again; the stored row already records it (#1236).
         return
     if not plan.resolved_earlier:
-        _write_occurrence(plan, claimant_id=claimant_id, thread_id=thread_id, db=db)
+        _write_occurrence(
+            plan,
+            claimant_id=claimant_id,
+            thread_id=thread_id,
+            db=db,
+            purged_extractions=purged_extractions,
+        )
     if plan.deferred:
         return
     _write_slice(plan, claimant_id=claimant_id, thread_id=thread_id, db=db)
 
 
 def _write_occurrence(
-    plan: AttachmentWritePlan, *, claimant_id: str, thread_id: str, db: Database
+    plan: AttachmentWritePlan,
+    *,
+    claimant_id: str,
+    thread_id: str,
+    db: Database,
+    purged_extractions: dict[tuple[str, str], sqlite3.Row] | None,
 ) -> None:
     """The occurrence's row, its cached result and its completeness (or
     its deferral mark)."""
@@ -921,6 +934,13 @@ def _write_occurrence(
             ocr_pages_skipped=result.ocr_pages_skipped,
             text_complete=result.text_complete,
         )
+    elif purged_extractions:
+        # A cache hit whose row an earlier message of the batch purged
+        # (it dropped the last occurrence using it, #1375): put it back
+        # as it was, so this occurrence has its cached result.
+        purged = purged_extractions.get((plan.attachment.content_hash, module))
+        if purged is not None:
+            db.restore_attachment_extraction(purged)
     # Whether the chunks written below hold all of this occurrence's
     # text (#1242): in the caller's transaction, so it commits and rolls
     # back with them.

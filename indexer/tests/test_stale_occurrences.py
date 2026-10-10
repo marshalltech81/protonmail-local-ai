@@ -501,66 +501,111 @@ class TestThreadAttachmentFlag:
         assert flag() == 0
 
 
-class TestBatchPeerKeepsItsCache:
-    def test_a_peer_prepared_against_the_cached_row_keeps_it(self, tmp_path, monkeypatch):
-        """Message A drops the last stored occurrence of a payload while
-        message B, in the same batch, was prepared against its cached
-        extraction and writes its occurrence after A's commit: A's drop
-        must not purge the row (Codex round 1 on #1385)."""
-        p = StalePipeline(tmp_path, monkeypatch)
-        shared = [(b"peer-payload", "text/plain", f"{MARKER}.txt")]
-        drop = {"on": False}
-
-        def rewrite(path, msg):
-            if drop["on"] and path.endswith("first.eml"):
-                msg.attachments = []
-
-        p.parse_with(rewrite)
-        first = p.add("first", shared)
-        p.drain()
-        payload = hashlib.sha256(b"peer-payload").hexdigest()
-        extractions = len(p.extractor.calls)
-
-        drop["on"] = True
-        # Foreground rows are claimed first, so the dropping message is
-        # committed before its peer.
-        second = p.add("second", shared, reason=REASON_REPARSE)
-        p.queue.enqueue(first, REASON_INITIAL_SCAN)
-        p.drain()
-        assert p.job(first) is None and p.job(second) is None
-        # B used the cache: nothing was extracted again, and the row it
-        # relies on is still there beside its occurrence.
-        assert len(p.extractor.calls) == extractions
-        assert [r[1] for r in p.rows()] == [payload]
-        assert (
-            p.db._conn.execute(
-                "SELECT COUNT(*) FROM attachment_extractions WHERE attachment_id = ?",
-                (payload,),
-            ).fetchone()[0]
-            == 1
+def _extraction_rows(p: StalePipeline, payload: str) -> list[tuple]:
+    return [
+        tuple(r)
+        for r in p.db._conn.execute(
+            "SELECT extractor_module, extraction_status, extractor, extracted_text, "
+            "extraction_error, extracted_at, ocr_pages_skipped, text_complete "
+            "FROM attachment_extractions WHERE attachment_id = ? ORDER BY extractor_module",
+            (payload,),
         )
+    ]
 
 
-class TestFailedPeerLeavesNoOrphan:
-    def test_a_peer_whose_commit_fails_does_not_keep_the_cache_row(self, tmp_path, monkeypatch):
-        """The row A's drop left for the end of the batch is purged once
-        the peer's commit failed, so no carrier-less extraction stays
-        (Codex round 3 on #1385)."""
-        p = StalePipeline(tmp_path, monkeypatch)
-        shared = [(b"orphan-payload", "text/plain", f"{MARKER}.txt")]
-        drop = {"on": False}
+class _PeerSetup:
+    """A message ``first`` that drops its only attachment on a reparse
+    and a new message ``second`` carrying the same payload."""
+
+    def __init__(self, tmp_path, monkeypatch, content=b"peer-payload"):
+        self.p = StalePipeline(tmp_path, monkeypatch)
+        self.shared = [(content, "text/plain", f"{MARKER}.txt")]
+        self.payload = hashlib.sha256(content).hexdigest()
+        self.drop = {"on": False}
 
         def rewrite(path, msg):
-            if drop["on"] and path.endswith("first.eml"):
+            if self.drop["on"] and path.endswith("first.eml"):
                 msg.attachments = []
 
-        p.parse_with(rewrite)
-        first = p.add("first", shared)
-        p.drain()
-        payload = hashlib.sha256(b"orphan-payload").hexdigest()
+        self.p.parse_with(rewrite)
+        self.first = self.p.add("first", self.shared)
+        self.p.drain()
 
-        drop["on"] = True
-        second = p.add("second", shared, reason=REASON_REPARSE)
+    def run_batch(self, *, dropper_first=True):
+        """One batch with the dropper and the peer; foreground rows are
+        claimed (and committed) first."""
+        self.drop["on"] = True
+        if dropper_first:
+            self.second = self.p.add("second", self.shared, reason=REASON_REPARSE)
+            self.p.queue.enqueue(self.first, REASON_INITIAL_SCAN)
+        else:
+            self.second = self.p.add("second", self.shared)
+            self.p.queue.enqueue(self.first, REASON_REPARSE)
+        self.p.drain()
+
+
+class TestBatchPeerRestoresItsCache:
+    def test_a_peer_prepared_against_the_cached_row_gets_it_back_as_it_was(
+        self, tmp_path, monkeypatch
+    ):
+        """Message A drops the last occurrence of a payload (the row is
+        purged at once) and message B, prepared against that cached row,
+        writes its occurrence after A's commit: B restores the row
+        unchanged, ``extracted_at`` included, with no new extraction."""
+        s = _PeerSetup(tmp_path, monkeypatch)
+        before = _extraction_rows(s.p, s.payload)
+        extractions = len(s.p.extractor.calls)
+        s.run_batch()
+        assert s.p.job(s.first) is None and s.p.job(s.second) is None
+        assert len(s.p.extractor.calls) == extractions
+        assert [r[1] for r in s.p.rows()] == [s.payload]
+        assert _extraction_rows(s.p, s.payload) == before
+
+    def test_a_peer_committed_before_the_dropper_keeps_the_row(self, tmp_path, monkeypatch):
+        s = _PeerSetup(tmp_path, monkeypatch)
+        before = _extraction_rows(s.p, s.payload)
+        extractions = len(s.p.extractor.calls)
+        s.run_batch(dropper_first=False)
+        assert s.p.job(s.first) is None and s.p.job(s.second) is None
+        assert len(s.p.extractor.calls) == extractions
+        assert _extraction_rows(s.p, s.payload) == before
+
+    def test_a_peer_that_extracts_again_keeps_its_own_result(self, tmp_path, monkeypatch):
+        """A row without a completeness record is re-extracted once, so
+        the peer is not a cache hit: it persists its fresh result and the
+        purged row is not put back over it."""
+        s = _PeerSetup(tmp_path, monkeypatch)
+        s.p.db._conn.execute("UPDATE attachment_extractions SET text_complete = NULL")
+        s.p.db._conn.commit()
+        extractions = len(s.p.extractor.calls)
+        s.run_batch()
+        assert len(s.p.extractor.calls) == extractions + 1
+        rows = _extraction_rows(s.p, s.payload)
+        assert len(rows) == 1
+        assert rows[0][7] == 1
+
+    def test_a_non_success_row_is_restored_with_its_status_and_error(self, tmp_path, monkeypatch):
+        s = _PeerSetup(tmp_path, monkeypatch, content=b"failing-payload")
+        s.p.extractor.fail.add(b"failing-payload")
+        s.p.db._conn.execute("DELETE FROM attachment_extractions")
+        s.p.db._conn.commit()
+        s.p.queue.enqueue(s.first, REASON_REPARSE)
+        s.p.drain()
+        before = _extraction_rows(s.p, s.payload)
+        assert before and before[0][1] == "failed"
+        extractions = len(s.p.extractor.calls)
+        s.run_batch()
+        assert len(s.p.extractor.calls) == extractions
+        assert _extraction_rows(s.p, s.payload) == before
+
+    def test_a_peer_whose_commit_fails_leaves_no_cache_row_and_extracts_on_retry(
+        self, tmp_path, monkeypatch
+    ):
+        """A's drop purges the row at once, so a peer that fails to commit
+        leaves no carrier-less extraction, and no state outlives the batch:
+        the retry (as after a crash) misses the cache and extracts once."""
+        s = _PeerSetup(tmp_path, monkeypatch, content=b"orphan-payload")
+        extractions = len(s.p.extractor.calls)
         real = Database.set_body_complete
 
         def failing(self, claimant_id, *args, **kwargs):
@@ -569,18 +614,69 @@ class TestFailedPeerLeavesNoOrphan:
             return real(self, claimant_id, *args, **kwargs)
 
         monkeypatch.setattr(Database, "set_body_complete", failing)
-        p.queue.enqueue(first, REASON_INITIAL_SCAN)
+        s.run_batch()
+        assert s.p.job(s.first) is None
+        assert s.p.job(s.second)["last_error"] == "OperationalError"
+        assert s.p.rows() == []
+        assert _extraction_rows(s.p, s.payload) == []
+
+        monkeypatch.setattr(Database, "set_body_complete", real)
+        s.p.drain()
+        assert s.p.job(s.second) is None
+        assert len(s.p.extractor.calls) == extractions + 1
+        assert [r[1] for r in s.p.rows()] == [s.payload]
+        assert len(_extraction_rows(s.p, s.payload)) == 1
+
+    def test_a_batch_without_drops_retains_no_purged_rows(self, tmp_path, monkeypatch):
+        p = StalePipeline(tmp_path, monkeypatch)
+        shared = [(b"hit-payload", "text/plain", f"{MARKER}.txt")]
+        p.add("one", shared)
         p.drain()
-        assert p.job(first) is None
-        assert p.job(second)["last_error"] == "OperationalError"
-        assert p.rows() == []
-        assert (
-            p.db._conn.execute(
-                "SELECT COUNT(*) FROM attachment_extractions WHERE attachment_id = ?",
-                (payload,),
-            ).fetchone()[0]
-            == 0
+        seen: list[dict] = []
+        real = Database.delete_attachment_occurrences
+
+        def spy(self, claimant_id, occurrence_ids, purged):
+            seen.append(purged)
+            return real(self, claimant_id, occurrence_ids, purged)
+
+        monkeypatch.setattr(Database, "delete_attachment_occurrences", spy)
+        for name in ("two", "three", "four"):
+            p.add(name, shared)
+        p.drain()
+        assert seen and all(d == {} for d in seen)
+
+
+class TestRestoreAttachmentExtraction:
+    def test_restores_a_purged_row_as_it_was_and_never_overwrites(self, tmp_path):
+        db = Database(tmp_path / "mail.db")
+        db.store_attachment_extraction(
+            attachment_id="a" * 64,
+            extractor_module="text",
+            extraction_status="success",
+            extractor="text@1",
+            extracted_text="synthetic",
+            extraction_error=None,
+            ocr_pages_skipped=2,
+            text_complete=True,
         )
+        row = db._conn.execute("SELECT * FROM attachment_extractions").fetchone()
+        db._conn.execute("DELETE FROM attachment_extractions")
+        db._conn.commit()
+        db.restore_attachment_extraction(row)
+        assert tuple(db._conn.execute("SELECT * FROM attachment_extractions").fetchone()) == tuple(
+            row
+        )
+        db.store_attachment_extraction(
+            attachment_id="a" * 64,
+            extractor_module="text",
+            extraction_status="empty",
+            extractor="text@2",
+            extracted_text=None,
+            extraction_error=None,
+        )
+        newer = tuple(db._conn.execute("SELECT * FROM attachment_extractions").fetchone())
+        db.restore_attachment_extraction(row)
+        assert tuple(db._conn.execute("SELECT * FROM attachment_extractions").fetchone()) == newer
 
 
 class TestSharedSliceAcrossModules:
@@ -714,7 +810,7 @@ class TestPartialModuleRowsAndPeerFlag:
             "SELECT attachment_occurrence_id FROM attachments WHERE claimant_id = ?",
             (claimant,),
         ).fetchone()[0]
-        p.db.delete_attachment_occurrences(claimant, [occurrence], set(), set())
+        p.db.delete_attachment_occurrences(claimant, [occurrence], {})
         flag = p.db._conn.execute(
             "SELECT has_attachments FROM threads WHERE thread_id = ?", (thread_id,)
         ).fetchone()[0]

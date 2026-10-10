@@ -1845,8 +1845,7 @@ class Database:
         self,
         claimant_id: str,
         occurrence_ids: list[str],
-        keep_extractions: set[tuple[str, str]],
-        purge_later: set[tuple[str, str]],
+        purged_extractions: dict[tuple[str, str], sqlite3.Row],
     ) -> tuple[int, int]:
         """Drop occurrences of ``claimant_id`` its current parse no longer
         produces (#1375) and return how many rows went and how many
@@ -1860,12 +1859,12 @@ class Database:
         a corrected filename) uses it; its vectors are subtracted from
         their threads' chunk-vector sums (#1356). A cached extraction of
         the payload that no remaining occurrence uses is purged, as when
-        the whole message is removed, except a (payload, module) row in
-        ``keep_extractions``: a later message of the same batch prepared
-        against that cached row and writes its occurrence after this
-        one. Such a row is added to ``purge_later``, for
-        ``purge_orphan_extractions`` once the batch's commits are known
-        (a peer whose commit fails leaves the row without a carrier). The thread's ``has_attachments`` is recomputed, since
+        the whole message is removed; each row purged is also put in
+        ``purged_extractions`` (by payload and module), so a later
+        message of the same batch that prepared against it can restore it
+        with ``restore_attachment_extraction`` (a peer that fails to
+        commit restores nothing, and a crash before it commits makes the
+        peer extract again). The thread's ``has_attachments`` is recomputed, since
         ``upsert_thread`` only ever sets it: it stays true while any
         occurrence of the thread is stored or any message of it has
         attachments without a stored occurrence yet (a batch peer
@@ -1914,17 +1913,18 @@ class Database:
                         (claimant_id, attachment_id),
                     )
                     slices += bool(rows)
-                for (module,) in cur.execute(
-                    "SELECT extractor_module FROM attachment_extractions WHERE attachment_id = ?",
+                for cached in cur.execute(
+                    "SELECT attachment_id, extractor_module, extraction_status, extractor, "
+                    "extracted_text, extraction_error, extracted_at, ocr_pages_skipped, "
+                    "text_complete FROM attachment_extractions WHERE attachment_id = ?",
                     (attachment_id,),
                 ).fetchall():
-                    if (attachment_id, module) in keep_extractions:
-                        purge_later.add((attachment_id, module))
-                    else:
-                        cur.execute(
-                            _PURGE_ORPHAN_EXTRACTION_SQL + " AND extractor_module = ?",
-                            (attachment_id, module),
-                        )
+                    purge = cur.execute(
+                        _PURGE_ORPHAN_EXTRACTION_SQL + " AND extractor_module = ?",
+                        (attachment_id, cached["extractor_module"]),
+                    )
+                    if purge.rowcount:
+                        purged_extractions[(attachment_id, cached["extractor_module"])] = cached
             if deleted:
                 cur.execute(
                     "UPDATE threads SET has_attachments = EXISTS ("
@@ -1947,20 +1947,35 @@ class Database:
         return deleted, slices
 
     @_synchronized
-    def purge_orphan_extractions(self, keys: set[tuple[str, str]]) -> None:
-        """Drop each cached extraction among ``keys`` (payload, module)
-        that no ``attachments`` row uses (#1375), in one transaction."""
-        if not keys:
-            return
+    def restore_attachment_extraction(self, row: sqlite3.Row) -> None:
+        """Put back a cached extraction row ``delete_attachment_occurrences``
+        purged, as it was (``extracted_at`` included), unless the key
+        already has a row (#1375)."""
         cur = self._conn.cursor()
         started = False
         try:
             started = self._begin_if_needed(cur)
-            for attachment_id, module in sorted(keys):
-                cur.execute(
-                    _PURGE_ORPHAN_EXTRACTION_SQL + " AND extractor_module = ?",
-                    (attachment_id, module),
-                )
+            cur.execute(
+                """
+                INSERT INTO attachment_extractions
+                    (attachment_id, extractor_module, extraction_status, extractor,
+                     extracted_text, extraction_error, extracted_at, ocr_pages_skipped,
+                     text_complete)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attachment_id, extractor_module) DO NOTHING
+                """,
+                (
+                    row["attachment_id"],
+                    row["extractor_module"],
+                    row["extraction_status"],
+                    row["extractor"],
+                    row["extracted_text"],
+                    row["extraction_error"],
+                    row["extracted_at"],
+                    row["ocr_pages_skipped"],
+                    row["text_complete"],
+                ),
+            )
             self._commit_if_started(started)
         except Exception:
             self._rollback_if_started(started)
