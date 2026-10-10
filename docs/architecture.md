@@ -168,7 +168,10 @@ mbsync writes one Maildir per Proton folder (`mbsync/mbsyncrc.template`):
   well as in its real folder. The channel's `Patterns` leave them out, so
   each message is synced and indexed once. A star still arrives, as the
   Maildir `F` flag on the real copy (`flagged` in the MCP tools); a label
-  does not. A custom folder named `Starred` is `Folders/Starred` and
+  does not. Labels are left out by project policy, not by a Bridge
+  restriction: the index does not model label membership apart from
+  physical folders, so a label copy would add duplicates it could not
+  describe. A custom folder named `Starred` is `Folders/Starred` and
   syncs.
 - **Names isync needs for itself:** a child folder named `uidvalidity`,
   `isyncuidmap.db`, `mbsyncstate`, `mbsyncstate.journal`, `mbsyncstate.new`
