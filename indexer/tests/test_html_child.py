@@ -457,7 +457,9 @@ class TestLimitHit:
         space than the child may map fails in the child, reported by type."""
         caplog.set_level("DEBUG")
         monkeypatch.setattr(html, "CHILD_MAX_ADDRESS_SPACE_BYTES", 256 * 1024 * 1024)
-        source = b"<hr>" * 10_000_000
+        # 20 MB of ``<hr>`` peaks near 380 MB (about 19 MB per MB in the
+        # image), inside the 50 MB parse cap once base64-encoded.
+        source = b"<hr>" * 5_000_000
         msg, _ = _parse(tmp_path, _message(("text/html", source), plain="kept"))
         assert msg.body_text == "kept"
         assert msg.parse_caps == {"html_body": 1}
