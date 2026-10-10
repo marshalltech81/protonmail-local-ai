@@ -43,7 +43,7 @@ render() {
         ${GIT_COMMIT:+GIT_COMMIT="$GIT_COMMIT"} \
         ${EMBED_BASE_URL:+EMBED_BASE_URL="$EMBED_BASE_URL"} \
         ${EMBED_MODEL:+EMBED_MODEL="$EMBED_MODEL"} \
-        ${MCP_PORT:+MCP_PORT="$MCP_PORT"} \
+        ${RENDER_MCP_PORT:+MCP_PORT="$RENDER_MCP_PORT"} \
         docker compose --project-directory "$ROOT_DIR" --env-file /dev/null "${args[@]}" \
         config --format json >"$WORK/config.json" 2>"$WORK/compose.err" || {
         cat "$WORK/compose.err"
@@ -612,7 +612,7 @@ the_base_runs_mbsync_indexer_and_mcp_server() {
 # #1192: the published port and its container target must both follow
 # MCP_PORT, so a literal in ports: cannot leave the server unreachable.
 mcp_port_follows_the_published_port() {
-    MCP_PORT=4000 render "$BASE"
+    RENDER_MCP_PORT=4000 render "$BASE"
     expect '.services["mcp-server"].environment.MCP_PORT == "4000"' || return 1
     expect '.services["mcp-server"].ports | map("\(.host_ip):\(.published):\(.target)/\(.protocol)") == ["127.0.0.1:4000:4000/tcp"]' || return 1
 }
