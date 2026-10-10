@@ -1415,16 +1415,18 @@ _OCR_PAGE_CAP_MODULES = frozenset({"pdf", "image"})
 def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
     """The fixed ``unsupported`` error for an exception from ``module_name``
     that the same bytes always repeat, else ``None`` (#931). Matched by
-    exact class, never by message text: a subclass (pypdf's
-    ``WrongPasswordError``, raised only for a password we never supply)
-    or any other exception stays ``failed``. The extractor already ran,
-    so its module imports."""
+    exact class, never by message text: any other exception stays
+    ``failed``. For ``pdf`` these are the classes the parent raises from
+    the child's exact type names (#1464), so pypdf's
+    ``WrongPasswordError``, a subclass raised only for a password we
+    never supply, stays ``failed``. The extractor already ran, so its
+    module imports."""
     if module_name == "pdf":
-        from pypdf.errors import FileNotDecryptedError, LimitReachedError
+        from .pdf import PdfEncryptedError, PdfLimitError
 
-        if type(exc) is FileNotDecryptedError:
+        if type(exc) is PdfEncryptedError:
             return ENCRYPTED_PDF_ERROR
-        if type(exc) is LimitReachedError:
+        if type(exc) is PdfLimitError:
             return PDF_LIMIT_ERROR
     elif module_name == "xlsx":
         from .xlsx import XlsxEagerPartBudgetError

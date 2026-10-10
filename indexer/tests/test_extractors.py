@@ -20,8 +20,10 @@ import pytest
 from src.extractors import (
     CONTAINER_IDENTIFIER,
     DOCX_PACKAGE_BUDGET_ERROR,
+    ENCRYPTED_PDF_ERROR,
     NOT_CONTAINER_IDENTIFIER,
     NOT_OLE2_OR_OOXML_ERROR,
+    PDF_LIMIT_ERROR,
     PPTX_PACKAGE_BUDGET_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
@@ -3728,6 +3730,33 @@ class TestPermanentFailuresAreUnsupported:
         for marker in ("SYNTHETIC_DEEP_TREE_MARKER", "SYNTHETIC_FILENAME_MARKER"):
             assert marker not in caplog.text
 
+    @pytest.mark.parametrize(
+        ("name", "error"),
+        [("PdfEncryptedError", ENCRYPTED_PDF_ERROR), ("PdfLimitError", PDF_LIMIT_ERROR)],
+    )
+    def test_the_pdf_extractors_own_permanent_errors_are_unsupported(
+        self, monkeypatch, name, error
+    ):
+        """#1464: the parent raises its own classes for the child's
+        ``FileNotDecryptedError`` and ``LimitReachedError`` tokens, so it
+        never imports pypdf; the dispatcher matches those classes."""
+        from src.extractors import pdf
+
+        exc_type = getattr(pdf, name)
+
+        def boom(payload, **opts):
+            raise exc_type()
+
+        monkeypatch.setattr("src.extractors._safe_import", lambda module: boom)
+
+        result = extract(content_type="application/pdf", filename="a.pdf", payload=b"x")
+
+        assert (result.status, result.error, result.extractor) == (
+            STATUS_UNSUPPORTED,
+            error,
+            "pdf@6",
+        )
+
     @pytest.mark.parametrize("module", ["pptx", "docx"])
     def test_package_over_a_pre_open_budget_is_unsupported(self, module, monkeypatch, caplog):
         """#1032: the PPTX and DOCX pre-open package budgets are decided
@@ -3836,6 +3865,13 @@ class TestPermanentFailuresAreUnsupported:
             ("pdf", "pypdf.errors.PdfReadError"),
             # A subclass of an allowlisted type is not matched.
             ("pdf", "pypdf.errors.WrongPasswordError"),
+            # pypdf's own classes never reach the parent (#1464): the
+            # child's tokens are raised as the repo's classes.
+            ("pdf", "pypdf.errors.FileNotDecryptedError"),
+            ("pdf", "pypdf.errors.LimitReachedError"),
+            # The PDF classes are matched for the PDF extractor only.
+            ("xlsx", "src.extractors.pdf.PdfEncryptedError"),
+            ("xlsx", "src.extractors.pdf.PdfLimitError"),
             # An allowlisted type from another extractor is not matched.
             ("xlsx", "pypdf.errors.FileNotDecryptedError"),
             ("pdf", "src.extractors.xlsx.XlsxEagerPartBudgetError"),

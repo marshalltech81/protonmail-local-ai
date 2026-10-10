@@ -34,10 +34,12 @@ fixed tokens and counts only (#1293):
 
 The caps, counts and the OCR failure are applied and logged here, from
 ``_report``, whether the child then returned text or raised, as the
-in-process extractor applied them before it returned or raised. A
-``FileNotDecryptedError`` or ``LimitReachedError`` (pypdf, matched by
-exact type name) is raised again here so the dispatcher records it
-``unsupported`` (#931); any other error, the child's own
+in-process extractor applied them before it returned or raised. The
+child's ``FileNotDecryptedError`` or ``LimitReachedError`` (pypdf,
+matched by exact type name) is raised here as ``PdfEncryptedError`` or
+``PdfLimitError``, so the dispatcher records it ``unsupported`` (#931)
+and this process never imports pypdf (#1464); any other error, the
+child's own
 ``MemoryError`` or ``RecursionError`` at its limits included, is
 recorded ``failed`` by type name, as are a limit hit, a timeout and
 output that breaks the protocol.
@@ -49,8 +51,6 @@ import logging
 import math
 import os
 from collections.abc import Callable
-
-from pypdf.errors import FileNotDecryptedError, LimitReachedError
 
 from . import (
     CAP_DIGITAL_PAGES,
@@ -66,6 +66,27 @@ from . import (
 from ._runner import ChildReport, run_child
 
 log = logging.getLogger("indexer.extractor.pdf")
+
+
+class PdfEncryptedError(Exception):
+    """The child's pypdf ``FileNotDecryptedError``: the PDF needs an open
+    password, which is never supplied. Fixed text: the dispatcher records
+    it as ``unsupported`` with its own fixed text, since the same bytes
+    always fail the same way (#931). Defined here so this process never
+    imports pypdf (#1464)."""
+
+    def __init__(self) -> None:
+        super().__init__("pdf needs an open password")
+
+
+class PdfLimitError(Exception):
+    """The child's pypdf ``LimitReachedError``: the PDF's structure is
+    over one of pypdf's limits. Fixed text, recorded ``unsupported`` as
+    ``PdfEncryptedError`` is (#931, #1464)."""
+
+    def __init__(self) -> None:
+        super().__init__("pdf structure is over a pypdf limit")
+
 
 # The extractor names the child may return: the digital text layer, the
 # per-page OCR fallback, and the sentinel for a PDF that needs OCR while
@@ -298,8 +319,8 @@ def extract(
         counts=CHILD_DEGRADATION_KEYS,
         names=_NAMES,
         permanent={
-            "FileNotDecryptedError": FileNotDecryptedError,
-            "LimitReachedError": LimitReachedError,
+            "FileNotDecryptedError": PdfEncryptedError,
+            "LimitReachedError": PdfLimitError,
         },
         on_progress=on_progress,
         on_report=report,

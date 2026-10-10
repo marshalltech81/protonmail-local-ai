@@ -704,6 +704,18 @@ under about 80 characters.
   terms, and say whether the choice can change what the tools return.
   An agent working the PR stops and reports instead of pushing a
   design change.
+- Splitting a PR (owner, 2026-10-10): propose a split, for the owner
+  to approve, only when all of these hold. The part that merges is
+  clean on its own and adds nothing wrong or misleading: a stale claim
+  or figure is removed, not labelled pending. The rest has its own
+  issue, a sub-issue of the PR's issue filed before the split, so the
+  end state is unchanged ("Accuracy first" below). And the rest is
+  blocked by something outside the PR (an idle live system, an
+  upstream release, owner input, a draining queue), or is an
+  independent part where review findings keep landing. A long review
+  history, size or cost is never the reason on its own, and a gap the
+  PR introduced is still fixed in the PR. #1376 split at round 36:
+  the benchmark merged, its figures waited for an idle indexer.
 - A fix that adds a state, mode or queue path, or that moves where
   input is validated, is a design change at any round (owner,
   2026-10-08, #1162). Stop and ask before pushing it, recommending the
