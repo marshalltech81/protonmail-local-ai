@@ -45,6 +45,7 @@ from .extractors import (
     BINARY_AS_TEXT_ERROR,
     LEGACY_OLE2_ERROR,
     NON_OLE2_PPT_ERROR,
+    NOT_OLE2_OR_OOXML_ERROR,
     OCR_DISABLED_ERROR,
     PERMANENT_FAILURE_ERRORS,
     STATUS_EMPTY,
@@ -366,9 +367,10 @@ def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) 
 
     An "OCR disabled" result holds until OCR is turned on. An OLE2 result
     under an OOXML label, a "binary payload labelled as text" result, a
-    "not an OLE2 compound file" result under the ``ppt`` label and the
-    "no extractor" result are decided by the label and the bytes alone
-    (#694, #932, #957), so they hold for good. So do an encrypted PDF, a
+    "not an OLE2 compound file" result under the ``ppt`` label, a "not an
+    OLE2 or OOXML container" result under a legacy label and the "no
+    extractor" result are decided by the label and the bytes alone (#694,
+    #932, #957, #1227), so they hold for good. So do an encrypted PDF, a
     PDF over a pypdf limit, a workbook over the eager-part budget, a
     deck or document over a pre-open package budget and an encrypted
     legacy ``.ppt``: the module that raised them would decline the same
@@ -380,7 +382,12 @@ def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) 
     error = error or ""
     if "OCR disabled" in error:
         return not ocr_enabled
-    if error in {LEGACY_OLE2_ERROR, BINARY_AS_TEXT_ERROR, NON_OLE2_PPT_ERROR}:
+    if error in {
+        LEGACY_OLE2_ERROR,
+        BINARY_AS_TEXT_ERROR,
+        NON_OLE2_PPT_ERROR,
+        NOT_OLE2_OR_OOXML_ERROR,
+    }:
         return True
     if error in PERMANENT_FAILURE_ERRORS:
         return True

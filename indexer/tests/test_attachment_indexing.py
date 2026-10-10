@@ -324,6 +324,10 @@ def test_stale_row_is_left_to_the_occurrences_that_select_its_module(tmp_path, m
     assert (docx_row["extractor"], docx_row["extracted_text"]) == ("docx", "old text")
 
 
+# The DOCX MIME type: a payload under it runs the ``docx`` module (#1227).
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
 def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
     """Another message's re-extraction of the same bytes ended ``empty`` and
     stamped the row current. This message then gets a plain cache hit on
@@ -345,7 +349,7 @@ def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
     _prepare_and_apply(
-        attachment=_attachment(b"docx bytes", filename="c.docx", content_type="application/msword"),
+        attachment=_attachment(b"docx bytes", filename="c.docx", content_type=_DOCX_MIME),
         claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
