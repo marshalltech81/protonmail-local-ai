@@ -56,9 +56,11 @@ SubFolders Legacy
 # Bridge's operation guard refuses to change. Labels are excluded by project
 # policy, not by a Bridge restriction: the index does not model label
 # membership apart from physical folders, so a label copy would add
-# duplicates it could not describe. Bridge's pinned source does not
-# restrict label mailboxes. Expunge None avoids the IMAP CLOSE error that
-# Gluon reports under Expunge Both or Far (gluon#426).
+# duplicates it could not describe. Upstream Bridge source reviewed at
+# commit b9c5dac (point-in-time evidence, not a pin: Bridge updates are
+# managed by the app) does not restrict label mailboxes. Expunge None
+# avoids the IMAP CLOSE error that Gluon reports under Expunge Both or
+# Far (gluon#426).
 # It excludes the top-level Starred folder too, which is also virtual: a
 # second copy of each starred message, whose star already arrives as the
 # F flag on the real copy (#692). A custom folder named Starred is
