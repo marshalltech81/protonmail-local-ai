@@ -579,6 +579,13 @@ class ExtractionResult:
 # that only with a raised OCR page limit or crafted input — owner
 # exception, 2026-10-08, no bump (bumping would reset completeness and
 # re-OCR with new failure modes).
+# image 4: converts frames in modes Pillow cannot write as PNG (CMYK,
+# ...) to RGB (#1400). Those images were recorded ``failed``, and a
+# failed row is re-run only when its bytes are extracted again, so the
+# bump is what makes the startup sweep re-queue them; it re-OCRs every
+# cached image payload once (about 3,460 on the live index) and clears
+# ``text_complete`` on them until re-indexed (owner approved). A later
+# image change (#1413 routing) takes 5 or higher.
 # doc 2, ppt 2: the raw tool's output byte cap follows the configured
 # ``max_extracted_chars`` (four bytes a character, up to a 40 MiB
 # ceiling) instead of a fixed 8 MiB (#1308), so the same bytes can
@@ -604,7 +611,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
     "eml": 3,
-    "image": 3,
+    "image": 4,
     "pdf": 5,
     "ppt": 2,
     "pptx": 3,

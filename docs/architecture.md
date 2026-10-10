@@ -1777,7 +1777,18 @@ characters (`image_text_chars`, an extractor cap) so its output, read
 whole by the parent, has a fixed bound (40 MiB plus 1 MiB of frames);
 the indexer keeps at most `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`
 (2,000,000 by default) anyway.
-The version stays `image@3` (owner exception, 2026-10-08): a row cached
+pytesseract saves each frame as PNG before Tesseract runs, and Pillow
+cannot write some modes (CMYK, YCbCr, HSV, F, LAB, `RGBa`, `RGBX`) as PNG, so
+the child converts a frame in such a mode to RGB, frame by frame, after
+the EXIF rotation; modes PNG holds (`1`, `L`, `P`, `RGB`, the alpha
+modes, ...) go through unchanged (#1400). That fix bumps the version
+to `image@4` (owner approved): a CMYK image was recorded `failed`, a
+failed row is re-run only when its bytes are extracted again, and the
+startup sweep keys on the recorded version, so without a bump nothing
+re-queues it. The bump re-OCRs every cached image payload once and
+clears `text_complete` on them until their messages are re-indexed. A
+later image change (#1413) takes version 5 or higher.
+The version stayed `image@3` through #1292 (owner exception, 2026-10-08): a row cached
 before this change may hold more text when the stripped OCR output
 exceeds 10,000,000 characters and the character cap is off or above
 10,000,000. An error in the child (`DecompressionBombError`,
@@ -1802,7 +1813,7 @@ none, the CPU limit) plus 10 s, plus 30 s: a 21-frame TIFF of text
 pages at the cap took 140 s for its 20 pages. Starting the child adds
 about 0.09 s per image (0.23 s against 0.14 s in process for a small
 screenshot). The text is byte-identical to the in-process extraction,
-so `image@3` is not bumped.
+so #1292 did not bump `image`.
 
 Binary payloads labelled as text: the text extractor decodes whatever
 it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent

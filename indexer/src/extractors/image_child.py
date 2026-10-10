@@ -13,6 +13,9 @@ OCR is enabled, so this module assumes Tesseract is available — a
 missing binary surfaces as ``TesseractNotFoundError``, which the
 parent records as a ``failed`` extraction row.
 
+A frame in a mode Pillow cannot write as PNG (CMYK, YCbCr, ...), which
+``pytesseract`` needs, is converted to RGB per frame (#1400).
+
 Auto-rotates EXIF-oriented JPEGs (smartphone photos default to
 landscape EXIF metadata even when shot portrait, and unrotated input
 hurts OCR accuracy materially). A multipage TIFF (a scanned invoice or
@@ -63,6 +66,16 @@ pillow_heif.register_heif_opener(thumbnails=False, depth_images=False, aux_image
 
 _SEPARATOR = "\n\n"
 
+# The modes ``pytesseract`` can pass on: it saves each frame as PNG
+# before running Tesseract, after pasting any alpha channel onto white
+# (``RGBA``, ``LA``, ``PA``). Any other mode Pillow cannot write as PNG
+# (CMYK, YCbCr, HSV, F, the premultiplied and padded RGB/L modes) raises
+# ``OSError`` on that save (#1400). ``LAB`` is left out: Pillow cannot
+# write it either, and pytesseract would take its "A" band for alpha and
+# paste through it. ``tests/test_image_child.py`` checks this set against
+# Pillow's own save for each mode.
+_PNG_MODES = frozenset({"1", "L", "P", "PA", "LA", "RGB", "RGBA", "I", "I;16", "I;16B"})
+
 
 def extract_text(
     payload: bytes,
@@ -107,7 +120,9 @@ def extract_text(
         while True:
             # ``exif_transpose`` reads the EXIF Orientation tag and rotates
             # the pixels accordingly. No-op for images without EXIF.
-            text = pytesseract.image_to_string(ImageOps.exif_transpose(image), **tesseract_kwargs)
+            text = pytesseract.image_to_string(
+                _png_ready(ImageOps.exif_transpose(image)), **tesseract_kwargs
+            )
             if on_progress is not None:
                 on_progress()
             if texts:
@@ -129,6 +144,13 @@ def extract_text(
             except EOFError:
                 break
     return _joined(texts), []
+
+
+def _png_ready(frame: Image.Image) -> Image.Image:
+    """The frame as ``pytesseract`` can save it: unchanged when Pillow
+    writes its mode as PNG, else converted to RGB (#1400). The frame is
+    already decoded under the pixel cap and the child's memory limit."""
+    return frame if frame.mode in _PNG_MODES else frame.convert("RGB")
 
 
 def _joined(texts: list[str]) -> str:
