@@ -825,6 +825,16 @@ def test_common_prefix_claimants_share_998_bytes_and_stay_distinct(bench, tmp_pa
     assert len(threads) == 1  # one Message-ID, one thread, as in production
 
 
+@pytest.mark.parametrize("identity", ["typical", "ascii998", "ascii998common", "utf8x4"])
+def test_claimant_suffix_is_the_stored_content_hash_prefix(bench, tmp_path, identity):
+    db = tmp_path / "suffix.db"
+    bench.build(db, 12, 1, identity, "typical")
+    with closing(sqlite3.connect(db)) as conn:
+        rows = conn.execute("SELECT claimant_id, content_hash FROM messages").fetchall()
+    assert len({h for _, h in rows}) == 12
+    assert all(c.rsplit("#", 1)[1] == h[:16] for c, h in rows)
+
+
 def test_alternate_names_trade_participants_within_the_address_budget(bench, tmp_path):
     db = tmp_path / "names.db"
     built = bench.build(db, 3, 1, "typical", "cardinality_names", references=2)

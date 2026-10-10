@@ -219,12 +219,17 @@ def message_id(i: int, identity: str) -> str:
     raise ValueError(f"unknown identity width {identity!r}")
 
 
-def claimant_of(mid: str, i: int | None = None) -> str:
-    """The claimant ID: the Message-ID plus ``#`` and 16 hex digits of a
-    hash (the file's bytes in production); ``i`` distinguishes files that
-    claim the same Message-ID."""
+def file_hash(mid: str, i: int | None = None) -> str:
+    """The synthetic stand-in for a file's SHA-256 (``content_hash``);
+    ``i`` distinguishes files that claim the same Message-ID."""
     salt = mid if i is None else f"{mid}\0{i}"
-    return f"{mid}#{hashlib.sha256(salt.encode()).hexdigest()[:16]}"
+    return hashlib.sha256(salt.encode()).hexdigest()
+
+
+def claimant_of(mid: str, i: int | None = None) -> str:
+    """The claimant ID: the Message-ID plus ``#`` and the first 16 hex
+    digits of the file's hash, as in production."""
+    return f"{mid}#{file_hash(mid, i)[:16]}"
 
 
 def _folder(i: int) -> str:
@@ -403,7 +408,8 @@ def build(
             name_rows, chunk_rows, fts_rows, worst_rows = [], [], [], []
             for i in order[start : start + batch]:
                 mid = message_id(i, identity)
-                cid = claimant_of(mid, i if identity == "ascii998common" else None)
+                variant = i if identity == "ascii998common" else None
+                cid = claimant_of(mid, variant)
                 tid = message_id(i - i % 4, identity)
                 at = f"20{10 + i % 15:02d}-{1 + i % 12:02d}-{1 + i % 28:02d}T{i % 24:02d}:{i % 60:02d}:00+00:00"
                 shape = _shape(i, identity, records, references)
@@ -425,7 +431,7 @@ def build(
                         json.dumps(shape["references"]),
                         1 if per_message else 0,
                         4096 + i,
-                        hashlib.sha256(mid.encode()).hexdigest(),
+                        file_hash(mid, variant),
                         at,
                         at,
                         i % 2,
