@@ -2161,6 +2161,20 @@ def _ppt_encrypted_case(monkeypatch) -> tuple[bytes, str, str]:
     return _OLE2_MAGIC + b"SYNTHETIC_TEXT_MARKER" + bytes(64), ENCRYPTED_PPT_ERROR, "ppt@2"
 
 
+def _image_ceiling_case(monkeypatch) -> tuple[bytes, str, str]:
+    """A PNG over a lowered image-child pixel ceiling (#1401): no JPEG
+    scale-down applies, so it is ``unsupported``."""
+    import io
+
+    from PIL import Image
+    from src.extractors import IMAGE_PIXEL_CEILING_ERROR, image_child
+
+    monkeypatch.setattr(image_child, "CHILD_MAX_IMAGE_PIXELS", 100)
+    buf = io.BytesIO()
+    Image.new("L", (20, 20), 255).save(buf, format="PNG")
+    return buf.getvalue(), IMAGE_PIXEL_CEILING_ERROR, "image@6"
+
+
 class TestPermanentFailureCacheRows:
     """#931: an encrypted PDF, a PDF over a pypdf limit and a workbook over
     the eager-part budget fail the same way in the same extractor, so they
@@ -2192,6 +2206,7 @@ class TestPermanentFailureCacheRows:
             "docx",
         ),
         "ppt-encrypted": (_ppt_encrypted_case, "application/vnd.ms-powerpoint", "deck.ppt", "ppt"),
+        "image-pixel-ceiling": (_image_ceiling_case, "image/png", "photo.png", "image"),
     }
 
     def test_every_permanent_error_has_a_case(self, monkeypatch):
@@ -2331,6 +2346,7 @@ class TestPermanentFailureCacheRows:
             ("xlsx-eager-budget", "xlsx@5", "XlsxEagerPartBudgetError"),
             ("pptx-package-budget", "pptx@2", "PptxPackageBudgetError"),
             ("docx-package-budget", "docx@5", "DocxPackageBudgetError"),
+            ("image-pixel-ceiling", "image@5", "DecompressionBombWarning"),
         ],
     )
     def test_stale_failed_row_is_refreshed_to_unsupported_once(
@@ -3058,14 +3074,14 @@ class TestOccurrenceTextComplete:
             attachment_id=attachment.content_hash,
             extractor_module=_module(attachment),
             extraction_status=STATUS_UNSUPPORTED,
-            extractor="image@5",
+            extractor="image@6",
             extracted_text=None,
             extraction_error="OCR disabled (INDEXER_OCR_ENABLED=false)",
         )
         plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
         assert plan.cached
         self._apply(db, plan)
-        assert self._row(db, plan) == (0, "image@5")
+        assert self._row(db, plan) == (0, "image@6")
 
     def test_a_payload_a_parse_cap_emptied_is_zero(self, tmp_path, monkeypatch):
         db = _setup_db_for_attachment(tmp_path)

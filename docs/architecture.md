@@ -1699,7 +1699,7 @@ The limits on every external program the indexer runs:
 | Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
 | extractor child, OOXML (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
 | extractor child, attached emails (`message/rfc822`, `application/eml`, `.eml`) | 1 GiB | 60 s | 75 s |
-| extractor child, PIL and Tesseract (images), each process | 1 GiB | 4 × `INDEXER_OCR_TIMEOUT_SECONDS` + 30 s (270 s) | pages × (OCR timeout + 10 s) + 30 s (1,430 s) |
+| extractor child, PIL and Tesseract (images), each process | 1,605 MiB | 4 × `INDEXER_OCR_TIMEOUT_SECONDS` + 30 s (270 s) | pages × (OCR timeout + 10 s) + 30 s (1,430 s) |
 | Tesseract (scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
 | Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |
 
@@ -1767,9 +1767,30 @@ before. Each Tesseract is a process the child starts, so it inherits
 the child's limits (each process has its own) and is killed with the
 child's process group when the run ends; pytesseract's temporary files
 go to the run's scratch directory, which the runner removes. The child
-imports the extractors package, so the 30,000,000-pixel cap and the
-decompression-bomb handling apply there as before; the indexer itself
-no longer imports pytesseract or pillow-heif for images. A
+has its own pixel ceiling, 48,000,000 pixels (#1401; the package's
+30,000,000-pixel cap stays the cap of every other PIL consumer); the
+indexer itself no longer imports pytesseract or pillow-heif for images.
+A frame at or under the ceiling is OCR'd at full resolution. A JPEG or
+MPO over it (up to 192,000,000 pixels) is decoded at half scale with
+`Image.draft` before any pixel is decoded or rotated, the returned size
+checked, as a lossy fallback (measured loss below): the parent logs the
+`image_pixel_ceiling` extractor cap at WARNING with the factor
+(`image decoded at 1/2 scale (lossy) to fit the pixel ceiling`), the
+text is marked incomplete, and when the scaled-down image yields text an
+INFO line gives its character count. Any other format over the
+ceiling, a JPEG that half scale cannot fit, and a later TIFF frame over
+it (Pillow checks each frame as it is loaded) are recorded
+`unsupported` ("image exceeds the pixel ceiling", a permanent error).
+While the header is read, Pillow's own limit is four times the ceiling;
+its `DecompressionBombWarning` (promoted to an error) above that and its
+`DecompressionBombError` above twice that are caught by class and
+recorded the same way, so their messages go nowhere. A multi-picture
+JPEG (MPO), such as a phone photo with a second picture, is OCR'd from
+its primary picture only; when its header lists more than one, the
+`mpo_frames` extractor cap reports the omission and the text is marked
+incomplete. The ceiling and the half-scale factor are fixed, not
+settings, so they record no cap value on the row (#1418); a change to
+either is an `image` version bump. A
 `P` frame after each OCR'd page refreshes the heartbeat; the frame cap
 (`ocr_frames`, or `ocr_frames_unreadable` when the probe frame cannot
 be read) crosses as a `C` frame, and the parent logs and counts it as
@@ -1795,24 +1816,95 @@ clears `text_complete` on them until their messages are re-indexed.
 an image (see *PDFs labelled as images*); like 4, it re-OCRs every
 cached image payload once while OCR is on, and re-runs the `failed`
 image rows whatever the OCR setting.
+`image@6` (#1401, owner approved 2026-10-10) is the pixel ceiling
+above: images from 30,000,000 to 48,000,000 pixels, recorded `failed`
+under `DecompressionBombWarning` before, are read at full resolution,
+larger JPEGs at half scale, and the rest are `unsupported`. Like 4 and
+5 it re-OCRs every cached image payload once while OCR is on; with OCR
+off it re-runs the `image@5` "OCR disabled" rows once (no OCR runs;
+they are re-stamped).
 The version stayed `image@3` through #1292 (owner exception, 2026-10-08): a row cached
 before this change may hold more text when the stripped OCR output
 exceeds 10,000,000 characters and the character cap is off or above
-10,000,000. An error in the child (`DecompressionBombError`,
-`TesseractError`, `RuntimeError` for a Tesseract timeout, its own
+10,000,000. An error in the child (`TesseractError`, `RuntimeError`
+for a Tesseract timeout, its own
 `MemoryError` or `RecursionError`) is recorded `failed` under its type
 name; in process a `MemoryError` or `RecursionError` was host
 pressure.
 
 The limits were measured plainly in the indexer image (Tesseract 5.5.0,
-which runs up to four OpenMP threads), as the smallest address-space
-limit under which the extraction still succeeds, on synthetic images at
-the pixel cap: a photo-like page with 3,000 words of text, as JPEG and
-as HEIC, 441 MiB and 8 s; an all-white 30,000,000-pixel RGBA PNG of
-126 KB, 441 MiB (the child's own decode) and 1 s; random noise,
-606 MiB and 6 s. 1 GiB is 1.7 times the largest. A page of dense text
-that needs more than the 60 s OCR timeout fails on the timeout under
-the limit as without it (364 MB peak). CPU time counts every thread, so
+which runs up to four OpenMP threads), through the real launcher, on
+synthetic images (#1401). "Minimum" is the smallest address-space limit,
+in 16 MiB steps with no OCR timeout, under which the extraction still
+succeeds; the other columns are one run at the 1,605 MiB limit with the
+60 s OCR timeout: wall clock, CPU time of the child's tree, the largest
+resident size of the child and Tesseract together (both run at once,
+each under its own limit) and the largest size of the run's scratch
+directory (the payload and pytesseract's temporary PNG).
+
+| Image (synthetic) | Payload | Minimum | Wall | CPU | Tree RSS | Scratch |
+|---|---|---|---|---|---|---|
+| 48 MP text page, JPEG (baseline, progressive or EXIF-rotated) | 10 to 12 MiB | 688 MiB | 29 s | 43 to 46 s | 1,050 to 1,052 MiB | 54 to 55 MiB |
+| 48 MP MPO, two pictures (`mpo_frames`) | 23 MiB | 688 MiB | 30 s | 46 s | 1,063 MiB | 67 MiB |
+| 48 MP CMYK JPEG (converted to RGB) | 36 MiB | 688 MiB | 35 s | 53 s | 1,075 MiB | 96 MiB |
+| 48 MP HEIC (512-pixel grid tiles) | 23 MiB | 688 MiB | 36 s | 57 s | 1,083 MiB | 68 MiB |
+| 48 MP PNG, RGB | 3 MiB | 672 MiB | 20 s | 40 s | 1,044 MiB | 6 MiB |
+| 48 MP PNG, palette (`P`) | 2 MiB | 336 MiB | 19 s | 39 s | 420 MiB | 3 MiB |
+| 48 MP PNG, all-white RGBA | 0.2 MiB | 672 MiB | 2 s | 2 s | 1,110 MiB | 0 MiB |
+| 48 MP TIFF, LZW RGB | 9 MiB | 672 MiB | 18 s | 33 s | 1,051 MiB | 11 MiB |
+| 48 MP TIFF, 32-bit integer (`I`) | 9 MiB | 464 MiB | 17 s | 32 s | 728 MiB | 11 MiB |
+| 48 MP TIFF, three pages | 26 MiB | 672 MiB | 56 s | 103 s | 1,069 MiB | 29 MiB |
+| 48 MP JPEG of random noise | 22 MiB | 944 MiB | 11 s | 11 s | 1,353 MiB | 159 MiB |
+| 108 MP JPEG at half scale (baseline, progressive, rotated, MPO) | 18 to 41 MiB | 464 to 496 MiB | 23 to 26 s | 39 to 43 s | 680 to 702 MiB | 42 to 65 MiB |
+| 108 MP noise JPEG at half scale | 36 MiB | not searched | 7 s | 6 s | 794 MiB | 108 MiB |
+| 192 MP JPEG at half scale (baseline, rotated, MPO) | 33 to 66 MiB | 672 MiB | 31 to 32 s | 46 to 51 s | 1,076 to 1,109 MiB | 71 to 104 MiB |
+| 192 MP progressive JPEG at half scale | 28 MiB | 832 MiB | 33 s | 51 s | 1,072 MiB | 67 MiB |
+| 192 MP noise JPEG at half scale | 28 MiB | 864 MiB | 12 s | 12 s | 1,310 MiB | 148 MiB |
+| 108 MP PNG or TIFF, 192 MP PNG or three-page TIFF | 4 to 61 MiB | (refused) | 0.1 to 0.2 s | 0.1 to 0.2 s | up to 101 MiB | up to 61 MiB |
+
+At full resolution the same images need more than the old 1 GiB from
+108 MP on (1,296 MiB for text and 2,032 MiB for noise at 108 MP;
+2,112 MiB for text and over 3,072 MiB for noise at 192 MP), which is
+why only JPEG and MPO, which decode at half scale, go past the ceiling.
+1,605 MiB is the smallest limit that gives the largest case inside the
+default 32 MiB byte cap, the 48 MP noise JPEG at 944 MiB, the 1.7 times
+margin the 30,000,000-pixel limit was sized with. Past the default byte
+cap, a 192 MP noise JPEG of 87 MiB needs 1,008 MiB (1.6 times) and
+reaches a 1,466 MiB tree; a 108 MP one of 49 MiB, 592 MiB. The
+32-bit TIFF row is a page whose samples span the 16-bit range; one
+whose samples use only the 8-bit range is read as an empty page
+(#1435). At the previous 30,000,000-pixel cap a text page needed
+441 MiB and noise 606 MiB.
+
+Memory under the indexer's 6 GiB `mem_limit`: the scratch directory is
+on the `/tmp` tmpfs, which counts against the limit with the child and
+Tesseract. The largest tree above inside the byte cap (1,353 MiB) plus
+its scratch (159 MiB) is about 1.5 GiB; the bound is two processes at
+1,605 MiB each plus the scratch, about 3.4 GiB. On the live indexer
+(running `image@4` OCR under the old 1 GiB limit), the container used
+1.6 GiB between extractions (the indexer process 1.5 GiB resident), and
+its peak since its start was 4.65 GiB, children and tmpfs included.
+Adding the larger tree's 0.5 GiB to that peak, or the 3.4 GiB bound to
+the 1.6 GiB, stays under 6 GiB.
+
+The half-scale fallback is lossy. On a synthetic catalogue (one font,
+rendered at 0.7 of the line height, at one line spacing; 12 lines of
+48 characters per image; lines 40, 60, 80, 120 and 200 px high; clean,
+Gaussian blur, a keystone perspective, low-contrast ink and JPEG
+quality 50; on 48, 108 and 192 MP canvases), scored by character
+accuracy against the rendered text, half scale kept 58 of the 62 cases
+that read at full resolution to within 2 points and read nothing of the
+other four: low-contrast lines of 60 px (48 MP) and 120 px (192 MP),
+and 40 px lines, clean and compressed (108 MP). A sweep of ink
+contrast at 48 MP (lines of 50 to 90 px) lost 2 of the 12 cases that
+read at full resolution, both low-contrast lines of 50 and 60 px.
+Quarter scale lost every 40 px case at 48 MP and is not used. The
+catalogue is one synthetic font and layout, so it shows where the
+fallback loses text, not that it keeps it.
+
+A page of dense text that needs more than the 60 s OCR timeout fails on
+the timeout under the limit as without it (364 MB peak, measured at the
+old limit). CPU time counts every thread, so
 each process may use four times the OCR timeout plus 30 s of CPU, and
 the timeout fires first; with the timeout off (`0`) the 60 s default's
 limit applies. The wall clock allows every page its OCR timeout (with
@@ -2000,10 +2092,13 @@ the eager-part budget"), and a deck or document over the PPTX or DOCX
 pre-open package budgets ("presentation exceeds a pre-open package
 budget", "document exceeds a pre-open package budget"; #1032), which
 are decided from the ZIP central directory alone before the package is
-opened, and a password-protected legacy `.ppt` ("encrypted legacy .ppt
+opened, a password-protected legacy `.ppt` ("encrypted legacy .ppt
 (open password required)"; #983): `PptText.java` exits with a reserved
 status (10) for POI's `EncryptedPowerPointFileException`, matched by
-exact class in Java, and only the `ppt` extractor reads that status.
+exact class in Java, and only the `ppt` extractor reads that status,
+and an image over the image child's pixel ceiling that half scale
+cannot fit ("image exceeds the pixel ceiling"; #1401), decided from the
+image's header.
 Each is matched by exact exception class;
 anything else stays `failed`. The row is keyed by the module that
 raised the error (#928), so it is served only to occurrences that run
@@ -2042,8 +2137,9 @@ status.
 HEIC / HEIF photos (the iPhone default) are images like any other:
 `image/heic`, `image/heif` (any `image/` type) and the `.heic`, `.heif`
 and `.hif` extensions route to the image extractor, which opens them through the `pillow-heif`
-Pillow plugin (#691). They go through the same byte cap, pixel cap and
-decompression-bomb handling as other images; Pillow checks the size in
+Pillow plugin (#691). They go through the same byte cap, the image
+child's pixel ceiling and decompression-bomb handling as other images
+(a HEIC is not a JPEG, so over the ceiling it is `unsupported`); Pillow checks the size in
 the header before anything is decoded. Only the primary image is OCR'd;
 thumbnails, depth maps and auxiliary images are not decoded. The HEIF
 image-sequence extensions `.heics` / `.heifs` are not routed by name;

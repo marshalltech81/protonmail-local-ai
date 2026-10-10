@@ -28,12 +28,35 @@ preprocessing — is left as a future tuning concern.
 
 Decompression-bomb defense: ``INDEXER_ATTACHMENT_MAX_BYTES`` caps the
 payload on disk, but PNG / WebP / TIFF can deflate ~1000× into a
-multi-gigapixel canvas. The pixel-count cap lives at process scope in
-``indexer.extractors.__init__`` (``GLOBAL_MAX_IMAGE_PIXELS``), which the
-child imports, so it applies here as in the indexer. This module
-promotes the milder ``DecompressionBombWarning`` to an error inside
-``extract_text()`` so a between-cap-and-2x-cap image surfaces as a
-``failed`` extraction row rather than passing through.
+multi-gigapixel canvas. The child has its own pixel ceiling (#1401,
+``image.CHILD_MAX_IMAGE_PIXELS``, measured under the child's
+address-space limit); ``GLOBAL_MAX_IMAGE_PIXELS`` stays the cap of every
+other PIL consumer. ``extract_text`` sets Pillow's limit for its own
+run and restores it after:
+
+* While the header is read, the limit is the ceiling times the square
+  of ``image.MAX_DRAFT_FACTOR``: the largest JPEG a scale-down can fit.
+  Pillow's ``DecompressionBombWarning`` (promoted to an error) above it
+  and its ``DecompressionBombError`` above twice it reject the image
+  from the header alone.
+* A frame at or under the ceiling is decoded and OCR'd at full
+  resolution, as before.
+* A JPEG or MPO over it is decoded at the smallest scale (1/2, 1/4 or
+  1/8, up to ``MAX_DRAFT_FACTOR``, which is 2) that fits, through
+  ``Image.draft`` before any decode or rotation; the returned size is
+  checked, and the factor is recorded for the parent
+  (``record_image_scale_factor``), which reports it as an extractor cap.
+  This is a lossy fallback: small low-contrast text can be lost
+  (``image.MAX_DRAFT_FACTOR``).
+* Any other format over it, a JPEG no allowed factor fits, and a later
+  TIFF frame over it (Pillow checks each frame against the ceiling when
+  it is loaded) raise ``image.ImagePixelCeilingError``, which the
+  dispatcher records ``unsupported``. Both Pillow exceptions are caught
+  by class and replaced by it, so their messages go nowhere.
+
+A multi-picture (MPO) JPEG, such as a phone's photo with a second
+picture, is OCR'd from its primary picture only; when its header lists
+more than one, the cap ``mpo_frames`` reports the omission.
 
 HEIC / HEIF (iPhone photos) open through pillow-heif's Pillow plugin
 (#691), registered below at import, so they pass the same byte cap,
@@ -51,13 +74,24 @@ from __future__ import annotations
 
 import io
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 import pillow_heif
 import pytesseract
 from PIL import Image, ImageOps
 
-from .image import _MAX_TEXT_CHARS, CAP_FRAMES, CAP_FRAMES_UNREADABLE, CAP_TEXT
+from . import record_image_scale_factor
+from .image import (
+    _MAX_TEXT_CHARS,
+    CAP_FRAMES,
+    CAP_FRAMES_UNREADABLE,
+    CAP_MPO_FRAMES,
+    CAP_TEXT,
+    CHILD_MAX_IMAGE_PIXELS,
+    MAX_DRAFT_FACTOR,
+    ImagePixelCeilingError,
+)
 
 # HEIF opener only (pillow-heif 1.x has no AVIF plugin); skip decoding a
 # photo's thumbnails, depth maps and auxiliary images, which OCR never
@@ -75,6 +109,11 @@ _SEPARATOR = "\n\n"
 # paste through it. ``tests/test_image_child.py`` checks this set against
 # Pillow's own save for each mode.
 _PNG_MODES = frozenset({"1", "L", "P", "PA", "LA", "RGB", "RGBA", "I", "I;16", "I;16B"})
+
+# The formats ``Image.draft`` scales down while decoding (libjpeg's DCT
+# scaling), and the factors it offers.
+_DRAFT_FORMATS = frozenset({"JPEG", "MPO"})
+_DRAFT_FACTORS = (2, 4, 8)
 
 
 def extract_text(
@@ -103,47 +142,109 @@ def extract_text(
     timeout = float(ocr_timeout_seconds)
     if tesseract_cmd is not None:
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-    with warnings.catch_warnings():
-        # Promote the bomb warning to an error so anything between the
-        # global pixel cap and PIL's hard 2x ceiling becomes a clean
-        # ``failed`` extraction. Scoped via ``catch_warnings`` so the
-        # filter doesn't leak across unrelated callers in the same
-        # process.
+    with warnings.catch_warnings(), _pillow_limit(CHILD_MAX_IMAGE_PIXELS * MAX_DRAFT_FACTOR**2):
+        # Promote the bomb warning to an error, scoped via
+        # ``catch_warnings`` so the filter doesn't leak across unrelated
+        # callers in the same process. Pillow raises either one only
+        # from a size, before any pixel is decoded.
         warnings.simplefilter("error", Image.DecompressionBombWarning)
-        image: Image.Image = Image.open(io.BytesIO(payload))
-        tesseract_kwargs: dict[str, float] = {}
-        if timeout > 0:
-            tesseract_kwargs["timeout"] = timeout
-        texts: list[str] = []
-        stripped = _StrippedLength()
-        page = 0
-        while True:
-            # ``exif_transpose`` reads the EXIF Orientation tag and rotates
-            # the pixels accordingly. No-op for images without EXIF.
-            text = pytesseract.image_to_string(
-                _png_ready(ImageOps.exif_transpose(image)), **tesseract_kwargs
-            )
-            if on_progress is not None:
-                on_progress()
-            if texts:
-                stripped.add(_SEPARATOR)
-            stripped.add(text)
-            texts.append(text)
-            page += 1
-            if stripped.length > _MAX_TEXT_CHARS:
-                return _joined(texts)[:_MAX_TEXT_CHARS], [CAP_TEXT]
-            if image.format != "TIFF":
-                break
-            if page_cap > 0 and page >= page_cap:
-                cap = _probe_past_cap(image, page)
-                return _joined(texts), [] if cap is None else [cap]
-            # Seek page by page rather than read ``n_frames``: that walks
-            # every image directory in the file before any cap applies.
-            try:
-                image.seek(page)
-            except EOFError:
-                break
-    return _joined(texts), []
+        try:
+            return _extract(payload, page_cap, timeout, on_progress)
+        except Image.DecompressionBombError, Image.DecompressionBombWarning:
+            raise ImagePixelCeilingError from None
+
+
+def _extract(
+    payload: bytes,
+    page_cap: int,
+    timeout: float,
+    on_progress: Callable[[], None] | None,
+) -> tuple[str, list[str]]:
+    """``extract_text``'s work, under its Pillow limit and warning filter."""
+    image: Image.Image = Image.open(io.BytesIO(payload))
+    # Every frame decoded from here on is checked against the ceiling
+    # itself (a later TIFF frame when it is loaded).
+    Image.MAX_IMAGE_PIXELS = CHILD_MAX_IMAGE_PIXELS
+    factor = _fit_to_ceiling(image)
+    if factor > 1:
+        record_image_scale_factor(factor)
+    caps: list[str] = []
+    if image.format == "MPO" and getattr(image, "n_frames", 1) > 1:
+        caps.append(CAP_MPO_FRAMES)
+    tesseract_kwargs: dict[str, float] = {}
+    if timeout > 0:
+        tesseract_kwargs["timeout"] = timeout
+    texts: list[str] = []
+    stripped = _StrippedLength()
+    page = 0
+    while True:
+        # ``exif_transpose`` reads the EXIF Orientation tag and rotates
+        # the pixels accordingly. No-op for images without EXIF.
+        text = pytesseract.image_to_string(
+            _png_ready(ImageOps.exif_transpose(image)), **tesseract_kwargs
+        )
+        if on_progress is not None:
+            on_progress()
+        if texts:
+            stripped.add(_SEPARATOR)
+        stripped.add(text)
+        texts.append(text)
+        page += 1
+        if stripped.length > _MAX_TEXT_CHARS:
+            return _joined(texts)[:_MAX_TEXT_CHARS], [*caps, CAP_TEXT]
+        if image.format != "TIFF":
+            break
+        if page_cap > 0 and page >= page_cap:
+            cap = _probe_past_cap(image, page)
+            return _joined(texts), caps if cap is None else [*caps, cap]
+        # Seek page by page rather than read ``n_frames``: that walks
+        # every image directory in the file before any cap applies.
+        try:
+            image.seek(page)
+        except EOFError:
+            break
+    return _joined(texts), caps
+
+
+@contextmanager
+def _pillow_limit(pixels: int) -> Iterator[None]:
+    """Set Pillow's pixel limit (``Image.MAX_IMAGE_PIXELS``) to
+    ``pixels`` for the block, and restore it after. In the child, the
+    only work in its process; in a test that runs the child in process,
+    restored for the rest."""
+    saved = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = pixels
+    try:
+        yield
+    finally:
+        Image.MAX_IMAGE_PIXELS = saved
+
+
+def _fit_to_ceiling(image: Image.Image) -> int:
+    """The factor the image is decoded at: 1 when it is within the
+    child's pixel ceiling, else the smallest ``_DRAFT_FACTORS`` entry up
+    to ``MAX_DRAFT_FACTOR`` that scales a JPEG or MPO under it, set with
+    ``Image.draft`` before anything is decoded. Raises
+    ``ImagePixelCeilingError`` for any other format over the ceiling, a
+    JPEG no allowed factor fits, and a draft that does not return the
+    size asked for (``draft`` returns ``None`` when it cannot scale)."""
+    width, height = image.size
+    if width * height <= CHILD_MAX_IMAGE_PIXELS:
+        return 1
+    if image.format not in _DRAFT_FORMATS:
+        raise ImagePixelCeilingError
+    for factor in _DRAFT_FACTORS:
+        if factor > MAX_DRAFT_FACTOR:
+            break
+        # libjpeg rounds a scaled dimension up.
+        scaled = (-(-width // factor), -(-height // factor))
+        if scaled[0] * scaled[1] > CHILD_MAX_IMAGE_PIXELS:
+            continue
+        drafted = image.draft(None, (max(1, width // factor), max(1, height // factor)))
+        if drafted is None or image.size != scaled:
+            raise ImagePixelCeilingError
+        return factor
+    raise ImagePixelCeilingError
 
 
 def _png_ready(frame: Image.Image) -> Image.Image:

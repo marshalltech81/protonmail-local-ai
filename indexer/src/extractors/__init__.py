@@ -362,6 +362,11 @@ def drain_counters() -> dict[str, int]:
 # line below stands for them.
 CHILD_TEXT_LOST = "text_lost"
 CHILD_OCR_PAGES_SKIPPED = "result_ocr_pages_skipped"
+# The factor (2, 4 or 8) by which the image child scaled down a JPEG over
+# its pixel ceiling before OCR (``record_image_scale_factor``, #1401).
+CHILD_IMAGE_SCALE_FACTOR = "image_scale_factor"
+# The cap name the parent reports a scale-down under.
+IMAGE_PIXEL_CEILING_CAP = "image_pixel_ceiling"
 CHILD_DEGRADATION_KEYS = frozenset(
     {
         "pdf_pages_failed",
@@ -378,6 +383,7 @@ CHILD_DEGRADATION_KEYS = frozenset(
         "eml_charsets_degraded",
         CHILD_TEXT_LOST,
         CHILD_OCR_PAGES_SKIPPED,
+        CHILD_IMAGE_SCALE_FACTOR,
     }
 )
 
@@ -390,6 +396,14 @@ def reset_attempt() -> None:
     parent records it."""
     _attempt.text_lost = False
     _attempt.ocr_pages_skipped = None
+    _attempt.image_scale_factor = None
+
+
+def record_image_scale_factor(factor: int) -> None:
+    """In the image child: record that the image was decoded at
+    1/``factor`` scale to fit the child's pixel ceiling (#1401). The
+    parent reports it as an extractor cap (``apply_child_degradation``)."""
+    _attempt.image_scale_factor = factor
 
 
 def child_degradation() -> dict[str, int]:
@@ -401,6 +415,9 @@ def child_degradation() -> dict[str, int]:
     skipped = getattr(_attempt, "ocr_pages_skipped", None)
     if skipped is not None:
         state[CHILD_OCR_PAGES_SKIPPED] = skipped
+    factor = getattr(_attempt, "image_scale_factor", None)
+    if factor is not None:
+        state[CHILD_IMAGE_SCALE_FACTOR] = factor
     return state
 
 
@@ -409,7 +426,19 @@ def apply_child_degradation(logger: logging.Logger, module: str, counts: Mapping
     (``child_degradation``) to the counters and the running extraction,
     then log it in one rate-limited WARNING naming ``module`` and each
     key with its count. The counts and the text loss are applied
-    whether or not the line is logged."""
+    whether or not the line is logged. An image scale-down
+    (``CHILD_IMAGE_SCALE_FACTOR``) is an extractor cap instead, logged
+    on its own line with the factor (#1401)."""
+    factor = counts.get(CHILD_IMAGE_SCALE_FACTOR)
+    if factor:
+        warn_extractor_cap(
+            logger,
+            IMAGE_PIXEL_CEILING_CAP,
+            "%s decoded at 1/%d scale (lossy) to fit the pixel ceiling",
+            module,
+            factor,
+        )
+        counts = {key: n for key, n in counts.items() if key != CHILD_IMAGE_SCALE_FACTOR}
     if not counts:
         return
     add_counters(counts)
@@ -630,6 +659,19 @@ class ExtractionResult:
 # ``_unsupported_still_holds``), and the ``failed`` image rows are re-run
 # too (owner approved, 2026-10-10). Like 4, it re-OCRs every cached image
 # payload once while OCR is on.
+# image 6: the image child has its own pixel ceiling, 48,000,000 pixels,
+# under a 1,605 MiB address-space limit (#1401, owner decision
+# 2026-10-10). Images from 30,000,000 to 48,000,000 pixels, recorded
+# ``failed`` under ``DecompressionBombWarning`` before, are read at full
+# resolution. A JPEG or MPO over the ceiling is read at 1/2 scale
+# (``draft``) as a lossy fallback (``image.MAX_DRAFT_FACTOR``: on the
+# synthetic catalogue, low-contrast lines of 50 and 60 px were lost at
+# half scale), reported as the ``image_pixel_ceiling`` cap; an image
+# that still does not fit is recorded ``unsupported``
+# (``IMAGE_PIXEL_CEILING_ERROR``), and an MPO reports that only its
+# primary picture was read. The bump re-OCRs every cached image payload
+# once, as image 4 did, and with OCR off re-runs the ``image@5`` "OCR
+# disabled" rows once (no OCR runs; they are re-stamped).
 # doc 2, ppt 2: the raw tool's output byte cap follows the configured
 # ``max_extracted_chars`` (four bytes a character, up to a 40 MiB
 # ceiling) instead of a fixed 8 MiB (#1308), so the same bytes can
@@ -655,7 +697,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
     "eml": 3,
-    "image": 5,
+    "image": 6,
     "pdf": 5,
     "ppt": 2,
     "pptx": 3,
@@ -769,6 +811,9 @@ DOCX_PACKAGE_BUDGET_ERROR = "document exceeds a pre-open package budget"
 # A password-protected legacy ``.ppt`` (#983), from the reader's reserved
 # exit status.
 ENCRYPTED_PPT_ERROR = "encrypted legacy .ppt (open password required)"
+# An image over the image child's pixel ceiling that a JPEG scale-down
+# within the validated factor cannot fit (#1401).
+IMAGE_PIXEL_CEILING_ERROR = "image exceeds the pixel ceiling"
 PERMANENT_FAILURE_ERRORS = frozenset(
     {
         ENCRYPTED_PDF_ERROR,
@@ -777,6 +822,7 @@ PERMANENT_FAILURE_ERRORS = frozenset(
         PPTX_PACKAGE_BUDGET_ERROR,
         DOCX_PACKAGE_BUDGET_ERROR,
         ENCRYPTED_PPT_ERROR,
+        IMAGE_PIXEL_CEILING_ERROR,
     }
 )
 # Extractors that read an OOXML package (a ZIP): each gets the OLE2 check
@@ -1217,6 +1263,11 @@ def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
 
         if type(exc) is PptEncryptedError:
             return ENCRYPTED_PPT_ERROR
+    elif module_name == "image":
+        from .image import ImagePixelCeilingError
+
+        if type(exc) is ImagePixelCeilingError:
+            return IMAGE_PIXEL_CEILING_ERROR
     return None
 
 

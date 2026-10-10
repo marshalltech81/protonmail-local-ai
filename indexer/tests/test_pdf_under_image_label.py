@@ -2,7 +2,8 @@
 
 The dispatcher routes an ``image``-module payload starting ``%PDF-`` to
 ``pdf`` before the OCR gate, the cache key follows the same routine, and
-the "OCR disabled" result of an image is stamped (``image@5``), so a row
+the "OCR disabled" result of an image is stamped (``image@5`` from
+#1415, the current ``image`` version since), so a row
 recorded with no stamp, which may hold such a PDF, is re-run once whatever
 the OCR setting: by the cache check and by the startup sweep, under both
 legacy keys (``''`` from migration 0001 and ``image``). Synthetic payloads
@@ -24,6 +25,7 @@ from src.attachment_indexing import (
     reprocess_reruns_extraction,
 )
 from src.extractors import (
+    EXTRACTOR_VERSIONS,
     OCR_DISABLED_ERROR,
     SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_SUCCESS,
@@ -38,6 +40,9 @@ from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT
 from tests.test_extraction_budget import Pipeline
 
 MARKER = "SYNTHETIC_1415_MARKER"
+# The stamp the current ``image`` version writes (``image@5`` when #1415
+# landed; #1401 moved it on).
+_STAMP = f"image@{EXTRACTOR_VERSIONS['image']}"
 
 # Image labels: by MIME type, by a generic ``image/*`` type and by
 # extension under a generic MIME type.
@@ -153,7 +158,7 @@ class TestRouting:
         assert (result.status, result.error, result.extractor) == (
             STATUS_UNSUPPORTED,
             OCR_DISABLED_ERROR,
-            "image@5",
+            _STAMP,
         )
         assert calls == []
         assert extraction_module(content_type, filename, _PNG) == "image"
@@ -174,7 +179,7 @@ class TestLegacyPredicate:
             # The unstamped image row never holds (#1415).
             (OCR_DISABLED_ERROR, None, False, False),
             # A stamped one holds while OCR is off.
-            (OCR_DISABLED_ERROR, "image@5", False, True),
+            (OCR_DISABLED_ERROR, _STAMP, False, True),
             # The scanned-PDF row is unaffected.
             (SCANNED_PDF_OCR_DISABLED_ERROR, None, False, True),
         ],
@@ -241,24 +246,27 @@ class TestCacheCheck:
         monkeypatch.setattr(attachment_indexing, "extract_attachment", counting)
         return calls
 
-    def test_an_unstamped_image_row_is_re_extracted_and_stamped(self, db, monkeypatch):
+    @pytest.mark.parametrize("old", [None, "image@5"], ids=["unstamped", "historical-image@5"])
+    def test_an_unstamped_image_row_is_re_extracted_and_stamped(self, db, monkeypatch, old):
         """With OCR off: the unstamped row does not short-circuit, the fresh
-        result is stamped ``image@5`` and persisted, and from then on it
-        does."""
+        result is stamped with the current ``image`` version and persisted,
+        and from then on it does. A row #1415 stamped ``image@5`` is older
+        than the current version (#1401), so it is refreshed once the same
+        way, then reused."""
         calls = self._counting(monkeypatch)
         attachment = _attachment(_PNG)
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
             extractor_module="image",
             extraction_status=STATUS_UNSUPPORTED,
-            extractor=None,
+            extractor=old,
             extracted_text=None,
             extraction_error=OCR_DISABLED_ERROR,
         )
         plan = _prepare(db, attachment, ocr_enabled=False)
         assert (plan.status, plan.cached, len(calls)) == (STATUS_UNSUPPORTED, False, 1)
         assert plan.extraction_to_persist is not None
-        assert plan.extraction_to_persist.extractor == "image@5"
+        assert plan.extraction_to_persist.extractor == _STAMP
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
             extractor_module="image",
@@ -385,7 +393,7 @@ class TestSweep:
         assert (f"{MARKER}-4.pdf", "pdf", None, "unsupported", SCANNED_PDF_OCR_DISABLED_ERROR) in (
             before
         )
-        assert (f"{MARKER}-5.png", "image", "image@5", "unsupported", OCR_DISABLED_ERROR) in before
+        assert (f"{MARKER}-5.png", "image", _STAMP, "unsupported", OCR_DISABLED_ERROR) in before
 
         caplog.clear()
         assert main._requeue_stale_extractions(p.db, p.queue) == 3
@@ -410,7 +418,7 @@ class TestSweep:
         after = _rows(p)
         assert (f"{MARKER}-1.png", "pdf", "pdf-digital@5", "success", None) in after
         assert (f"{MARKER}-2.jpg", "pdf", "pdf-digital@5", "success", None) in after
-        assert (f"{MARKER}-3.png", "image", "image@5", "unsupported", OCR_DISABLED_ERROR) in after
+        assert (f"{MARKER}-3.png", "image", _STAMP, "unsupported", OCR_DISABLED_ERROR) in after
         assert (f"{MARKER}-7.png", "pdf", "pdf-digital@5", "success", None) in after
         # Untouched: the scanned PDF, the stamped image and the dead letter.
         for kept in (f"{MARKER}-4.pdf", f"{MARKER}-5.png", f"{MARKER}-6.png"):
