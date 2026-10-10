@@ -1597,6 +1597,66 @@ State the scope and disclose
 unread pages, missing indexed bodies and unavailable attachment text
 instead of claiming full coverage.
 
+#### Certifying a paged run: sizing (planned)
+
+No tool certifies a paged run yet. The owner chose a certificate plus a
+read-only reconcile tool for it
+([#1218](https://github.com/marshalltech81/protonmail-local-ai/issues/1218),
+Design A); this section describes the benchmark that sizes that design
+before any protocol code exists. The protocol itself will be documented
+here when it ships.
+
+No figures are recorded yet: the measurement on the indexer's rows is
+tracked in
+[#1469](https://github.com/marshalltech81/protonmail-local-ai/issues/1469),
+and the limits it proposes will be stated here from those figures. WAL
+retention under a concurrent writer, the other part of this sizing, is
+[#1476](https://github.com/marshalltech81/protonmail-local-ai/issues/1476).
+
+**The benchmark.** `mcp-server/scripts/reconcile_bench.py` builds a
+synthetic index (generated values only, never mail) whose tables mirror
+indexer schema v11 and hold the rows the indexer writes for the
+messages the benchmark renders
+(`indexer/tests/test_reconcile_bench_fidelity.py` indexes those files
+with the indexer and compares every row). `--identity utf8x4` is the
+exception: its 4,009-byte claimant IDs are a stress shape the parser
+cannot produce
+([#1424](https://github.com/marshalltech81/protonmail-local-ai/issues/1424)),
+which the fidelity test therefore does not cover, so its figures
+do not size any limit. Each step runs in a fresh
+child process on the server's own read-only connection and with the
+server's own predicate compiler (unfiltered, Trash is left out), and
+records are read and serialized with the server's own `query_messages`
+and `query_attachments` helpers. Timings are plain `perf_counter`
+medians of `--repeat` runs, never a profiler. The page cache is not
+controlled: it holds whatever the build and the earlier steps left, so
+a step's figures depend on the order of the steps and on how much of
+the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
+
+- a certificate: `COUNT(*)`, then every matching identity (claimant ID
+  or attachment occurrence) scanned, sorted and hashed in one read
+  transaction, either streamed in primary-key order or collected and
+  sorted in Python;
+- a reconcile round: parse the client's packed upload (one SHA-256 per
+  identity), diff it against the snapshot and read at most K missing
+  records in the same transaction, with request and response bytes;
+- with `--filtered`, filtered predicates (participant, subject, body
+  text, authority, dates) against one production page of the same
+  query.
+
+Run it inside the mcp-server image so SQLite and Python match the
+server's; `--help` lists every option:
+
+```bash
+docker build -t mcp-bench mcp-server
+docker run --rm --entrypoint python \
+  -v "$PWD/mcp-server/scripts:/app/scripts:ro" mcp-bench \
+  scripts/reconcile_bench.py --messages 50000 --identity typical --filtered
+```
+
+Run it only while the live indexer is idle: a busy indexer shares the
+host's CPU and disk and inflates every timing.
+
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,
 grouped by one dimension, without listing them
@@ -1749,8 +1809,10 @@ and `status_counts`: `total_matches` split by extraction status, with
 (#1236) and `none` for occurrences that have no extraction recorded. Anything but
 `success` means no extracted text is available, not that the file says
 nothing relevant. Each row carries the occurrence ID, the payload's
-`attachment_id`, its `extractor_module` (`''` when its label selects no
-extractor), the claimant, Message-ID and thread IDs, the filename and
+`attachment_id`, its `extractor_module` (the extraction cache
+namespace its label selects, `''` when it selects no extractor; an OLE2
+or ZIP file runs the extractor its contents name whatever its label, so
+the extractor that ran is in `extractor`, #1416), the claimant, Message-ID and thread IDs, the filename and
 MIME type (each cut at 500 characters, with `filename_clipped` /
 `content_type_clipped` set when the stored value is longer), the size,
 the carrying message's folder, `sent_at`, `sent_at_status`,
@@ -1833,7 +1895,7 @@ unread.
 | `success` | the stored text | null |
 | `empty` | `""` | null |
 | `failed` | null | `extraction failed` (the stored error is never returned) |
-| `unsupported` | null | `no extractor could read this file: its type has no extractor, the extractor is missing from this image, or it declined the file (for example an encrypted PDF or a work cap)`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` (since #1415 a PDF sent under an image label is extracted as a PDF instead) |
+| `unsupported` | null | `no extractor could read this file: its type has no extractor, the extractor is missing from this image, or it declined the file (for example an encrypted PDF or a work cap)`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` (since #1415 a PDF sent under an image label is extracted as a PDF instead; since #1416 an OLE2 or ZIP file under any type is identified by its contents, and one no extractor reads, such as an encrypted Office file or an Outlook message, is reported with the first reason) |
 | `too_large` | null | the file is over the indexer's attachment size limit |
 | `deferred` | null | the indexer deferred this attachment's extraction to a later pass (its per-message extraction budget was reached); its text is not indexed yet |
 | none recorded | null | no extraction is recorded yet (not run yet, or extraction off) |

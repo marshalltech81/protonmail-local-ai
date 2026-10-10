@@ -841,8 +841,9 @@ class ListedAttachment(_Output):
         "twice on one, share it."
     )
     extractor_module: str = Field(
-        description="The extractor this occurrence's MIME type and filename select ('' for "
-        "none); with attachment_id, it keys the extraction the row reports."
+        description="The extraction cache namespace this occurrence's MIME type and filename "
+        "select ('' for none); with attachment_id, it keys the extraction the row reports. "
+        "An OLE2 or ZIP file runs the extractor its contents name, which is in extractor."
     )
     claimant_id: str = Field(
         description="The message carrying the attachment; pass it to get_message."

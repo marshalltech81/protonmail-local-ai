@@ -36,6 +36,7 @@ from src.attachment_indexing import (
 from src.chunker import l2_normalize
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import (
+    NOT_CONTAINER_IDENTIFIER,
     STATUS_FAILED,
     STATUS_SUCCESS,
     ExtractionResult,
@@ -97,8 +98,13 @@ class LaunchingExtractor:
         module = extraction_module(content_type, filename, payload) or "text"
         stamp = _stamp_extractor(module, module)
         if payload in self.fail:
+            # Text payloads: no container identification applies (#1416).
             return ExtractionResult(
-                status=STATUS_FAILED, extractor=stamp, text=None, error="SyntheticError"
+                status=STATUS_FAILED,
+                extractor=stamp,
+                text=None,
+                error="SyntheticError",
+                identifier=NOT_CONTAINER_IDENTIFIER,
             )
         return ExtractionResult(
             status=STATUS_SUCCESS,
@@ -112,6 +118,7 @@ class LaunchingExtractor:
             ),
             error=None,
             text_complete=True,
+            identifier=NOT_CONTAINER_IDENTIFIER,
         )
 
 
@@ -752,7 +759,13 @@ class TestContinuation:
                     "ocr_disabled_ocr_off": (STATUS_UNSUPPORTED, OCR_DISABLED_ERROR),
                     "no_extractor": (STATUS_UNSUPPORTED, NO_EXTRACTOR_ERROR),
                 }[refresh]
-                return ExtractionResult(status=status, extractor=None, text=None, error=error)
+                return ExtractionResult(
+                    status=status,
+                    extractor=None,
+                    text=None,
+                    error=error,
+                    identifier=NOT_CONTAINER_IDENTIFIER,
+                )
             return real_call(**kwargs)
 
         p = Pipeline(tmp_path, monkeypatch, extractor, launches=2)
