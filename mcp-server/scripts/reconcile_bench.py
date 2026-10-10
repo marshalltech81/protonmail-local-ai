@@ -124,6 +124,10 @@ CREATE TABLE message_chunks (
     thread_id     TEXT NOT NULL,
     chunk_index   INTEGER NOT NULL,
     text          TEXT NOT NULL,
+    char_start    INTEGER NOT NULL,
+    char_end      INTEGER NOT NULL,
+    token_est     INTEGER NOT NULL,
+    chunked_at    TEXT NOT NULL,
     fts_rowid     INTEGER,
     attachment_id TEXT,
     kind          TEXT NOT NULL
@@ -418,7 +422,22 @@ def build(
                     # Production inserts without a rowid, in insertion order.
                     rowid = n_chunks + 1
                     fts_rows.append((rowid, body))
-                    chunk_rows.append((f"{cid}:{c}", cid, tid, c, body, rowid, None, "body"))
+                    chunk_rows.append(
+                        (
+                            f"{cid}:{c}",
+                            cid,
+                            tid,
+                            c,
+                            body,
+                            c * len(body),
+                            (c + 1) * len(body),
+                            len(body.split()),
+                            at,
+                            rowid,
+                            None,
+                            "body",
+                        )
+                    )
                     n_chunks += 1
                 for k in range(per_message):
                     payload = hashlib.sha256(f"{i}:{k}".encode()).hexdigest()
@@ -457,7 +476,7 @@ def build(
             conn.executemany("INSERT INTO message_chunks_fts (rowid, text) VALUES (?, ?)", fts_rows)
             conn.executemany("INSERT INTO bench_worst (identity) VALUES (?)", worst_rows)
             conn.executemany(
-                "INSERT INTO message_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?)", chunk_rows
+                "INSERT INTO message_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", chunk_rows
             )
             conn.executemany(
                 "INSERT INTO attachments (attachment_occurrence_id, claimant_id, attachment_id, "
@@ -1503,7 +1522,8 @@ def main(argv: list[str] | None = None) -> dict:
         "--upload-total",
         type=lambda s: [int(x) for x in s.split(",")],
         default=None,
-        help="messages,occurrences: fill each upload to this many digests with extras",
+        help="messages,occurrences: fill each upload to this many digests with extras "
+        "(both values)",
     )
     p.add_argument(
         "--missing-from",
@@ -1577,6 +1597,8 @@ def main(argv: list[str] | None = None) -> dict:
         help="seconds the WAL round keeps its transaction open after its work (smoke test only)",
     )
     args = p.parse_args(argv)
+    if args.upload_total is not None and len(args.upload_total) != 2:
+        p.error("--upload-total takes two values: messages,occurrences")
     _require_balanced_repeat(args)
     report = run(args)
     print(json.dumps(report, indent=2))

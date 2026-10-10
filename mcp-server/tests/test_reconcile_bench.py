@@ -683,3 +683,22 @@ def test_collect_scan_time_includes_ordering_and_hashing(bench, tmp_path):
     bench.build(db, 200, 1, "typical", "typical")
     r = bench.phase_certificate(str(db), "messages", "collect")
     assert r["fetch_s"] <= r["scan_s"] <= r["total_s"]
+
+
+def test_upload_total_needs_both_values(bench, tmp_path):
+    with pytest.raises(SystemExit):
+        bench.main(["--workdir", str(tmp_path), "--messages", "10", "--upload-total", "100"])
+
+
+def test_chunk_rows_carry_every_production_column(bench, tmp_path):
+    db = tmp_path / "cols.db"
+    bench.build(db, 10, 1, "typical", "typical", chunks=2)
+    with closing(sqlite3.connect(db)) as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(message_chunks)")]
+        row = conn.execute(
+            "SELECT char_start, char_end, token_est, chunked_at FROM message_chunks "
+            "WHERE chunk_index = 1 LIMIT 1"
+        ).fetchone()
+    for name in ("char_start", "char_end", "token_est", "chunked_at"):
+        assert name in cols
+    assert row[1] > row[0] > 0 and row[2] == 40 and row[3]

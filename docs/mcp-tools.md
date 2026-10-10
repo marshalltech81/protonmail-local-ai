@@ -1616,7 +1616,7 @@ own predicate compiler (unfiltered: Trash left out, so 95% of the
 synthetic messages match). Records are read and serialized with the
 server's own `query_messages` and `query_attachments` helpers. Every
 message has a 40-word body chunk drawn from 5,000 distinct words.
-Timings are plain `perf_counter` medians of three runs, without a
+Timings are plain `perf_counter` medians of the runs of each step (`--repeat`: three in the early tables, two in the cap-sized run and in the filtered runs from round 10 on; the benchmark now defaults to two, or six with `--filtered`), without a
 profiler, with the page cache warm; peak RSS is the child's `VmHWM`.
 Run inside the mcp-server image (SQLite 3.46.1, Python 3.14.8; figures
 below from an 18-core OrbStack VM):
@@ -1631,7 +1631,14 @@ docker run --rm --entrypoint python \
 `--identity` sets the Message-ID width: `typical` (about 50 ASCII
 characters), `ascii998` (998 characters, the longest the indexer
 accepts, so a 1,015-byte claimant ID) or `utf8x4` (998 four-byte
-characters, 4,009 bytes, the UTF-8 upper bound). `--records worst`
+characters, 4,009 bytes). The parser cannot produce a `utf8x4` ID: a raw
+non-ASCII Message-ID reaches `_clean_id` as an `email.header.Header` and
+fails
+([#1424](https://github.com/marshalltech81/protonmail-local-ai/issues/1424)),
+and an RFC 2047 form stays ASCII, so 1,015 bytes (`ascii998`) is the
+longest reachable claimant ID. Every `utf8x4` figure here, the cap-sized
+run included, is a stress shape the indexer cannot build, not a limit
+input. `--records worst`
 fills every character-clipped field of a record past its clip with
 four-byte characters (subject, 11 participants per role with name and
 address, 11 References entries, In-Reply-To, filename and MIME type).
