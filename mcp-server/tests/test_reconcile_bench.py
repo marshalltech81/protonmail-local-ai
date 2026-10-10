@@ -142,14 +142,15 @@ def test_reconcile_round_returns_at_most_k_missing_records(report):
 
 
 def test_worst_records_carry_four_byte_fields_past_their_clips(report):
-    # 33 participants, each a name and an address of 500 kept characters
-    # of four bytes; an occurrence's filename and MIME type likewise.
+    # 33 participants, each a four-byte name and an ASCII address of 500
+    # kept characters; an occurrence's four-byte filename and ASCII MIME
+    # type likewise.
     messages = report["reconcile"]["messages"]["stream"]["10"]
-    assert messages["record_bytes_max"] > 33 * 2 * 500 * 4
+    assert messages["record_bytes_max"] > 30 * (500 * 4 + 500)
     assert messages["participant_rows"] == 10 * 33
     assert messages["references"] == 10 * 11
     occurrences = report["reconcile"]["occurrences"]["stream"]["10"]
-    assert occurrences["record_bytes_max"] > 2 * 500 * 4
+    assert occurrences["record_bytes_max"] > 500 * 4 + 500
     assert occurrences["participant_rows"] == occurrences["references"] == 0
 
 
@@ -315,7 +316,7 @@ def mixed(bench, tmp_path_factory):
 def test_combined_round_returns_only_worst_records_with_many_extras(mixed):
     # Every record the combined round returns is a worst-case one, next
     # to many extras and four-byte IDs, so its peak covers them together.
-    for kind, floor in (("messages", 33 * 2 * 500 * 4), ("occurrences", 2 * 500 * 4)):
+    for kind, floor in (("messages", 30 * (500 * 4 + 500)), ("occurrences", 500 * 4 + 500)):
         for method in ("stream", "collect"):
             round_ = mixed["reconcile"][kind][method]["3"]
             assert round_["returned"] == 3
@@ -702,3 +703,24 @@ def test_chunk_rows_carry_every_production_column(bench, tmp_path):
     for name in ("char_start", "char_end", "token_est", "chunked_at"):
         assert name in cols
     assert row[1] > row[0] > 0 and row[2] == 40 and row[3]
+
+
+@pytest.mark.parametrize("repeat", [0, -2])
+def test_nonpositive_repeat_is_refused(bench, repeat):
+    import argparse
+
+    with pytest.raises(SystemExit):
+        bench._require_balanced_repeat(argparse.Namespace(repeat=repeat, filtered=False))
+
+
+def test_report_and_wal_results_record_the_artificial_hold(report):
+    assert "wal_hold" in report["config"]
+    assert all("hold_s" in w for w in report["wal"])
+
+
+def test_worst_fields_are_parser_reachable(bench):
+    shape = bench._shape(1, "ascii998", "worst", 0)
+    assert all("@" in address and address.isascii() for _, address, _ in shape["people"])
+    assert shape["in_reply_to"].isascii() and all(r.isascii() for r in shape["references"])
+    assert shape["content_type"].isascii()
+    assert max(len(a) for _, a, _ in shape["people"]) > 500

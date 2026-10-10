@@ -1636,9 +1636,8 @@ non-ASCII Message-ID reaches `_clean_id` as an `email.header.Header` and
 fails
 ([#1424](https://github.com/marshalltech81/protonmail-local-ai/issues/1424)),
 and an RFC 2047 form stays ASCII, so 1,015 bytes (`ascii998`) is the
-longest reachable claimant ID. Every `utf8x4` figure here, the cap-sized
-run included, is a stress shape the indexer cannot build, not a limit
-input. `--records worst`
+longest reachable claimant ID. Every `utf8x4` figure here is a stress shape the indexer cannot build, not
+a limit input; the final cap-sized run below used `ascii998`. `--records worst`
 fills every character-clipped field of a record past its clip with
 four-byte characters (subject, 11 participants per role with name and
 address, 11 References entries, In-Reply-To, filename and MIME type).
@@ -1704,10 +1703,11 @@ occurrence page and 3.9 s for its collected certificate (7.4 s
 streamed). At 200,000 messages: 2.3 s and 1.2 s for messages, 1.7 s
 and 1.0 s for occurrences (3.2 s streamed), and an occurrence date
 range 0.30 s and 0.17 s (2.3 s streamed). Across every filter and
-corpus, with the scan method proposed below (stream for messages,
-collect for occurrences), a certificate cost at most 1.6 times one page
-of the same message query and 0.9 times one occurrence page; streaming
-the occurrences instead cost up to 7.6 times a page. The set caps below
+corpus in these early runs (stream first), a certificate (stream for
+messages, collect for occurrences) cost at most 1.6 times one page of
+the same message query and 0.9 times one occurrence page; streaming the
+occurrences instead cost up to 7.6 times a page. The balanced runs under
+"Proposed limits" give the ratios for the proposed scan method. The set caps below
 bound the scan, hash and response, not this predicate cost, which every
 page of the same query already pays.
 
@@ -1911,15 +1911,19 @@ run has no such insert.
   Bound the packed request's structure before it is parsed (above);
   the byte cap alone does not.
 - **K:** 100 message records and 1,000 occurrence records per round.
-  On the largest records measured, with few extras, that is 15.9 MB and
-  17.1 MB per response at a peak RSS of 167 MiB and 156 MiB; with the
-  largest accepted upload (all extras, 200,000 and 600,000 of them) the
-  cap-sized run measured 29.1 MB and 310 MiB for 100 message records
-  and 55.3 MB and 574 MiB for 1,000 occurrence records (a round of
-  1,000 message records: 170 MB, 849 MiB). A typical
-  response is 0.1 MB and 1.0 MB. A larger K would need a byte budget
-  per response alongside it to keep the worst case bounded, which the
-  approved design does not include.
+  With the largest accepted upload (all extras, 200,000 and 600,000
+  of them) the cap-sized run measured 29.1 MB and 310 MiB for 100
+  message records and 55.3 MB and 574 MiB for 1,000 occurrence records
+  (a round of 1,000 message records: 170 MB, 849 MiB). Those runs used
+  worst-case records with fields the parser cannot store (addresses
+  without an `@`, four-byte In-Reply-To and References, a four-byte
+  MIME type); with parser-reachable fields, at small scale, a message
+  record is 96.0 KB (157.0 KB in the run) and an occurrence record
+  13.6 KB (15.1 KB), so the response sizes and peak RSS above are upper
+  bounds and were not repeated at the caps. A typical response is 0.1
+  MB and 1.0 MB. A larger K would need a byte budget per response
+  alongside it to keep the worst case bounded, which the approved
+  design does not include.
 - **Retry bound:** at most ceil(M / K) + 3 rounds per run, where M is
   the missing count of the run's first round: ceil(M / K) rounds that
   each return up to K records, plus three for churn. When they run out,

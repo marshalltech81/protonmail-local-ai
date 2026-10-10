@@ -249,20 +249,27 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
     if records == "mixed":
         records = "worst" if _mixed_worst(i) else "typical"
     if records == "worst":
+        # Fields the parser stores and the tools return, past their
+        # clips: four-byte characters only where a header's RFC 2047
+        # encoded-word or a decoded name can carry them (subject,
+        # display names, filename); addresses, Message-IDs and the MIME
+        # type are ASCII, and an address holds an ``@``
+        # (``canonical_addr`` drops one without).
         wide = _WIDE * 501
+        ascii_id = "i" * 998
         people = [
-            (role, f"{p:02d}{role}" + _WIDE * (501 - 2 - len(role)), wide)
+            (role, f"{p:02d}{role}" + "a" * (590 - len(role)) + "@x.example", wide)
             for role in ("from", "to", "cc")
             for p in range(11)
         ]
         return {
             "subject": _WIDE * 2000,
-            "in_reply_to": wide,
-            "references": [wide] * 11,
+            "in_reply_to": ascii_id,
+            "references": [ascii_id] * 11,
             "people": people,
             "file_name": f"{i:012d}" + "f" * (255 - 12),
             "filename": wide,
-            "content_type": wide,
+            "content_type": "application/" + "x" * 600,
             # The full Maildir path and the folder derived from it are
             # stored and returned unclipped: nested folders of 63
             # four-byte characters (252 bytes, under a file system's
@@ -1234,6 +1241,7 @@ def run_wal(
     return {
         "commit_bytes": commit_bytes,
         "writer_interval_s": interval,
+        "hold_s": hold_s,
         "wal_steady_max_bytes": warm_max,
         "wal_at_transaction_start_bytes": at_start,
         "wal_max_during_transaction_bytes": max(in_window, default=0),
@@ -1274,6 +1282,7 @@ def run(args: argparse.Namespace) -> dict:
             "upload_total": args.upload_total,
             "all_extras": args.all_extras,
             "k": args.k,
+            "wal_hold": args.wal_hold,
             "sqlite": sqlite3.sqlite_version,
             "python": sys.version.split()[0],
         },
@@ -1487,6 +1496,8 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
     single, unbalanced run and is allowed."""
     if args.repeat is None:
         args.repeat = 6 if args.filtered else 2
+    if args.repeat < 1:
+        raise SystemExit(f"--repeat {args.repeat}: use 1 or a multiple of 2 (6 with --filtered)")
     if args.repeat == 1:
         return
     step = 6 if args.filtered else 2
