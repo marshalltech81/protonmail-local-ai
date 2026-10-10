@@ -2018,7 +2018,8 @@ def _file_floor(args: argparse.Namespace) -> int:
 
 
 def _largest_file(args: argparse.Namespace) -> int:
-    """The largest Maildir file of the corpus, exactly: every size occurs
+    """The largest Maildir file of the corpus, exactly (or the first size
+    over ``PARSE_MAX_BYTES``, which is refused anyway): every size occurs
     in the first ``SHAPE_PERIOD`` messages, and every attachment part of
     a message has one size, so ``n`` parts cost ``n - 1`` times the
     second part's bytes more than one."""
@@ -2043,6 +2044,9 @@ def _largest_file(args: argparse.Namespace) -> int:
         else:
             one, two = size(i, 1), size(i, 2)
             largest = max(largest, one + (args.per_message - 1) * (two - one))
+        if largest > PARSE_MAX_BYTES:
+            # Refused anyway: rendering the other probes is wasted work.
+            break
     return largest
 
 

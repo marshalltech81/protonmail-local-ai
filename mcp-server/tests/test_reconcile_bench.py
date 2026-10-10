@@ -1091,6 +1091,26 @@ def test_oversized_references_are_refused_without_rendering(bench, tmp_path, mon
     assert rendered == []
 
 
+def test_an_oversized_body_is_refused_after_one_probe(bench, tmp_path, monkeypatch):
+    # Every message of this corpus is over the file limit: validation
+    # stops at the first oversized probe rather than rendering all of
+    # the SHAPE_PERIOD probes.
+    real = bench.render_eml
+    rendered = []
+    monkeypatch.setattr(bench, "render_eml", lambda *a: rendered.append(a[0]) or real(*a))
+    argv = {
+        "--messages": "50000",
+        "--per-message": "0",
+        "--missing": "0",
+        "--chunks": "41666",
+        "--chunk-tokens": "200",
+        "--workdir": str(tmp_path),
+    }
+    with pytest.raises(SystemExit, match="file limit"):
+        bench.parse_args(_argv(argv))
+    assert len(rendered) == 1
+
+
 @pytest.mark.parametrize("references", [1, 9, 10, 11, 99, 100, 12_345])
 def test_file_floor_counts_the_references_header_exactly(bench, references):
     header = "References: " + "\n ".join(f"<r{n}@x.example>" for n in range(references))
