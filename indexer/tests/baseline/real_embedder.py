@@ -19,11 +19,12 @@ golden questions on every repeat, checks the floors and reports ranking
 flips between repeats.
 
 Vectors are cached in ``<cache_dir>/vectors.sqlite`` (git-ignored,
-mode 600) under a key of the text, the repeat number and the embedding
-identity (endpoint, model, batch size, dimensions, SDK and encoding),
-so a rerun with an unchanged corpus and configuration sends nothing,
-and any change re-embeds only what it changed. Delete the cache to
-measure the variation afresh.
+mode 600) under a key of the text and the whole request it was sent
+in, the repeat number and the embedding identity (endpoint, model,
+batch size, dimensions, SDK and encoding), so a rerun with an unchanged
+corpus and configuration sends nothing, and a change re-sends whole
+every request it changed. Delete the cache to measure the variation
+afresh.
 
 Every provider request, retries and the calibration request included,
 counts against ``--max-requests``. The request that would exceed it is
@@ -327,7 +328,9 @@ def embedding_identity(settings: Settings, role: str) -> dict[str, object]:
 
 
 class VectorCache:
-    """Vectors keyed by sha256(identity, repeat, text) in SQLite."""
+    """Vectors keyed by sha256(identity, repeat, item) in SQLite, where
+    the item names a text in the request it was sent in
+    (``CachedEmbedder.item``)."""
 
     def __init__(self, cache_dir: Path, identity: Mapping[str, object]) -> None:
         cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -339,8 +342,8 @@ class VectorCache:
         )
         self._identity = json.dumps(identity, sort_keys=True)
 
-    def key(self, repeat: int, text: str) -> str:
-        payload = json.dumps([self._identity, repeat, text])
+    def key(self, repeat: int, item: str) -> str:
+        payload = json.dumps([self._identity, repeat, item])
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def get(self, key: str) -> list[float] | None:
@@ -415,9 +418,17 @@ def query_sender(
 
 class CachedEmbedder:
     """``EmbeddingBackend`` serving one repeat's vectors from the cache
-    and passing only the misses, in their original order, to ``send``
-    (the indexer's ``OpenAIEmbedder.embed_batch`` for chunks,
-    ``query_sender`` for queries)."""
+    and passing the misses, in their original order, to ``send`` (the
+    indexer's ``OpenAIEmbedder.embed_batch`` for chunks, ``query_sender``
+    for queries).
+
+    The provider's vector for a text can depend on the texts batched
+    with it, so a text is cached under the whole call it came in (every
+    text, in order) and its position: a call that differs in any text
+    misses entirely and is sent whole, as a fresh build would send it.
+    With ``one_at_a_time`` each text is its own request, so the call is
+    the text alone.
+    """
 
     def __init__(
         self, send: Sender, cache: VectorCache, repeat: int, *, one_at_a_time: bool = False
@@ -428,7 +439,7 @@ class CachedEmbedder:
         self.one_at_a_time = one_at_a_time
         self.cache = cache
         self.repeat = repeat
-        self.texts: set[str] = set()
+        self.items: set[str] = set()
         self.hits = 0
         self.misses = 0
 
@@ -438,15 +449,28 @@ class CachedEmbedder:
     def embed(self, text: str) -> list[float]:
         return self.embed_batch([text])[0]
 
+    @staticmethod
+    def item(call: list[str], index: int) -> str:
+        digest = hashlib.sha256(json.dumps(call).encode("utf-8")).hexdigest()
+        return f"{digest}:{index}"
+
     def embed_batch(
         self,
         texts: list[str],
         *,
         on_batch_complete: Callable[[], None] | None = None,
     ) -> list[list[float]]:
-        keys = [self.cache.key(self.repeat, t) for t in texts]
+        items = [
+            self.item([t], 0) if self.one_at_a_time else self.item(texts, i)
+            for i, t in enumerate(texts)
+        ]
+        keys = [self.cache.key(self.repeat, item) for item in items]
         found = [self.cache.get(k) for k in keys]
         missing = [i for i, vector in enumerate(found) if vector is None]
+        if missing and not self.one_at_a_time:
+            # Any miss re-sends the whole call, so every text in it gets
+            # the batch it would get in a fresh build.
+            missing = list(range(len(texts)))
         self.hits += len(texts) - len(missing)
         self.misses += len(missing)
         groups = [[i] for i in missing] if self.one_at_a_time else [missing] if missing else []
@@ -457,19 +481,19 @@ class CachedEmbedder:
                 found[i] = vector
         if not missing and on_batch_complete is not None:
             on_batch_complete()
-        self.texts.update(texts)
+        self.items.update(items)
         return [vector for vector in found if vector is not None]
 
 
-def measure_variation(cache: VectorCache, texts_per_repeat: list[set[str]]) -> dict[str, object]:
+def measure_variation(cache: VectorCache, items_per_repeat: list[set[str]]) -> dict[str, object]:
     """Cosine distance between repeat 1's vector and every later
-    repeat's for each text both embedded."""
+    repeat's for each item (a text in its request) both embedded."""
     distances: list[float] = []
     differing = 0
-    for repeat, texts in enumerate(texts_per_repeat[1:], start=2):
-        for text in sorted(texts_per_repeat[0] & texts):
-            first = cache.get(cache.key(1, text))
-            later = cache.get(cache.key(repeat, text))
+    for repeat, items in enumerate(items_per_repeat[1:], start=2):
+        for item in sorted(items_per_repeat[0] & items):
+            first = cache.get(cache.key(1, item))
+            later = cache.get(cache.key(repeat, item))
             assert first is not None and later is not None
             differing += first != later
             # Clamped: identical vectors can come out a rounding error
@@ -499,7 +523,7 @@ def run(settings: Settings, meter: RequestMeter) -> dict[str, object]:
         for role in ("chunk", "query")
     }
     senders = {"chunk": embedder.embed_batch, "query": query_sender(embedder, meter)}
-    texts_per_repeat: dict[str, list[set[str]]] = {role: [] for role in caches}
+    items_per_repeat: dict[str, list[set[str]]] = {role: [] for role in caches}
     hits = misses = 0
     try:
         for repeat in range(1, settings.repeats + 1):
@@ -524,11 +548,11 @@ def run(settings: Settings, meter: RequestMeter) -> dict[str, object]:
                 record_identity=record_identity,
             )
             for role, used in (("chunk", cached), ("query", queries)):
-                texts_per_repeat[role].append(used.texts)
+                items_per_repeat[role].append(used.items)
                 hits += used.hits
                 misses += used.misses
         variation = {
-            name: measure_variation(caches[role], texts_per_repeat[role])
+            name: measure_variation(caches[role], items_per_repeat[role])
             for name, role in (("chunks", "chunk"), ("queries", "query"))
         }
     finally:

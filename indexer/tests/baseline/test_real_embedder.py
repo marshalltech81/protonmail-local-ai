@@ -263,22 +263,27 @@ class _Inner:
 _IDENTITY = {"endpoint": "http://127.0.0.1/v1", "model": "m", "batch_size": 64}
 
 
-def test_cache_sends_only_misses_in_order_and_serves_hits(tmp_path):
+def test_cache_serves_a_repeated_call_and_re_embeds_a_changed_batch(tmp_path):
+    """A chunk vector is cached under the whole call it was sent in
+    (Codex round 1): the provider's output can depend on a text's batch
+    neighbours, so a call that differs in any text, or in order, is
+    sent again whole, as a fresh build would send it."""
     cache = VectorCache(tmp_path / "cache", _IDENTITY)
     inner = _Inner()
     embedder = CachedEmbedder(inner.embed_batch, cache, repeat=1)
     assert embedder.embed_batch(["aa", "b"]) == [[2.0, 1.0], [1.0, 1.0]]
     done = []
-    assert embedder.embed_batch(["b", "ccc", "aa"], on_batch_complete=lambda: done.append(1)) == [
-        [1.0, 1.0],
-        [3.0, 1.0],
+    assert embedder.embed_batch(["aa", "b"], on_batch_complete=lambda: done.append(1)) == [
         [2.0, 1.0],
+        [1.0, 1.0],
     ]
-    assert inner.calls == [["aa", "b"], ["ccc"]]
-    assert (embedder.hits, embedder.misses) == (2, 3) and done == [1]
-    embedder.embed_batch(["ccc"], on_batch_complete=lambda: done.append(2))
-    assert done == [1, 2] and len(inner.calls) == 2
-    assert embedder.texts == {"aa", "b", "ccc"}
+    assert inner.calls == [["aa", "b"]] and done == [1]
+    # One new neighbour, or the same texts reordered: every text is sent.
+    embedder.embed_batch(["aa", "b", "ccc"])
+    embedder.embed_batch(["b", "aa"])
+    assert inner.calls == [["aa", "b"], ["aa", "b", "ccc"], ["b", "aa"]]
+    assert (embedder.hits, embedder.misses) == (2, 7)
+    assert len(embedder.items) == 7
     assert stat.S_IMODE((tmp_path / "cache").stat().st_mode) == 0o700
     assert stat.S_IMODE((tmp_path / "cache" / "vectors.sqlite").stat().st_mode) == 0o600
     cache.close()
@@ -425,9 +430,12 @@ def test_one_at_a_time_caches_each_vector_before_the_next_request(tmp_path):
     with pytest.raises(EmbedBudgetExhausted):
         embedder.embed_batch(["a", "b"])
     assert sent == [["a"], ["b"]]
-    # "a" was paid for and kept.
-    assert cache.get(cache.key(1, "a")) == [1.0, 0.0]
-    assert cache.get(cache.key(1, "b")) is None
+    # "a" was paid for and kept, under a key that ignores its neighbours
+    # (each query is sent alone).
+    assert sent == [["a"], ["b"]]
+    sent.clear()
+    assert embedder.embed_batch(["z", "a"]) == [[1.0, 0.0], [1.0, 0.0]]
+    assert sent == [["z"]]
     cache.close()
 
 

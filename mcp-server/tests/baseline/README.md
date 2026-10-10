@@ -125,11 +125,13 @@ make baseline-real-embedder REAL_EMBED_ARGS="--repeats 5 --max-requests 600"
    questions and the calibration sample are sent; the key is read from
    the secrets file inside the process and is never an argument or
    printed. Vectors are cached in `REAL_EMBED_CACHE` (default
-   `.real-embedder-cache/`, git-ignored, mode 700/600) under the text,
-   the repeat number, the endpoint, model, batch size, dimensions, SDK
-   version and encoding, so a rerun with nothing changed sends no
-   requests and a corpus edit re-embeds only the texts it changed.
-   Delete the cache to measure the variation afresh.
+   `.real-embedder-cache/`, git-ignored, mode 700/600) under the text
+   together with every text of the request it was sent in (the
+   provider's vector can depend on its batch neighbours), the repeat
+   number, the endpoint, model, batch size, dimensions, SDK version and
+   encoding. A rerun with nothing changed sends no requests; a corpus
+   edit re-sends every request whose texts it changed, whole, as a
+   fresh build would. Delete the cache to measure the variation afresh.
 2. **Check** (`test_real_embedder_baseline.py`, `REAL_EMBED_DIR` set).
    Ranks every `search` and `semantic` question in `golden.json`
    through `hybrid_search` (no reranker) on each repeat, fails if any
