@@ -613,8 +613,11 @@ contents of a returned thread, follow up with `get_thread` or
 `summarize_thread` using the result's `Thread ID`.
 
 For the latest or N most recent messages from a person, use
-`query_messages(sender=..., limit=N)`, newest first, then `get_message`
-or `get_thread`. This tool ranks by relevance, not date.
+`query_messages(sender=..., limit=N)`, newest first. A page holds at most
+100 messages, so follow `next_cursor` until N are collected. This tool
+ranks by relevance, not date. Read a body with `get_message` only when
+the answer needs its content; `get_thread` can return messages outside
+the requested sender and count.
 
 For outstanding-item questions, the description gives the same
 verification guidance as [`query_messages`](#query_messages): look for

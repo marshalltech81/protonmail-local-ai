@@ -262,7 +262,8 @@ def register_search_tools(
         query_messages for those; it enumerates the complete set with an
         exact count. For the latest or N most recent messages from a
         person, use query_messages(sender=..., limit=N): it returns the
-        newest first, where this tool ranks by relevance.
+        newest first, where this tool ranks by relevance. A page holds at
+        most 100 messages, so follow next_cursor until N are collected.
 
         Filtering by sender — read this before iterating queries:
             - User said a NAME or ROLE ("Jane Smith", "the accountant",
