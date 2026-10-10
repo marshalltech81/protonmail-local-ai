@@ -147,11 +147,12 @@ def make_ole2(*stream_names: str, trailer: bytes = b"", storages: tuple[str, ...
 
 def make_zip(*member_names: str, contents: bytes = b"") -> bytes:
     """A synthetic ZIP whose members are ``member_names``, each holding
-    ``contents`` (stored)."""
+    ``contents`` (stored), with a fixed timestamp, so the same arguments
+    give the same bytes in every run."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
         for name in member_names:
-            archive.writestr(name, contents)
+            archive.writestr(zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0)), contents)
     return buffer.getvalue()
 
 

@@ -2252,13 +2252,15 @@ class TestAttachmentBoundaries:
         from src.parser import MAX_ATTACHED_MESSAGE_DEPTH, MAX_DECODED_ATTACHMENT_BYTES
 
         decoded_sizes: list[int] = []
-        real = parser_module._decode_transport_form
+        real = parser_module._decode_transport_bytes
 
-        def counting(data, encoding, content_type):
+        def counting(data, encoding):
             decoded_sizes.append(len(data))
-            return real(data, encoding, content_type)
+            return real(data, encoding)
 
-        monkeypatch.setattr(parser_module, "_decode_transport_form", counting)
+        # The walk decodes a transport form here, then checks it for a
+        # container before parsing it (#1416).
+        monkeypatch.setattr(parser_module, "_decode_transport_bytes", counting)
         inner = b"From: z@example.test\r\nSubject: leaf\r\n\r\n" + (b"y" * 76 + b"\r\n") * 6_000
         for i in range(40):
             inner = (

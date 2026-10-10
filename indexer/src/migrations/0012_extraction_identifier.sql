@@ -11,7 +11,10 @@
 -- occurrence through the cache lookup once, which stamps '' on a row
 -- whose payload has neither signature (its result kept) and identifies
 -- and re-extracts the rest. Unchanged chunks keep their vectors; text a
--- re-identified container now yields is embedded as new chunks. The startup sweep
+-- re-identified container now yields is embedded as new chunks. A
+-- container sent under a message/* label is kept as sent from this
+-- version, so its occurrence gets a new attachment ID: the reparse
+-- removes the old occurrence, its FTS row, chunks and vectors. The startup sweep
 -- queues the same rows and clears their occurrences' text completeness
 -- first, so a message with an extraction continuation already queued
 -- (which the reparse leaves as it is) refreshes them too.

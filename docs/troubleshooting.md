@@ -1415,7 +1415,10 @@ Queue and maintenance (all INFO unless noted):
   remaining=` on the heartbeat) and, after it, an index whose Office
   attachments sent under the wrong type are readable. Their newly read
   text is embedded once by the configured embedder (sent to its
-  provider if that is remote); unchanged text is not embedded again. While OCR is off,
+  provider if that is remote); unchanged text is not embedded again.
+  An Office file sent with a `message/*` type (as if it were an
+  attached email) gets a new attachment ID in this reparse, since it is
+  now kept as sent: its old entry and text are replaced. While OCR is off,
   a result OCR produced is kept until OCR is on; `too_large` results are
   left to their own refresh. Already queued messages pick it up on their
   own pass; dead-lettered ones keep their old text until `make
