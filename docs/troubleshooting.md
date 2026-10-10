@@ -1478,12 +1478,14 @@ A `degraded_<lane>` count on a tool's `mcp.timings` line (see
 [Stage timings](mcp-tools.md#stage-timings-in-the-server-log)) means a
 retrieval lane failed and the call carried on without it, so the
 results are worse than usual although `outcome=ok`. A standalone
-`mcp.sqlite` or `mcp.reranker` WARNING names the lane and the exception
-type. Each lane and exception type logs that WARNING once a minute
+`mcp.sqlite` WARNING names the lane and the exception type. Each lane and exception type logs that WARNING once a minute
 (#1216); later failures in the same minute are counted and reported in
 one aggregate line when the next failure arrives after the minute, so a
 failure that repeats on every call is not one WARNING per call. The
 `degraded_<lane>` count on each call's timing line is not rate-limited.
+The rate limit covers the `mcp.sqlite` lanes only: a `mcp.reranker`
+WARNING, and the invalid-index fallback in the rerank path, are still
+logged on every call.
 
 - `degraded_rerank` on most calls: the rerank provider is failing (the
   `mcp.reranker` warning gives the status code). Check
