@@ -56,12 +56,14 @@ payload:
 Each budget that cut the text is reported to the parent, which logs it
 through ``warn_extractor_cap``, so the result is marked incomplete
 (#1242). So is a decode that lost bytes: a body text part's
-(``eml_body_decode``), a nested email's base64, any body text part or
-nested email in quoted-printable, whose loss records nothing to detect
-(#1288), and any body text part in another encoding that is not
-identity (uuencode and its aliases, or an unknown value), each counted
-only when the body keeps that part, and a nested email whose transport
-text lost a line to the parse. So is a
+(``eml_body_decode``), a nested email's base64 or quoted-printable
+(``eml_nested_messages``), a body text part's quoted-printable or
+uuencode (#1288: a quoted-printable ``=`` that is no escape or soft
+break, a uuencode decode that fell back to its transport text), and any
+body text part in another encoding that is not identity (an unknown
+value), each counted only when the body keeps that part, and a nested
+email whose transport text lost a line to the parse. A part that
+decoded cleanly stays complete. So is a
 part declared ``multipart/*`` that the standard library left
 undecomposed (no or a missing boundary), whose text is never read,
 when the body could keep it (``eml_body_structure``), and so is a
