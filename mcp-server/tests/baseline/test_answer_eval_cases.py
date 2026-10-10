@@ -647,12 +647,50 @@ _DECOYS = {
 }
 
 
+# The decoy value the swim cases check for, which their case data leaves
+# empty (#1409): the November schedule's distinguishing words. The other
+# decoys take their values from ``must_not_include``, so the test file
+# stays the only place this rule is written.
+_SWIM_DECOY_VALUES = ("Wednesdays", "5:30pm")
+
+
+def _decoy_shown(case_id: str, passages: list[dict]) -> bool:
+    """Whether the decoy is offered whole: an untruncated passage of the
+    decoy's message exists, and one such passage holds every value the
+    case's decoy carries (#1183, #1409). A cut passage may have lost the
+    value, and another passage of the same message may not carry it."""
+    decoy = message_id_of(_DECOYS[case_id])
+    shown = [p["text"] for p in passages if p["message_id"] == decoy and not p["truncated"]]
+    if not shown:
+        return False
+    values = (
+        _SWIM_DECOY_VALUES
+        if case_id.startswith("ask-swim")
+        else next(c for c in CASES if c.id == case_id).must_not_include
+    )
+    assert values, case_id
+    return any(all(v in text for v in values) for text in shown)
+
+
 @pytest.mark.parametrize("case_id", sorted(_DECOYS))
 def test_decoy_reaches_the_answering_model(case_id: str, records: dict[str, dict]) -> None:
     """Review round 6: a decoy case tests nothing unless the out-of-scope
-    sibling's passage is in the prompt the model received."""
-    supplied = {p["message_id"] for p in _DETAILS[case_id]["passages"].values()}
-    assert message_id_of(_DECOYS[case_id]) in supplied, (case_id, sorted(supplied))
+    sibling's passage is in the prompt the model received, whole."""
+    assert _decoy_shown(case_id, list(_DETAILS[case_id]["passages"].values())), case_id
+
+
+def test_a_cut_decoy_is_not_shown_by_an_unrelated_whole_passage():
+    """#1409: an unrelated whole passage of the decoy's message must not
+    stand in for the cut passage that carries the decoy's value."""
+    case_id = "ask-swim-scope-stated"
+    decoy = message_id_of(_DECOYS[case_id])
+    passages = [
+        {"message_id": decoy, "text": "Wednesdays at 5:30pm", "truncated": True},
+        {"message_id": decoy, "text": "Hello families, unrelated text", "truncated": False},
+    ]
+    assert not _decoy_shown(case_id, passages)
+    passages.append({"message_id": decoy, "text": "Wednesdays at 5:30pm", "truncated": False})
+    assert _decoy_shown(case_id, passages)
 
 
 # Each #910 attachment-layer case's shape, as the (message, source)

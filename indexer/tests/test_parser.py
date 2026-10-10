@@ -6235,6 +6235,131 @@ class TestTransferDecodeLossDetection:
         ):
             assert parser_module._decode_lost_bytes(self._leaf(encoding, broken)) is True
 
+    _UU_DATA = _uu_lines(b"SYNTHETIC_TEXT_MARKER " * 4) + b"`\n"
+
+    @pytest.mark.parametrize(
+        ("payload", "lost"),
+        [
+            # Complete: the last non-blank line is `end`.
+            (b"begin 644 f\n" + _UU_DATA + b"end\n", False),
+            (b"begin 644 f\n" + _UU_DATA + b"end", False),
+            (b"begin 644 f\r\n" + _UU_DATA.replace(b"\n", b"\r\n") + b"end\r\n", False),
+            (b"begin 644 f\n" + _UU_DATA + b"end \t \n", False),
+            (b"begin 644 f\n" + _UU_DATA + b"end\n\n  \n\n", False),
+            (b"begin 0 f\n" + _UU_DATA + b"end\n", False),
+            (b"begin 644 f\nend\n", False),  # empty file
+            (b"begin 644 a b c\n" + _UU_DATA + b"end\n", False),
+            # Preamble before the begin line.
+            (b"text\n\nbegin 644 f\n" + _UU_DATA + b"end\n", False),
+            # Nonoctal begin skipped, then a valid one.
+            (b"begin xyz f\nbegin 644 f\n" + _UU_DATA + b"end\n", False),
+            # Two complete blocks: the second is dropped but the tail is
+            # `end`; a tail check cannot see it (documented).
+            (b"begin 644 a\n" + _UU_DATA + b"end\nbegin 644 b\n" + _UU_DATA + b"end\n", False),
+            # Cut before the end line.
+            (b"begin 644 f\n" + _UU_DATA, True),
+            (b"begin 644 f\n" + _uu_lines(b"SYNTHETIC_TEXT_MARKER"), True),
+            (b"begin 644 f\n", True),
+            (b"begin 644 f", True),
+            (b"begin 644 f\n" + _UU_DATA + b"\n\n", True),  # blank line before end
+            (b"begin 644 f\n" + _UU_DATA + b"en", True),
+            (b"begin 644 f\n" + _UU_DATA + b"endx\n", True),
+            (b"begin 644 f\n" + _UU_DATA + b"x end\n", True),
+            # Text after the end line is not decoded.
+            (b"begin 644 f\n" + _UU_DATA + b"end\nSYNTHETIC_FOOTER\n", True),
+            (b"begin 644 a\n" + _UU_DATA + b"end\nbegin 644 b\n" + _UU_DATA, True),
+            # `end` before the begin line only.
+            (b"end\nbegin 644 f\n" + _UU_DATA, True),
+            # No begin line, an empty body: the fallback already counts.
+            (_UU_DATA + b"end\n", True),
+            (b"", True),
+        ],
+    )
+    def test_uuencode_end_line_shapes(self, payload, lost):
+        """#1402: the decoder stops at the first `end` and returns a cut
+        body's prefix with no error; the last non-blank line tells."""
+        part = self._leaf("x-uuencode", payload)
+        decoded = parser_module._decoded_payload(part)
+        assert parser_module._decode_lost_bytes(part, decoded) is lost
+        if lost:
+            return
+        # The lenient decoded bytes are the stdlib's, unchanged.
+        assert decoded == email.message._decode_uu(payload)
+
+    def test_the_tail_check_reads_a_fixed_tail_only(self, monkeypatch):
+        """#1402: a huge body costs the same as a small one: the check
+        slices the last window and never scans or splits the whole text."""
+        window = parser_module._UU_TAIL_CHARS
+        sizes = []
+        real = parser_module._uu_ends_with_end_line
+
+        def counting(text):
+            sizes.append(len(text))
+            return real(text)
+
+        monkeypatch.setattr(parser_module, "_uu_ends_with_end_line", counting)
+        body = b"begin 644 f\n" + _uu_lines(b"S" * 900_000) + b"`\nend\n"
+        part = self._leaf("x-uuencode", body)
+        decoded = parser_module._decoded_payload(part)
+        assert len(body) > 100 * window
+        assert parser_module._decode_lost_bytes(part, decoded) is False
+        assert sizes == [len(body)]
+        # Pure function: only the window is examined.
+        seen = []
+
+        class Spy(str):
+            def __getitem__(self, key):
+                seen.append(key)
+                return super().__getitem__(key)
+
+        assert real(Spy("x" * 10 * window + "\nend\n")) is True
+        assert seen == [slice(-window, None)]
+
+    @pytest.mark.parametrize(
+        ("text", "ends"),
+        [
+            ("end" + "\n" * 5000, False),  # trailing blank run beyond the window
+            ("end" + " " * 5000, False),
+            ("x" * 5000 + "end", False),  # a last line longer than the window
+            ("x" * 5000 + "\nend", True),
+            ("x" * 5000 + "end" + " " * 1021, False),
+        ],
+        ids=[
+            "blank_run",
+            "space_run",
+            "long_line",
+            "short_line_after_long",
+            "window_starts_at_end",
+        ],
+    )
+    def test_a_tail_the_window_cannot_settle_counts_as_missing(self, text, ends):
+        assert parser_module._uu_ends_with_end_line(text) is ends
+
+    def test_a_cut_uuencode_attachment_and_body_are_incomplete(self, tmp_path, caplog):
+        cut = b"begin 644 f\n" + _uu_lines(_INNER_EMAIL)
+        msg = parse_email(self._write(tmp_path, cut))
+        assert msg is not None
+        assert msg.attachments[0].payload_complete is False
+        assert msg.parse_caps == {"leaf_transport_lossy": 1}
+        part = email.message_from_bytes(
+            b"Content-Type: text/plain\r\nContent-Transfer-Encoding: x-uuencode\r\n\r\n" + cut
+        )
+        walk = parser_module.BodyWalk()
+        parser_module._extract_body_and_attachments(part, walk=walk)
+        assert walk.decode_lost_parts == 1
+
+    @staticmethod
+    def _write(tmp_path, body):
+        path = tmp_path / "u.eml"
+        path.write_bytes(
+            _with_attachment(
+                b"Content-Type: application/octet-stream\r\n"
+                b"Content-Transfer-Encoding: x-uuencode\r\n",
+                body,
+            )
+        )
+        return path
+
     @pytest.mark.parametrize("charset", ["utf-16le", "utf-16", "utf-8", "latin-1", "bogus"])
     def test_a_declared_charset_does_not_hide_the_equals_sign(self, charset):
         """Review round 1 on #1398: ``get_payload()`` decodes 8-bit bytes

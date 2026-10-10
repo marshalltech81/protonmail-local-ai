@@ -625,12 +625,8 @@ def _corpus(path: Path, chunks: int, per_thread: int = 10) -> Database:
     written as the indexer writes them (``indexer/src/database.py``: the
     same text in ``message_chunks`` and ``message_chunks_fts``, one FTS
     insert per chunk so the index keeps its automerge segments), with the
-    indexer's two ``message_chunks`` indexes the lookups rely on."""
+    indexer's indexes the lookups rely on (the test schema, #1213)."""
     conn = _open(path)
-    conn.executescript(
-        "CREATE INDEX idx_message_chunks_thread ON message_chunks(thread_id);"
-        "CREATE INDEX idx_message_chunks_fts_rowid ON message_chunks(fts_rowid);"
-    )
     cur = conn.cursor()
     threads = chunks // per_thread
     cur.executemany(

@@ -18,12 +18,21 @@ import shutil
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
 from src import extractors
-from src.extractors import STATUS_EMPTY, STATUS_FAILED, STATUS_SUCCESS, _runner, extract, image
+from src.extractors import (
+    STATUS_EMPTY,
+    STATUS_FAILED,
+    STATUS_SUCCESS,
+    _runner,
+    extract,
+    image,
+    image_child,
+)
 
 from tests.test_extractor_child import stub_child_output
 
@@ -327,6 +336,110 @@ class TestProgressFramesInProcess:
         assert events == ["ocr", "progress"] * 3
 
 
+class TestModesPillowCannotSaveAsPng:
+    """``pytesseract`` saves a frame as PNG before running Tesseract, and
+    Pillow cannot write some modes as PNG (a CMYK JPEG failed with
+    ``OSError``, #1400). The child converts those frames to RGB, per
+    frame, and leaves every mode PNG can hold as it was."""
+
+    # ``La`` is left out: Pillow cannot convert it to RGB either, and no
+    # decoder produces it (only ``convert("La")`` does).
+    MODES = (
+        "1", "L", "P", "PA", "RGB", "RGBA", "RGBa", "RGBX", "LA", "CMYK",
+        "YCbCr", "LAB", "HSV", "I", "F", "I;16", "I;16L", "I;16B", "I;16N",
+    )  # fmt: skip
+
+    @staticmethod
+    def _saves_as_png(mode: str) -> bool:
+        """Whether pytesseract can hand a frame of this mode to Tesseract:
+        Pillow writes it as PNG, or pytesseract pastes its alpha channel
+        onto white first (``RGBA``, ``LA``, ``PA``). Not pytesseract's own
+        save, which takes ``LAB``'s "A" band for alpha and pastes through
+        it, garbling the colours instead of failing."""
+        if mode in {"RGBA", "LA", "PA"}:
+            return True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                Image.new(mode, (4, 4)).save(io.BytesIO(), format="PNG")
+            except OSError:
+                return False
+        return True
+
+    @staticmethod
+    def _ocr_through_pytesseract_save(monkeypatch) -> list[str]:
+        """Stub Tesseract but keep pytesseract's real PNG save; returns the
+        mode of each frame it was given."""
+        from src.extractors import image_child
+
+        modes: list[str] = []
+
+        def fake(frame, **_kwargs):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                with image_child.pytesseract.pytesseract.save(frame):
+                    pass
+            modes.append(frame.mode)
+            return "text"
+
+        monkeypatch.setattr(image_child.pytesseract, "image_to_string", fake)
+        return modes
+
+    def test_the_mode_list_covers_what_pillow_cannot_save(self):
+        """Some of these modes must fail the PNG save, or the test below
+        proves nothing; a new Pillow that saves more shows up here."""
+        failing = {m for m in self.MODES if not self._saves_as_png(m)}
+        assert {"CMYK", "YCbCr", "HSV", "F", "RGBa", "RGBX", "LAB"} <= failing
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_the_prepared_frame_always_saves_and_is_unchanged_when_it_already_did(self, mode):
+        from src.extractors import image_child
+
+        frame = Image.new(mode, (4, 4))
+        prepared = image_child._png_ready(frame)
+        if self._saves_as_png(mode):
+            assert prepared is frame
+        else:
+            assert prepared.mode == "RGB"
+            assert self._saves_as_png(prepared.mode)
+
+    @pytest.mark.parametrize("fmt", ["JPEG", "TIFF"])
+    def test_a_cmyk_image_is_ocrd(self, monkeypatch, fmt):
+        modes = self._ocr_through_pytesseract_save(monkeypatch)
+        buf = io.BytesIO()
+        Image.new("CMYK", (16, 16)).save(buf, format=fmt)
+        text, caps = image_child.extract_text(buf.getvalue(), "20", "0")
+        assert (text, caps, modes) == ("text", [], ["RGB"])
+
+    def test_each_frame_of_a_multipage_tiff_is_converted(self, monkeypatch):
+        modes = self._ocr_through_pytesseract_save(monkeypatch)
+        frames = [
+            Image.new("CMYK", (16, 16)),
+            Image.new("L", (16, 16)),
+            Image.new("CMYK", (16, 16)),
+        ]
+        buf = io.BytesIO()
+        frames[0].save(buf, format="TIFF", save_all=True, append_images=frames[1:])
+        text, caps = image_child.extract_text(buf.getvalue(), "20", "0")
+        assert (text, caps, modes) == ("text\n\ntext\n\ntext", [], ["RGB", "L", "RGB"])
+
+    @pytest.mark.parametrize("mode", ["RGB", "L", "P", "1"])
+    def test_common_modes_reach_ocr_as_they_were(self, monkeypatch, mode):
+        modes = self._ocr_through_pytesseract_save(monkeypatch)
+        image_child.extract_text(_png((16, 16), mode), "20", "0")
+        assert modes == [mode]
+
+    @requires_tesseract
+    def test_the_text_of_a_cmyk_image_is_read(self):
+        img = Image.new("CMYK", (700, 120), (0, 0, 0, 0))
+        ImageDraw.Draw(img).text((20, 30), "SYNTHETICCMYK", fill=(0, 0, 0, 255), font_size=48)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        text, caps = image_child.extract_text(buf.getvalue(), "20", "0", TESSERACT)
+        assert "SYNTHETICCMYK" in text.replace(" ", "")
+        assert caps == []
+
+
 @real_child
 class TestRealChild:
     def test_a_decompression_bomb_is_failed_before_any_page_is_read(self, caplog):
@@ -346,7 +459,7 @@ class TestRealChild:
             "DecompressionBombError",
             None,
         )
-        assert result.extractor == "image@3"
+        assert result.extractor == "image@4"
         assert pages == []
         assert MARKER not in caplog.text
 
@@ -369,7 +482,7 @@ class TestRealChild:
         pages: list[int] = []
         result = _extract(_tiff(4), max_ocr_pages=2, on_progress=lambda: pages.append(1))
         assert result.status in (STATUS_SUCCESS, STATUS_EMPTY)
-        assert result.extractor == "image-ocr@3"
+        assert result.extractor == "image-ocr@4"
         assert result.text_complete is False
         assert len(pages) == 2
         assert extractors.drain_extractor_counts()["ocr_capped_images"] == 1

@@ -954,7 +954,12 @@ writes the occurrence's chunks, so they roll back with them.
   escape nor a soft line break, and for a uuencode part (all four
   aliases) whose decode fell back to the transport text (#1288; one
   linear scan of the part's text, behind the same per-message byte
-  budgets; a truncation that leaves valid encoding stays undetectable).
+  budgets) or whose last non-blank line is not `end` (#1402: a body cut
+  off before its `end` line, or with text after it that the decoder
+  never reads; only the last 1,024 characters are read, so a trailing
+  blank run or a last line longer than that also counts. A second
+  complete block still ends with `end` and is not detected. Any other
+  truncation that leaves valid encoding stays undetectable).
   For
   a base64 attached email, whose transport form the parser decodes
   leniently, the same text is decoded once more through the stdlib leaf
@@ -1575,7 +1580,8 @@ lost bytes: a body text part's (`eml_body_decode`), a nested email's
 base64 or quoted-printable (`eml_nested_messages`; a quoted-printable
 `=` that is neither an escape nor a soft line break, #1288), and a body
 text part's quoted-printable or uuencode (the same `=` rule, or a
-uuencode decode that fell back to its transport text). A body text
+uuencode decode that fell back to its transport text or whose last
+non-blank line is not `end`, #1402). A body text
 part in any other encoding that is not identity (an unknown value) is
 kept as decoded but counted as `eml_body_decode` too, since a
 malformed one comes back as its transport text. A body
@@ -1771,7 +1777,18 @@ characters (`image_text_chars`, an extractor cap) so its output, read
 whole by the parent, has a fixed bound (40 MiB plus 1 MiB of frames);
 the indexer keeps at most `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`
 (2,000,000 by default) anyway.
-The version stays `image@3` (owner exception, 2026-10-08): a row cached
+pytesseract saves each frame as PNG before Tesseract runs, and Pillow
+cannot write some modes (CMYK, YCbCr, HSV, F, LAB, `RGBa`, `RGBX`) as PNG, so
+the child converts a frame in such a mode to RGB, frame by frame, after
+the EXIF rotation; modes PNG holds (`1`, `L`, `P`, `RGB`, the alpha
+modes, ...) go through unchanged (#1400). That fix bumps the version
+to `image@4` (owner approved): a CMYK image was recorded `failed`, a
+failed row is re-run only when its bytes are extracted again, and the
+startup sweep keys on the recorded version, so without a bump nothing
+re-queues it. The bump re-OCRs every cached image payload once and
+clears `text_complete` on them until their messages are re-indexed. A
+later image change (#1413) takes version 5 or higher.
+The version stayed `image@3` through #1292 (owner exception, 2026-10-08): a row cached
 before this change may hold more text when the stripped OCR output
 exceeds 10,000,000 characters and the character cap is off or above
 10,000,000. An error in the child (`DecompressionBombError`,
@@ -1796,7 +1813,7 @@ none, the CPU limit) plus 10 s, plus 30 s: a 21-frame TIFF of text
 pages at the cap took 140 s for its 20 pages. Starting the child adds
 about 0.09 s per image (0.23 s against 0.14 s in process for a small
 screenshot). The text is byte-identical to the in-process extraction,
-so `image@3` is not bumped.
+so #1292 did not bump `image`.
 
 Binary payloads labelled as text: the text extractor decodes whatever
 it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent

@@ -1447,8 +1447,14 @@ tool=get_thread outcome=error total_ms=1.9 stages_ms={} counts={} config={}
   ERROR line from the tool's own logger (`mcp.tools.retrieval`,
   `mcp.tools.system`) naming the cause as fixed text or an exception
   type, for example
-  `get_thread failed: not found`, `rejected invalid argument:
+  `get_thread failed: not_found`, `rejected invalid argument:
   list_threads.filter_type` or `query_messages error: OperationalError`.
+  `get_thread` and `get_message` log a missing, reaped or ambiguous ID
+  once per reason per minute (#1265): repeats in that minute are counted
+  into one `get_thread failed in the last <N>s: not_found=<count>` line
+  (or `get_message failed ...`), logged when the next such failure
+  arrives after the minute ends. Each call still gets its own
+  `outcome=error` line.
   A rejected argument (every tool, keyed by tool and field, #1039) is
   logged once per key per minute; later repeats in that minute are
   counted into one `rejected invalid arguments in the last <N>s:
@@ -1486,8 +1492,14 @@ A `degraded_<lane>` count on a tool's `mcp.timings` line (see
 [Stage timings](mcp-tools.md#stage-timings-in-the-server-log)) means a
 retrieval lane failed and the call carried on without it, so the
 results are worse than usual although `outcome=ok`. A standalone
-`mcp.sqlite` or `mcp.reranker` WARNING names the exception type at the
-same moment.
+`mcp.sqlite` WARNING names the lane and the exception type. Each lane and exception type logs that WARNING once a minute
+(#1216); later failures in the same minute are counted and reported in
+one aggregate line when the next failure arrives after the minute, so a
+failure that repeats on every call is not one WARNING per call. The
+`degraded_<lane>` count on each call's timing line is not rate-limited.
+The rate limit covers the `mcp.sqlite` lanes only: a `mcp.reranker`
+WARNING, and the invalid-index fallback in the rerank path, are still
+logged on every call.
 
 - `degraded_rerank` on most calls: the rerank provider is failing (the
   `mcp.reranker` warning gives the status code). Check
@@ -1613,7 +1625,8 @@ only, never filenames or text (`make logs`):
   decompression bomb is `DecompressionBombError` (or
   `DecompressionBombWarning` between the pixel cap and twice it), a
   Tesseract failure `TesseractError` and a Tesseract timeout
-  `RuntimeError`; an image whose decode or Tesseract needs more than
+  `RuntimeError` (an image in a mode Pillow cannot write as PNG, such as
+  CMYK, is converted to RGB first, #1400); an image whose decode or Tesseract needs more than
   the child's 1 GiB is `MemoryError` or `TesseractError`, and one that
   runs past the child's CPU or wall-clock limit `ToolCrashError` or
   `ToolTimeoutError` (limits in `docs/architecture.md`, "Image
@@ -1740,7 +1753,8 @@ only, never filenames or text (`make logs`):
   - `eml_body_decode`: a body text part of an attached email whose
     base64 decoding lost bytes, a quoted-printable one with an `=` that
     is neither an escape nor a soft line break, a uuencode one (any
-    alias) that fell back to its transport text, or one in an encoding
+    alias) that fell back to its transport text or has no `end` line last
+    (#1402), or one in an encoding
     not decoded here (an unknown value), which can come back as its
     transport text (#922, #1288). Only a part the body keeps (or
     would keep, had it decoded whole) counts; an alternative rendering
@@ -1916,7 +1930,7 @@ with no extractor's file name) is not logged.
 | `attached_fields` | The same, once the message's attached emails exceed the per-message part and header budget |
 | `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read; or an attached email in another transfer encoding (uuencode and its aliases, or an unknown value), whose transport text is not extracted |
 | `transport_lossy` | A base64 attached email whose transport decoded with bytes lost, or a quoted-printable one with an `=` that is neither an escape nor a soft line break (#1288): its decoded text is kept and indexed but marked incomplete, and the attachments inside it are read, though one whose boundary was lost is missing, so the attachment list is incomplete |
-| `leaf_transport_lossy` | An attachment an extractor reads whose base64, quoted-printable or uuencode decoding lost bytes (#1288), or an `application/eml` or `.eml` attachment in a transfer encoding nothing here decodes: its text is kept but marked incomplete. The attachments inside it are never read by the parser, so the attachment list is not affected |
+| `leaf_transport_lossy` | An attachment an extractor reads whose base64, quoted-printable or uuencode decoding lost bytes (#1288; a uuencode body with no `end` line last, #1402), or an `application/eml` or `.eml` attachment in a transfer encoding nothing here decodes: its text is kept but marked incomplete. The attachments inside it are never read by the parser, so the attachment list is not affected |
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |

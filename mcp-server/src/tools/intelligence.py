@@ -1979,7 +1979,9 @@ class EvidenceRef:
     do not label passages. ``header_scope`` is the scope field its
     header showed (``"in scope"`` / ``"context"``), ``None`` when the
     header showed none, so the header can be rebuilt as the model saw
-    it (``_piece_header``).
+    it (``_piece_header``). ``truncated`` says the text was cut to the
+    budget; a thread shown by its indexed text has no ``char_end`` to
+    say so (#1128).
     """
 
     label: str
@@ -1989,6 +1991,7 @@ class EvidenceRef:
     text: str = ""
     in_scope: bool | None = None
     header_scope: str | None = None
+    truncated: bool = False
 
 
 # Upper bound on a labelled passage header (#284). A header whose values
@@ -2322,7 +2325,8 @@ def _build_evidence(
             if room <= 0:
                 coverage.omitted += len(pieces) - k
                 break
-            if len(text) > room:
+            cut = len(text) > room
+            if cut:
                 text = text[:room]
                 coverage.truncated += 1
             else:
@@ -2340,7 +2344,7 @@ def _build_evidence(
                 # escapes them (a tag cannot span a passage's edges).
                 shown = _escape_delimiter_tags(text)
                 evidence_map[label] = EvidenceRef(
-                    label, thread.thread_id, chunk, char_end, shown, flag, tag
+                    label, thread.thread_id, chunk, char_end, shown, flag, tag, truncated=cut
                 )
             used += separator + header_len + len(text)
         if pieces and not parts:
@@ -2812,7 +2816,12 @@ def _summarize_context(
     body = f"{body_header}\n{body_text}" if body_header and body_text else body_text
     if evidence_map is not None and body_text:
         evidence_map["E1"] = EvidenceRef(
-            "E1", thread.thread_id, None, None, _escape_delimiter_tags(body_text)
+            "E1",
+            thread.thread_id,
+            None,
+            None,
+            _escape_delimiter_tags(body_text),
+            truncated=len(body_text) < len(full_body),
         )
     # The tail budget is spent on messages newest-first — the latest
     # reply is what the tail exists for, and one ordinary chunk can fill
