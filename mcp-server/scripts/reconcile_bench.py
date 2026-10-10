@@ -1069,6 +1069,7 @@ def run_wal(
     commit_bytes: int,
     interval: float,
     hold_s: float = 0.0,
+    worst_first: bool = False,
 ) -> dict:
     """WAL growth while one reconcile round holds its snapshot under a
     concurrent writer, and whether a TRUNCATE checkpoint then reclaims
@@ -1119,7 +1120,13 @@ def run_wal(
             try:
                 result.update(
                     _child(
-                        "reconcile", db_path=db_path, kind=kind, k=k, request=request, hold_s=hold_s
+                        "reconcile",
+                        db_path=db_path,
+                        kind=kind,
+                        k=k,
+                        request=request,
+                        hold_s=hold_s,
+                        worst_first=worst_first,
                     )
                 )
             except BaseException as exc:  # re-raised below, after the writer stops
@@ -1282,6 +1289,7 @@ def run(args: argparse.Namespace) -> dict:
                     commit_bytes,
                     interval,
                     args.wal_hold,
+                    args.all_extras,
                 ),
             }
             for kind in ("messages", "occurrences")
