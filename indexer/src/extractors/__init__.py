@@ -523,6 +523,16 @@ class ExtractionResult:
     scanned page left unread, an image's OCR frame cap). ``False`` for
     every other status, which never certifies absence. ``None`` when not
     known (a result built without it). Kept with the cached row.
+
+    ``identifier`` (#1416) records how the payload's container was
+    certified: ``CONTAINER_IDENTIFIER`` when it starts with an OLE2 or
+    ZIP signature and its directory was identified
+    (``container.identify``) before dispatch, ``""`` when it starts with
+    neither, so no identification applies to it, and ``None`` when no
+    dispatch ran (``too_large``). Kept on the cached row
+    (``attachment_extractions.identifier``): a row with none, or one an
+    older identification version certified, is refreshed
+    (``attachment_indexing.identification_due``).
     """
 
     status: str
@@ -534,6 +544,7 @@ class ExtractionResult:
     ocr_pages_cap: int | None = None
     digital_pages_cap: int | None = None
     extracted_chars_cap: int | None = None
+    identifier: str | None = None
 
 
 # Version of each extractor module whose output changed for the same
@@ -693,6 +704,11 @@ class ExtractionResult:
 # eml 3: a uuencode body part of an attached email with no ``end`` line
 # last (cut in transit) is incomplete (#1402); text unchanged, same
 # re-run of the cached ``eml`` rows.
+# No bump for container identification (#1416): an OLE2 or ZIP payload
+# now runs the extractor its directory names, whatever its label, so
+# rows cached for such payloads can change. They are refreshed by the
+# row's ``identifier`` (``CONTAINER_IDENTIFIER``), not by a version here,
+# so no module's other rows are re-run (owner decision on #1416).
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
@@ -775,12 +791,12 @@ SCANNED_PDF_OCR_DISABLED_ERROR = f"{OCR_DISABLED_ERROR}; scanned PDF"
 # persisted text names neither (#257).
 NO_EXTRACTOR_ERROR = "no extractor for this content type or filename extension"
 
-# ``unsupported`` error for a payload bound for an OOXML extractor (DOCX,
-# XLSX, PPTX) that is an OLE2 compound file, which none of them can read
-# (#694, #936), when the occurrence's label selects no legacy extractor
-# (#935): a password-protected OOXML package, or a legacy file labelled
-# as OOXML. An occurrence labelled ``.doc`` / ``.xls`` selects the legacy
-# extractor and has its own cache row (#928).
+# ``unsupported`` error recorded, before #1416, for a payload bound for an
+# OOXML extractor (DOCX, XLSX, PPTX) that is an OLE2 compound file (#694,
+# #936, #935), with no subtype check. No longer written: an OLE2 payload
+# is identified by its directory under any label (``_identify_container``).
+# Kept for the rows that carry it, which have no ``identifier`` and are
+# identified once (``attachment_indexing.identification_due``).
 LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office file)"
 
 # ``unsupported`` error for a payload labelled ``.ppt`` /
@@ -797,6 +813,30 @@ NOT_OLE2_OR_OOXML_ERROR = "not an OLE2 or OOXML container (labelled as a legacy 
 
 # The fixed 8-byte signature every OLE2 compound file starts with.
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+# ``unsupported`` errors for an OLE2 or ZIP payload whose directory
+# (``container.identify``, #1416) shows no extractor reads it: an OLE2
+# file with no Word, Excel or PowerPoint stream at its root (an Outlook
+# message, a Visio drawing, an installer), an encrypted OOXML file, a
+# ZIP that is not a Word, Excel or PowerPoint package (or an OOXML
+# package of another kind under a label that selects no OOXML
+# extractor), and a container holding more than one of those document
+# kinds, which is not guessed. Decided by the bytes alone, whatever the
+# label, so they hold for good (``PERMANENT_FAILURE_ERRORS``).
+OLE2_NOT_OFFICE_ERROR = "OLE2 compound file with no Word, Excel or PowerPoint stream"
+ENCRYPTED_OFFICE_ERROR = "encrypted Office file (open password required)"
+ZIP_NOT_OFFICE_ERROR = "ZIP archive with no Word, Excel or PowerPoint document"
+AMBIGUOUS_CONTAINER_ERROR = "container holds more than one Word, Excel or PowerPoint document"
+
+# The container-identification version (#1416): stamped on every cached
+# row of an OLE2 or ZIP payload as ``container@<version>``, and ``""`` on
+# a row whose payload starts with neither signature. Bump it when a
+# change makes ``container.identify`` name another extractor for the
+# same bytes: every row certified by an older version is refreshed
+# (``attachment_indexing.identification_due``), and a row a newer
+# version certified is kept after a rollback.
+CONTAINER_IDENTIFICATION_VERSION = 1
+CONTAINER_IDENTIFIER = f"container@{CONTAINER_IDENTIFICATION_VERSION}"
 
 # ``unsupported`` errors for an extractor exception the same bytes always
 # repeat in that extractor (#931), so a ``failed`` row would only re-run
@@ -823,10 +863,15 @@ PERMANENT_FAILURE_ERRORS = frozenset(
         DOCX_PACKAGE_BUDGET_ERROR,
         ENCRYPTED_PPT_ERROR,
         IMAGE_PIXEL_CEILING_ERROR,
+        OLE2_NOT_OFFICE_ERROR,
+        ENCRYPTED_OFFICE_ERROR,
+        ZIP_NOT_OFFICE_ERROR,
+        AMBIGUOUS_CONTAINER_ERROR,
     }
 )
-# Extractors that read an OOXML package (a ZIP): each gets the OLE2 check
-# and the ZIP guard before its library opens the payload.
+# Extractors that read an OOXML package (a ZIP): each gets the ZIP guard
+# before its library opens the payload (and container identification
+# before that, #1416).
 OOXML_MODULES = frozenset({"docx", "pptx", "xlsx"})
 
 # ``unsupported`` error for a payload bound for the text extractor that
@@ -838,7 +883,9 @@ BINARY_AS_TEXT_ERROR = "binary payload labelled as text"
 # Fixed prefixes of binary formats senders mislabel as text: PDF, ZIP
 # (including OOXML; an empty archive starts with its end-of-central-
 # directory record), OLE2, PNG, JPEG and GIF. A prefix list only; no
-# sniffing beyond it.
+# sniffing beyond it. An OLE2 or ZIP payload is identified by its
+# directory before this check is reached (#1416), so only the others
+# decide it now.
 _BINARY_SIGNATURES = (
     b"%PDF-",
     b"PK\x03\x04",
@@ -959,6 +1006,13 @@ def _recording_text_completeness[**P](
     return wrapper
 
 
+def has_container_prefix(payload: bytes) -> bool:
+    """Whether ``payload`` starts with the OLE2 signature or a ZIP
+    signature, so its directory is identified before dispatch (#1416).
+    A constant-size prefix check."""
+    return payload.startswith(_CONTAINER_SIGNATURES)
+
+
 @_recording_text_completeness
 def extract(
     *,
@@ -972,6 +1026,40 @@ def extract(
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
     on_progress: Callable[[], None] | None = None,
+) -> ExtractionResult:
+    """Run text extraction for one attachment payload (``_dispatch``),
+    and record on the result how its container was certified
+    (``ExtractionResult.identifier``, #1416)."""
+    result = _dispatch(
+        content_type=content_type,
+        filename=filename,
+        payload=payload,
+        ocr_enabled=ocr_enabled,
+        max_bytes=max_bytes,
+        max_ocr_pages=max_ocr_pages,
+        max_extracted_chars=max_extracted_chars,
+        ocr_timeout_seconds=ocr_timeout_seconds,
+        max_pdf_pages=max_pdf_pages,
+        on_progress=on_progress,
+    )
+    if result.status == STATUS_TOO_LARGE:
+        return result
+    identifier = CONTAINER_IDENTIFIER if has_container_prefix(payload) else ""
+    return replace(result, identifier=identifier)
+
+
+def _dispatch(
+    *,
+    content_type: str,
+    filename: str,
+    payload: bytes,
+    ocr_enabled: bool,
+    max_bytes: int,
+    max_ocr_pages: int,
+    max_extracted_chars: int | None,
+    ocr_timeout_seconds: float | None,
+    max_pdf_pages: int | None,
+    on_progress: Callable[[], None] | None,
 ) -> ExtractionResult:
     """Run text extraction for one attachment payload.
 
@@ -1001,10 +1089,19 @@ def extract(
 
     module_name, dispatch_via = _resolve_extractor(content_type, filename)
 
+    # An OLE2 or ZIP payload is identified by its directory, whatever its
+    # label and before the OCR gate (#1416): the extractor its directory
+    # names runs, or the result is decided here. The label's checks below
+    # apply only to a payload that is neither.
+    if has_container_prefix(payload):
+        identified = _identify_container(module_name, payload, dispatch_via)
+        if isinstance(identified, ExtractionResult):
+            return identified
+        module_name = identified
     # A PDF under an image label runs the PDF extractor (#1415), decided
     # before the OCR gate below, since that extractor reads a digital text
     # layer without OCR: the same constant-size prefix check.
-    if module_name == "image":
+    elif module_name == "image":
         module_name = _route_container(module_name, payload)
 
     # Image types are gated by ``ocr_enabled`` because the only sensible
@@ -1276,11 +1373,83 @@ def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
 _LEGACY_TO_OOXML = {"doc": "docx", "xls": "xlsx"}
 _ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06")
 _PDF_SIGNATURE = b"%PDF-"
+# The prefixes whose payloads are identified by their directory (#1416).
+_CONTAINER_SIGNATURES = (_OLE2_SIGNATURE, *_ZIP_SIGNATURES)
+
+# The identification tokens (``container``) that name the extractor
+# module to run, and the fixed ``unsupported`` error each other token
+# records. ``ooxml`` (an OOXML package with no Word, Excel or PowerPoint
+# main part the directory names) keeps the label's OOXML extractor, if
+# the label selects one (``_label_ooxml_module``).
+_CONTAINER_MODULES = frozenset({"doc", "xls", "ppt", "docx", "xlsx", "pptx"})
+_CONTAINER_ERRORS = {
+    "ole2-other": OLE2_NOT_OFFICE_ERROR,
+    "ole2-encrypted": ENCRYPTED_OFFICE_ERROR,
+    "zip-other": ZIP_NOT_OFFICE_ERROR,
+    "ambiguous": AMBIGUOUS_CONTAINER_ERROR,
+}
+
+
+def _label_ooxml_module(module_name: str | None) -> str | None:
+    """The OOXML extractor a label selects for a ZIP payload: its own
+    OOXML module, or a legacy label's OOXML counterpart; else ``None``."""
+    if module_name in OOXML_MODULES:
+        return module_name
+    if module_name in _LEGACY_TO_OOXML:
+        return _LEGACY_TO_OOXML[module_name]
+    return None
+
+
+def _identify_container(
+    module_name: str | None, payload: bytes, dispatch_via: str
+) -> str | ExtractionResult:
+    """The extractor module that reads the OLE2 or ZIP ``payload``, named
+    by its directory (``container.identify``, in a child process), or the
+    result when none does: ``unsupported`` with a fixed error for a
+    container no extractor reads, ``failed`` (the error's type name) when
+    the identification failed or hit a limit. ``module_name`` is the
+    module the label selects, used only for an OOXML package whose kind
+    the directory does not name. Nothing is extracted to decide.
+
+    Each result that drops the attachment out of search logs a
+    rate-limited WARNING with fixed text and the type name only."""
+    from .container import OOXML_UNKNOWN, identify
+
+    try:
+        token = identify(payload)
+    except MemoryError, RecursionError:
+        # Host pressure, as for an extractor: the child's own limits
+        # report as ``ChildError`` instead.
+        raise
+    except Exception as exc:  # noqa: BLE001 — recorded by type name only
+        error_type = exc.type_name if isinstance(exc, ChildError) else type(exc).__name__
+        _warn_failed("container", dispatch_via, error_type)
+        return ExtractionResult(status=STATUS_FAILED, extractor=None, text=None, error=error_type)
+    identified = token if token in _CONTAINER_MODULES else None
+    if token == OOXML_UNKNOWN:
+        identified = _label_ooxml_module(module_name)
+    if identified is not None:
+        return identified
+    # An OOXML package of an unnamed kind under a label with no OOXML
+    # extractor is a ZIP no extractor reads.
+    error = ZIP_NOT_OFFICE_ERROR if token == OOXML_UNKNOWN else _CONTAINER_ERRORS[token]
+    warn_rate_limited(
+        log,
+        "extractor container declined (dispatch_via=%s): %s; recorded unsupported, not retried",
+        dispatch_via,
+        error,
+    )
+    return ExtractionResult(status=STATUS_UNSUPPORTED, extractor=None, text=None, error=error)
 
 
 def _route_container(module_name: str, payload: bytes) -> str | None:
     """The extractor for ``payload`` once its container is known, or
-    ``None`` when it is an OLE2 file no extractor reads.
+    ``None`` when it is an OLE2 file no extractor reads, by the
+    constant-size prefix alone. ``extraction_module`` (the cache key)
+    uses it; dispatch identifies an OLE2 or ZIP payload by its directory
+    first (``_identify_container``, #1416), so for those bytes the key is
+    the label's cache namespace and the module that ran is the row's
+    stamp.
 
     * A legacy label (``doc``, ``xls``) keeps its legacy extractor for an
       OLE2 payload; any other payload goes to the OOXML extractor, a
@@ -1306,14 +1475,18 @@ def _route_container(module_name: str, payload: bytes) -> str | None:
 
 
 def extraction_module(content_type: str, filename: str, payload: bytes) -> str | None:
-    """The extractor module whose result an extraction of ``payload``
-    under this label is, or ``None`` when the label selects none: the
-    module the label selects after the container check (``.doc`` with
-    OOXML bytes runs ``docx``, an image label with PDF bytes ``pdf``). An
-    OLE2 payload under an OOXML label, which no extractor reads, stays
-    under that label's module. A prefix
-    check only. With the content hash, the extraction cache key (#928):
-    labels that run the same extractor on the same bytes share its row."""
+    """The extraction cache namespace of ``payload`` under this label, or
+    ``None`` when the label selects none: the module the label selects
+    after the constant-size prefix check (``.doc`` with OOXML bytes is
+    ``docx``, an image label with PDF bytes ``pdf``). An OLE2 payload
+    under an OOXML label stays under that label's module. A prefix check
+    only. With the content hash, the extraction cache key (#928): the
+    result is deterministic in the key, so every occurrence with the
+    same key shares one row. For an OLE2 or ZIP payload the extractor
+    that ran is the one its directory names (#1416), recorded in the
+    row's stamp, which can differ from the key's module (key ``image``,
+    stamp ``doc@2``); the key is not moved to it, since that would need
+    a child launch before every lookup (owner decision on #1416)."""
     selected = _resolve_extractor(content_type, filename)[0]
     if selected is None:
         return None
@@ -1332,10 +1505,12 @@ def ole2_extraction_module(content_type: str, filename: str) -> str | None:
 
 
 def label_extraction_modules(content_type: str, filename: str) -> frozenset[str]:
-    """Every module ``extraction_module`` can return for this label,
-    whatever the bytes: a legacy label also runs its OOXML extractor on
-    bytes that are not OLE2, and an image label the PDF extractor on PDF
-    bytes (#1415). Empty when the label selects none."""
+    """Every cache namespace ``extraction_module`` can return for this
+    label, whatever the bytes: a legacy label's OOXML namespace for
+    bytes that are not OLE2, and an image label's ``pdf`` one for PDF
+    bytes (#1415). These are cache keys, not the modules that run: an
+    OLE2 or ZIP payload runs what its directory names (#1416). Empty
+    when the label selects none."""
     selected = _resolve_extractor(content_type, filename)[0]
     if selected is None:
         return frozenset()

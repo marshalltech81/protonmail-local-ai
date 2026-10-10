@@ -72,8 +72,10 @@ class _ConnSpy:
         return getattr(self.real, name)
 
     def sweep_cursors(self) -> list[_CursorSpy]:
-        """The cursors of the three per-occurrence sweep queries, in the
-        order they ran."""
+        """The cursors of the per-occurrence sweep queries that read
+        ``unsupported`` or ``too_large`` rows, in the order they ran: "no
+        extractor", fitting ``too_large``, container identification
+        (#1416, which excludes ``too_large``) and "OCR disabled"."""
         return [
             c
             for c in self.cursors
@@ -105,10 +107,12 @@ def _occurrences(db: Database, filepath: str, rows: list[tuple]) -> None:
             for i, (aid, name, ctype, size, module, _s, _e) in enumerate(rows)
         ],
     )
+    # Certified rows of payloads with no OLE2 or ZIP signature (#1416), so
+    # the identification arm finds none unless a test clears them.
     db._conn.executemany(
         "INSERT OR IGNORE INTO attachment_extractions (attachment_id, extractor_module, "
-        "extraction_status, extractor, extracted_text, extraction_error, extracted_at) "
-        "VALUES (?, ?, ?, NULL, NULL, ?, '2026-01-01')",
+        "extraction_status, extractor, extracted_text, extraction_error, extracted_at, "
+        "identifier) VALUES (?, ?, ?, NULL, NULL, ?, '2026-01-01', '')",
         [(aid, module, status, error) for aid, _n, _c, _z, module, status, error in rows],
     )
     db._conn.commit()
@@ -220,14 +224,17 @@ def test_sweep_reads_bounded_batches_and_closes_its_cursors(mailbox, monkeypatch
 
     main._requeue_stale_extractions(db, queue)
 
-    no_extractor, too_large, ocr = spy.sweep_cursors()
+    no_extractor, too_large, identification, ocr = spy.sweep_cursors()
     assert "'too_large'" in too_large.sql
+    assert "e.identifier IS NULL" in identification.sql
     # Every occurrence each query matches is inspected; the too-large
     # size test runs in SQL, so that query returns only the fitting one.
     assert sum(no_extractor.batches) == (OCCURRENCES + 1) + OCCURRENCES + 2
     assert sum(ocr.batches) == OCCURRENCES
     assert sum(too_large.batches) == 1
-    for cursor in (no_extractor, too_large, ocr):
+    # Every row is certified: the identification test runs in SQL too.
+    assert sum(identification.batches) == 0
+    for cursor in (no_extractor, too_large, identification, ocr):
         # Never more than SWEEP_FETCH_ROWS rows held at once, never
         # fetchall, and the cursor closed.
         assert max(cursor.batches) <= database.SWEEP_FETCH_ROWS
@@ -266,8 +273,8 @@ def test_sweep_enqueue_counts_exclusions_and_log_line(mailbox, monkeypatch, capl
         "whose attachments were extracted by an older extractor version (none), skipped "
         "while OCR was off, had no extractor, now fit under "
         "INDEXER_ATTACHMENT_MAX_BYTES, were cut by a since-raised limit or predate the "
-        "cap record, or were deferred by the per-message extraction "
-        "budget; 1 already pending, skipped 1 dead-lettered "
+        "cap record, predate container identification, or were deferred by the "
+        "per-message extraction budget; 1 already pending, skipped 1 dead-lettered "
         "(run make requeue-dead to refresh them)."
     )
     assert MARKER not in caplog.text
@@ -290,8 +297,8 @@ def test_ocr_off_queues_only_unstamped_ocr_disabled_rows(mailbox, monkeypatch, s
     spy = _spy(db, monkeypatch)
     assert main._requeue_stale_extractions(db, queue) == queued
     cursors = spy.sweep_cursors()
-    assert len(cursors) == 3
-    ocr = cursors[2]
+    assert len(cursors) == 4
+    ocr = cursors[3]
     assert sum(ocr.batches) == OCCURRENCES
     assert max(ocr.batches) <= database.SWEEP_FETCH_ROWS
     assert ocr.closed and not ocr.fetchall_called
@@ -327,3 +334,50 @@ def test_cursor_closed_and_lock_released_when_the_predicate_raises(mailbox, monk
     worker.start()
     worker.join()
     assert acquired == [True]
+
+
+def test_identification_arm_reads_bounded_batches(mailbox, monkeypatch, caplog):
+    """#1416: rows cached before container identification (no
+    ``identifier``) are found in the same bounded batches, one filepath
+    per message, never a ``too_large`` row; the arm logs its own counts
+    and queues each message once, leaving the dead and pending ones."""
+    caplog.set_level(logging.INFO)
+    db, queue, paths = mailbox
+    db._conn.execute("UPDATE attachment_extractions SET identifier = NULL")
+    db._conn.commit()
+    _configure(monkeypatch, ocr=True)
+    spy = _spy(db, monkeypatch)
+    caplog.clear()
+
+    main._requeue_stale_extractions(db, queue)
+
+    identification = spy.sweep_cursors()[2]
+    # Every occurrence of every row but the ``too_large`` ones.
+    assert sum(identification.batches) == (OCCURRENCES + 1) + OCCURRENCES + OCCURRENCES + 2
+    assert max(identification.batches) <= database.SWEEP_FETCH_ROWS
+    assert identification.closed and not identification.fetchall_called
+    queued = {
+        r["filepath"]
+        for r in db._conn.execute(
+            "SELECT filepath FROM indexing_jobs WHERE status = 'queued' AND reason = ?",
+            (REASON_REEXTRACT,),
+        )
+    }
+    assert queued == {
+        paths["noext_mixed"],
+        paths["noext_dup"],
+        paths["ocr"],
+        paths["big_mixed"],
+    }
+    [line] = [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("container identification sweep")
+    ]
+    assert line == (
+        "container identification sweep (version 1): 5 message(s) with an attachment result "
+        "cached before its OLE2 / ZIP container certification or under an older "
+        "identification version; re-queued 3, already queued 1, skipped 1 dead-lettered "
+        "(run make requeue-dead to refresh them)."
+    )
+    assert MARKER not in caplog.text

@@ -48,6 +48,7 @@ from .extractors import (
     CAP_DIGITAL_PAGES,
     CAP_EXTRACTED_CHARS,
     CAP_OCR_PAGES,
+    CONTAINER_IDENTIFICATION_VERSION,
     LEGACY_OLE2_ERROR,
     NON_OLE2_PPT_ERROR,
     NOT_OLE2_OR_OOXML_ERROR,
@@ -61,6 +62,7 @@ from .extractors import (
     ExtractionResult,
     drain_extractor_counts,
     extraction_module,
+    has_container_prefix,
     is_stale_extractor,
     label_extraction_modules,
     note_ocr_capped,
@@ -424,6 +426,11 @@ def _unsupported_still_holds(
     deck or document over a pre-open package budget and an encrypted
     legacy ``.ppt``: the module that raised them would decline the same
     bytes again, and the row is that module's own (#931, #1032, #983).
+    So do the container results (#1416: an OLE2 file with no Office
+    stream, an encrypted Office file, a ZIP that is not an Office
+    package, an ambiguous container), decided by the bytes alone. A row
+    whose container certification is due never reaches this check: the
+    lookup re-extracts it first (``identification_refreshes``).
     Any other result (an
     extractor not importable in this image) holds only while the
     occurrence selects no extractor.
@@ -556,6 +563,46 @@ def cap_bootstrap_due(row: Mapping[str, Any], *, ocr_enabled: bool) -> bool:
     if _ocr_row_kept(row, ocr_enabled):
         return False
     return row["text_complete"] == 0 and all(row[cap] is None for cap in CAP_COLUMNS)
+
+
+def _identifier_version(identifier: str) -> int:
+    """``container@2`` -> 2; 0 for a value with no version, as the
+    sweep's SQL reads it."""
+    _, _, version = identifier.partition("@")
+    return int(version) if version.isdigit() else 0
+
+
+def identification_due(row: Mapping[str, Any], *, ocr_enabled: bool) -> bool:
+    """Whether a cached row's container certification is due (#1416):
+    it has no ``identifier`` (cached before schema v12) or one an older
+    identification version wrote. '' (a payload with neither the OLE2
+    nor a ZIP signature) and a newer version (after a rollback) are not.
+    Never a ``too_large`` row, which no dispatch reached, and, while OCR
+    is off, never a row an OCR extractor wrote, as
+    ``extractors.stale_extractor_module`` keeps one. The startup sweep
+    runs the same test in SQL (``Database.
+    find_identification_refresh_attachment_filepaths``); the lookup adds
+    the payload's prefix (``identification_refreshes``)."""
+    if row["extraction_status"] == STATUS_TOO_LARGE:
+        return False
+    if not ocr_enabled and (row["extractor"] or "").partition("@")[0].endswith("-ocr"):
+        return False
+    identifier = row["identifier"]
+    if identifier is None:
+        return True
+    return identifier != "" and _identifier_version(identifier) < CONTAINER_IDENTIFICATION_VERSION
+
+
+def identification_refreshes(row: Mapping[str, Any], payload: bytes, *, ocr_enabled: bool) -> bool:
+    """Whether the lookup re-extracts a cached row for its container
+    certification (#1416): ``identification_due``, except a row with no
+    identifier whose payload starts with neither the OLE2 nor a ZIP
+    signature (a constant-size check). That row's result is kept: the
+    apply phase records '' on it
+    (``Database.certify_extraction_identifier``)."""
+    if not identification_due(row, ocr_enabled=ocr_enabled):
+        return False
+    return row["identifier"] is not None or has_container_prefix(payload)
 
 
 def _cache_hit_short_circuits(
@@ -833,9 +880,14 @@ def _resolve_extracted_text(
     # otherwise be served forever: it is re-extracted, and only by an
     # occurrence that selects its module.
     # A row with no completeness record is re-extracted once (#1285).
+    # A row whose container certification is due (#1416) is checked here,
+    # beside the stale stamp and before any status is honoured: an OLE2 or
+    # ZIP payload cached before identification, or under an older
+    # identification version, is identified and extracted again.
     if (
         cached is not None
         and not is_stale_extractor(cached["extractor"], ocr_enabled=ocr_enabled)
+        and not identification_refreshes(cached, attachment.payload, ocr_enabled=ocr_enabled)
         and not completeness_unrecorded(
             cached["extraction_status"],
             cached["extractor"],
@@ -1137,14 +1189,21 @@ def _write_occurrence(
             ocr_pages_cap=result.ocr_pages_cap,
             digital_pages_cap=result.digital_pages_cap,
             extracted_chars_cap=result.extracted_chars_cap,
+            identifier=result.identifier,
         )
-    elif purged_extractions:
-        # A cache hit whose row an earlier message of the batch purged
-        # (it dropped the last occurrence using it, #1375): put it back
-        # as it was, so this occurrence has its cached result.
-        purged = purged_extractions.get((plan.attachment.content_hash, module))
-        if purged is not None:
-            db.restore_attachment_extraction(purged)
+    else:
+        if purged_extractions:
+            # A cache hit whose row an earlier message of the batch purged
+            # (it dropped the last occurrence using it, #1375): put it back
+            # as it was, so this occurrence has its cached result.
+            purged = purged_extractions.get((plan.attachment.content_hash, module))
+            if purged is not None:
+                db.restore_attachment_extraction(purged)
+        # A cache hit on a row with no identifier whose payload has neither
+        # the OLE2 nor a ZIP signature: no identification applies, so the
+        # row is certified '' and kept (#1416). A no-op on any other row.
+        if not has_container_prefix(plan.attachment.payload):
+            db.certify_extraction_identifier(plan.attachment.content_hash, module)
     # Whether the chunks written below hold all of this occurrence's
     # text (#1242): in the caller's transaction, so it commits and rolls
     # back with them.

@@ -35,6 +35,7 @@ dependencies = [
     "openpyxl==3.1.5",             # XLSX read-only workbook walk
     "python-pptx==1.0.2",          # PPTX slide shape + notes walk
     "xlrd==2.0.2",                 # legacy binary .xls (OLE2) workbook read
+    "olefile==0.47",               # OLE2 directory read for container identification (#1416)
     "defusedxml==0.7.1",           # XML-bomb defense for python-docx + openpyxl
 ]
 
@@ -44,10 +45,6 @@ dev = [
     # SDK); the runtime gets it transitively via openai.
     "httpx2==2.13.1",
     "mypy==2.4.0",
-    # Reads OLE2 SummaryInformation (Author, Last Saved By) in
-    # tests/test_fixture_authors.py (#980); no runtime dependency reads
-    # OLE2 property sets.
-    "olefile==0.47",
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
 ]
@@ -66,6 +63,7 @@ check_untyped_defs = true
 [[tool.mypy.overrides]]
 module = [
     "defusedxml.*",
+    "olefile.*",
     "openpyxl.*",
     "pytesseract.*",
     "sqlite_vec.*",

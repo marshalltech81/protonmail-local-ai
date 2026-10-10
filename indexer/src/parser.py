@@ -29,6 +29,7 @@ from typing import Any, Literal
 import html2text
 
 from .extractors import (
+    has_container_prefix,
     note_parser_address_repeats,
     note_parser_caps_message,
     resolved_extractor_module,
@@ -1670,8 +1671,10 @@ def _extract_body_and_attachments(
             )
             # Read once: it scans the payload (#1288).
             leaf_lost = not part.is_multipart() and _decode_lost_bytes(part, payload)
+            # An OLE2 or ZIP payload is read whatever its label (#1416): a
+            # constant-size prefix check on the decoded bytes.
             if (
-                module is not None
+                (module is not None or has_container_prefix(payload))
                 and not part.is_multipart()
                 and (leaf_lost or (module == "eml" and _transfer_decode_unchecked(part)))
             ):

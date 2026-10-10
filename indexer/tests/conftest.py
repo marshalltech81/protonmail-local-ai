@@ -2,7 +2,10 @@
 Shared fixtures for indexer tests.
 """
 
+import io
+import struct
 import sys
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -85,6 +88,78 @@ def make_thread(
     )
 
 
+_OLE2_END = 0xFFFFFFFE
+_OLE2_FREE = 0xFFFFFFFF
+_OLE2_NOSTREAM = 0xFFFFFFFF
+
+
+def _ole2_entry(name: str, kind: int, *, left: int, right: int, child: int) -> bytes:
+    encoded = (name + "\0").encode("utf-16-le")
+    return (
+        encoded.ljust(64, b"\0")
+        + struct.pack("<HBB3I", len(encoded), kind, 1, left, right, child)
+        + b"\0" * 36
+        + struct.pack("<IQ", _OLE2_END, 0)
+    )
+
+
+def make_ole2(*stream_names: str, trailer: bytes = b"") -> bytes:
+    """A synthetic, valid OLE2 compound file (version 3, 512-byte
+    sectors) whose root storage holds empty streams named
+    ``stream_names``, followed by ``trailer``. Identification (#1416)
+    reads only these names; the bytes carry no document."""
+    entries_per_sector = 4
+    count = len(stream_names) + 1
+    dir_sectors = -(-count // entries_per_sector)
+    fat = [0xFFFFFFFD] + [i + 2 if i < dir_sectors - 1 else _OLE2_END for i in range(dir_sectors)]
+    fat += [_OLE2_FREE] * (128 - len(fat))
+
+    # A balanced red-black tree over the root's children (all black).
+    links: dict[int, tuple[int, int]] = {}
+
+    def subtree(lo: int, hi: int) -> int:
+        if lo > hi:
+            return _OLE2_NOSTREAM
+        mid = (lo + hi) // 2
+        links[mid] = (subtree(lo, mid - 1), subtree(mid + 1, hi))
+        return mid
+
+    root_child = subtree(1, count - 1)
+    entries = [
+        _ole2_entry("Root Entry", 5, left=_OLE2_NOSTREAM, right=_OLE2_NOSTREAM, child=root_child)
+    ]
+    for sid, name in enumerate(stream_names, start=1):
+        left, right = links[sid]
+        entries.append(_ole2_entry(name, 2, left=left, right=right, child=_OLE2_NOSTREAM))
+    directory = b"".join(entries).ljust(dir_sectors * 512, b"\0")
+    header = (
+        b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        + b"\0" * 16
+        + struct.pack("<HHHHH", 0x3E, 3, 0xFFFE, 9, 6)
+        + b"\0" * 6
+        + struct.pack("<9I", 0, 1, 1, 0, 4096, _OLE2_END, 0, _OLE2_END, 0)
+        + struct.pack("<109I", 0, *([_OLE2_FREE] * 108))
+    )
+    return header + struct.pack("<128I", *fat) + directory + trailer
+
+
+def make_zip(*member_names: str, contents: bytes = b"") -> bytes:
+    """A synthetic ZIP whose members are ``member_names``, each holding
+    ``contents`` (stored)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        for name in member_names:
+            archive.writestr(name, contents)
+    return buffer.getvalue()
+
+
+def make_ooxml_names(kind: str) -> tuple[str, ...]:
+    """The member names identification (#1416) reads for an OOXML
+    package of ``kind`` (``docx``, ``xlsx`` or ``pptx``)."""
+    main = {"docx": "word/document.xml", "xlsx": "xl/workbook.xml", "pptx": "ppt/presentation.xml"}
+    return ("[Content_Types].xml", "_rels/.rels", main[kind])
+
+
 def count_pending_deletions(db: Database) -> int:
     """Number of tombstones in ``pending_deletions``."""
     return int(db._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])
@@ -130,7 +205,7 @@ def _reset_extractor_warning_budget(monkeypatch):
 @pytest.fixture(autouse=True)
 def _ooxml_child_in_process(request, monkeypatch):
     """Run the extractor child (#1040, #1291, #1292) in this process for
-    the OOXML and image extractors, through the same frames and parsing
+    the OOXML and image extractors and container identification (#1416), through the same frames and parsing
     (progress frames as each page is read), so a test can patch a walk's
     budgets, stub Tesseract or count calls. The ``xls`` extractor starts
     the real child, as before. A test marked ``real_extractor_child``
@@ -148,7 +223,7 @@ def _ooxml_child_in_process(request, monkeypatch):
         pytesseract.pytesseract, "tesseract_cmd", pytesseract.pytesseract.tesseract_cmd
     )
     real = _runner.run_tool
-    in_process = OOXML_MODULES | {"image"}
+    in_process = OOXML_MODULES | {"image", "container"}
 
     def run_tool(argv, payload, *, on_output=None, **kwargs):
         child = str(_runner._CHILD)

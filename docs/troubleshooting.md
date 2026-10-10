@@ -1367,7 +1367,8 @@ Queue and maintenance (all INFO unless noted):
   messages to refresh: after an extractor change, after OCR is
   turned on with OCR rows cached before schema v6, for an image "OCR
   disabled" row recorded with no stamp, whatever the OCR setting
-  (#1415), or for a message
+  (#1415), for a result cached before container identification (#1416,
+  see the next line but one), or for a message
   whose deferred attachment extraction has no job left (attachment
   extraction was switched off while it was being continued; #1236).
   The second number counts the messages found, once each; the already
@@ -1398,12 +1399,32 @@ Queue and maintenance (all INFO unless noted):
   `INDEXER_OCR_TIMEOUT_SECONDS` of OCR plus its render, so keep
   `INDEXER_MESSAGE_TIMEOUT_SECONDS` (the stall guard, per attachment)
   above that, or the indexer restarts mid-extraction.
+- `container identification sweep (version <n>): <n> message(s) with an
+  attachment result cached before its OLE2 / ZIP container certification
+  or under an older identification version; re-queued <n>, already
+  queued <n>, skipped <n> dead-lettered (run make requeue-dead to refresh
+  them).` (INFO), at startup when cached attachment results have no
+  container certification (every result cached before schema v12, once)
+  or one an older identification version wrote (#1416). Every message
+  using such a result is re-queued once; its pass checks the first
+  bytes: a file that is not OLE2 or ZIP keeps its result and is
+  certified, and an OLE2 or ZIP file is identified by its directory and
+  extracted again by the extractor it names, whatever its label. The
+  upgrade to schema v12 also queues a reparse of every indexed file,
+  which does the same work, so expect a long reparse (`reparse:
+  remaining=` on the heartbeat) and, after it, an index whose Office
+  attachments sent under the wrong type are readable. While OCR is off,
+  a result OCR produced is kept until OCR is on; `too_large` results are
+  left to their own refresh. Already queued messages pick it up on their
+  own pass; dead-lettered ones keep their old text until `make
+  requeue-dead`.
 - `cleared attachment text completeness on <n> occurrence(s) due a
   refresh; each is unknown until its message is processed again.`, at
   startup when the sweep found occurrences to refresh (a result with no
   extractor whose label now has one, a `too_large` result that now fits,
   an "OCR disabled" result once OCR is on, an unstamped image one
-  whatever the OCR setting, a cached result with no
+  whatever the OCR setting, a result whose container certification is
+  due, a cached result with no
   completeness record), so a message mid-continuation picks them up
   (#1236).
 - `cleared attachment text completeness on <n> occurrence(s) extracted
@@ -1650,6 +1671,19 @@ only, never filenames or text (`make logs`):
   rejects is failed under xlrd's own type name (`CompDocError`,
   `XLRDError`, ...), and one that needs more than its 512 MiB is
   `MemoryError` (#1291).
+  `extractor container failed` is an OLE2 or ZIP file, under any type,
+  whose directory could not be read (#1416): olefile's or zipfile's own
+  type for a malformed one (`NotOleFileError`, `BadZipFile`, ...),
+  `ContainerDirectoryBudgetError` for one with more than 50,000
+  directory entries or allocation tables larger than the file,
+  `RecursionError` for an OLE2 directory chained too deep, and
+  `MemoryError`, `ToolCrashError` or `ToolTimeoutError` for the
+  identification child's 256 MiB, 5 s CPU and 10 s limits. No extractor
+  ran. `extractor container declined (...): <fixed text>; recorded
+  unsupported, not retried` (WARNING) is one whose directory shows no
+  extractor reads it (an encrypted Office file, an OLE2 file with no
+  Word, Excel or PowerPoint stream, a ZIP that is not one of those
+  packages, or one holding more than one of them).
   An image is decoded and OCR'd in a child process (#1292): a
   Tesseract failure is `TesseractError` and a Tesseract timeout
   `RuntimeError` (an image in a mode Pillow cannot write as PNG, such as
@@ -1895,19 +1929,23 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, and password-protected Office files and other
-    OLE2 files not labelled `.doc` / `.xls` / `.ppt`, recorded with
-    "OLE2 compound file" rather than as `failed`, so they are not
-    retried (#694); a `.ppt`-labelled file that is not OLE2 is recorded
-    with "not an OLE2 compound file (labelled legacy .ppt)" (#957).
+    no extractor reads, and an OLE2 or ZIP file whose directory shows no
+    extractor reads it, whatever its label (#1416): a password-protected
+    Office file, an OLE2 file with no Word, Excel or PowerPoint stream
+    (an Outlook message, a Visio drawing), a ZIP that is not a Word,
+    Excel or PowerPoint package, or a container holding more than one
+    of them; these are not retried. A Word, Excel or PowerPoint file
+    sent under another type (an image, text, another Office type) is
+    read by the extractor its directory names. A `.ppt`-labelled file
+    that is not OLE2 or ZIP is recorded with "not an OLE2 compound file
+    (labelled legacy .ppt)" (#957).
     Genuine legacy `.doc`, `.xls` and `.ppt` files are extracted with
     catdoc, xlrd and Apache POI (#935, #957); each `.ppt` starts a Java
     process, about 0.2 to 0.4 s of CPU; a crashed,
     timed-out or over-limit run is `failed` with a fixed error type such
     as `ToolTimeoutError` or `ToolExitError` (see `docs/architecture.md`,
-    "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,
-    GIF) sent as text are recorded with "binary payload labelled as
-    text" (#932). It also counts PDFs that need an open password or
+    "Extractor dispatch"). Binary files (PDF, PNG, JPEG, GIF) sent as
+    text are recorded with "binary payload labelled as text" (#932). It also counts PDFs that need an open password or
     exceed pypdf's limits, workbooks over the XLSX eager-part budget,
     decks and documents over the PPTX / DOCX pre-open package budgets,
     and password-protected legacy `.ppt` decks, which fail the same way

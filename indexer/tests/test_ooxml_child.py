@@ -148,7 +148,9 @@ importlib.import_module("src.extractors." + module).CHILD_MAX_ADDRESS_SPACE_BYTE
 calls = []
 real = _runner.run_tool
 def spy(*args, **kwargs):
-    calls.append(1)
+    # Container identification (#1416) runs first; count the extraction.
+    if args[0][-1] != "container":
+        calls.append(1)
     return real(*args, **kwargs)
 _runner.run_tool = spy
 result = extract(content_type=mime, filename="a." + module, payload=open(path, "rb").read())
@@ -185,11 +187,13 @@ def understated_512m():
 @pytest.fixture
 def run_tool_calls(monkeypatch):
     """Record each ``run_tool`` call the OOXML extractors make, and run
-    the real one."""
+    the real one. The container identification that runs before them
+    (#1416) is run and not recorded."""
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def spy(argv, payload, *, on_output, **kwargs):
-        calls.append((argv, kwargs))
+        if argv[-1] != "container":
+            calls.append((argv, kwargs))
         return run_tool(argv, payload, on_output=on_output, **kwargs)
 
     monkeypatch.setattr(_runner, "run_tool", spy)

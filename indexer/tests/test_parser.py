@@ -6029,6 +6029,32 @@ def test_a_lossy_base64_leaf_an_extractor_reads_is_counted(tmp_path, caplog, hea
     assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
 
 
+def test_a_lossy_container_leaf_under_any_label_is_counted(tmp_path, caplog):
+    """#1416: an OLE2 or ZIP payload is read whatever its label, so a
+    lossy base64 leaf of one under a label that selects no extractor is
+    counted like one an extractor's label selects."""
+    from tests.conftest import make_zip
+
+    caplog.set_level("DEBUG")
+    encoded = base64.encodebytes(make_zip("[Content_Types].xml", "SYNTHETIC_TEXT_MARKER.xml"))
+    path = tmp_path / "m.eml"
+    path.write_bytes(
+        _with_attachment(
+            b"Content-Type: application/x-unknown-synthetic\r\n"
+            b"Content-Transfer-Encoding: base64\r\n",
+            encoded[:8] + b"!!!!" + encoded[12:],
+            b'Content-Disposition: attachment; filename="f.bin"\r\n',
+        )
+    )
+    msg = parse_email(path)
+    assert msg is not None
+    [attachment] = msg.attachments
+    assert attachment.payload.startswith(b"PK\x03\x04")
+    assert attachment.payload_complete is False
+    assert msg.parse_caps == {"leaf_transport_lossy": 1}
+    assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+
+
 def test_a_nul_in_a_body_charset_does_not_fail_the_parse(tmp_path):
     """Review round 14 on #1311: ``bytes.decode`` raises ``ValueError``
     on a codec name holding a NUL, which failed the whole message; it

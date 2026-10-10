@@ -98,6 +98,7 @@ from .entities import (
     load_operator_identity,
 )
 from .extractors import (
+    CONTAINER_IDENTIFICATION_VERSION,
     DEFAULT_MAX_BYTES,
     ExtractionResult,
     drain_suppressed_lines,
@@ -2935,7 +2936,13 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     OCR is off, never a row OCR wrote, cut or skipped pages of
     (``attachment_indexing.cap_raised`` and ``cap_bootstrap_due``,
     #1418). They get their own INFO line with
-    the three settings and the counts. A message carrying an
+    the three settings and the counts. A row whose container
+    certification is due (no ``identifier``, cached before schema v12,
+    or one an older identification version wrote) is re-queued, while
+    OCR is off never one an OCR extractor wrote and never a ``too_large``
+    one (``attachment_indexing.identification_due``, #1416); the
+    lookup certifies or re-extracts it, which ends it. Those get their
+    own INFO line with the counts. A message carrying an
     occurrence whose extraction the per-message budget deferred (#1236)
     and no queued job (its continuation was lost: a pass with extraction
     switched off marked it succeeded) is re-queued, so a deferral is
@@ -3012,6 +3019,13 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     )
     cap_paths = cap_raised_paths | cap_bootstrap_paths
     filepaths.update(cap_paths)
+    # A cached result whose container certification is due (#1416): every
+    # message using the row is queued, and its assessment cleared, here,
+    # before the drain identifies and replaces the row for any of them.
+    identification_paths = db.find_identification_refresh_attachment_filepaths(
+        ocr_enabled=INDEXER_OCR_ENABLED, assessed=assessed
+    )
+    filepaths.update(identification_paths)
     # "OCR disabled" rows: every one once OCR is on; while it is off, only
     # an unstamped image row, which may hold a PDF recorded before an
     # image label with PDF bytes ran the PDF extractor (#1415).
@@ -3034,19 +3048,35 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     already_pending = 0
     skipped_dead = 0
     cap_outcomes: Counter[str] = Counter()
+    identification_outcomes: Counter[str] = Counter()
     for filepath in sorted(filepaths):
         if queue.has_pending_row(filepath):
             already_pending += 1
             cap_outcomes["already_queued"] += filepath in cap_paths
+            identification_outcomes["already_queued"] += filepath in identification_paths
             continue
         if queue.is_dead(filepath):
             skipped_dead += 1
             cap_outcomes["dead"] += filepath in cap_paths
+            identification_outcomes["dead"] += filepath in identification_paths
             continue
         queue.enqueue(filepath, REASON_REEXTRACT)
         re_enqueued += 1
         re_enqueued_unrecorded += filepath in unrecorded
         cap_outcomes["queued"] += filepath in cap_paths
+        identification_outcomes["queued"] += filepath in identification_paths
+    if identification_paths:
+        log.info(
+            "container identification sweep (version %d): %d message(s) with an attachment "
+            "result cached before its OLE2 / ZIP container certification or under an older "
+            "identification version; re-queued %d, already queued %d, skipped %d "
+            "dead-lettered (run make requeue-dead to refresh them).",
+            CONTAINER_IDENTIFICATION_VERSION,
+            len(identification_paths),
+            identification_outcomes["queued"],
+            identification_outcomes["already_queued"],
+            identification_outcomes["dead"],
+        )
     if cap_paths:
         log.info(
             "cap refresh sweep (INDEXER_OCR_MAX_PAGES=%d INDEXER_PDF_MAX_DIGITAL_PAGES=%d "
@@ -3073,7 +3103,8 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
             "whose attachments were extracted by an older extractor version (%s), skipped "
             "while OCR was off, had no extractor, now fit under "
             "INDEXER_ATTACHMENT_MAX_BYTES, were cut by a since-raised limit or predate the "
-            "cap record, or were deferred by the per-message extraction "
+            "cap record, predate container identification, or were deferred by the "
+            "per-message extraction "
             "budget; %d already pending, skipped %d dead-lettered "
             "(run make requeue-dead to refresh them).",
             re_enqueued,
