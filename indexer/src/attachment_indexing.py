@@ -34,17 +34,23 @@ import logging
 import sqlite3
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from threading import Lock
+from typing import Any
 
 from .chunker import MessageChunk, chunk_message
 from .database import Database
 from .extractors import (
     BINARY_AS_TEXT_ERROR,
+    CAP_COLUMNS,
+    CAP_DIGITAL_PAGES,
+    CAP_EXTRACTED_CHARS,
+    CAP_OCR_PAGES,
     LEGACY_OLE2_ERROR,
     NON_OLE2_PPT_ERROR,
+    NOT_OLE2_OR_OOXML_ERROR,
     OCR_DISABLED_ERROR,
     PERMANENT_FAILURE_ERRORS,
     STATUS_EMPTY,
@@ -58,7 +64,9 @@ from .extractors import (
     is_stale_extractor,
     label_extraction_modules,
     note_ocr_capped,
+    note_ocr_capped_image,
     ole2_extraction_module,
+    warn_extractor_cap,
     warn_rate_limited,
 )
 from .extractors import (
@@ -288,6 +296,32 @@ def record_committed_outcomes(plans: list[AttachmentWritePlan]) -> None:
                 "pdf OCR capped: cached result is missing %d scanned pages",
                 plan.ocr_pages_skipped,
             )
+        if plan.cached:
+            _count_cached_caps(plan)
+
+
+def _count_cached_caps(plan: AttachmentWritePlan) -> None:
+    """Count a cut a configured limit made that remains on a result
+    served from the cache or the batch (#1418), as the extractor counts
+    a fresh one, with the same rate-limited WARNING: an image's OCR frame
+    cap (#1201) in ``ocr_capped_images``, the PDF digital-page and the
+    character caps in ``extractor_caps``. A PDF's OCR page cap is counted
+    by its pages skipped, above. Counts and limits only."""
+    ocr_pages_cap, digital_pages_cap, extracted_chars_cap = plan.caps
+    module = (plan.text_extractor or "").partition("@")[0].partition("-")[0]
+    if ocr_pages_cap and module == "image":
+        note_ocr_capped_image()
+        warn_rate_limited(
+            log, "image OCR capped: cached result stopped at %d frames", ocr_pages_cap
+        )
+    if digital_pages_cap:
+        warn_extractor_cap(
+            log, "pdf_digital_pages", "cached result stopped at %d pages", digital_pages_cap
+        )
+    if extracted_chars_cap:
+        warn_extractor_cap(
+            log, "extracted_chars", "cached result was cut at %d chars", extracted_chars_cap
+        )
 
 
 def attachment_outcomes_degraded(counts: dict[str, int]) -> bool:
@@ -360,15 +394,32 @@ def extraction_cache_module(attachment: Attachment) -> str:
     )
 
 
-def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) -> bool:
-    """Whether an ``unsupported`` result cached under ``module`` still
-    holds for the occurrences that select that module (#928).
+def unstamped_ocr_disabled(error: str | None, extractor: str | None) -> bool:
+    """Whether a cached ``unsupported`` row is an image's "OCR disabled"
+    result recorded with no stamp, before an image label with PDF bytes
+    ran the PDF extractor (#1415). Such a row may hold a PDF the PDF
+    extractor reads without OCR, so it never holds: it is re-run once,
+    whatever the OCR setting, and the fresh result is stamped (or keyed
+    ``pdf``), so it is not matched again. A scanned PDF's own row is not
+    one."""
+    return error == OCR_DISABLED_ERROR and extractor is None
 
-    An "OCR disabled" result holds until OCR is turned on. An OLE2 result
+
+def _unsupported_still_holds(
+    error: str | None, module: str, ocr_enabled: bool, extractor: str | None
+) -> bool:
+    """Whether an ``unsupported`` result cached under ``module`` and
+    recorded by ``extractor`` still holds for the occurrences that select
+    that module (#928).
+
+    An unstamped image "OCR disabled" result never holds
+    (``unstamped_ocr_disabled``, #1415); any other "OCR disabled" result
+    holds until OCR is turned on. An OLE2 result
     under an OOXML label, a "binary payload labelled as text" result, a
-    "not an OLE2 compound file" result under the ``ppt`` label and the
-    "no extractor" result are decided by the label and the bytes alone
-    (#694, #932, #957), so they hold for good. So do an encrypted PDF, a
+    "not an OLE2 compound file" result under the ``ppt`` label, a "not an
+    OLE2 or OOXML container" result under a legacy label and the "no
+    extractor" result are decided by the label and the bytes alone (#694,
+    #932, #957, #1227), so they hold for good. So do an encrypted PDF, a
     PDF over a pypdf limit, a workbook over the eager-part budget, a
     deck or document over a pre-open package budget and an encrypted
     legacy ``.ppt``: the module that raised them would decline the same
@@ -377,10 +428,17 @@ def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) 
     extractor not importable in this image) holds only while the
     occurrence selects no extractor.
     """
+    if unstamped_ocr_disabled(error, extractor):
+        return False
     error = error or ""
     if "OCR disabled" in error:
         return not ocr_enabled
-    if error in {LEGACY_OLE2_ERROR, BINARY_AS_TEXT_ERROR, NON_OLE2_PPT_ERROR}:
+    if error in {
+        LEGACY_OLE2_ERROR,
+        BINARY_AS_TEXT_ERROR,
+        NON_OLE2_PPT_ERROR,
+        NOT_OLE2_OR_OOXML_ERROR,
+    }:
         return True
     if error in PERMANENT_FAILURE_ERRORS:
         return True
@@ -388,14 +446,18 @@ def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) 
 
 
 def reprocess_reruns_extraction(
-    error: str | None, extractor_module: str, content_type: str, filename: str
+    error: str | None,
+    extractor_module: str,
+    content_type: str,
+    filename: str,
+    extractor: str | None,
 ) -> bool:
     """Whether reprocessing an occurrence (by its MIME type and filename)
     that uses an ``unsupported`` row with ``error`` cached under
-    ``extractor_module`` would extract again once OCR is on: its label
-    now runs another module on the bytes (a release started routing it,
-    or a migrated v0 row was keyed by its stamp), or the row no longer
-    holds. The startup sweep re-queues by this, so it shares
+    ``extractor_module`` by ``extractor`` would extract again once OCR is
+    on: its label now runs another module on the bytes (a release started
+    routing it, or a migrated v0 row was keyed by its stamp), or the row
+    no longer holds. The startup sweep re-queues by this, so it shares
     ``_unsupported_still_holds`` with the cache check."""
     if error == LEGACY_OLE2_ERROR:
         # The row says the bytes are OLE2, so the label's module is exact.
@@ -404,7 +466,21 @@ def reprocess_reruns_extraction(
         modules = set(label_extraction_modules(content_type, filename)) or {NO_EXTRACTOR_MODULE}
     if extractor_module not in modules:
         return True
-    return not _unsupported_still_holds(error, extractor_module, ocr_enabled=True)
+    return not _unsupported_still_holds(error, extractor_module, True, extractor)
+
+
+# A result's cap record: ``(ocr_pages_cap, digital_pages_cap,
+# extracted_chars_cap)``, as ``CAP_COLUMNS`` orders them (#1418).
+CapRecord = tuple[int | None, int | None, int | None]
+_NO_CAPS: CapRecord = (None, None, None)
+
+
+def _result_caps(result: ExtractionResult) -> CapRecord:
+    return (result.ocr_pages_cap, result.digital_pages_cap, result.extracted_chars_cap)
+
+
+def _row_caps(row: Mapping[str, Any]) -> CapRecord:
+    return (row[CAP_OCR_PAGES], row[CAP_DIGITAL_PAGES], row[CAP_EXTRACTED_CHARS])
 
 
 def too_large_fits(size: int, max_bytes: int) -> bool:
@@ -414,8 +490,84 @@ def too_large_fits(size: int, max_bytes: int) -> bool:
     return size <= max_bytes
 
 
+def _ocr_row_kept(row: Mapping[str, Any], ocr_enabled: bool) -> bool:
+    """Whether a cached ``success`` or ``empty`` row is kept as it is
+    while OCR is off, out of both cap-refresh arms (#1418): an OCR
+    extractor wrote it (the stamp before ``@`` ends in ``-ocr``), or OCR
+    pages cut or skipped it (``ocr_pages_cap`` or ``ocr_pages_skipped``
+    above 0; NULL counts as 0). Re-extracting it with OCR off could only
+    record "OCR disabled" over its text or lose the record of its unread
+    scanned pages, so it waits until OCR is on. The sweep's SQL applies
+    the same test."""
+    if ocr_enabled:
+        return False
+    return (
+        (row["extractor"] or "").partition("@")[0].endswith("-ocr")
+        or (row[CAP_OCR_PAGES] or 0) > 0
+        or (row["ocr_pages_skipped"] or 0) > 0
+    )
+
+
+def _limit_raised(recorded: int | None, current: int) -> bool:
+    """Whether a limit that cut at ``recorded`` (> 0) is now higher, or
+    off (``current`` 0, for a limit that has a disabled value)."""
+    return recorded is not None and recorded > 0 and (current == 0 or current > recorded)
+
+
+def cap_raised(
+    row: Mapping[str, Any],
+    *,
+    ocr_enabled: bool,
+    max_ocr_pages: int,
+    max_pdf_pages: int,
+    max_extracted_chars: int,
+) -> bool:
+    """Whether a cached result (``row``: its status, stamp and cap
+    record) was cut by a configured limit the operator has since raised
+    (#1418), so it is extracted again. Only a ``success`` or ``empty``
+    result, never one ``_ocr_row_kept`` keeps while OCR is off. ``max_ocr_pages``
+    has no disabled value (``INDEXER_OCR_MAX_PAGES`` is at least 1), so
+    only a higher value lifts its cut; ``max_pdf_pages`` and
+    ``max_extracted_chars`` are 0 for no limit, which lifts theirs.
+    Lowering a limit never qualifies. ``Database.
+    find_cap_refresh_attachment_filepaths`` runs the same test in SQL
+    for the startup sweep."""
+    if row["extraction_status"] not in {STATUS_SUCCESS, STATUS_EMPTY}:
+        return False
+    if _ocr_row_kept(row, ocr_enabled):
+        return False
+    ocr_pages_cap = row[CAP_OCR_PAGES]
+    return (
+        (ocr_pages_cap is not None and ocr_pages_cap > 0 and max_ocr_pages > ocr_pages_cap)
+        or _limit_raised(row[CAP_DIGITAL_PAGES], max_pdf_pages)
+        or _limit_raised(row[CAP_EXTRACTED_CHARS], max_extracted_chars)
+    )
+
+
+def cap_bootstrap_due(row: Mapping[str, Any], *, ocr_enabled: bool) -> bool:
+    """Whether a cached result predates the cap record (all three
+    columns NULL, cached before schema v11) and lost text
+    (``text_complete`` 0), so it is extracted once to record which
+    limits cut it (#1418): NULL alone never proves a limit was raised.
+    The re-extraction records the columns, so this holds once per row.
+    Same status and OCR rules as ``cap_raised``."""
+    if row["extraction_status"] not in {STATUS_SUCCESS, STATUS_EMPTY}:
+        return False
+    if _ocr_row_kept(row, ocr_enabled):
+        return False
+    return row["text_complete"] == 0 and all(row[cap] is None for cap in CAP_COLUMNS)
+
+
 def _cache_hit_short_circuits(
-    cached: dict, attachment: Attachment, module: str, ocr_enabled: bool, max_bytes: int
+    cached: Mapping[str, Any],
+    attachment: Attachment,
+    module: str,
+    ocr_enabled: bool,
+    max_bytes: int,
+    *,
+    max_ocr_pages: int,
+    max_pdf_pages: int,
+    max_extracted_chars: int,
 ) -> bool:
     """Return True when ``cached`` should short-circuit re-extraction.
 
@@ -425,19 +577,38 @@ def _cache_hit_short_circuits(
 
     * ``STATUS_EMPTY`` — the payload genuinely had no text. Re-running
       will produce the same empty result.
+
+    A ``success`` or ``empty`` row is not a hit when a configured limit
+    that cut it has since been raised (``cap_raised``), or when it
+    predates the cap record and lost text (``cap_bootstrap_due``, once):
+    it is extracted again (#1418). The limits are the settings as
+    ``extract`` takes them, ``max_pdf_pages`` and ``max_extracted_chars``
+    0 for none.
     * ``STATUS_TOO_LARGE`` — while the payload still exceeds
       ``max_bytes``. Once the operator raises the cap far enough for it
       to fit, the row is stale and the payload is extracted (#693);
       the startup sweep runs ``too_large_fits``' comparison in SQL
       (``Database.find_fitting_too_large_attachment_filepaths``).
     * ``STATUS_UNSUPPORTED`` — while ``_unsupported_still_holds`` for
-      the row's module: re-run once OCR is re-enabled.
+      the row's module and stamp: re-run once OCR is re-enabled, and an
+      unstamped image "OCR disabled" row at once (#1415).
     * ``STATUS_FAILED`` — re-run if the cached row is older than
       ``_FAILED_CACHE_MAX_AGE`` (defense against a chronic failure
       burning OCR cycles on every reappearance), otherwise honor the
       cache.
     """
     status = cached["extraction_status"]
+    if status in {STATUS_SUCCESS, STATUS_EMPTY} and (
+        cap_raised(
+            cached,
+            ocr_enabled=ocr_enabled,
+            max_ocr_pages=max_ocr_pages,
+            max_pdf_pages=max_pdf_pages,
+            max_extracted_chars=max_extracted_chars,
+        )
+        or cap_bootstrap_due(cached, ocr_enabled=ocr_enabled)
+    ):
+        return False
     if status == STATUS_SUCCESS:
         return bool(cached["extracted_text"])
     if status == STATUS_EMPTY:
@@ -445,7 +616,9 @@ def _cache_hit_short_circuits(
     if status == STATUS_TOO_LARGE:
         return not too_large_fits(len(attachment.payload), max_bytes)
     if status == STATUS_UNSUPPORTED:
-        return _unsupported_still_holds(cached["extraction_error"], module, ocr_enabled)
+        return _unsupported_still_holds(
+            cached["extraction_error"], module, ocr_enabled, cached["extractor"]
+        )
     if status == STATUS_FAILED:
         cached_at = cached["extracted_at"]
         if not cached_at:
@@ -497,6 +670,9 @@ class AttachmentWritePlan:
     # The scanned PDF pages the OCR cap left unread in that result, or
     # ``None`` when unknown (#891).
     ocr_pages_skipped: int | None = None
+    # That result's cap record (``CAP_COLUMNS``, #1418): a cut that
+    # remains on a result served from the cache is counted at commit.
+    caps: CapRecord = (None, None, None)
     # Whether the occurrence's text is complete (``occurrence_text_complete``)
     # and the extractor stamp of the result that applied, written with
     # its chunks (#1242).
@@ -576,15 +752,24 @@ def _resolve_extracted_text(
     budget: ExtractionBudget | None = None,
     serve_cached: bool = False,
 ) -> tuple[
-    str | None, str, ExtractionResult | None, str | None, bool, int | None, str | None, bool | None
+    str | None,
+    str,
+    ExtractionResult | None,
+    str | None,
+    bool,
+    int | None,
+    str | None,
+    bool | None,
+    CapRecord,
 ]:
     """Return ``(text, status, extraction_to_persist, error, cached,
-    ocr_pages_skipped, extractor, text_complete)``: ``error`` is the
+    ocr_pages_skipped, extractor, text_complete, caps)``: ``error`` is the
     extraction error behind ``status``, ``cached`` whether the result was
     served without extracting and ``ocr_pages_skipped`` the result's
     OCR-cap count (``None`` when unknown), for the outcome counts;
     ``extractor`` is the result's stamp and ``text_complete`` whether it
-    lost no text (``None`` when unknown, #1242).
+    lost no text (``None`` when unknown, #1242); ``caps`` is its cap
+    record (``CAP_COLUMNS``, #1418).
 
     A successful cache hit short-circuits and returns the stored text
     with ``extraction_to_persist=None`` so the apply phase does not
@@ -627,6 +812,7 @@ def _resolve_extracted_text(
             pending.ocr_pages_skipped,
             pending.extractor,
             pending.text_complete,
+            _result_caps(pending),
         )
 
     cached = db.get_attachment_extraction(attachment.content_hash, module)
@@ -641,6 +827,7 @@ def _resolve_extracted_text(
             cached["ocr_pages_skipped"],
             cached["extractor"],
             None if cached["text_complete"] is None else bool(cached["text_complete"]),
+            _row_caps(cached),
         )
     # A row written by an older version of a since-fixed extractor would
     # otherwise be served forever: it is re-extracted, and only by an
@@ -655,7 +842,16 @@ def _resolve_extracted_text(
             cached["text_complete"],
             ocr_enabled=ocr_enabled,
         )
-        and _cache_hit_short_circuits(cached, attachment, module, ocr_enabled, max_bytes)
+        and _cache_hit_short_circuits(
+            cached,
+            attachment,
+            module,
+            ocr_enabled,
+            max_bytes,
+            max_ocr_pages=max_ocr_pages,
+            max_pdf_pages=max_pdf_pages or 0,
+            max_extracted_chars=max_extracted_chars or 0,
+        )
     ):
         # Successful hits return the stored text; non-success hits
         # (empty / unsupported / too_large / failed-within-window)
@@ -671,11 +867,12 @@ def _resolve_extracted_text(
             cached["ocr_pages_skipped"],
             cached["extractor"],
             None if cached["text_complete"] is None else bool(cached["text_complete"]),
+            _row_caps(cached),
         )
 
     if budget is not None and budget.exhausted():
         budget.deferred += 1
-        return (None, STATUS_DEFERRED, None, None, False, None, None, None)
+        return (None, STATUS_DEFERRED, None, None, False, None, None, None, _NO_CAPS)
 
     launches_before = process_launches()
     started = budget.clock() if budget is not None else 0.0
@@ -705,6 +902,7 @@ def _resolve_extracted_text(
         result.ocr_pages_skipped,
         result.extractor,
         result.text_complete,
+        _result_caps(result),
     )
 
 
@@ -771,6 +969,7 @@ def prepare_attachment_writes(
         ocr_pages_skipped,
         extractor,
         extraction_complete,
+        caps,
     ) = _resolve_extracted_text(
         attachment=attachment,
         db=db,
@@ -817,6 +1016,7 @@ def prepare_attachment_writes(
             extraction_error=extraction_error,
             cached=cached,
             ocr_pages_skipped=ocr_pages_skipped,
+            caps=caps,
             text_complete=text_complete,
             text_extractor=extractor,
             resolved_earlier=resolved_earlier,
@@ -844,6 +1044,7 @@ def prepare_attachment_writes(
         extraction_error=extraction_error,
         cached=cached,
         ocr_pages_skipped=ocr_pages_skipped,
+        caps=caps,
         text_complete=text_complete,
         text_extractor=extractor,
         resolved_earlier=resolved_earlier,
@@ -933,6 +1134,9 @@ def _write_occurrence(
             extraction_error=result.error,
             ocr_pages_skipped=result.ocr_pages_skipped,
             text_complete=result.text_complete,
+            ocr_pages_cap=result.ocr_pages_cap,
+            digital_pages_cap=result.digital_pages_cap,
+            extracted_chars_cap=result.extracted_chars_cap,
         )
     elif purged_extractions:
         # A cache hit whose row an earlier message of the batch purged

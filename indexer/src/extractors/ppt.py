@@ -21,7 +21,10 @@ dispatcher's ``max_extracted_chars``, never past ``_MAX_OUTPUT_BYTES``
 errors and Log4j's "no provider" line can quote the deck or are
 noise). Output past the byte cap is not indexed: the text
 before it is kept and the cap is reported through
-``warn_extractor_cap``. A password-protected deck makes the reader exit
+``warn_extractor_cap`` with the bound that cut (``bound=chars`` or
+``bound=ceiling``); a cut at the character cap's bound is recorded on
+the result, so raising the setting re-extracts it (#1418). A
+password-protected deck makes the reader exit
 with ``ENCRYPTED_EXIT_STATUS`` (POI's encrypted-file exception, matched
 by exact class), raised here as ``PptEncryptedError`` and recorded
 ``unsupported`` with fixed text, since we never supply a password and
@@ -40,8 +43,15 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from . import warn_extractor_cap
-from ._runner import ToolExitError, ToolNotFoundError, raw_output_cap, run_tool
+from . import CAP_EXTRACTED_CHARS, record_cap_cut, warn_extractor_cap
+from ._runner import (
+    BOUND_CHARS,
+    ToolExitError,
+    ToolNotFoundError,
+    raw_output_bound,
+    raw_output_cap,
+    run_tool,
+)
 
 log = logging.getLogger("indexer.extractor.ppt")
 
@@ -146,11 +156,17 @@ def extract(
             raise PptEncryptedError from None
         raise
     if output.truncated:
+        bound = raw_output_bound(max_extracted_chars, ceiling=_MAX_OUTPUT_BYTES)
         warn_extractor_cap(
             log,
             "ppt_output_bytes",
-            "ppt output cut at %d bytes",
+            "ppt output cut at %d bytes (bound=%s)",
             max_output_bytes,
+            bound,
         )
+        # The configured character cap that cut, so raising it
+        # re-extracts (#1418); a cut at the ceiling records nothing.
+        if bound == BOUND_CHARS and max_extracted_chars is not None:
+            record_cap_cut(CAP_EXTRACTED_CHARS, max_extracted_chars)
     # A cut can split a UTF-8 sequence; the reader writes valid UTF-8 otherwise.
     return output.data.decode("utf-8", errors="replace"), "ppt"

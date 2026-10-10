@@ -212,6 +212,30 @@ def record_ocr_pages_skipped(pages_skipped: int) -> None:
     _attempt.ocr_pages_skipped = pages_skipped
 
 
+# The configured limits that cut the running extraction (#1418), one per
+# setting: ``INDEXER_OCR_MAX_PAGES`` (PDF pages OCR'd, TIFF frames),
+# ``INDEXER_PDF_MAX_DIGITAL_PAGES`` and
+# ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS``. ``extract`` sets each to 0
+# (the limit in effect did not cut) for the modules it applies to, or
+# ``None`` (not applicable), before the extractor runs; the extractor
+# records the limit's value when it cuts. A hardcoded limit (an image's
+# text budget, a raw tool's output ceiling, a page-pixel budget) records
+# nothing: raising a setting cannot lift it, and a fix to it is an
+# ``EXTRACTOR_VERSIONS`` bump. Kept on the cached row, so a result cut
+# by a limit the operator has since raised is extracted again
+# (``attachment_indexing.cap_raised``).
+CAP_OCR_PAGES = "ocr_pages_cap"
+CAP_DIGITAL_PAGES = "digital_pages_cap"
+CAP_EXTRACTED_CHARS = "extracted_chars_cap"
+CAP_COLUMNS = (CAP_OCR_PAGES, CAP_DIGITAL_PAGES, CAP_EXTRACTED_CHARS)
+
+
+def record_cap_cut(cap: str, limit: int) -> None:
+    """Record on the running extraction's result that the configured
+    ``limit`` of ``cap`` (one of ``CAP_COLUMNS``) cut it."""
+    setattr(_attempt, cap, limit)
+
+
 def note_ocr_capped_image() -> None:
     """Count one multipage image whose OCR stopped at the page cap."""
     global _ocr_capped_images
@@ -338,6 +362,11 @@ def drain_counters() -> dict[str, int]:
 # line below stands for them.
 CHILD_TEXT_LOST = "text_lost"
 CHILD_OCR_PAGES_SKIPPED = "result_ocr_pages_skipped"
+# The factor (2, 4 or 8) by which the image child scaled down a JPEG over
+# its pixel ceiling before OCR (``record_image_scale_factor``, #1401).
+CHILD_IMAGE_SCALE_FACTOR = "image_scale_factor"
+# The cap name the parent reports a scale-down under.
+IMAGE_PIXEL_CEILING_CAP = "image_pixel_ceiling"
 CHILD_DEGRADATION_KEYS = frozenset(
     {
         "pdf_pages_failed",
@@ -354,6 +383,7 @@ CHILD_DEGRADATION_KEYS = frozenset(
         "eml_charsets_degraded",
         CHILD_TEXT_LOST,
         CHILD_OCR_PAGES_SKIPPED,
+        CHILD_IMAGE_SCALE_FACTOR,
     }
 )
 
@@ -361,9 +391,19 @@ CHILD_DEGRADATION_KEYS = frozenset(
 def reset_attempt() -> None:
     """Clear the running extraction's text loss and OCR pages skipped,
     as the dispatcher does before an extractor runs; the child calls it
-    before its extraction."""
+    before its extraction. The cap record (``CAP_COLUMNS``) is the
+    parent's alone: the child reports a cap that cut by name and the
+    parent records it."""
     _attempt.text_lost = False
     _attempt.ocr_pages_skipped = None
+    _attempt.image_scale_factor = None
+
+
+def record_image_scale_factor(factor: int) -> None:
+    """In the image child: record that the image was decoded at
+    1/``factor`` scale to fit the child's pixel ceiling (#1401). The
+    parent reports it as an extractor cap (``apply_child_degradation``)."""
+    _attempt.image_scale_factor = factor
 
 
 def child_degradation() -> dict[str, int]:
@@ -375,6 +415,9 @@ def child_degradation() -> dict[str, int]:
     skipped = getattr(_attempt, "ocr_pages_skipped", None)
     if skipped is not None:
         state[CHILD_OCR_PAGES_SKIPPED] = skipped
+    factor = getattr(_attempt, "image_scale_factor", None)
+    if factor is not None:
+        state[CHILD_IMAGE_SCALE_FACTOR] = factor
     return state
 
 
@@ -383,7 +426,19 @@ def apply_child_degradation(logger: logging.Logger, module: str, counts: Mapping
     (``child_degradation``) to the counters and the running extraction,
     then log it in one rate-limited WARNING naming ``module`` and each
     key with its count. The counts and the text loss are applied
-    whether or not the line is logged."""
+    whether or not the line is logged. An image scale-down
+    (``CHILD_IMAGE_SCALE_FACTOR``) is an extractor cap instead, logged
+    on its own line with the factor (#1401)."""
+    factor = counts.get(CHILD_IMAGE_SCALE_FACTOR)
+    if factor:
+        warn_extractor_cap(
+            logger,
+            IMAGE_PIXEL_CEILING_CAP,
+            "%s decoded at 1/%d scale (lossy) to fit the pixel ceiling",
+            module,
+            factor,
+        )
+        counts = {key: n for key, n in counts.items() if key != CHILD_IMAGE_SCALE_FACTOR}
     if not counts:
         return
     add_counters(counts)
@@ -452,6 +507,14 @@ class ExtractionResult:
     none), ``None`` (unknown) otherwise. Kept with the cached row so an
     occurrence served from the cache still counts as capped.
 
+    ``ocr_pages_cap``, ``digital_pages_cap`` and ``extracted_chars_cap``
+    (#1418) record, on a ``success`` or ``empty`` result, the configured
+    limit that cut it (``INDEXER_OCR_MAX_PAGES``,
+    ``INDEXER_PDF_MAX_DIGITAL_PAGES``,
+    ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS``): its value when it cut,
+    0 when it did not, ``None`` when it does not apply to the module or
+    the result has another status. See ``CAP_COLUMNS``.
+
     ``text_complete`` (#1242) is whether ``text`` holds all the text the
     extractor could read: ``True`` only for a ``success`` or ``empty``
     result whose extraction lost nothing (``note_text_lost``: an
@@ -468,6 +531,9 @@ class ExtractionResult:
     error: str | None
     ocr_pages_skipped: int | None = None
     text_complete: bool | None = None
+    ocr_pages_cap: int | None = None
+    digital_pages_cap: int | None = None
+    extracted_chars_cap: int | None = None
 
 
 # Version of each extractor module whose output changed for the same
@@ -586,6 +652,26 @@ class ExtractionResult:
 # cached image payload once (about 3,460 on the live index) and clears
 # ``text_complete`` on them until re-indexed (owner approved). A later
 # image change (#1413 routing) takes 5 or higher.
+# image 5: the "OCR disabled" result of an image is stamped ``image@5``
+# (#1415), so a row recorded with no stamp, which may be a PDF sent
+# under an image label from before the routing to ``pdf``, is re-run
+# once whatever the OCR setting (``attachment_indexing``
+# ``_unsupported_still_holds``), and the ``failed`` image rows are re-run
+# too (owner approved, 2026-10-10). Like 4, it re-OCRs every cached image
+# payload once while OCR is on.
+# image 6: the image child has its own pixel ceiling, 48,000,000 pixels,
+# under a 1,605 MiB address-space limit (#1401, owner decision
+# 2026-10-10). Images from 30,000,000 to 48,000,000 pixels, recorded
+# ``failed`` under ``DecompressionBombWarning`` before, are read at full
+# resolution. A JPEG or MPO over the ceiling is read at 1/2 scale
+# (``draft``) as a lossy fallback (``image.MAX_DRAFT_FACTOR``: on the
+# synthetic catalogue, low-contrast lines of 50 and 60 px were lost at
+# half scale), reported as the ``image_pixel_ceiling`` cap; an image
+# that still does not fit is recorded ``unsupported``
+# (``IMAGE_PIXEL_CEILING_ERROR``), and an MPO reports that only its
+# primary picture was read. The bump re-OCRs every cached image payload
+# once, as image 4 did, and with OCR off re-runs the ``image@5`` "OCR
+# disabled" rows once (no OCR runs; they are re-stamped).
 # doc 2, ppt 2: the raw tool's output byte cap follows the configured
 # ``max_extracted_chars`` (four bytes a character, up to a 40 MiB
 # ceiling) instead of a fixed 8 MiB (#1308), so the same bytes can
@@ -611,7 +697,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
     "eml": 3,
-    "image": 4,
+    "image": 6,
     "pdf": 5,
     "ppt": 2,
     "pptx": 3,
@@ -704,6 +790,11 @@ LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office 
 # re-running on each (``attachment_indexing``).
 NON_OLE2_PPT_ERROR = "not an OLE2 compound file (labelled legacy .ppt)"
 
+# ``unsupported`` error for a payload under a legacy ``.doc`` / ``.xls`` label
+# that is neither OLE2 nor a ZIP (for example an RTF file labelled ``.doc``):
+# no reader takes it, and the OOXML route would only fail and be retried (#1227).
+NOT_OLE2_OR_OOXML_ERROR = "not an OLE2 or OOXML container (labelled as a legacy Office type)"
+
 # The fixed 8-byte signature every OLE2 compound file starts with.
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
@@ -720,6 +811,9 @@ DOCX_PACKAGE_BUDGET_ERROR = "document exceeds a pre-open package budget"
 # A password-protected legacy ``.ppt`` (#983), from the reader's reserved
 # exit status.
 ENCRYPTED_PPT_ERROR = "encrypted legacy .ppt (open password required)"
+# An image over the image child's pixel ceiling that a JPEG scale-down
+# within the validated factor cannot fit (#1401).
+IMAGE_PIXEL_CEILING_ERROR = "image exceeds the pixel ceiling"
 PERMANENT_FAILURE_ERRORS = frozenset(
     {
         ENCRYPTED_PDF_ERROR,
@@ -728,6 +822,7 @@ PERMANENT_FAILURE_ERRORS = frozenset(
         PPTX_PACKAGE_BUDGET_ERROR,
         DOCX_PACKAGE_BUDGET_ERROR,
         ENCRYPTED_PPT_ERROR,
+        IMAGE_PIXEL_CEILING_ERROR,
     }
 )
 # Extractors that read an OOXML package (a ZIP): each gets the OLE2 check
@@ -906,13 +1001,21 @@ def extract(
 
     module_name, dispatch_via = _resolve_extractor(content_type, filename)
 
+    # A PDF under an image label runs the PDF extractor (#1415), decided
+    # before the OCR gate below, since that extractor reads a digital text
+    # layer without OCR: the same constant-size prefix check.
+    if module_name == "image":
+        module_name = _route_container(module_name, payload)
+
     # Image types are gated by ``ocr_enabled`` because the only sensible
     # extractor is Tesseract. Disabling OCR globally should cleanly
-    # downgrade them to ``unsupported`` rather than failing per-call.
+    # downgrade them to ``unsupported`` rather than failing per-call. The
+    # result is stamped (#1415), so a row recorded before the routing above
+    # (no stamp) is told apart and re-run once.
     if module_name == "image" and not ocr_enabled:
         return ExtractionResult(
             status=STATUS_UNSUPPORTED,
-            extractor=None,
+            extractor=_stamp_extractor(module_name, module_name),
             text=None,
             error=OCR_DISABLED_ERROR,
         )
@@ -933,6 +1036,24 @@ def extract(
             extractor=None,
             text=None,
             error=NON_OLE2_PPT_ERROR,
+        )
+
+    # A legacy label whose bytes are neither OLE2 nor ZIP (#1227): the same
+    # constant-size prefix check; no reader takes it, so it is not retried.
+    if module_name in _LEGACY_TO_OOXML and not payload.startswith(
+        (*_ZIP_SIGNATURES, _OLE2_SIGNATURE)
+    ):
+        # Logged like the other permanent declines: fixed text, no payload (#1227).
+        warn_rate_limited(
+            log,
+            "%s payload is not an OLE2 or OOXML container; recorded unsupported, not retried",
+            module_name,
+        )
+        return ExtractionResult(
+            status=STATUS_UNSUPPORTED,
+            extractor=None,
+            text=None,
+            error=NOT_OLE2_OR_OOXML_ERROR,
         )
 
     # The container decides between a legacy and an OOXML extractor
@@ -988,6 +1109,12 @@ def extract(
     # Known zero for a PDF unless its OCR cap records a count; unknown for
     # every other module (#891).
     _attempt.ocr_pages_skipped = 0 if module_name == "pdf" else None
+    # The configured limits each module is subject to start at 0 (did not
+    # cut); the extractor records the limit when it cuts (#1418). The
+    # character cap is the dispatcher's own, below, for every module.
+    _attempt.ocr_pages_cap = 0 if module_name in _OCR_PAGE_CAP_MODULES else None
+    _attempt.digital_pages_cap = 0 if module_name == "pdf" else None
+    _attempt.extracted_chars_cap = 0
     # The raw-tool extractors size their output byte cap from the
     # character cap (#1308); no other extractor takes it.
     raw_tool_options = (
@@ -1069,6 +1196,9 @@ def extract(
             text=None,
             error=None,
             ocr_pages_skipped=ocr_pages_skipped,
+            ocr_pages_cap=_attempt.ocr_pages_cap,
+            digital_pages_cap=_attempt.digital_pages_cap,
+            extracted_chars_cap=_attempt.extracted_chars_cap,
         )
     if max_extracted_chars is not None and len(cleaned) > max_extracted_chars:
         # Text past the cap is not indexed: WARNING, rate limited (#903).
@@ -1081,13 +1211,22 @@ def extract(
             max_extracted_chars,
         )
         cleaned = cleaned[:max_extracted_chars]
+        record_cap_cut(CAP_EXTRACTED_CHARS, max_extracted_chars)
     return ExtractionResult(
         status=STATUS_SUCCESS,
         extractor=extractor_name,
         text=cleaned,
         error=None,
         ocr_pages_skipped=ocr_pages_skipped,
+        ocr_pages_cap=_attempt.ocr_pages_cap,
+        digital_pages_cap=_attempt.digital_pages_cap,
+        extracted_chars_cap=_attempt.extracted_chars_cap,
     )
+
+
+# Modules ``INDEXER_OCR_MAX_PAGES`` applies to: scanned PDF pages and
+# multipage image frames (#1418).
+_OCR_PAGE_CAP_MODULES = frozenset({"pdf", "image"})
 
 
 def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
@@ -1124,12 +1263,19 @@ def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
 
         if type(exc) is PptEncryptedError:
             return ENCRYPTED_PPT_ERROR
+    elif module_name == "image":
+        from .image import ImagePixelCeilingError
+
+        if type(exc) is ImagePixelCeilingError:
+            return IMAGE_PIXEL_CEILING_ERROR
     return None
 
 
 # The legacy (OLE2) extractor for a legacy label, and the OOXML one the
 # same label selects for a payload that is not OLE2.
 _LEGACY_TO_OOXML = {"doc": "docx", "xls": "xlsx"}
+_ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06")
+_PDF_SIGNATURE = b"%PDF-"
 
 
 def _route_container(module_name: str, payload: bytes) -> str | None:
@@ -1144,8 +1290,13 @@ def _route_container(module_name: str, payload: bytes) -> str | None:
       OOXML extractor (DOCX, XLSX, PPTX) can read OLE2, and an attempt
       would only record ``failed`` and re-run every
       ``_FAILED_CACHE_MAX_AGE`` (#694).
+    * A PDF (``%PDF-``) under an image label goes to ``pdf`` (#1415): the
+      image extractor cannot read it, and the PDF extractor reads its
+      digital text layer whatever the OCR setting.
     * Anything else is unchanged.
     """
+    if module_name == "image" and payload.startswith(_PDF_SIGNATURE):
+        return "pdf"
     ole2 = payload.startswith(_OLE2_SIGNATURE)
     if module_name in _LEGACY_TO_OOXML:
         return module_name if ole2 else _LEGACY_TO_OOXML[module_name]
@@ -1158,13 +1309,18 @@ def extraction_module(content_type: str, filename: str, payload: bytes) -> str |
     """The extractor module whose result an extraction of ``payload``
     under this label is, or ``None`` when the label selects none: the
     module the label selects after the container check (``.doc`` with
-    OOXML bytes runs ``docx``). An OLE2 payload under an OOXML label,
-    which no extractor reads, stays under that label's module. A prefix
+    OOXML bytes runs ``docx``, an image label with PDF bytes ``pdf``). An
+    OLE2 payload under an OOXML label, which no extractor reads, stays
+    under that label's module. A prefix
     check only. With the content hash, the extraction cache key (#928):
     labels that run the same extractor on the same bytes share its row."""
     selected = _resolve_extractor(content_type, filename)[0]
     if selected is None:
         return None
+    # A legacy label with bytes no reader takes (#1227) stays under its own
+    # module: under the OOXML module it would share a row with an OOXML label.
+    if selected in _LEGACY_TO_OOXML and not payload.startswith((*_ZIP_SIGNATURES, _OLE2_SIGNATURE)):
+        return selected
     return _route_container(selected, payload) or selected
 
 
@@ -1178,12 +1334,15 @@ def ole2_extraction_module(content_type: str, filename: str) -> str | None:
 def label_extraction_modules(content_type: str, filename: str) -> frozenset[str]:
     """Every module ``extraction_module`` can return for this label,
     whatever the bytes: a legacy label also runs its OOXML extractor on
-    bytes that are not OLE2. Empty when the label selects none."""
+    bytes that are not OLE2, and an image label the PDF extractor on PDF
+    bytes (#1415). Empty when the label selects none."""
     selected = _resolve_extractor(content_type, filename)[0]
     if selected is None:
         return frozenset()
     if selected in _LEGACY_TO_OOXML:
         return frozenset({selected, _LEGACY_TO_OOXML[selected]})
+    if selected == "image":
+        return frozenset({selected, "pdf"})
     return frozenset({selected})
 
 

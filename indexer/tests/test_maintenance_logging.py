@@ -576,10 +576,14 @@ class TestReextractSweepDeadSkips:
         lines = _messages(caplog, "re-queued ")
         assert len(lines) == 1
         assert lines[0].levelno == logging.WARNING
+        assert lines[0].getMessage().startswith("re-queued 1 of 3 message(s) ")
         assert (
             lines[0]
             .getMessage()
-            .endswith("; skipped 2 dead-lettered (run make requeue-dead to refresh them).")
+            .endswith(
+                "; 0 already pending, skipped 2 dead-lettered "
+                "(run make requeue-dead to refresh them)."
+            )
         )
         assert MARKER not in caplog.text
         db.close()
@@ -594,7 +598,7 @@ class TestReextractSweepDeadSkips:
         self._stale(db, monkeypatch, [path])
 
         assert main._requeue_stale_extractions(db, queue) == 0
-        lines = _messages(caplog, "re-queued 0 message(s)")
+        lines = _messages(caplog, "re-queued 0 of 1 message(s)")
         assert len(lines) == 1
         assert "skipped 1 dead-lettered" in lines[0].getMessage()
         db.close()
@@ -609,8 +613,30 @@ class TestReextractSweepDeadSkips:
         (line,) = _messages(caplog, "re-queued ")
         assert line.levelno == logging.INFO
         assert line.getMessage().endswith(
-            "; skipped 0 dead-lettered (run make requeue-dead to refresh them)."
+            "; 0 already pending, skipped 0 dead-lettered (run make requeue-dead to refresh them)."
         )
+        db.close()
+
+    def test_already_pending_files_are_counted(self, tmp_path, monkeypatch, caplog):
+        """#1415: a message the sweep found that already has a queued job is
+        counted, once, whatever arms found it, and keeps its job."""
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db)
+        paths = [f"/maildir/{MARKER}/cur/{n}" for n in ("a", "b")]
+        queue.enqueue(paths[1], REASON_INITIAL_SCAN)
+        self._stale(db, monkeypatch, paths)
+        # The same message found by a second arm counts once.
+        monkeypatch.setattr(db, "find_no_extractor_attachment_filepaths", lambda _q, _a: {paths[1]})
+
+        assert main._requeue_stale_extractions(db, queue) == 1
+        (line,) = _messages(caplog, "re-queued ")
+        assert line.levelno == logging.INFO
+        assert line.getMessage().startswith("re-queued 1 of 2 message(s) ")
+        assert line.getMessage().endswith(
+            "; 1 already pending, skipped 0 dead-lettered (run make requeue-dead to refresh them)."
+        )
+        assert MARKER not in caplog.text
         db.close()
 
 

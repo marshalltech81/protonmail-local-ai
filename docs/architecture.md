@@ -1436,7 +1436,7 @@ as message bodies. Two extra tables sit alongside `message_chunks`:
 | Table | Keyed by | Purpose |
 |---|---|---|
 | `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. `extractor_module` names the extraction row the occurrence uses (see below; '' when its label selects no extractor). `text_complete` and `text_extractor` record whether its committed chunks hold all its text, and the stamp of the result that applied (#1242; see *Attachment text completeness*). When one message carries the same bytes under labels that run different extractors, the texts share the message's chunk slice for the payload, and every text's chunks are kept. A text hit in `search_attachments` is attributed to an occurrence whose row is a success; with two such occurrences in one message, to the first by occurrence id. |
-| `attachment_extractions` | (attachment_id, extractor_module) | Cache of extracted text + status, keyed by the payload's sha256 and the extractor module the occurrence's MIME type and filename run on those bytes, after the container check (OOXML bytes labelled `.doc` run `docx` and share the `.docx` row; '' when the label selects no extractor) (#928). Dispatch from a label and the bytes is deterministic, so every occurrence with the same key would extract the same result, and an occurrence is served only what an extraction under its own label gives, whatever labels of the same bytes arrived before it: an OLE2 `.doc` first seen as `.txt`, or a PowerPoint file first sent as `.doc` (#986), no longer decides the later occurrences' result. The same bytes under two labels that run different extractors store two rows; the cost is one extraction per module the bytes arrive under and a second copy of the text, which is negligible next to the mail itself. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per payload and module, including within one indexing batch, where results not yet committed are shared by the same key. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it holds: an "OCR disabled" row until OCR is turned on; an "OLE2 compound file" row (an OLE2 payload under an OOXML label, #694, #936), a "binary payload labelled as text" row (#932), a "not an OLE2 compound file" row under the `ppt` module (#957) and a "no extractor" row for good, since the label and the bytes decide them; an encrypted-PDF or pypdf-limit row under `pdf`, an eager-part-budget row under `xlsx` and a pre-open package-budget row under `pptx` or `docx` for good too, since that module would decline the same bytes again (#931, #1032); any other (an extractor not importable in the image) only under the '' module; `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is re-extracted by the next occurrence that uses it, and the indexer re-queues every message with an occurrence using it once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that uses it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message with an occurrence using an "OCR disabled" row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence uses a "no extractor" or "OLE2 compound file" row but whose label now selects another module, as when a release starts routing an extension such as `.heic` (#691), `.dotx` (#937), `.pptx` (#936), `.ppt` (#957), `.pptm` / `.ppsx` / `.potx` (#947) or `.ppsm` / `.potm` (#1042); the reprocess writes the occurrence's own row and points the occurrence at it, so each is re-queued once. Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message with an occurrence using a `too_large` row whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). `ocr_pages_skipped` holds the scanned pages the PDF OCR page cap left unread (0 when none, NULL when unknown: a non-PDF result, a `failed` or `unsupported` one, or a row cached before schema v3), so an occurrence served the row is still counted as capped once its message commits (#891); the text served is the same. `text_complete` records whether the result lost no text (#1242); a `success` or `empty` row with none (cached before schema v6) is re-extracted once, except an `-ocr` row while OCR is off (#1285). Schema v1 introduced the key; see *Schema versions*. |
+| `attachment_extractions` | (attachment_id, extractor_module) | Cache of extracted text + status, keyed by the payload's sha256 and the extractor module the occurrence's MIME type and filename run on those bytes, after the container check (OOXML bytes labelled `.doc` run `docx` and share the `.docx` row, PDF bytes under an image label run `pdf` and share the `.pdf` row (#1415); '' when the label selects no extractor) (#928). Dispatch from a label and the bytes is deterministic, so every occurrence with the same key would extract the same result, and an occurrence is served only what an extraction under its own label gives, whatever labels of the same bytes arrived before it: an OLE2 `.doc` first seen as `.txt`, or a PowerPoint file first sent as `.doc` (#986), no longer decides the later occurrences' result. The same bytes under two labels that run different extractors store two rows; the cost is one extraction per module the bytes arrive under and a second copy of the text, which is negligible next to the mail itself. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per payload and module, including within one indexing batch, where results not yet committed are shared by the same key. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it holds: an "OCR disabled" row until OCR is turned on, except an image one recorded with no stamp (before #1415), which never holds; an "OLE2 compound file" row (an OLE2 payload under an OOXML label, #694, #936), a "binary payload labelled as text" row (#932), a "not an OLE2 compound file" row under the `ppt` module (#957), a "not an OLE2 or OOXML container" row under a legacy `doc` / `xls` label (#1227) and a "no extractor" row for good, since the label and the bytes decide them; an encrypted-PDF or pypdf-limit row under `pdf`, an eager-part-budget row under `xlsx` and a pre-open package-budget row under `pptx` or `docx` for good too, since that module would decline the same bytes again (#931, #1032); any other (an extractor not importable in the image) only under the '' module; `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is re-extracted by the next occurrence that uses it, and the indexer re-queues every message with an occurrence using it once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that uses it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message with an occurrence using an "OCR disabled" row, and, whatever the OCR setting, one using an image "OCR disabled" row with no stamp, keyed `image` or '' (#1415). The sweep also re-queues, whatever the OCR setting, each message whose occurrence uses a "no extractor" or "OLE2 compound file" row but whose label now selects another module, as when a release starts routing an extension such as `.heic` (#691), `.dotx` (#937), `.pptx` (#936), `.ppt` (#957), `.pptm` / `.ppsx` / `.potx` (#947) or `.ppsm` / `.potm` (#1042); the reprocess writes the occurrence's own row and points the occurrence at it, so each is re-queued once. Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message with an occurrence using a `too_large` row whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). `ocr_pages_skipped` holds the scanned pages the PDF OCR page cap left unread (0 when none, NULL when unknown: a non-PDF result, a `failed` or `unsupported` one, or a row cached before schema v3), so an occurrence served the row is still counted as capped once its message commits (#891); the text served is the same. `text_complete` records whether the result lost no text (#1242); a `success` or `empty` row with none (cached before schema v6) is re-extracted once, except an `-ocr` row while OCR is off (#1285). `ocr_pages_cap`, `digital_pages_cap` and `extracted_chars_cap` record the configured limit that cut a `success` or `empty` result (#1418): `INDEXER_OCR_MAX_PAGES` (scanned PDF pages, TIFF frames; recorded by `pdf` and `image`), `INDEXER_PDF_MAX_DIGITAL_PAGES` (`pdf`) and `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` (the dispatcher's cut for every module, and the `.doc` / `.ppt` tools' output bound when the setting, not the 40 MiB ceiling, set it): the limit's value when it cut, 0 when it did not, NULL when it does not apply or the row predates schema v11. A hardcoded limit (an image's 10,000,000-character text budget, a TIFF frame that cannot be read past the cap, the tools' ceiling, the page-pixel budgets) records nothing; a fix to one is an `EXTRACTOR_VERSIONS` bump. A row a limit cut is not served once that limit is raised (higher, or `0` for the two that have no-limit values; lowering never counts), and an incomplete row (`text_complete` 0) cached before schema v11 is re-extracted once to record its caps. While OCR is off, a row an OCR extractor wrote (`-ocr` stamp) or whose `ocr_pages_cap` or `ocr_pages_skipped` is above 0 is kept out of both, so a refresh cannot record "OCR disabled" over it or forget its unread pages; it is refreshed once OCR is on. The lookup (`attachment_indexing.cap_raised`, `cap_bootstrap_due`) and the startup sweep (`Database.find_cap_refresh_attachment_filepaths`, the same test in SQL) agree; the sweep queues every message using such a row before the drain replaces it, and logs one INFO line with the three settings and its counts (`docs/troubleshooting.md`). A cut that remains on a result served from the cache is counted and logged at commit, as a fresh one is. Schema v1 introduced the key; see *Schema versions*. |
 
 Per-occurrence chunks land in `message_chunks` with the
 `attachment_id` column populated and `kind` set to `attachment`. They embed exactly like body chunks
@@ -1467,9 +1467,13 @@ Legacy Office types (#694, #935, #957): `application/msword` / `.doc`,
 / `.ppt` select the `doc`, `xls` and `ppt` extractors. The container
 decides which one runs: a genuine legacy
 binary is an OLE2 compound file (it starts with `D0 CF 11 E0 A1 B1 1A
-E1`) and goes to the legacy extractor; any other payload goes to the
-DOCX or XLSX extractor, as a best effort for OOXML files mislabelled as
-a legacy type. `.ppt` has no OOXML fallback: a `.ppt`-labelled payload
+E1`) and goes to the legacy extractor; a ZIP payload goes to the DOCX or
+XLSX extractor, as a best effort for OOXML files mislabelled as a legacy
+type. A payload that is neither OLE2 nor ZIP (an RTF file, for one) is
+recorded `unsupported` ("not an OLE2 or OOXML container", #1227) without
+running anything, and its row is keyed under the legacy module, so an
+occurrence with an OOXML label of the same bytes still runs its own
+extractor. `.ppt` has no OOXML fallback: a `.ppt`-labelled payload
 that is not OLE2 is recorded `unsupported` ("not an OLE2 compound file
 (labelled legacy .ppt)") without running anything, and that row is
 served for later `.ppt` occurrences. An OLE2 payload whose label
@@ -1695,7 +1699,7 @@ The limits on every external program the indexer runs:
 | Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
 | extractor child, OOXML (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
 | extractor child, attached emails (`message/rfc822`, `application/eml`, `.eml`) | 1 GiB | 60 s | 75 s |
-| extractor child, PIL and Tesseract (images), each process | 1 GiB | 4 × `INDEXER_OCR_TIMEOUT_SECONDS` + 30 s (270 s) | pages × (OCR timeout + 10 s) + 30 s (1,430 s) |
+| extractor child, PIL and Tesseract (images), each process | 1,605 MiB | 4 × `INDEXER_OCR_TIMEOUT_SECONDS` + 30 s (270 s) | pages × (OCR timeout + 10 s) + 30 s (1,430 s) |
 | Tesseract (scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
 | Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |
 
@@ -1763,9 +1767,30 @@ before. Each Tesseract is a process the child starts, so it inherits
 the child's limits (each process has its own) and is killed with the
 child's process group when the run ends; pytesseract's temporary files
 go to the run's scratch directory, which the runner removes. The child
-imports the extractors package, so the 30,000,000-pixel cap and the
-decompression-bomb handling apply there as before; the indexer itself
-no longer imports pytesseract or pillow-heif for images. A
+has its own pixel ceiling, 48,000,000 pixels (#1401; the package's
+30,000,000-pixel cap stays the cap of every other PIL consumer); the
+indexer itself no longer imports pytesseract or pillow-heif for images.
+A frame at or under the ceiling is OCR'd at full resolution. A JPEG or
+MPO over it (up to 192,000,000 pixels) is decoded at half scale with
+`Image.draft` before any pixel is decoded or rotated, the returned size
+checked, as a lossy fallback (measured loss below): the parent logs the
+`image_pixel_ceiling` extractor cap at WARNING with the factor
+(`image decoded at 1/2 scale (lossy) to fit the pixel ceiling`), the
+text is marked incomplete, and when the scaled-down image yields text an
+INFO line gives its character count. Any other format over the
+ceiling, a JPEG that half scale cannot fit, and a later TIFF frame over
+it (Pillow checks each frame as it is loaded) are recorded
+`unsupported` ("image exceeds the pixel ceiling", a permanent error).
+While the header is read, Pillow's own limit is four times the ceiling;
+its `DecompressionBombWarning` (promoted to an error) above that and its
+`DecompressionBombError` above twice that are caught by class and
+recorded the same way, so their messages go nowhere. A multi-picture
+JPEG (MPO), such as a phone photo with a second picture, is OCR'd from
+its primary picture only; when its header lists more than one, the
+`mpo_frames` extractor cap reports the omission and the text is marked
+incomplete. The ceiling and the half-scale factor are fixed, not
+settings, so they record no cap value on the row (#1418); a change to
+either is an `image` version bump. A
 `P` frame after each OCR'd page refreshes the heartbeat; the frame cap
 (`ocr_frames`, or `ocr_frames_unreadable` when the probe frame cannot
 be read) crosses as a `C` frame, and the parent logs and counts it as
@@ -1786,26 +1811,100 @@ to `image@4` (owner approved): a CMYK image was recorded `failed`, a
 failed row is re-run only when its bytes are extracted again, and the
 startup sweep keys on the recorded version, so without a bump nothing
 re-queues it. The bump re-OCRs every cached image payload once and
-clears `text_complete` on them until their messages are re-indexed. A
-later image change (#1413) takes version 5 or higher.
+clears `text_complete` on them until their messages are re-indexed.
+`image@5` (#1415, owner approved) stamps the "OCR disabled" result of
+an image (see *PDFs labelled as images*); like 4, it re-OCRs every
+cached image payload once while OCR is on, and re-runs the `failed`
+image rows whatever the OCR setting.
+`image@6` (#1401, owner approved 2026-10-10) is the pixel ceiling
+above: images from 30,000,000 to 48,000,000 pixels, recorded `failed`
+under `DecompressionBombWarning` before, are read at full resolution,
+larger JPEGs at half scale, and the rest are `unsupported`. Like 4 and
+5 it re-OCRs every cached image payload once while OCR is on; with OCR
+off it re-runs the `image@5` "OCR disabled" rows once (no OCR runs;
+they are re-stamped).
 The version stayed `image@3` through #1292 (owner exception, 2026-10-08): a row cached
 before this change may hold more text when the stripped OCR output
 exceeds 10,000,000 characters and the character cap is off or above
-10,000,000. An error in the child (`DecompressionBombError`,
-`TesseractError`, `RuntimeError` for a Tesseract timeout, its own
+10,000,000. An error in the child (`TesseractError`, `RuntimeError`
+for a Tesseract timeout, its own
 `MemoryError` or `RecursionError`) is recorded `failed` under its type
 name; in process a `MemoryError` or `RecursionError` was host
 pressure.
 
 The limits were measured plainly in the indexer image (Tesseract 5.5.0,
-which runs up to four OpenMP threads), as the smallest address-space
-limit under which the extraction still succeeds, on synthetic images at
-the pixel cap: a photo-like page with 3,000 words of text, as JPEG and
-as HEIC, 441 MiB and 8 s; an all-white 30,000,000-pixel RGBA PNG of
-126 KB, 441 MiB (the child's own decode) and 1 s; random noise,
-606 MiB and 6 s. 1 GiB is 1.7 times the largest. A page of dense text
-that needs more than the 60 s OCR timeout fails on the timeout under
-the limit as without it (364 MB peak). CPU time counts every thread, so
+which runs up to four OpenMP threads), through the real launcher, on
+synthetic images (#1401). "Minimum" is the smallest address-space limit,
+in 16 MiB steps with no OCR timeout, under which the extraction still
+succeeds; the other columns are one run at the 1,605 MiB limit with the
+60 s OCR timeout: wall clock, CPU time of the child's tree, the largest
+resident size of the child and Tesseract together (both run at once,
+each under its own limit) and the largest size of the run's scratch
+directory (the payload and pytesseract's temporary PNG).
+
+| Image (synthetic) | Payload | Minimum | Wall | CPU | Tree RSS | Scratch |
+|---|---|---|---|---|---|---|
+| 48 MP text page, JPEG (baseline, progressive or EXIF-rotated) | 10 to 12 MiB | 688 MiB | 29 s | 43 to 46 s | 1,050 to 1,052 MiB | 54 to 55 MiB |
+| 48 MP MPO, two pictures (`mpo_frames`) | 23 MiB | 688 MiB | 30 s | 46 s | 1,063 MiB | 67 MiB |
+| 48 MP CMYK JPEG (converted to RGB) | 36 MiB | 688 MiB | 35 s | 53 s | 1,075 MiB | 96 MiB |
+| 48 MP HEIC (512-pixel grid tiles) | 23 MiB | 688 MiB | 36 s | 57 s | 1,083 MiB | 68 MiB |
+| 48 MP PNG, RGB | 3 MiB | 672 MiB | 20 s | 40 s | 1,044 MiB | 6 MiB |
+| 48 MP PNG, palette (`P`) | 2 MiB | 336 MiB | 19 s | 39 s | 420 MiB | 3 MiB |
+| 48 MP PNG, all-white RGBA | 0.2 MiB | 672 MiB | 2 s | 2 s | 1,110 MiB | 0 MiB |
+| 48 MP TIFF, LZW RGB | 9 MiB | 672 MiB | 18 s | 33 s | 1,051 MiB | 11 MiB |
+| 48 MP TIFF, 32-bit integer (`I`) | 9 MiB | 464 MiB | 17 s | 32 s | 728 MiB | 11 MiB |
+| 48 MP TIFF, three pages | 26 MiB | 672 MiB | 56 s | 103 s | 1,069 MiB | 29 MiB |
+| 48 MP JPEG of random noise | 22 MiB | 944 MiB | 11 s | 11 s | 1,353 MiB | 159 MiB |
+| 108 MP JPEG at half scale (baseline, progressive, rotated, MPO) | 18 to 41 MiB | 464 to 496 MiB | 23 to 26 s | 39 to 43 s | 680 to 702 MiB | 42 to 65 MiB |
+| 108 MP noise JPEG at half scale | 36 MiB | not searched | 7 s | 6 s | 794 MiB | 108 MiB |
+| 192 MP JPEG at half scale (baseline, rotated, MPO) | 33 to 66 MiB | 672 MiB | 31 to 32 s | 46 to 51 s | 1,076 to 1,109 MiB | 71 to 104 MiB |
+| 192 MP progressive JPEG at half scale | 28 MiB | 832 MiB | 33 s | 51 s | 1,072 MiB | 67 MiB |
+| 192 MP noise JPEG at half scale | 28 MiB | 864 MiB | 12 s | 12 s | 1,310 MiB | 148 MiB |
+| 108 MP PNG or TIFF, 192 MP PNG or three-page TIFF | 4 to 61 MiB | (refused) | 0.1 to 0.2 s | 0.1 to 0.2 s | up to 101 MiB | up to 61 MiB |
+
+At full resolution the same images need more than the old 1 GiB from
+108 MP on (1,296 MiB for text and 2,032 MiB for noise at 108 MP;
+2,112 MiB for text and over 3,072 MiB for noise at 192 MP), which is
+why only JPEG and MPO, which decode at half scale, go past the ceiling.
+1,605 MiB is the smallest limit that gives the largest case inside the
+default 32 MiB byte cap, the 48 MP noise JPEG at 944 MiB, the 1.7 times
+margin the 30,000,000-pixel limit was sized with. Past the default byte
+cap, a 192 MP noise JPEG of 87 MiB needs 1,008 MiB (1.6 times) and
+reaches a 1,466 MiB tree; a 108 MP one of 49 MiB, 592 MiB. The
+32-bit TIFF row is a page whose samples span the 16-bit range; one
+whose samples use only the 8-bit range is read as an empty page
+(#1435). At the previous 30,000,000-pixel cap a text page needed
+441 MiB and noise 606 MiB.
+
+Memory under the indexer's 6 GiB `mem_limit`: the scratch directory is
+on the `/tmp` tmpfs, which counts against the limit with the child and
+Tesseract. The largest tree above inside the byte cap (1,353 MiB) plus
+its scratch (159 MiB) is about 1.5 GiB; the bound is two processes at
+1,605 MiB each plus the scratch, about 3.4 GiB. On the live indexer
+(running `image@4` OCR under the old 1 GiB limit), the container used
+1.6 GiB between extractions (the indexer process 1.5 GiB resident), and
+its peak since its start was 4.65 GiB, children and tmpfs included.
+Adding the larger tree's 0.5 GiB to that peak, or the 3.4 GiB bound to
+the 1.6 GiB, stays under 6 GiB.
+
+The half-scale fallback is lossy. On a synthetic catalogue (one font,
+rendered at 0.7 of the line height, at one line spacing; 12 lines of
+48 characters per image; lines 40, 60, 80, 120 and 200 px high; clean,
+Gaussian blur, a keystone perspective, low-contrast ink and JPEG
+quality 50; on 48, 108 and 192 MP canvases), scored by character
+accuracy against the rendered text, half scale kept 58 of the 62 cases
+that read at full resolution to within 2 points and read nothing of the
+other four: low-contrast lines of 60 px (48 MP) and 120 px (192 MP),
+and 40 px lines, clean and compressed (108 MP). A sweep of ink
+contrast at 48 MP (lines of 50 to 90 px) lost 2 of the 12 cases that
+read at full resolution, both low-contrast lines of 50 and 60 px.
+Quarter scale lost every 40 px case at 48 MP and is not used. The
+catalogue is one synthetic font and layout, so it shows where the
+fallback loses text, not that it keeps it.
+
+A page of dense text that needs more than the 60 s OCR timeout fails on
+the timeout under the limit as without it (364 MB peak, measured at the
+old limit). CPU time counts every thread, so
 each process may use four times the OCR timeout plus 30 s of CPU, and
 the timeout fires first; with the timeout off (`0`) the 60 s default's
 limit applies. The wall clock allows every page its OCR timeout (with
@@ -1814,6 +1913,20 @@ pages at the cap took 140 s for its 20 pages. Starting the child adds
 about 0.09 s per image (0.23 s against 0.14 s in process for a small
 screenshot). The text is byte-identical to the in-process extraction,
 so #1292 did not bump `image`.
+
+PDFs labelled as images (#1415): a payload under an image label
+(an `image/*` type or an image extension) that starts with `%PDF-`
+runs the PDF extractor, not the image extractor, which cannot read it.
+The dispatcher checks that fixed prefix before the OCR gate, so with
+OCR off such a PDF is still read from its digital text layer (a
+scanned one is recorded as a scanned PDF, "OCR disabled ... scanned
+PDF"). Only the prefix is checked; the row is the `pdf` module's,
+shared with a `.pdf` occurrence of the same bytes (#928). With OCR off,
+an image's "OCR disabled" result is stamped `image@5`; a row recorded
+with no stamp (before this routing, possibly a PDF) is re-run once
+whatever the OCR setting, by the cache check and by the startup sweep
+(see the `attachment_extractions` cache and *OCR*), and the re-run
+writes a stamped row or a `pdf` one, so it is not matched again.
 
 Binary payloads labelled as text: the text extractor decodes whatever
 it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent
@@ -1979,10 +2092,13 @@ the eager-part budget"), and a deck or document over the PPTX or DOCX
 pre-open package budgets ("presentation exceeds a pre-open package
 budget", "document exceeds a pre-open package budget"; #1032), which
 are decided from the ZIP central directory alone before the package is
-opened, and a password-protected legacy `.ppt` ("encrypted legacy .ppt
+opened, a password-protected legacy `.ppt` ("encrypted legacy .ppt
 (open password required)"; #983): `PptText.java` exits with a reserved
 status (10) for POI's `EncryptedPowerPointFileException`, matched by
-exact class in Java, and only the `ppt` extractor reads that status.
+exact class in Java, and only the `ppt` extractor reads that status,
+and an image over the image child's pixel ceiling that half scale
+cannot fit ("image exceeds the pixel ceiling"; #1401), decided from the
+image's header.
 Each is matched by exact exception class;
 anything else stays `failed`. The row is keyed by the module that
 raised the error (#928), so it is served only to occurrences that run
@@ -2021,8 +2137,9 @@ status.
 HEIC / HEIF photos (the iPhone default) are images like any other:
 `image/heic`, `image/heif` (any `image/` type) and the `.heic`, `.heif`
 and `.hif` extensions route to the image extractor, which opens them through the `pillow-heif`
-Pillow plugin (#691). They go through the same byte cap, pixel cap and
-decompression-bomb handling as other images; Pillow checks the size in
+Pillow plugin (#691). They go through the same byte cap, the image
+child's pixel ceiling and decompression-bomb handling as other images
+(a HEIC is not a JPEG, so over the ceiling it is `unsupported`); Pillow checks the size in
 the header before anything is decoded. Only the primary image is OCR'd;
 thumbnails, depth maps and auxiliary images are not decoded. The HEIF
 image-sequence extensions `.heics` / `.heifs` are not routed by name;
@@ -2066,7 +2183,10 @@ issue #490 tracks it.
 With OCR off, images, and PDFs whose whole text layer is below the
 threshold, are recorded as "OCR disabled". When the indexer starts
 with OCR on, it re-queues once each message carrying such an
-attachment as an image or a PDF, except dead-lettered messages. A PDF
+attachment as an image or a PDF, except dead-lettered messages. An
+image row recorded with no stamp (before #1415, when a PDF under an
+image label was recorded this way) is re-queued once whatever the OCR
+setting. A PDF
 with usable digital text is indexed from it while OCR is off, and its
 scanned pages are not re-read when OCR is turned on later.
 
@@ -2077,10 +2197,10 @@ scanned pages are not re-read when OCR is turned on later.
 | `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` | `true` | Master switch — turns the whole pipeline off if needed |
 | `INDEXER_OCR_ENABLED` | `true` | Disables all OCR paths (image + PDF fallback) |
 | `INDEXER_ATTACHMENT_MAX_BYTES` | `33554432` (32 MiB) | Skip very large attachments — bounds CPU/memory for huge zips. Sized for the 10–30 MB scanned PDFs common in real mail; an `.eml` under the default `INDEXER_PARSE_MAX_BYTES` (50 MB) carries at most ~36 MB of base64-encoded attachment. Raising it re-queues, once at startup, the messages whose attachments were cached `too_large` and now fit |
-| `INDEXER_OCR_MAX_PAGES` | `20` | Cap pages OCR'd per PDF or multipage TIFF |
+| `INDEXER_OCR_MAX_PAGES` | `20` | Cap pages OCR'd per PDF or multipage TIFF. Raising it re-queues, once at startup, the messages whose cached results it cut (#1418). |
 | `INDEXER_OCR_TIMEOUT_SECONDS` | `60` | Per-page Tesseract timeout — bounds runaway OCR on a crafted high-noise image — and the deadline for rendering a scanned PDF's pages with Poppler. pdf2image's own page count before each render takes no timeout, so the indexer first times one bounded page count: one over half the deadline is an OCR timeout, and each render's timeout holds back that time. A page count much slower on pdf2image's call than on the timed one can still overrun (#868). Set `0` to disable both. Image OCR also runs under a CPU limit per process of 4 × this value + 30 s (270 s with `0` or the default), which `0` does not lift (#1292). |
-| `INDEXER_PDF_MAX_DIGITAL_PAGES` | `500` | Cap pages walked by the digital pypdf path — protects against text-only PDFs with thousands of pages. Set `0` to disable. A PDF cut here logs the `pdf_digital_pages` extractor-cap WARNING (#903). |
-| `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. The XLSX extractor also stops at 10,000,000 characters of its own, whatever this is set to, so shared strings repeated across many cells cannot expand without limit (#294). The legacy `.doc` and `.ppt` tools' output is read up to four bytes per character of this cap, never past 40 MiB, whatever it is set to (#1308). Text cut by either logs an extractor-cap WARNING (`extracted_chars`, `xlsx_text_chars`) and counts in the attachments line's `extractor_caps` (#903). |
+| `INDEXER_PDF_MAX_DIGITAL_PAGES` | `500` | Cap pages walked by the digital pypdf path — protects against text-only PDFs with thousands of pages. Set `0` to disable. A PDF cut here logs the `pdf_digital_pages` extractor-cap WARNING (#903). Raising or disabling it re-queues, once at startup, the messages whose cached results it cut (#1418). |
+| `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. The XLSX extractor also stops at 10,000,000 characters of its own, whatever this is set to, so shared strings repeated across many cells cannot expand without limit (#294). The legacy `.doc` and `.ppt` tools' output is read up to four bytes per character of this cap, never past 40 MiB, whatever it is set to (#1308). Text cut by either logs an extractor-cap WARNING (`extracted_chars`, `xlsx_text_chars`) and counts in the attachments line's `extractor_caps` (#903). Raising or disabling it re-queues, once at startup, the messages whose cached results it cut; the 10,000,000-character and 40 MiB limits are not settings and are not refreshed (#1418). |
 
 The XLSX extractor has fixed budgets of its own besides these. It cuts
 worksheets at an XML node budget (#432). The parts openpyxl loads whole
@@ -2193,7 +2313,8 @@ in the seconds.
   bounded batches of one transaction each (holding one batch of IDs at
   most), on the occurrences of a `no extractor` or
   OLE2 result their label now routes to a module, a `too_large` result
-  that now fits, an "OCR disabled" result once OCR is on, and a cached
+  that now fits, an "OCR disabled" result once OCR is on (an unstamped
+  image one whatever the OCR setting, #1415), and a cached
   result with no completeness record (whatever the occurrence's own
   record). A queued continuation then resolves them as pending; its row
   (stage, error, attempts, due time) and the deferral marks are left
@@ -2426,6 +2547,7 @@ already indexed without embedding calls (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 11 | `0011_extraction_cap_record.sql` | `attachment_extractions.ocr_pages_cap`, `digital_pages_cap` and `extracted_chars_cap` (#1418; see the `attachment_extractions` row above): the configured limit that cut the result, 0 when it did not, NULL (unknown) on every row cached before it. The extractor writes them, so no reparse is queued; the startup sweep re-queues once the messages using an incomplete `success` / `empty` row with no record (the bootstrap arm), and the re-extraction records the columns. |
 | 10 | `0010_thread_vector_sums.sql` | `thread_vector_sums` (#1356; see *Thread vector sums*): each thread's exact chunk-vector sum and count, so the thread vector is derived without reading every chunk vector. The migration writes no row: the first write that touches a thread fills its row, and the backfill sweep fills the rest in bounded batches. Nothing is re-parsed or re-embedded. |
 | 9 | `0009_attachment_extraction_deferral.sql` | `attachments.extraction_deferred_at` (#1236; see *Per-message extraction budget*): when the budget deferred the occurrence's extraction to a later pass, NULL otherwise, with the partial index `idx_attachments_deferred` on `(claimant_id, attachment_id)` over the deferred rows (the MCP server's per-chunk flag reads it). No message was deferred before it, so every row starts NULL and no reparse is queued. |
 | 8 | `0008_unknown_sent_dates.sql` | Unknown send dates (#1080; see *Message time*): `messages` is rebuilt with a nullable `sent_at`, `sent_at_status` (`parsed` / `missing` / `invalid`, NULL until assessed) and `first_indexed_at`, and `effective_at` becomes `COALESCE(occurred_at, sent_at, first_indexed_at)`. Every existing value is kept, the participant rows are copied aside and back in the same transaction, and the migration queues a reparse, which stores an unknown date as NULL and moves the old fallback to `first_indexed_at` without embedding calls. Until the reparse reaches a message without a delivery date, a date bound counts it as indeterminate. |

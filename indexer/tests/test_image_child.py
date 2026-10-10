@@ -25,9 +25,11 @@ import pytest
 from PIL import Image, ImageDraw
 from src import extractors
 from src.extractors import (
+    IMAGE_PIXEL_CEILING_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
+    STATUS_UNSUPPORTED,
     _runner,
     extract,
     image,
@@ -336,6 +338,359 @@ class TestProgressFramesInProcess:
         assert events == ["ocr", "progress"] * 3
 
 
+def _jpeg(
+    size: tuple[int, int],
+    *,
+    mode: str = "RGB",
+    orientation: int | None = None,
+    progressive: bool = False,
+) -> bytes:
+    buf = io.BytesIO()
+    kwargs: dict = {"progressive": progressive}
+    if orientation is not None:
+        exif = Image.Exif()
+        exif[0x0112] = orientation
+        kwargs["exif"] = exif.tobytes()
+    Image.new(mode, size, "white" if mode == "RGB" else None).save(buf, format="JPEG", **kwargs)
+    return buf.getvalue()
+
+
+def _header_only(kind: str, size: tuple[int, int]) -> bytes:
+    """A small PNG or JPEG whose header declares ``size``: Pillow reads
+    the size from the header (PNG ``IHDR``, JPEG ``SOF0``) before any
+    pixel, so a refusal from the header needs no large payload."""
+    import struct
+    import zlib
+
+    width, height = size
+    if kind == "png":
+
+        def chunk(kind: bytes, body: bytes) -> bytes:
+            crc = struct.pack(">I", zlib.crc32(kind + body))
+            return struct.pack(">I", len(body)) + kind + body + crc
+
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(b""))
+            + chunk(b"IEND", b"")
+        )
+    data = bytearray(_jpeg((16, 16), mode="L"))
+    sof = data.index(b"\xff\xc0")
+    data[sof + 5 : sof + 9] = struct.pack(">HH", height, width)
+    return bytes(data)
+
+
+def _mpo(size: tuple[int, int], pictures: int = 2) -> bytes:
+    frames = [Image.new("RGB", size, "white") for _ in range(pictures)]
+    buf = io.BytesIO()
+    frames[0].save(buf, format="MPO", save_all=True, append_images=frames[1:])
+    return buf.getvalue()
+
+
+def _frames(payload: bytes, max_pages: str = "20") -> tuple[str, list[str], list[tuple]]:
+    """Run the child's extraction in process with Tesseract stubbed;
+    returns the text, the caps and each OCR'd frame's size and mode."""
+    seen: list[tuple] = []
+
+    def ocr(frame, **_kwargs):
+        seen.append((frame.size, frame.mode))
+        return "text"
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(image_child.pytesseract, "image_to_string", ocr)
+        text, caps = image_child.extract_text(payload, max_pages, "0")
+    return text, caps, seen
+
+
+# A small ceiling for the tests: 100 x 100 pixels.
+_CEILING = 10_000
+
+
+class TestPixelCeiling:
+    """#1401: the image child's own pixel ceiling. At or under it, full
+    resolution as before; over it, a JPEG or MPO is decoded at the
+    smallest ``draft`` factor up to ``MAX_DRAFT_FACTOR`` that fits, and
+    anything else is ``unsupported`` under a permanent error. The global
+    cap is the cap of every other PIL consumer and is left as it was."""
+
+    @pytest.fixture(autouse=True)
+    def _ceiling(self, monkeypatch):
+        monkeypatch.setattr(image_child, "CHILD_MAX_IMAGE_PIXELS", _CEILING)
+        extractors.drain_extractor_counts()
+        extractors.reset_attempt()
+
+    @pytest.mark.parametrize(
+        ("payload", "size"),
+        [
+            (_jpeg((100, 100)), (100, 100)),
+            (_jpeg((10_000, 1)), (10_000, 1)),
+            (_png((100, 100)), (100, 100)),
+            (_tiff(1, (50, 200)), (50, 200)),
+        ],
+        ids=["jpeg-at", "jpeg-thin-at", "png-at", "tiff-at"],
+    )
+    def test_at_the_ceiling_the_image_is_read_at_full_resolution(self, payload, size):
+        text, caps, seen = _frames(payload)
+        assert (text, caps, [s for s, _ in seen]) == ("text", [], [size])
+        assert extractors.child_degradation() == {}
+
+    @pytest.mark.parametrize(
+        ("size", "max_factor", "factor", "decoded"),
+        [
+            ((101, 100), 2, 2, (51, 50)),
+            ((200, 200), 2, 2, (100, 100)),
+            ((201, 200), 8, 4, (51, 50)),
+            ((800, 800), 8, 8, (100, 100)),
+            ((19_999, 2), 8, 2, (10_000, 1)),
+        ],
+    )
+    def test_a_jpeg_over_it_is_drafted_at_the_smallest_factor_that_fits(
+        self, size, max_factor, factor, decoded, monkeypatch
+    ):
+        monkeypatch.setattr(image_child, "MAX_DRAFT_FACTOR", max_factor)
+        from PIL import ImageFile
+
+        decodes: list[tuple[int, int]] = []
+        real_load = ImageFile.ImageFile.load
+
+        def counting_load(self):
+            decodes.append(self.size)
+            return real_load(self)
+
+        monkeypatch.setattr(ImageFile.ImageFile, "load", counting_load)
+        text, caps, seen = _frames(_jpeg(size))
+        assert (text, caps, [s for s, _ in seen]) == ("text", [], [decoded])
+        # Nothing was decoded at full size.
+        assert size not in decodes
+        assert extractors.child_degradation() == {extractors.CHILD_IMAGE_SCALE_FACTOR: factor}
+
+    @pytest.mark.parametrize(
+        ("orientation", "progressive", "mode", "decoded", "ocr_mode"),
+        [
+            (6, False, "RGB", (50, 100), "RGB"),
+            (8, True, "RGB", (50, 100), "RGB"),
+            (None, True, "L", (100, 50), "L"),
+            (None, False, "CMYK", (100, 50), "RGB"),
+        ],
+        ids=["rotated", "rotated-progressive", "progressive-gray", "cmyk"],
+    )
+    def test_the_draft_comes_before_rotation_and_conversion(
+        self, orientation, progressive, mode, decoded, ocr_mode
+    ):
+        payload = _jpeg((200, 100), mode=mode, orientation=orientation, progressive=progressive)
+        text, caps, seen = _frames(payload)
+        assert (text, caps, seen) == ("text", [], [(decoded, ocr_mode)])
+        assert extractors.child_degradation()[extractors.CHILD_IMAGE_SCALE_FACTOR] == 2
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            _jpeg((201, 200)),
+            _png((101, 100)),
+            _png((101, 100), "RGBA"),
+            _tiff(1, (101, 100)),
+        ],
+        ids=["jpeg-past-the-factor", "png", "png-rgba", "tiff"],
+    )
+    def test_anything_else_over_it_is_refused_before_any_decode(self, payload, monkeypatch):
+        monkeypatch.setattr(
+            image_child.pytesseract, "image_to_string", lambda *_a, **_k: pytest.fail("OCR'd")
+        )
+        loads: list[int] = []
+        monkeypatch.setattr(image_child.ImageOps, "exif_transpose", lambda *_a: loads.append(1))
+        with pytest.raises(image.ImagePixelCeilingError):
+            image_child.extract_text(payload, "20", "0")
+        assert loads == []
+
+    def test_a_heic_over_it_is_refused(self, monkeypatch):
+        from tests.test_extractors import _heic
+
+        with pytest.raises(image.ImagePixelCeilingError):
+            image_child.extract_text(_heic((101, 100)), "20", "0")
+
+    @pytest.mark.parametrize(
+        "side",
+        # The header limit is the ceiling times the largest factor
+        # squared (2 x 2): Pillow's promoted warning above it, its hard
+        # error above twice it.
+        [int((1.5 * 4 * _CEILING) ** 0.5), int((3 * 4 * _CEILING) ** 0.5)],
+        ids=["bomb-warning", "bomb-error"],
+    )
+    def test_pillows_bomb_exceptions_become_the_ceiling_error_without_their_text(
+        self, side, caplog
+    ):
+        caplog.set_level("DEBUG")
+        for payload in (_jpeg((side, side)), _png((side, side), "L")):
+            with pytest.raises(image.ImagePixelCeilingError) as raised:
+                image_child.extract_text(payload, "20", "0")
+            assert raised.value.__cause__ is None
+            assert raised.value.__suppress_context__
+            assert "pixels" not in str(raised.value)
+
+    def test_a_later_tiff_frame_over_it_is_refused(self, monkeypatch):
+        frames = [Image.new("L", (50, 50), 255), Image.new("L", (300, 300), 255)]
+        buf = io.BytesIO()
+        frames[0].save(buf, format="TIFF", save_all=True, append_images=frames[1:])
+        monkeypatch.setattr(image_child.pytesseract, "image_to_string", lambda *_a, **_k: "p")
+        with pytest.raises(image.ImagePixelCeilingError):
+            image_child.extract_text(buf.getvalue(), "20", "0")
+
+    def test_a_jpeg_too_thin_to_scale_is_refused(self, monkeypatch):
+        """One pixel high: ``draft`` keeps the full size, which the
+        returned-size check catches."""
+        monkeypatch.setattr(
+            image_child.pytesseract, "image_to_string", lambda *_a, **_k: pytest.fail("OCR'd")
+        )
+        with pytest.raises(image.ImagePixelCeilingError):
+            image_child.extract_text(_jpeg((20_001, 1)), "20", "0")
+
+    @pytest.mark.parametrize("returned", ["none", "wrong-size"])
+    def test_a_draft_that_does_not_scale_is_refused(self, returned, monkeypatch):
+        from PIL import JpegImagePlugin
+
+        def draft(self, mode, size):
+            if returned == "none":
+                return None
+            return self.mode, (0, 0, self.size[0], self.size[1])
+
+        monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft", draft)
+        monkeypatch.setattr(
+            image_child.pytesseract, "image_to_string", lambda *_a, **_k: pytest.fail("OCR'd")
+        )
+        with pytest.raises(image.ImagePixelCeilingError):
+            image_child.extract_text(_jpeg((150, 150)), "20", "0")
+
+    @pytest.mark.parametrize("payload", [_jpeg((150, 150)), _png((101, 100)), _png((900, 900))])
+    def test_pillows_global_limit_is_restored(self, payload, monkeypatch):
+        monkeypatch.setattr(image_child.pytesseract, "image_to_string", lambda *_a, **_k: "p")
+        before = Image.MAX_IMAGE_PIXELS
+        try:
+            image_child.extract_text(payload, "20", "0")
+        except image.ImagePixelCeilingError:
+            pass
+        assert Image.MAX_IMAGE_PIXELS == before == extractors.GLOBAL_MAX_IMAGE_PIXELS
+
+
+def test_the_child_ceiling_is_not_the_global_cap():
+    """The child's ceiling is its own constant; the global cap of every
+    other PIL consumer is unchanged (#1401)."""
+    assert extractors.GLOBAL_MAX_IMAGE_PIXELS == 30_000_000
+    assert image.CHILD_MAX_IMAGE_PIXELS == image_child.CHILD_MAX_IMAGE_PIXELS
+    assert image.MAX_DRAFT_FACTOR == image_child.MAX_DRAFT_FACTOR
+    assert image.MAX_DRAFT_FACTOR in (1, 2, 4, 8)
+
+
+class TestMultiPictureJpeg:
+    """#1401: an MPO is read from its primary picture only; when its
+    header lists more than one, ``mpo_frames`` reports the omission."""
+
+    def test_only_the_primary_picture_is_read_and_the_rest_reported(self):
+        text, caps, seen = _frames(_mpo((40, 30), pictures=3))
+        assert (text, caps, seen) == ("text", [image.CAP_MPO_FRAMES], [((40, 30), "RGB")])
+
+    def test_a_plain_jpeg_reports_nothing(self):
+        assert _frames(_jpeg((40, 30)))[1] == []
+
+    def test_an_mpo_over_the_ceiling_is_drafted_and_reported(self, monkeypatch):
+        monkeypatch.setattr(image_child, "CHILD_MAX_IMAGE_PIXELS", _CEILING)
+        extractors.reset_attempt()
+        text, caps, seen = _frames(_mpo((200, 200)))
+        assert (text, caps, seen) == ("text", [image.CAP_MPO_FRAMES], [((100, 100), "RGB")])
+        assert extractors.child_degradation()[extractors.CHILD_IMAGE_SCALE_FACTOR] == 2
+
+    def test_the_mpo_cap_is_logged_as_an_extractor_cap(self, monkeypatch, caplog):
+        caplog.set_level("DEBUG")
+        extractors.drain_extractor_counts()
+        monkeypatch.setattr(image_child.pytesseract, "image_to_string", lambda *_a, **_k: MARKER)
+        result = extract(
+            content_type="image/jpeg", filename=f"{MARKER}.jpg", payload=_mpo((40, 30))
+        )
+        assert (result.status, result.text, result.text_complete) == (STATUS_SUCCESS, MARKER, False)
+        [line] = [r for r in caplog.records if "extractor cap mpo_frames" in r.getMessage()]
+        assert (line.levelno, line.getMessage()) == (
+            logging.WARNING,
+            "extractor cap mpo_frames: image OCR read the primary picture of a "
+            "multi-picture file only",
+        )
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
+        assert MARKER not in caplog.text
+
+
+class TestScaleDownIsVisible:
+    """#1401: a scale-down crosses the protocol as an allowlisted count,
+    is an extractor cap in the parent (a rate-limited WARNING with the
+    factor, ``text_complete`` false), and the text it read is logged at
+    INFO with its count."""
+
+    @pytest.fixture(autouse=True)
+    def _ceiling(self, monkeypatch):
+        monkeypatch.setattr(image_child, "CHILD_MAX_IMAGE_PIXELS", _CEILING)
+        extractors.drain_extractor_counts()
+
+    def test_the_factor_is_logged_counted_and_marks_the_text_incomplete(self, monkeypatch, caplog):
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(image_child.pytesseract, "image_to_string", lambda *_a, **_k: MARKER)
+        result = extract(
+            content_type="image/jpeg", filename=f"{MARKER}.jpg", payload=_jpeg((150, 150))
+        )
+        assert (result.status, result.text, result.text_complete) == (STATUS_SUCCESS, MARKER, False)
+        assert result.extractor == "image-ocr@6"
+        lines = [
+            (r.levelno, r.getMessage()) for r in caplog.records if r.name.startswith("indexer")
+        ]
+        assert (
+            logging.WARNING,
+            "extractor cap image_pixel_ceiling: image decoded at 1/2 scale (lossy) to fit the pixel ceiling",
+        ) in lines
+        assert (logging.INFO, f"image OCR at 1/2 scale read {len(MARKER)} chars") in lines
+        assert not [line for line in lines if "degraded in the child" in line[1]]
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
+        assert MARKER not in caplog.text
+        # The ceiling is hardcoded, not a setting (#1418): it records no
+        # configured cap value, and a change to it is a version bump.
+        assert (result.ocr_pages_cap, result.digital_pages_cap, result.extracted_chars_cap) == (
+            0,
+            None,
+            0,
+        )
+
+    def test_a_scale_down_that_read_nothing_logs_no_outcome_line(self, monkeypatch, caplog):
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(image_child.pytesseract, "image_to_string", lambda *_a, **_k: " ")
+        result = extract(content_type="image/jpeg", filename="a.jpg", payload=_jpeg((150, 150)))
+        assert (result.status, result.text_complete) == (STATUS_EMPTY, False)
+        assert "1/2 scale (lossy) to fit" in caplog.text
+        assert "scale read" not in caplog.text
+
+    def test_the_factor_frame_is_accepted_from_the_child(self, monkeypatch, caplog):
+        caplog.set_level("DEBUG")
+        stub_child_output(monkeypatch, b"N image_scale_factor 4\nT 4\ntext")
+        result = _extract(_tiff(1))
+        assert (result.status, result.text, result.text_complete) == (STATUS_SUCCESS, "text", False)
+        assert "image decoded at 1/4 scale (lossy) to fit the pixel ceiling" in caplog.text
+        assert "image OCR at 1/4 scale read 4 chars" in caplog.text
+
+    @pytest.mark.parametrize(
+        "payload",
+        [_png((101, 100)), _jpeg((201, 200))],
+        ids=["png", "jpeg-past-the-factor"],
+    )
+    def test_an_image_over_the_ceiling_is_unsupported_for_good(self, payload, caplog):
+        caplog.set_level("DEBUG")
+        result = extract(content_type="image/png", filename=f"{MARKER}.png", payload=payload)
+        assert (result.status, result.error, result.text) == (
+            STATUS_UNSUPPORTED,
+            IMAGE_PIXEL_CEILING_ERROR,
+            None,
+        )
+        assert result.extractor == "image@6"
+        assert IMAGE_PIXEL_CEILING_ERROR in extractors.PERMANENT_FAILURE_ERRORS
+        assert "decompression bomb" not in caplog.text
+        assert MARKER not in caplog.text
+
+
 class TestModesPillowCannotSaveAsPng:
     """``pytesseract`` saves a frame as PNG before running Tesseract, and
     Pillow cannot write some modes as PNG (a CMYK JPEG failed with
@@ -442,38 +797,66 @@ class TestModesPillowCannotSaveAsPng:
 
 @real_child
 class TestRealChild:
-    def test_a_decompression_bomb_is_failed_before_any_page_is_read(self, caplog):
-        """Over twice the pixel cap (set by the package import in the
-        child too): rejected from the header, no page OCR'd."""
+    @pytest.mark.parametrize(
+        ("kind", "pixels"),
+        [
+            # Over twice the header limit: Pillow's hard error.
+            ("png", 2 * 4 * image.CHILD_MAX_IMAGE_PIXELS + 10_000),
+            ("jpeg", 2 * 4 * image.CHILD_MAX_IMAGE_PIXELS + 10_000),
+            # Between the header limit and twice it: the promoted warning.
+            ("jpeg", int(1.5 * 4 * image.CHILD_MAX_IMAGE_PIXELS)),
+            # Over the ceiling, inside the header limit: the child's own
+            # check (not a JPEG, so no scale-down).
+            ("png", int(1.5 * image.CHILD_MAX_IMAGE_PIXELS)),
+        ],
+        ids=["bomb-error", "jpeg-bomb-error", "jpeg-bomb-warning", "png-over-ceiling"],
+    )
+    def test_an_image_past_the_ceiling_is_unsupported_before_any_page_is_read(
+        self, kind, pixels, caplog
+    ):
+        """In the real child, with its real ceiling (#1401): refused from
+        the header, no page OCR'd, recorded ``unsupported`` for good."""
         caplog.set_level("DEBUG")
+        assert image.MAX_DRAFT_FACTOR == 2
         pages: list[int] = []
-        side = int((2 * extractors.GLOBAL_MAX_IMAGE_PIXELS) ** 0.5) + 100
+        side = int(pixels**0.5) + 1
+        # Only the header carries the size: the payload stays small.
+        payload = _header_only(kind, (side, side))
         result = extract(
-            content_type="image/png",
-            filename=f"{MARKER}.png",
-            payload=_png((side, side), "L"),
+            content_type=f"image/{kind}",
+            filename=f"{MARKER}.{kind}",
+            payload=payload,
             on_progress=lambda: pages.append(1),
         )
         assert (result.status, result.error, result.text) == (
-            STATUS_FAILED,
-            "DecompressionBombError",
+            STATUS_UNSUPPORTED,
+            IMAGE_PIXEL_CEILING_ERROR,
             None,
         )
-        assert result.extractor == "image@4"
+        assert result.extractor == "image@6"
         assert pages == []
         assert MARKER not in caplog.text
+        assert "decompression bomb" not in caplog.text
 
-    def test_the_warning_band_is_failed_before_any_page_is_read(self):
-        pages: list[int] = []
-        side = int((1.5 * extractors.GLOBAL_MAX_IMAGE_PIXELS) ** 0.5)
-        result = extract(
-            content_type="image/png",
-            filename="a.png",
-            payload=_png((side, side), "L"),
-            on_progress=lambda: pages.append(1),
-        )
-        assert (result.status, result.error) == (STATUS_FAILED, "DecompressionBombWarning")
-        assert pages == []
+    @requires_tesseract
+    def test_a_jpeg_over_the_ceiling_is_read_at_half_scale(self, caplog):
+        """A real JPEG over the real ceiling, through the real child and
+        Tesseract: decoded at 1/2 scale, its text read and the scale-down
+        reported."""
+        caplog.set_level("DEBUG")
+        extractors.drain_extractor_counts()
+        width = 8000
+        height = image.CHILD_MAX_IMAGE_PIXELS // width + 200
+        img = Image.new("L", (width, height), 255)
+        ImageDraw.Draw(img).text((200, 200), "SYNTHETICHALFSCALE 4242", fill=0, font_size=160)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        result = extract(content_type="image/jpeg", filename="a.jpg", payload=buf.getvalue())
+        assert result.status == STATUS_SUCCESS
+        assert "SYNTHETICHALFSCALE" in (result.text or "").replace(" ", "")
+        assert result.text_complete is False
+        assert "image decoded at 1/2 scale (lossy) to fit the pixel ceiling" in caplog.text
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
 
     @requires_tesseract
     def test_pages_are_ocrd_with_progress_and_the_cap_reported(self, caplog):
@@ -482,7 +865,7 @@ class TestRealChild:
         pages: list[int] = []
         result = _extract(_tiff(4), max_ocr_pages=2, on_progress=lambda: pages.append(1))
         assert result.status in (STATUS_SUCCESS, STATUS_EMPTY)
-        assert result.extractor == "image-ocr@4"
+        assert result.extractor == "image-ocr@6"
         assert result.text_complete is False
         assert len(pages) == 2
         assert extractors.drain_extractor_counts()["ocr_capped_images"] == 1

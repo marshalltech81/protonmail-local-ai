@@ -2251,7 +2251,7 @@ unread.
 | `success` | the stored text | null |
 | `empty` | `""` | null |
 | `failed` | null | `extraction failed` (the stored error is never returned) |
-| `unsupported` | null | `no extractor could read this file: its type has no extractor, the extractor is missing from this image, or it declined the file (for example an encrypted PDF or a work cap)`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` |
+| `unsupported` | null | `no extractor could read this file: its type has no extractor, the extractor is missing from this image, or it declined the file (for example an encrypted PDF or a work cap)`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` (since #1415 a PDF sent under an image label is extracted as a PDF instead) |
 | `too_large` | null | the file is over the indexer's attachment size limit |
 | `deferred` | null | the indexer deferred this attachment's extraction to a later pass (its per-message extraction budget was reached); its text is not indexed yet |
 | none recorded | null | no extraction is recorded yet (not run yet, or extraction off) |

@@ -4483,7 +4483,7 @@ class TestRequeueOcrDisabledExtractions:
         extractor = MagicMock(
             return_value=ExtractionResult(
                 status=STATUS_SUCCESS,
-                extractor="image-ocr@4",
+                extractor="image-ocr@6",
                 text="scanned words",
                 error=None,
                 text_complete=True,
@@ -4657,7 +4657,7 @@ class TestRequeueNewlyDispatchedExtensions:
         extractor = MagicMock(
             return_value=ExtractionResult(
                 status=STATUS_SUCCESS,
-                extractor="image-ocr@4",
+                extractor="image-ocr@6",
                 text="photo words",
                 error=None,
                 text_complete=True,

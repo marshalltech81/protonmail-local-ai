@@ -716,14 +716,18 @@ class TestContinuation:
         assert p.deferred() == 0
         assert sorted(extractor.calls) == sorted(b for b, _, _ in _parts("lost", 4))
 
-    @pytest.mark.parametrize("refresh", ["too_large", "ocr_disabled", "no_extractor", "unrecorded"])
+    @pytest.mark.parametrize(
+        "refresh",
+        ["too_large", "ocr_disabled", "ocr_disabled_ocr_off", "no_extractor", "unrecorded"],
+    )
     def test_a_refresh_reaches_a_queued_continuation(self, tmp_path, monkeypatch, refresh):
         """Owner decision 2026-10-09 (round 8 rework): an occurrence of a
         refresh class on a message mid-continuation has its completeness
         cleared by the startup sweep, so the continuation re-extracts it,
         while a resolved occurrence beside it whose failed row merely
         expired is not touched. The queue row and the deferral marks stay
-        exactly as they were."""
+        exactly as they were. An unstamped "OCR disabled" row is a refresh
+        class with OCR off too (#1415)."""
         from src.extractors import (
             NO_EXTRACTOR_ERROR,
             OCR_DISABLED_ERROR,
@@ -745,6 +749,7 @@ class TestContinuation:
                 status, error = {
                     "too_large": (STATUS_TOO_LARGE, "cap"),
                     "ocr_disabled": (STATUS_UNSUPPORTED, OCR_DISABLED_ERROR),
+                    "ocr_disabled_ocr_off": (STATUS_UNSUPPORTED, OCR_DISABLED_ERROR),
                     "no_extractor": (STATUS_UNSUPPORTED, NO_EXTRACTOR_ERROR),
                 }[refresh]
                 return ExtractionResult(status=status, extractor=None, text=None, error=error)
@@ -752,6 +757,7 @@ class TestContinuation:
 
         p = Pipeline(tmp_path, monkeypatch, extractor, launches=2)
         monkeypatch.setattr(attachment_indexing, "extract_attachment", first_result)
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", refresh != "ocr_disabled_ocr_off")
         path = p.add(f"refresh-{refresh}", parts, reason=REASON_REPARSE)
         p.drain()
         assert p.deferred() == 2

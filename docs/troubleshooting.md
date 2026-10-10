@@ -1360,21 +1360,50 @@ Queue and maintenance (all INFO unless noted):
   (counted apart from the attachment WARNINGs, so they never make the
   attachments line a WARNING). `queue heartbeat failed: <type>`
   (WARNING) if the counts could not be read.
-- `re-queued <n> message(s) (<n> for a missing text-completeness
+- `re-queued <n> of <n> message(s) (<n> for a missing text-completeness
   record) whose attachments were extracted by an older extractor
-  version (...); skipped <n> dead-lettered (run make requeue-dead to
-  refresh them).`, at startup after an extractor change, after OCR is
-  turned on with OCR rows cached before schema v6, or for a message
+  version (...); <n> already pending, skipped <n> dead-lettered (run
+  make requeue-dead to refresh them).`, at startup when the sweep found
+  messages to refresh: after an extractor change, after OCR is
+  turned on with OCR rows cached before schema v6, for an image "OCR
+  disabled" row recorded with no stamp, whatever the OCR setting
+  (#1415), or for a message
   whose deferred attachment extraction has no job left (attachment
   extraction was switched off while it was being continued; #1236).
-  WARNING when any
+  The second number counts the messages found, once each; the already
+  pending ones keep their queued job. WARNING when any
   dead-lettered message was skipped: those keep their old attachment
   text until you run `make requeue-dead`.
+- `cap refresh sweep (INDEXER_OCR_MAX_PAGES=<n>
+  INDEXER_PDF_MAX_DIGITAL_PAGES=<n>
+  INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS=<n>): <n> message(s) with an
+  attachment result a since-raised limit cut, <n> with one cached before
+  the cap record that lost text (bootstrap, once); re-queued <n>, already
+  queued <n>, skipped <n> dead-lettered (run make requeue-dead to refresh
+  them).` (INFO), at startup when a cached attachment result was cut by
+  one of these limits and you have since raised it (or set
+  `INDEXER_PDF_MAX_DIGITAL_PAGES` or
+  `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` to `0`, no limit), #1418.
+  Each cached result records the limit that cut it, so every message
+  using it is re-queued once and the drain extracts it again with the
+  new limit; lowering a limit re-queues nothing, and while OCR is off a
+  PDF or image result OCR produced, or that OCR pages cut or skipped, is
+  kept until OCR is on. The bootstrap count is the one-time pass
+  over results cached before schema v11 that lost text: they carry no
+  record of which limit cut them, so each is extracted once, which
+  records it. Already queued messages pick the refresh up on their own
+  pass; dead-lettered ones keep their old text until `make
+  requeue-dead`. Raising `INDEXER_OCR_MAX_PAGES` lengthens the worst
+  case of each scanned PDF: up to `INDEXER_OCR_MAX_PAGES` ×
+  `INDEXER_OCR_TIMEOUT_SECONDS` of OCR plus its render, so keep
+  `INDEXER_MESSAGE_TIMEOUT_SECONDS` (the stall guard, per attachment)
+  above that, or the indexer restarts mid-extraction.
 - `cleared attachment text completeness on <n> occurrence(s) due a
   refresh; each is unknown until its message is processed again.`, at
   startup when the sweep found occurrences to refresh (a result with no
   extractor whose label now has one, a `too_large` result that now fits,
-  an "OCR disabled" result once OCR is on, a cached result with no
+  an "OCR disabled" result once OCR is on, an unstamped image one
+  whatever the OCR setting, a cached result with no
   completeness record), so a message mid-continuation picks them up
   (#1236).
 - `cleared attachment text completeness on <n> occurrence(s) extracted
@@ -1622,12 +1651,10 @@ only, never filenames or text (`make logs`):
   `XLRDError`, ...), and one that needs more than its 512 MiB is
   `MemoryError` (#1291).
   An image is decoded and OCR'd in a child process (#1292): a
-  decompression bomb is `DecompressionBombError` (or
-  `DecompressionBombWarning` between the pixel cap and twice it), a
-  Tesseract failure `TesseractError` and a Tesseract timeout
+  Tesseract failure is `TesseractError` and a Tesseract timeout
   `RuntimeError` (an image in a mode Pillow cannot write as PNG, such as
   CMYK, is converted to RGB first, #1400); an image whose decode or Tesseract needs more than
-  the child's 1 GiB is `MemoryError` or `TesseractError`, and one that
+  the child's 1,605 MiB is `MemoryError` or `TesseractError`, and one that
   runs past the child's CPU or wall-clock limit `ToolCrashError` or
   `ToolTimeoutError` (limits in `docs/architecture.md`, "Image
   extraction runs in the extractor child").
@@ -1670,16 +1697,16 @@ only, never filenames or text (`make logs`):
   PDF had more pages without a text layer than `INDEXER_OCR_MAX_PAGES`;
   the pages past the cap are not read. Every capped PDF is also counted
   in the attachments line below (`ocr_capped_pdfs`, `ocr_pages_skipped`).
-  Raising the cap applies only to PDFs extracted afterwards, since the
-  result is cached. The cached result keeps the number of pages the cap
-  skipped (#891), so a later message carrying the same PDF, served from
-  the cache, logs `pdf OCR capped: cached result is missing <K> scanned
-  pages` (WARNING, rate limited like the line above) and is counted in
-  `ocr_capped_pdfs` and `ocr_pages_skipped` once its message commits.
-  A PDF cached before schema v3 has no recorded count: it is served as
-  a plain `success`, with no cap line and no count, until the same bytes
-  are extracted again for another reason. Nothing is re-extracted to
-  fill the count in.
+  The cached result records the cap that cut it (#1418), so raising
+  `INDEXER_OCR_MAX_PAGES` re-extracts it: see the `cap refresh sweep`
+  line above. It also keeps the number of pages the cap skipped (#891),
+  so a later message carrying the same PDF, served from the cache, logs
+  `pdf OCR capped: cached result is missing <K> scanned pages` (WARNING,
+  rate limited like the line above) and is counted in `ocr_capped_pdfs`
+  and `ocr_pages_skipped` once its message commits. A PDF cached before
+  schema v3 has no recorded count: it is served with no cap line and no
+  count until it is extracted again (the v11 bootstrap does that once
+  for a result that lost text).
 - `image OCR capped at <N> of at least <N+1> frames` (WARNING): a
   multipage TIFF had more frames than `INDEXER_OCR_MAX_PAGES`; the
   frames past the cap are not read. The indexer looks one frame past
@@ -1689,11 +1716,14 @@ only, never filenames or text (`make logs`):
   frames already read are still indexed. (Before #1292 it named the
   exception type; the type now stays in the extractor child.) Each is
   counted as `ocr_capped_images` in the attachments line below. The
-  same caching applies, but unlike the PDF cap the cached result does
-  not record the image cap: a later message served the cached TIFF
-  reports a plain `success`, with no cap line and no
-  `ocr_capped_images` count, although the cached text still lacks the
-  unread frames (#1201).
+  cached result records the frame cap that cut it (#1418, #1201): a
+  later message served the cached TIFF logs `image OCR capped: cached
+  result stopped at <N> frames` (WARNING, rate limited) and is counted
+  in `ocr_capped_images` once its message commits, and raising
+  `INDEXER_OCR_MAX_PAGES` re-extracts it (the `cap refresh sweep` line
+  above). An image whose next frame could not be read records no cap:
+  a higher limit would only try that frame, so it is neither re-extracted
+  nor counted again from the cache.
 - `extractor eml degraded in the child: <key>=<n> ...` (WARNING, rate
   limited): decoding fallbacks in an attached email's text (#922):
   `eml_headers_degraded` in its headers (an unknown charset, raw 8-bit
@@ -1707,7 +1737,15 @@ only, never filenames or text (`make logs`):
 - `extractor cap <name>: <fixed text and counts>` (WARNING): a cap
   inside an extractor cut the text it returned (#903). Logged once per
   cap per extraction, and counted as `extractor_caps` in the
-  attachments line below. The caps, by name:
+  attachments line below. A result served from the cache that
+  `INDEXER_PDF_MAX_DIGITAL_PAGES` or
+  `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` cut logs the same line
+  (`extractor cap pdf_digital_pages: cached result stopped at <N>
+  pages`, `extractor cap extracted_chars: cached result was cut at <N>
+  chars`) and counts once per occurrence whose message commits (#1418);
+  raising the limit re-extracts it (the `cap refresh sweep` line
+  above). The hardcoded caps below are not refreshed by a setting. The
+  caps, by name:
   - `extracted_chars`: the extracted text was longer than
     `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`; the rest is not stored.
   - `pdf_digital_pages`: the PDF has more pages than
@@ -1732,12 +1770,26 @@ only, never filenames or text (`make logs`):
   - `image_text_chars`: an image's OCR text, stripped of leading and
     trailing whitespace, passed 10,000,000 characters; the text is cut
     there and no later TIFF frame is read (#1292).
+  - `image_pixel_ceiling`: a JPEG over the image child's
+    48,000,000-pixel ceiling was decoded at half scale (`image decoded
+    at 1/2 scale (lossy) to fit the pixel ceiling`); small or
+    low-contrast text can be lost (#1401). When the scaled-down image
+    yields text, an INFO line `image OCR at 1/2 scale read N chars`
+    follows. Other formats over the ceiling, and JPEGs over
+    192,000,000 pixels, are recorded `unsupported` ("image exceeds the
+    pixel ceiling") without a cap line.
+  - `mpo_frames`: a multi-picture JPEG (MPO, such as a phone photo with
+    a second picture) listed more than one picture; only the primary
+    one is OCR'd (#1401).
   - `doc_output_bytes`: catdoc wrote more for a legacy `.doc` than
     four bytes per character of `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`,
     or than 40 MiB when that is larger or disabled (#1308), counted
-    before whitespace is stripped; the rest is not read (#935).
+    before whitespace is stripped; the rest is not read (#935). The line
+    ends `(bound=chars)` when the character setting set the cap, which
+    raising it lifts (#1418), or `(bound=ceiling)` at the 40 MiB
+    ceiling, which no setting lifts.
   - `ppt_output_bytes`: the same cap on the `.ppt` reader's output for a
-    legacy `.ppt` (#957).
+    legacy `.ppt` (#957), with the same `bound=`.
   - `eml_body_structure`: a part of an attached email declared
     `multipart/*` that could not be split into parts (no boundary
     parameter, or a boundary that never appears), so none of its text
@@ -1789,7 +1841,7 @@ only, never filenames or text (`make logs`):
 
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
-  zip, image-pixel and XLSX whole-part caps, the OCR timeout, the
+  zip, image-pixel (the image child's ceiling: `unsupported`) and XLSX whole-part caps, the OCR timeout, the
   legacy-Office tool timeouts and the `.xls` child's and the `.ppt`
   reader's memory and CPU limits); the OCR
   page caps have their own lines above. Like the OCR cap, a cap is reported

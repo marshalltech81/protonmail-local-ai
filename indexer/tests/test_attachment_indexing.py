@@ -324,6 +324,10 @@ def test_stale_row_is_left_to_the_occurrences_that_select_its_module(tmp_path, m
     assert (docx_row["extractor"], docx_row["extracted_text"]) == ("docx", "old text")
 
 
+# The DOCX MIME type: a payload under it runs the ``docx`` module (#1227).
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
 def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
     """Another message's re-extraction of the same bytes ended ``empty`` and
     stamped the row current. This message then gets a plain cache hit on
@@ -345,7 +349,7 @@ def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
     _prepare_and_apply(
-        attachment=_attachment(b"docx bytes", filename="c.docx", content_type="application/msword"),
+        attachment=_attachment(b"docx bytes", filename="c.docx", content_type=_DOCX_MIME),
         claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
@@ -1699,7 +1703,7 @@ class TestLegacyOle2CacheRows:
             )
             self._store_v0_row(db, attachment)
             assert attachment_indexing.reprocess_reruns_extraction(
-                LEGACY_OLE2_ERROR, "", content_type, filename
+                LEGACY_OLE2_ERROR, "", content_type, filename, None
             )
             plan = prepare_attachment_writes(
                 db=db, **_kwargs(attachment, claimant_id="message@example.com")
@@ -2020,7 +2024,7 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
 
     dotx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
     for content_type, filename in ((dotx_mime, "a.bin"), ("application/octet-stream", "a.dotx")):
-        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename)
+        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename, None)
         db = _setup_db_for_attachment(tmp_path / filename)
         attachment = _attachment(out.getvalue(), filename=filename, content_type=content_type)
         db.store_attachment_extraction(
@@ -2064,7 +2068,7 @@ def test_cached_no_extractor_row_for_a_powerpoint_variant_is_re_extracted(tmp_pa
     else:
         payload = _retyped_deck(main_type, _deck(_boxes(fact)))
     for content_type, filename in ((mime, "a.bin"), ("application/octet-stream", f"a{ext}")):
-        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename)
+        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename, None)
         db = _setup_db_for_attachment(tmp_path / filename)
         attachment = _attachment(payload, filename=filename, content_type=content_type)
         db.store_attachment_extraction(
@@ -2157,6 +2161,20 @@ def _ppt_encrypted_case(monkeypatch) -> tuple[bytes, str, str]:
     return _OLE2_MAGIC + b"SYNTHETIC_TEXT_MARKER" + bytes(64), ENCRYPTED_PPT_ERROR, "ppt@2"
 
 
+def _image_ceiling_case(monkeypatch) -> tuple[bytes, str, str]:
+    """A PNG over a lowered image-child pixel ceiling (#1401): no JPEG
+    scale-down applies, so it is ``unsupported``."""
+    import io
+
+    from PIL import Image
+    from src.extractors import IMAGE_PIXEL_CEILING_ERROR, image_child
+
+    monkeypatch.setattr(image_child, "CHILD_MAX_IMAGE_PIXELS", 100)
+    buf = io.BytesIO()
+    Image.new("L", (20, 20), 255).save(buf, format="PNG")
+    return buf.getvalue(), IMAGE_PIXEL_CEILING_ERROR, "image@6"
+
+
 class TestPermanentFailureCacheRows:
     """#931: an encrypted PDF, a PDF over a pypdf limit and a workbook over
     the eager-part budget fail the same way in the same extractor, so they
@@ -2188,6 +2206,7 @@ class TestPermanentFailureCacheRows:
             "docx",
         ),
         "ppt-encrypted": (_ppt_encrypted_case, "application/vnd.ms-powerpoint", "deck.ppt", "ppt"),
+        "image-pixel-ceiling": (_image_ceiling_case, "image/png", "photo.png", "image"),
     }
 
     def test_every_permanent_error_has_a_case(self, monkeypatch):
@@ -2327,6 +2346,7 @@ class TestPermanentFailureCacheRows:
             ("xlsx-eager-budget", "xlsx@5", "XlsxEagerPartBudgetError"),
             ("pptx-package-budget", "pptx@2", "PptxPackageBudgetError"),
             ("docx-package-budget", "docx@5", "DocxPackageBudgetError"),
+            ("image-pixel-ceiling", "image@5", "DecompressionBombWarning"),
         ],
     )
     def test_stale_failed_row_is_refreshed_to_unsupported_once(
@@ -2421,7 +2441,7 @@ class TestPermanentFailureCacheRows:
 
         build, content_type, filename, module = self._CASES[case]
         _, error, _ = build(monkeypatch)
-        assert not reprocess_reruns_extraction(error, module, content_type, filename)
+        assert not reprocess_reruns_extraction(error, module, content_type, filename, None)
 
     def test_a_later_extractor_version_still_refreshes_the_row(self, tmp_path, monkeypatch):
         """The row carries the extractor stamp, so a version bump (for
@@ -2700,7 +2720,7 @@ def test_cached_no_extractor_row_for_a_ppt_is_re_extracted(tmp_path, monkeypatch
     payload = _OLE2 + b"synthetic deck bytes"
     for content_type, filename in ((_PPT_MIME, "a.bin"), ("application/octet-stream", "a.ppt")):
         # The row an earlier release wrote is the '' module's (#928).
-        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename)
+        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename, None)
         seen = _stub_ppt_reader(monkeypatch, tmp_path / filename, b"SYNTHETIC_PPT_FACT")
         db = _setup_db_for_attachment(tmp_path / filename)
         attachment = _attachment(payload, filename=filename, content_type=content_type)
@@ -2994,7 +3014,8 @@ class TestOccurrenceTextComplete:
         self, tmp_path, monkeypatch, cached_flag, expected
     ):
         """A row with no record is refreshed instead
-        (``TestUnrecordedCacheRowsAreRefreshedOnce``)."""
+        (``TestUnrecordedCacheRowsAreRefreshedOnce``), as is an incomplete
+        one with no cap record (``TestCapRefresh``, #1418)."""
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment()
         db.store_attachment_extraction(
@@ -3005,6 +3026,7 @@ class TestOccurrenceTextComplete:
             extracted_text=f"{self.MARKER} cached",
             extraction_error=None,
             text_complete=None if cached_flag is None else bool(cached_flag),
+            extracted_chars_cap=0,
         )
         extractor = MagicMock()
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -3052,13 +3074,14 @@ class TestOccurrenceTextComplete:
             attachment_id=attachment.content_hash,
             extractor_module=_module(attachment),
             extraction_status=STATUS_UNSUPPORTED,
-            extractor=None,
+            extractor="image@6",
             extracted_text=None,
             extraction_error="OCR disabled (INDEXER_OCR_ENABLED=false)",
         )
         plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
+        assert plan.cached
         self._apply(db, plan)
-        assert self._row(db, plan) == (0, None)
+        assert self._row(db, plan) == (0, "image@6")
 
     def test_a_payload_a_parse_cap_emptied_is_zero(self, tmp_path, monkeypatch):
         db = _setup_db_for_attachment(tmp_path)
@@ -3187,6 +3210,9 @@ class TestUnrecordedCacheRowsAreRefreshedOnce:
             extracted_text=f"{self.MARKER} cached" if status == STATUS_SUCCESS else None,
             extraction_error=None,
             text_complete=record,
+            # A cap record, as every row written since v11 has: an
+            # incomplete row without one is the cap bootstrap's (#1418).
+            extracted_chars_cap=None if record is None else 0,
         )
 
     @staticmethod
