@@ -99,8 +99,12 @@ def _process_exists(pid: int) -> bool:
     except ProcessLookupError:
         return False
     if sys.platform == "linux":
-        with open(f"/proc/{pid}/stat") as stat:
-            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+        # The process can be reaped between the signal and the read.
+        try:
+            with open(f"/proc/{pid}/stat") as stat:
+                return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
     return True
 
 
@@ -768,6 +772,7 @@ class TestXlsExtractor:
         assert "OBSIDIAN-HERON 8812" in (result.text or "")
 
     @linux_only
+    @pytest.mark.serial
     def test_sst_loop_meets_the_address_space_limit(self, monkeypatch):
         """The shared-string loop runs until the child's address space
         runs out: the child reports MemoryError, a bounded failed row. The parent's

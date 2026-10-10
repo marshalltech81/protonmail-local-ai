@@ -911,6 +911,7 @@ class TestRealChild:
         assert (result.status, result.error) == (STATUS_FAILED, "PdfReadError")
         assert progress == 0
 
+    @pytest.mark.serial
     def test_a_walk_past_the_wall_clock_is_killed_with_its_pages_counted(self, monkeypatch):
         """Pages that each cost about a second of pypdf: the child is
         killed at its wall clock, having read some pages and not all, and
@@ -926,6 +927,7 @@ class TestRealChild:
 
 @real_child
 @linux_only
+@pytest.mark.serial
 class TestLimitsInTheImage:
     """Linux only: the address-space limit is not applied on macOS
     (``_launcher``), and the process checks read ``/proc``."""
