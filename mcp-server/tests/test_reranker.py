@@ -287,3 +287,60 @@ class TestRerankNoRetries:
         assert hits["n"] == 1
         assert "503" in caplog.text
         assert "SYNTHETIC_PRIVATE_MAIL" not in caplog.text
+
+
+class TestRerankRedirects:
+    def test_a_cross_origin_redirect_gets_no_body(self, caplog):
+        # #1357: the SDK follows 307/308 by default, and a redirect
+        # keeps the POST body, so the query and documents would reach
+        # any origin the configured endpoint names. The redirect must
+        # stop at the first origin; the call falls back to no rerank.
+        import logging
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        hits = {"allowed": 0, "other": 0}
+
+        def _serve(name, respond):
+            class _Handler(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    hits[name] += 1
+                    length = int(self.headers.get("Content-Length", "0"))
+                    self.rfile.read(length)
+                    respond(self)
+
+                def log_message(self, *_args):
+                    pass
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            return server
+
+        other = _serve("other", lambda h: (h.send_response(200), h.end_headers()))
+
+        def _redirect(handler):
+            location = f"http://127.0.0.1:{other.server_address[1]}/v2/rerank"
+            handler.send_response(307)
+            handler.send_header("Location", location)
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+
+        allowed = _serve("allowed", _redirect)
+        try:
+            r = CohereReranker(
+                RerankConfig(
+                    base_url=f"http://127.0.0.1:{allowed.server_address[1]}",
+                    model="rerank-v4.0-pro",
+                    api_key="ck-test",  # pragma: allowlist secret
+                    candidates=20,
+                    timeout_secs=5.0,
+                )
+            )
+            with caplog.at_level(logging.DEBUG):
+                assert r.rerank("q", ["SYNTHETIC_PRIVATE_MAIL"], top_n=5) == []
+        finally:
+            for server in (allowed, other):
+                server.shutdown()
+                server.server_close()
+        assert hits == {"allowed": 1, "other": 0}
+        assert "SYNTHETIC_PRIVATE_MAIL" not in caplog.text
