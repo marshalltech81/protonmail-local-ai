@@ -367,11 +367,35 @@ def _indexer_commits(bench, tmp_path, monkeypatch, n: int, batch: int):
     return _commits(statements, tables), tables
 
 
+def _stop_after_batch(db: Path, stop: Path, messages: int):
+    """A started thread that creates ``stop`` once the writer's first
+    batch is complete (``messages`` rows in all, no job left). The
+    writer then waits its hour-long interval, and stops before any
+    commit once ``stop`` exists, so it writes exactly one batch."""
+    import threading
+    import time
+
+    def run() -> None:
+        ready = Path(str(stop) + ".ready")
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if ready.exists():
+                with closing(sqlite3.connect(db, timeout=30)) as conn:
+                    rows = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                    jobs = conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0]
+                if rows == messages and jobs == 0:
+                    break
+            time.sleep(0.01)
+        stop.touch()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
 def _writer_commits(bench, tmp_path, monkeypatch, batch: int, tables: set[str]):
     """The WAL writer's commits for its first batch of ``batch``
     messages, its setup commit left out."""
-    import threading
-    import time
 
     tmp_path.mkdir()
     db = tmp_path / "bench.db"
@@ -387,18 +411,7 @@ def _writer_commits(bench, tmp_path, monkeypatch, batch: int, tables: set[str]):
     monkeypatch.setattr(bench.sqlite3, "connect", traced)
     stop = tmp_path / "stop"
 
-    def stop_after_ready() -> None:
-        # The writer checks for ``stop`` between batches and then waits
-        # its hour-long interval, so it writes exactly one batch.
-        ready = Path(str(stop) + ".ready")
-        deadline = time.monotonic() + 120
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        time.sleep(0.3)
-        stop.touch()
-
-    timer = threading.Thread(target=stop_after_ready)
-    timer.start()
+    timer = _stop_after_batch(db, stop, 8 + batch)
     bench.phase_writer(str(db), str(stop), batch, 3600.0, shape=_SHAPE)
     timer.join()
     assert "PRAGMA secure_delete = ON" in statements
@@ -579,19 +592,7 @@ def test_wal_writer_writes_the_rows_the_indexer_writes(bench, tmp_path, monkeypa
 
     monkeypatch.setattr(bench.sqlite3, "connect", traced_connect)
     stop = tmp_path / "stop"
-    import threading
-    import time
-
-    def stop_after_ready() -> None:
-        ready = Path(str(stop) + ".ready")
-        deadline = time.monotonic() + 120
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        time.sleep(0.3)
-        stop.touch()
-
-    timer = threading.Thread(target=stop_after_ready)
-    timer.start()
+    timer = _stop_after_batch(ours_db, stop, 4)
     shape = {**_SHAPE, "identity": identity, "records": records, "references": references}
     bench.phase_writer(str(ours_db), str(stop), 4, 3600.0, shape=shape)
     timer.join()

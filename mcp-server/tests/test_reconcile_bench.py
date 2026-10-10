@@ -1059,7 +1059,7 @@ def test_writer_indexes_each_batch_into_trash(bench, tmp_path):
     with closing(sqlite3.connect(db)) as conn:
         before = [conn.execute(sql, params).fetchone()[0] for sql, params in counts]
     stop = tmp_path / "stop"
-    timer = _stop_after_ready(stop, 0.3)
+    timer = _stop_after_batch(db, stop, 11)
     out = bench.phase_writer(str(db), str(stop), 3, 3600.0, shape={"per_message": 1})
     timer.join()
     # Per message: enqueue, charge, phase 1, refund, charge, refund,
@@ -1090,7 +1090,7 @@ def test_writer_stores_the_extraction_stress_text_as_build_does(bench, tmp_path)
     db = tmp_path / "stress.db"
     bench.build(db, 8, 1, "typical", "typical", extracted_chars=5)
     stop = tmp_path / "stop"
-    timer = _stop_after_ready(stop, 0.3)
+    timer = _stop_after_batch(db, stop, 9)
     shape = {"per_message": 1, "extracted_chars": 5}
     bench.phase_writer(str(db), str(stop), 1, 3600.0, shape=shape)
     timer.join()
@@ -1099,6 +1099,39 @@ def test_writer_stores_the_extraction_stress_text_as_build_does(bench, tmp_path)
         kinds = [r[0] for r in conn.execute("SELECT kind FROM message_chunks WHERE rowid > 8")]
     assert texts == {bench._WIDE * 5}
     assert kinds == ["body"]
+
+
+def test_writer_stops_mid_batch_once_stop_appears(bench, tmp_path):
+    # The round is over once ``stop`` exists, so the writer makes no
+    # further commit: a long batch is not left to run into run_wal's
+    # shutdown timeout.
+    db = tmp_path / "long.db"
+    bench.build(db, 8, 1, "typical", "typical")
+    stop = tmp_path / "stop"
+    timer = _stop_after_ready(stop, 0.2)
+    started = time.monotonic()
+    out = bench.phase_writer(str(db), str(stop), 1000, 0.0, shape={"per_message": 1})
+    timer.join()
+    assert time.monotonic() - started < 30
+    assert 0 < out["commits"] < 8 * 1000 + 1
+    assert len(out["commit_times"]) == out["commits"] + 1
+
+
+def test_a_writer_that_fails_before_it_is_ready_fails_the_measurement(bench, tmp_path):
+    # A ``threads`` table without the indexer's columns: the writer's
+    # setup fails, and run_wal says so as soon as the writer exits.
+    db = tmp_path / "unready.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    with closing(sqlite3.connect(db)) as conn:
+        conn.execute("CREATE TABLE threads (x)")
+        conn.commit()
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"hashes": ""}))
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="did not get ready"):
+        bench.run_wal(str(db), "messages", 5, str(request), 1, 0.0)
+    assert time.monotonic() - started < 30
+    assert not (tmp_path / "unready.db.stop").exists()
 
 
 def test_writer_removes_what_an_earlier_writer_added(bench, tmp_path):
@@ -1119,7 +1152,7 @@ def test_writer_removes_what_an_earlier_writer_added(bench, tmp_path):
 
     built = counts()
     stop = tmp_path / "stop"
-    timer = _stop_after_ready(stop, 0.3)
+    timer = _stop_after_batch(db, stop, 9)
     bench.phase_writer(str(db), str(stop), 1, 3600.0, shape={"per_message": 1})
     timer.join()
     assert counts()["messages"] == 9 and counts()["fts"] == 1
@@ -1342,7 +1375,7 @@ def test_writer_delay_ends_when_stop_appears(bench, tmp_path):
     bench.build(db, 8, 0, "typical", "typical")
     stop = tmp_path / "stop"
 
-    timer = _stop_after_ready(stop, 0.5)
+    timer = _stop_after_batch(db, stop, 9)
     started = time.monotonic()
     out = bench.phase_writer(str(db), str(stop), 1, 3600.0)
     timer.join()
@@ -1395,6 +1428,31 @@ def test_a_writer_that_dies_mid_round_fails_the_measurement(bench, tmp_path):
 def test_wal_results_name_the_round_they_measured(bench, report):
     # Kind, scan method and K: the workload each WAL figure belongs to.
     assert all(w["k"] == max(report["config"]["k"]) for w in report["wal"])
+
+
+def _stop_after_batch(db: Path, stop: Path, messages: int):
+    """A started thread that creates ``stop`` once the writer's first
+    batch is complete (``messages`` rows in all, no job left): the
+    writer stops before any commit once ``stop`` exists, so a test that
+    counts one batch waits for it, however slow the disk."""
+    import threading
+
+    def run() -> None:
+        ready = Path(str(stop) + ".ready")
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if ready.exists():
+                with closing(sqlite3.connect(db, timeout=30)) as conn:
+                    rows = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                    jobs = conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0]
+                if rows == messages and jobs == 0:
+                    break
+            time.sleep(0.01)
+        stop.touch()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
 
 
 def _stop_after_ready(stop: Path, delay: float):

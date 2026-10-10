@@ -1956,6 +1956,11 @@ def _writer_phase2c(
     _write_thread_vector(conn, thread)
 
 
+class _WriterStopped(Exception):
+    """``stop`` appeared: the round is over, so the writer makes no
+    further commit, even mid-batch."""
+
+
 def phase_writer(
     db_path: str,
     stop: str,
@@ -1995,8 +2000,9 @@ def phase_writer(
     only this process writes the WAL, and it runs with automatic
     checkpoints off, so the WAL is never restarted into its allocated
     file and the file's size is the WAL's logical end until the
-    truncating checkpoint ``run_wal`` runs after the round. The pause
-    after a batch ends early when ``stop`` appears."""
+    truncating checkpoint ``run_wal`` runs after the round. Once
+    ``stop`` exists (the round is over) it makes no further commit, even
+    mid-batch, and the pause after a batch ends early."""
     import sqlite_vec
 
     shape = shape or {}
@@ -2028,6 +2034,8 @@ def phase_writer(
             # (a large one spills dirty pages into the WAL before COMMIT)
             # falls on the same side of each boundary as its stamp.
             nonlocal commits
+            if os.path.exists(stop):
+                raise _WriterStopped
             with _ordered(order):
                 conn.execute("BEGIN IMMEDIATE")
                 yield
@@ -2059,69 +2067,72 @@ def phase_writer(
                     (path, _INTERRUPTED[0]),
                 )
 
-        thread: _WriterThread | None = None
-        while not os.path.exists(stop):
-            recs = []
-            for _ in range(batch):
-                recs.append(
-                    _record(
-                        next_i,
-                        shape.get("identity", "typical"),
-                        shape.get("records", "typical"),
-                        shape.get("references", 0),
-                        shape.get("chunks", 1),
-                        shape.get("chunk_tokens", BODY_TOKENS),
-                        shape.get("per_message", 0),
-                        _WIDE * stress if stress else None,
-                    )
-                )
-                next_i += 1
-            for rec in recs:
-                # indexer/src/database.py ``queue_enqueue``.
-                now = datetime.now(UTC).isoformat()
-                with transaction():
-                    conn.execute(
-                        "INSERT OR REPLACE INTO indexing_jobs (filepath, reason, status, "
-                        "attempts, last_error, last_stage, last_error_class, created_at, "
-                        "updated_at, next_attempt_at) "
-                        "VALUES (?, 'on_created', 'queued', 0, NULL, NULL, NULL, ?, ?, ?)",
-                        (rec.path, now, now, now),
-                    )
-            threads = []
-            for rec in recs:
-                charge(rec.path)
-                with transaction():
-                    thread = _writer_phase1(
-                        conn, rec, thread if rec.i % 4 else None, datetime.now(UTC).isoformat()
-                    )
-                threads.append(thread)
-                refund(rec.path)
-            for rec in recs:
-                charge(rec.path)
-                refund(rec.path)
-            if batch == 1:
-                charge(recs[0].path)
-            else:
-                # indexer/src/database.py ``queue_mark_interrupted``.
-                with transaction():
-                    conn.executemany(
-                        "UPDATE indexing_jobs SET last_stage = ?, last_error = ? "
-                        "WHERE filepath = ? AND status = 'queued'",
-                        [(*_INTERRUPTED, rec.path) for rec in recs],
-                    )
-            for rec, rec_thread in zip(recs, threads, strict=True):
-                with transaction():
-                    _writer_phase2c(conn, rec, rec_thread, rng, datetime.now(UTC).isoformat())
-                if batch == 1:
-                    refund(rec.path)
-                with transaction():
-                    conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (rec.path,))
-            resume = time.monotonic() + interval
+        try:
+            thread: _WriterThread | None = None
             while not os.path.exists(stop):
-                remaining = resume - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(0.05, remaining))
+                recs = []
+                for _ in range(batch):
+                    recs.append(
+                        _record(
+                            next_i,
+                            shape.get("identity", "typical"),
+                            shape.get("records", "typical"),
+                            shape.get("references", 0),
+                            shape.get("chunks", 1),
+                            shape.get("chunk_tokens", BODY_TOKENS),
+                            shape.get("per_message", 0),
+                            _WIDE * stress if stress else None,
+                        )
+                    )
+                    next_i += 1
+                for rec in recs:
+                    # indexer/src/database.py ``queue_enqueue``.
+                    now = datetime.now(UTC).isoformat()
+                    with transaction():
+                        conn.execute(
+                            "INSERT OR REPLACE INTO indexing_jobs (filepath, reason, status, "
+                            "attempts, last_error, last_stage, last_error_class, created_at, "
+                            "updated_at, next_attempt_at) "
+                            "VALUES (?, 'on_created', 'queued', 0, NULL, NULL, NULL, ?, ?, ?)",
+                            (rec.path, now, now, now),
+                        )
+                threads = []
+                for rec in recs:
+                    charge(rec.path)
+                    with transaction():
+                        thread = _writer_phase1(
+                            conn, rec, thread if rec.i % 4 else None, datetime.now(UTC).isoformat()
+                        )
+                    threads.append(thread)
+                    refund(rec.path)
+                for rec in recs:
+                    charge(rec.path)
+                    refund(rec.path)
+                if batch == 1:
+                    charge(recs[0].path)
+                else:
+                    # indexer/src/database.py ``queue_mark_interrupted``.
+                    with transaction():
+                        conn.executemany(
+                            "UPDATE indexing_jobs SET last_stage = ?, last_error = ? "
+                            "WHERE filepath = ? AND status = 'queued'",
+                            [(*_INTERRUPTED, rec.path) for rec in recs],
+                        )
+                for rec, rec_thread in zip(recs, threads, strict=True):
+                    with transaction():
+                        _writer_phase2c(conn, rec, rec_thread, rng, datetime.now(UTC).isoformat())
+                    if batch == 1:
+                        refund(rec.path)
+                    with transaction():
+                        conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (rec.path,))
+                resume = time.monotonic() + interval
+                while not os.path.exists(stop):
+                    remaining = resume - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.05, remaining))
+        except _WriterStopped:
+            pass
     return {"commits": commits, "commit_times": times}
 
 
@@ -2291,9 +2302,10 @@ def run_wal(
         try:
             # The writer's setup, then three seconds of commits before the
             # round.
-            deadline = time.monotonic() + 600
+            # The setup's work is bounded (what earlier writers added), so
+            # it is waited for while the writer runs, however long.
             while not ready.exists():
-                if writer.poll() is not None or time.monotonic() > deadline:
+                if writer.poll() is not None:
                     raise RuntimeError("the WAL writer did not get ready")
                 time.sleep(0.05)
             time.sleep(3)
