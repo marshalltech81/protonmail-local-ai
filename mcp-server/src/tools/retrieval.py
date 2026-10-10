@@ -595,6 +595,22 @@ def register_retrieval_tools(server, db):
     )
     # The same for every other rejected argument, keyed by tool and field (#1039).
     not_found = _not_found_log()
+    # get_thread and get_message failures on IDs the client chose, rate-limited
+    # per tool with fixed reasons (#1265).
+    thread_failures = RateLimitedLog(
+        log,
+        ("reaped", "not_found"),
+        _FIELDS_REJECTION_LOG_INTERVAL_SECS,
+        first_msg="get_thread failed: %s",
+        summary_msg="get_thread failed in the last %ds: %s",
+    )
+    message_failures = RateLimitedLog(
+        log,
+        ("reaped", "not_found", "ambiguous"),
+        _FIELDS_REJECTION_LOG_INTERVAL_SECS,
+        first_msg="get_message failed: %s",
+        summary_msg="get_message failed in the last %ds: %s",
+    )
     rejections = ArgumentRejections(
         log,
         (
@@ -708,10 +724,10 @@ def register_retrieval_tools(server, db):
             )
             # Fixed-text causes: the ID is the caller's and stays out of the log.
             if isinstance(page, ReapedSource):
-                log.warning("get_thread failed: reaped")
+                thread_failures.record("reaped")
                 raise ToolError(reaped_source("Thread", thread_id, page.reaped_at))
             if not page:
-                log.warning("get_thread failed: not found")
+                thread_failures.record("not_found")
                 raise ToolError(f"Thread not found: {thread_id}")
             thread, messages, total = page.thread, page.messages, page.total_messages
             timings.count("messages", len(messages))
@@ -901,16 +917,13 @@ def register_retrieval_tools(server, db):
             view = await asyncio.to_thread(db.get_message_view, message_id)
             # Fixed-text causes: the ID is the caller's and stays out of the log.
             if isinstance(view, ReapedSource):
-                log.warning("get_message failed: reaped")
+                message_failures.record("reaped")
                 raise ToolError(reaped_source("Message", message_id, view.reaped_at))
             if not view:
-                log.warning("get_message failed: not found")
+                message_failures.record("not_found")
                 raise ToolError(f"Message not found: {message_id}")
             if isinstance(view, AmbiguousMessageId):
-                log.warning(
-                    "get_message failed: ambiguous Message-ID (%d claimants listed)",
-                    len(view.claimants),
-                )
+                message_failures.record("ambiguous")
                 # Never pick one: either claimant may be the reused ID.
                 listed = "; ".join(
                     f"{c.claimant_id} ({'sent ' if c.sent_at else ''}"
