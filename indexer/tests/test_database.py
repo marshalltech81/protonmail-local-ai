@@ -118,9 +118,9 @@ class TestSchema:
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        v9 (#1236), skipping the migration files."""
-        assert SCHEMA_VERSION == 9
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 9
+        v10 (#1356), skipping the migration files."""
+        assert SCHEMA_VERSION == 10
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 10
 
     def test_fresh_install_has_a_nullable_ocr_pages_skipped_column(self, db):
         """#891: a count, NULL when unknown, with no default."""
@@ -318,7 +318,7 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9]" in caplog.text
+        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -542,9 +542,18 @@ _MESSAGE_INDEXES = (
 )
 
 
+def _v9_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v9 shape: v9 is the current schema
+    without ``thread_vector_sums`` (#1356)."""
+    db._conn.execute("DROP TABLE thread_vector_sums")
+    db._conn.execute("UPDATE schema_version SET version = 9")
+    db._conn.commit()
+
+
 def _v8_from_fresh(db: Database) -> None:
-    """Turn a fresh database into the v8 shape: v8 is the current schema
+    """Turn a fresh database into the v8 shape: v8 is the v9 schema
     without the occurrence's extraction deferral mark (#1236)."""
+    _v9_from_fresh(db)
     db._conn.execute("DROP INDEX idx_attachments_deferred")
     db._conn.execute("ALTER TABLE attachments DROP COLUMN extraction_deferred_at")
     db._conn.execute("UPDATE schema_version SET version = 8")
@@ -669,7 +678,7 @@ class TestMigrationV6:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [6, 7, 8, 9]" in caplog.text
+        assert "applied migrations: [6, 7, 8, 9, 10]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
     @pytest.mark.parametrize("table, column", [c for c in _V6_COLUMNS if c[1] == "text_complete"])
@@ -904,6 +913,50 @@ class TestUnknownSendDate:
         assert _dates(db, msg.claimant_id)[:2] == (msg.date.isoformat(), None)
 
 
+class TestMigrationV10:
+    """#1356: v9 -> v10 adds ``thread_vector_sums`` with no rows and
+    queues nothing; the backfill then fills each thread exactly."""
+
+    def test_v9_database_migrates_to_the_fresh_v10_shape(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        db = Database(tmp_path / "v9.db")
+        msg = make_message(message_id="old@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        chunk = _make_chunk("old".ljust(64, "0"), 0, "old body")
+        db.replace_message_chunks(
+            claimant_id=msg.claimant_id,
+            thread_id=msg.message_id,
+            chunks=[chunk],
+            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(3)},
+        )
+        _v9_from_fresh(db)
+        db.close()
+        migrated = Database(tmp_path / "v9.db")
+        fresh = Database(tmp_path / "fresh.db")
+        try:
+            assert (
+                migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+                == SCHEMA_VERSION
+                == 10
+            )
+            assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
+            assert (
+                migrated._conn.execute("SELECT COUNT(*) FROM thread_vector_sums").fetchone()[0] == 0
+            )
+            assert migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+            assert migrated.fill_missing_thread_vector_sums(max_threads=10, max_rows=10) == (
+                1,
+                1,
+                0,
+            )
+            mean = migrated.thread_chunk_mean(msg.message_id)
+            assert mean is not None and mean.index(1.0) == 3
+        finally:
+            migrated.close()
+            fresh.close()
+        assert "applied migrations: [10]" in caplog.text
+
+
 class TestMigrationV9:
     """#1236: v8 -> v9 adds the occurrence's extraction deferral mark,
     NULL on every existing row, with no reparse."""
@@ -923,7 +976,7 @@ class TestMigrationV9:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 9
+                == 10
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             assert [
@@ -940,7 +993,7 @@ class TestMigrationV9:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [9]" in caplog.text
+        assert "applied migrations: [9, 10]" in caplog.text
 
 
 class TestMigrationV8:
@@ -1049,7 +1102,7 @@ class TestMigrationV8:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [8, 9]" in caplog.text
+        assert "applied migrations: [8, 9, 10]" in caplog.text
         assert "SYNTHETIC_V8_MARKER" not in caplog.text
 
     def test_a_failed_rebuild_leaves_v7_intact(self, tmp_path):
@@ -1121,7 +1174,7 @@ class TestMigrationV7:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [7, 8, 9]" in caplog.text
+        assert "applied migrations: [7, 8, 9, 10]" in caplog.text
 
 
 class TestAttachmentTextCompleteness:
@@ -1244,7 +1297,7 @@ class TestMigrationV5:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [5, 6, 7, 8, 9]" in caplog.text
+        assert "applied migrations: [5, 6, 7, 8, 9, 10]" in caplog.text
 
     @pytest.mark.parametrize("column", [c for c in _V5_COLUMNS if c != "caps_json"])
     def test_the_flag_columns_reject_other_values(self, db, column):
@@ -1374,7 +1427,7 @@ class TestMigrationV2:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9]" in caplog.text
+        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9, 10]" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
         db = Database(tmp_path / "v1.db")
@@ -1426,7 +1479,7 @@ class TestMigrationV3:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [3, 4, 5, 6, 7, 8, 9]" in caplog.text
+        assert "applied migrations: [3, 4, 5, 6, 7, 8, 9, 10]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path, monkeypatch):
@@ -1543,7 +1596,7 @@ class TestThreadVectorUnitNormInvariant:
     retrieval. The three thread-vector write boundaries
     (``upsert_thread``, ``replace_thread_vector``, and
     ``_rewrite_thread_row`` via ``reap_thread_messages``) all normalize at the boundary so callers
-    that pass a non-unit ``mean_vector(...)`` cannot bypass the
+    that pass a non-unit mean cannot bypass the
     invariant. Zero placeholders survive normalization because the
     Phase 1 seed logic depends on them as a sentinel."""
 
@@ -1578,7 +1631,7 @@ class TestThreadVectorUnitNormInvariant:
         assert self._norm(stored) == pytest.approx(1.0, abs=1e-6)
 
     def test_replace_thread_vector_normalizes_non_unit_input(self, db):
-        # Phase 2c writes ``mean_vector(chunk_embs)`` here; mean of unit
+        # Phase 2c writes a chunk mean here; a mean of unit
         # vectors generally has norm < 1. Use a 3-4-5 style scaled
         # vector to make the normalization observable.
         from src.database import EMBEDDING_DIM
@@ -1591,7 +1644,7 @@ class TestThreadVectorUnitNormInvariant:
         assert self._norm(stored) == pytest.approx(1.0, abs=1e-6)
 
     def test_reap_thread_messages_normalizes_non_unit_input(self, db):
-        # The reconciler reap path passes ``mean_vector(survivor_chunks)``
+        # The reconciler reap path passes its subject fallback
         # through ``_rewrite_thread_row``. Verify the same normalize
         # boundary fires on that code path so reap-then-search returns
         # comparable cosine scores against still-live threads.
@@ -3295,11 +3348,10 @@ class TestMessageDateOnChunks:
 
 
 class TestThreadChunkAggregation:
-    def test_get_thread_chunk_embeddings_returns_per_message_vectors(self, db):
-        # Two messages in the same thread, each with one chunk. Use
-        # one-hot vectors with distinct active slots so the round-trip
-        # is checkable through the normalize-at-boundary path: the
-        # active slot identifies which input the vector came from.
+    def test_thread_chunk_mean_is_the_mean_of_every_message_chunk(self, db):
+        # Two messages in the same thread, each with one chunk. One-hot
+        # vectors with distinct active slots: the normalized mean has
+        # 1/sqrt(2) in exactly those two slots.
         _seed_thread_for_message(db, "m6a@x", "t6")
         msg = make_message(message_id="m6b@x", filepath="/maildir/INBOX/cur/m6b@x")
         db.upsert_thread(make_thread(messages=[msg], thread_id="t6"), FAKE_EMBEDDING)
@@ -3312,36 +3364,30 @@ class TestThreadChunkAggregation:
                 embeddings_by_chunk_id={chunk.chunk_id: _one_hot(slot)},
             )
 
-        results = db.get_thread_chunk_embeddings("t6")
-        assert len(results) == 2
-        active_slots = sorted(v.index(1.0) for v in results)
-        assert active_slots == [0, 1]
+        mean = db.thread_chunk_mean("t6")
+        assert mean is not None
+        assert [i for i, v in enumerate(mean) if v] == [0, 1]
+        assert mean[0] == mean[1] == pytest.approx(2**-0.5)
 
-    def test_get_chunk_embeddings_for_messages_filters_correctly(self, db):
+    def test_thread_has_chunks_outside_ignores_the_given_messages(self, db):
         _seed_thread_for_message(db, "m7a@x", "t7")
         msg = make_message(message_id="m7b@x", filepath="/maildir/INBOX/cur/m7b@x")
         db.upsert_thread(make_thread(messages=[msg], thread_id="t7"), FAKE_EMBEDDING)
-        for mid, slot in [("m7a@x", 2), ("m7b@x", 3)]:
-            chunk = _make_chunk(f"y{mid}".ljust(64, "0"), 0, f"body of {mid}")
-            db.replace_message_chunks(
-                claimant_id=mid,
-                thread_id="t7",
-                chunks=[chunk],
-                embeddings_by_chunk_id={chunk.chunk_id: _one_hot(slot)},
-            )
-
-        survivors = db.get_chunk_embeddings_for_messages(["m7a@x"])
-        assert len(survivors) == 1
-        assert survivors[0].index(1.0) == 2
-
-    def test_get_chunk_embeddings_for_messages_empty_input_returns_empty(self, db):
-        assert db.get_chunk_embeddings_for_messages([]) == []
+        chunk = _make_chunk("ym7a".ljust(64, "0"), 0, "body of m7a")
+        db.replace_message_chunks(
+            claimant_id="m7a@x",
+            thread_id="t7",
+            chunks=[chunk],
+            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(2)},
+        )
+        assert db.thread_has_chunks_outside("t7", ["m7b@x"]) is True
+        assert db.thread_has_chunks_outside("t7", []) is True
+        assert db.thread_has_chunks_outside("t7", ["m7a@x"]) is False
 
     def test_thread_has_chunks_returns_true_only_when_rows_exist(self, db):
         # ``thread_has_chunks`` exists so the batched indexer's hot
         # subject-fallback gate can check "any chunks committed?"
-        # without unpacking every chunk vector via
-        # ``get_thread_chunk_embeddings``. The contract: True when at
+        # without unpacking any chunk vector. The contract: True when at
         # least one ``message_chunks`` row references the thread,
         # False otherwise (no rows, or thread does not exist at all).
         assert db.thread_has_chunks("never-existed") is False
@@ -3424,7 +3470,12 @@ class TestChunkCascadeOnMessageRemoval:
         _tombstone_thread(db, t.thread_id)
         db.delete_thread_completely(t.thread_id)
 
-        assert db.get_thread_chunk_embeddings(t.thread_id) == []
+        assert (
+            db._conn.execute(
+                "SELECT COUNT(*) FROM thread_vector_sums WHERE thread_id = ?", (t.thread_id,)
+            ).fetchone()[0]
+            == 0
+        )
         assert (
             db._conn.execute(
                 "SELECT COUNT(*) FROM message_chunks WHERE thread_id = ?", (t.thread_id,)

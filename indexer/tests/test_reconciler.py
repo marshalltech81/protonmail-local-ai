@@ -11,6 +11,7 @@ tests do not require a live embedding service.
 from __future__ import annotations
 
 import logging
+import struct
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -991,18 +992,20 @@ class TestByteIdenticalCopies:
         for n in range(3):
             (maildir / f"170000000{n}.K{n}.host:2,ST").unlink()
         monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 2)
-        survivors_seen: list[list[str]] = []
-        real = db.get_chunk_embeddings_for_messages
+        before = {r["claimant_id"] for r in db.get_thread_messages(thread_id)}
+        reaped_seen: list[list[str]] = []
+        real = db.thread_has_chunks_outside
 
-        def spy(claimant_ids):
-            survivors_seen.append(sorted(claimant_ids))
-            return real(claimant_ids)
+        def spy(tid, claimant_ids):
+            reaped_seen.append(sorted(claimant_ids))
+            return real(tid, claimant_ids)
 
-        monkeypatch.setattr(db, "get_chunk_embeddings_for_messages", spy)
+        monkeypatch.setattr(db, "thread_has_chunks_outside", spy)
         rec.reap()
 
         remaining = sorted(r["claimant_id"] for r in db.get_thread_messages(thread_id))
-        assert survivors_seen == [remaining]
+        # The thread vector is computed without exactly the reaped messages.
+        assert reaped_seen == [sorted(before - set(remaining))]
         assert len(remaining) == 2
         assert sorted(self._stored_message_ids(db, thread_id)) == remaining
 
@@ -2645,8 +2648,32 @@ class TestReap:
         reconciler.sweep()
 
         embed_calls_before = embedder.calls
-        result = reconciler.reap()
+        thread_reads: list[str] = []
+        real_compute = Database._compute_thread_sums
+
+        def counted(db_self, tid):
+            thread_reads.append(tid)
+            return real_compute(db_self, tid)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Database, "_compute_thread_sums", counted)
+            result = reconciler.reap()
         assert result["threads_rebuilt"] == 1
+        # The survivors' mean comes from the thread's chunk-vector sum,
+        # with no thread-wide read (#1356): the survivor's vector alone.
+        assert thread_reads == []
+        stored = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()[0]
+        assert struct.unpack(f"{EMBEDDING_DIM}f", stored)[:2] == pytest.approx(
+            (EMBEDDING_DIM**-0.5,) * 2
+        )
+        assert (
+            db._conn.execute(
+                "SELECT count FROM thread_vector_sums WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+            == 1
+        )
 
         # Reaped message's chunk is gone from all three indexes.
         assert db.get_chunk_ids_for_message(co1) == set()

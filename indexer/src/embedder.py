@@ -676,8 +676,8 @@ class OpenAIEmbedder:
         # unit-normed regardless of provider. The DB write boundary
         # in ``database.py`` also normalizes at ``upsert_thread`` /
         # ``replace_thread_vector`` / ``_rewrite_thread_row``
-        # (because ``mean_vector`` of unit chunk vectors generally
-        # has norm < 1) and at ``replace_message_chunks`` (because
+        # (because a mean of unit chunk vectors generally has
+        # norm < 1) and at ``replace_message_chunks`` (because
         # the ``EmbeddingBackend`` contract accepts arbitrary callers
         # — fakes, future non-OpenAI backends — that may not
         # normalize), so the storage invariant — every vector in

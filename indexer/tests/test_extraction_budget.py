@@ -20,6 +20,7 @@ import hashlib
 import logging
 import shutil
 import sqlite3
+import struct
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -32,6 +33,7 @@ from src.attachment_indexing import (
     apply_attachment_writes,
     prepare_attachment_writes,
 )
+from src.chunker import l2_normalize
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import (
     STATUS_FAILED,
@@ -910,7 +912,8 @@ class WorkCounter:
     body chunkings, attachment cache reads (split by whether the
     occurrence had already resolved), attachment chunkings, slice chunk-ID
     reads, attachment row writes, deferral-mark writes and slice writes,
-    and the thread-vector rows read (Phase 1 seed and Phase 2c mean)."""
+    and the chunk vectors read thread-wide (#1356: only to fill a thread's
+    chunk-vector sum, once in its lifetime)."""
 
     KEYS = (
         "parses",
@@ -968,15 +971,14 @@ class WorkCounter:
             "slice_writes",
             when=lambda a, k: k.get("attachment_id") is not None,
         )
-        wrap(Database, "get_thread_chunk_embeddings", "vector_rows", rows=True)
-        real_seed = Database.get_phase1_seed_state
+        real_compute = Database._compute_thread_sums
 
-        def seed(db_self, thread_id):
-            embs, prior = real_seed(db_self, thread_id)
-            self.counts["vector_rows"] += len(embs)
-            return embs, prior
+        def compute(db_self, thread_id):
+            total, count = real_compute(db_self, thread_id)
+            self.counts["vector_rows"] += count
+            return total, count
 
-        monkeypatch.setattr(Database, "get_phase1_seed_state", seed)
+        monkeypatch.setattr(Database, "_compute_thread_sums", compute)
 
     def take(self, db) -> dict[str, int]:
         """This pass's counts; then remember which payloads have resolved
@@ -991,6 +993,29 @@ class WorkCounter:
             )
         }
         return counts
+
+
+def _assert_thread_vector_is_the_chunk_mean(db: Database) -> None:
+    """Every thread's stored vector is the normalized mean of all its
+    chunk vectors, computed here independently in float64."""
+    for (thread_id,) in db._conn.execute("SELECT thread_id FROM threads").fetchall():
+        blobs = [
+            r[0]
+            for r in db._conn.execute(
+                "SELECT v.embedding FROM message_chunks c JOIN message_chunks_vec v "
+                "ON v.chunk_id = c.chunk_id WHERE c.thread_id = ?",
+                (thread_id,),
+            )
+        ]
+        sums = [0.0] * EMBEDDING_DIM
+        for blob in blobs:
+            for i, value in enumerate(struct.unpack(f"{EMBEDDING_DIM}f", blob)):
+                sums[i] += value
+        expected = l2_normalize([x / len(blobs) for x in sums])
+        stored = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()[0]
+        assert struct.unpack(f"{EMBEDDING_DIM}f", stored) == pytest.approx(expected, abs=1e-7)
 
 
 class TestWorkPerPass:
@@ -1010,19 +1035,41 @@ class TestWorkPerPass:
             # deferred and marked.
             dict(parses=1, body_chunkings=1, cache_reads=7, cache_reads_resolved=0,
                  attachment_chunkings=3, slice_id_reads=3, attachment_upserts=7,
-                 completeness_writes=3, mark_writes=4, slice_writes=3, vector_rows=0 + 4),
+                 completeness_writes=3, mark_writes=4, slice_writes=3, vector_rows=0),
             # Continuations: the resolved occurrences are not touched; the
             # pending ones are probed once; re-deferred marks are not
             # rewritten.
             dict(parses=1, body_chunkings=1, cache_reads=4, cache_reads_resolved=0,
                  attachment_chunkings=3, slice_id_reads=3, attachment_upserts=3,
-                 completeness_writes=3, mark_writes=0, slice_writes=3, vector_rows=4 + 7),
+                 completeness_writes=3, mark_writes=0, slice_writes=3, vector_rows=0),
             dict(parses=1, body_chunkings=1, cache_reads=1, cache_reads_resolved=0,
                  attachment_chunkings=1, slice_id_reads=1, attachment_upserts=1,
-                 completeness_writes=1, mark_writes=0, slice_writes=1, vector_rows=7 + 8),
+                 completeness_writes=1, mark_writes=0, slice_writes=1, vector_rows=0),
         ]  # fmt: skip
-        # The thread vector is the mean of every chunk after each pass.
         assert len(extractor.calls) == 7
+        # The thread vector is the mean of every chunk after the passes,
+        # with no chunk vector of the thread read: the thread was created
+        # with an empty sum and each pass added its own chunks.
+        _assert_thread_vector_is_the_chunk_mean(p.db)
+
+    def test_a_thread_from_before_v10_is_read_once(self, tmp_path, monkeypatch):
+        """A thread with no sums row (indexed before v10) is read whole on
+        the first pass that touches it, and never again."""
+        extractor = LaunchingExtractor()
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=3)
+        work = WorkCounter(monkeypatch)
+        p.add("legacy", _parts("legacy", 7))
+        p.drain()
+        work.take(p.db)
+        p.db._conn.execute("DELETE FROM thread_vector_sums")
+        p.db._conn.commit()
+        rows = []
+        while p.queue.stats()["queued"]:
+            p.drain()
+            rows.append(work.take(p.db)["vector_rows"])
+        # Phase 1 fills the sum from the body and three attachment chunks.
+        assert rows == [4, 0]
+        _assert_thread_vector_is_the_chunk_mean(p.db)
 
     @pytest.mark.parametrize("parts, launches", [(12, 3), (48, 3)])
     def test_resolution_work_grows_with_parts_not_passes(
@@ -1060,6 +1107,8 @@ class TestWorkPerPass:
         assert totals["mark_writes"] == parts - launches
         # Per pass: one parse and one body chunking.
         assert totals["parses"] == totals["body_chunkings"] == passes
+        # No chunk vector of the thread is read on any pass (#1356).
+        assert totals["vector_rows"] == 0
 
     def test_rename_between_passes_continues_on_the_new_path(self, tmp_path, monkeypatch):
         extractor = LaunchingExtractor()
