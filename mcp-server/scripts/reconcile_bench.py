@@ -9,8 +9,7 @@ code exists:
 - a reconcile round: the client's uploaded SHA-256 per identity, the
   server-side diff at one snapshot, and at most K missing records
   materialized in the same transaction;
-- request and response bytes, peak RSS and WAL growth under a
-  concurrent writer while the round holds its snapshot.
+- request and response bytes and peak RSS.
 
 Every value is generated here; no mail is read. The mailbox connection
 is the server's own (``Database._connect``: ``mode=ro`` and
@@ -40,20 +39,17 @@ from __future__ import annotations
 
 import argparse
 import base64
-import fcntl
 import hashlib
 import json
 import math
-import os
-import random
 import resource
 import sqlite3
 import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Iterable, Iterator
-from contextlib import closing, contextmanager
+from collections.abc import Iterable
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.header import Header
@@ -207,9 +203,6 @@ CREATE VIRTUAL TABLE attachments_fts USING fts5(
     contentless_delete=1,
     tokenize='porter unicode61'
 );
--- Writer ballast for the WAL phase: stands for the chunk and vector
--- rows an indexer commit writes.
-CREATE TABLE bench_ballast (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
 -- Message and occurrence identities whose records are worst-case
 -- (``--records mixed``), for an upload that leaves exactly those out.
 CREATE TABLE bench_worst (identity TEXT PRIMARY KEY);
@@ -1031,43 +1024,20 @@ def _sorted_identities(
     return ids
 
 
-@contextmanager
-def _ordered(order: str) -> Iterator[None]:
-    """Hold the WAL measurement's order lock (an exclusive ``flock`` on
-    ``order``) for the block; no-op when ``order`` is empty. The writer
-    holds it across ``COMMIT`` and its stamp, the round across its
-    snapshot and each clock read that bounds its window, so every commit
-    falls wholly before or after each boundary."""
-    if not order:
-        yield
-        return
-    with open(order, "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-
-
 def phase_reconcile(
     db_path: str,
     kind: str,
     k: int,
     request: str,
-    hold_s: float = 0.0,
     method: str = "stream",
     worst_first: bool = False,
-    order: str = "",
 ) -> dict:
     """One reconcile round: parse the packed upload, then in one read
     transaction count, scan (``method``, as ``phase_certificate``),
     certify, diff on hashes and materialize at most ``k`` missing
     records (lowest identities first).
 
-    ``hold_s`` keeps the transaction open that much longer after the
-    round's work, outside every timing: only the smoke test's WAL check
-    uses it, so a tiny corpus still overlaps the writer. ``worst_first``
-    materializes missing worst-case identities (``--records mixed``)
+    ``worst_first`` materializes missing worst-case identities (``--records mixed``)
     before the others, so a round that misses every member still returns
     worst-case records."""
     _import_serializers()
@@ -1081,12 +1051,8 @@ def phase_reconcile(
     with closing(_ro(db_path)) as conn:
         conn.execute("BEGIN")
         # BEGIN is deferred: the first statement takes the snapshot when
-        # it starts, so a trivial read takes it, and the monotonic clock the
-        # WAL phase lines up with its samples is read right after,
-        # before the COUNT scan.
-        with _ordered(order):
-            conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone()
-            started_at = time.monotonic()
+        # it starts, so a trivial read takes it before the COUNT scan.
+        conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone()
         # The transaction's own time starts at its snapshot, after the
         # connection setup.
         t_snapshot = time.perf_counter()
@@ -1118,14 +1084,7 @@ def phase_reconcile(
         t_diff = time.perf_counter()
         records, read = _materialize(conn, kind, missing)
         t_records = time.perf_counter()
-        if hold_s:
-            time.sleep(hold_s)
-        # Still inside the transaction: its frames are retained until the
-        # rollback, which runs under the lock too, so no commit lands
-        # between the end stamp and the snapshot's release.
-        with _ordered(order):
-            ended_at = time.monotonic()
-            conn.rollback()
+        conn.rollback()
     response = {
         "complete": missing_total <= k,
         "snapshot_count": count,
@@ -1156,8 +1115,6 @@ def phase_reconcile(
         "records_s": t_records - t_diff,
         "transaction_s": t_records - t_snapshot,
         "total_s": t_end - t0,
-        "started_at": started_at,
-        "ended_at": ended_at,
         "rss_kib": _rss_kib(),
     }
 
@@ -1318,84 +1275,6 @@ def phase_request_shape(path: str, shape: str) -> dict:
     return {"elements": elements, "parse_s": parse_s, "rss_kib": _rss_kib()}
 
 
-# Ballast rows the writer keeps: each commit adds one and deletes the
-# oldest, standing for the rows an indexer commit replaces.
-BALLAST_ROWS = 64
-
-
-def phase_writer(
-    db_path: str, stop: str, commit_bytes: int, interval: float, order: str = ""
-) -> dict:
-    """A concurrent writer: until ``stop`` exists, index one message at a
-    time as the indexer does, in two transactions: one flips a random
-    message's ``seen`` (phase 1, the message's rows) and the next
-    appends ``commit_bytes`` of ballast (phase 2c, its chunks and
-    vectors). ``interval`` is the pause between messages; the bytes and
-    the pace are parameters, not the indexer's own figures.
-
-    It first replaces the ballast with ``BALLAST_ROWS`` rows of
-    ``commit_bytes``, the steady state in which each commit adds one row
-    and deletes one per message, records that state and creates ``stop + ".ready"``.
-
-    After each commit it records the time and the WAL file's size, so a
-    window's commit count and its WAL sizes come from the same records:
-    only this process writes the WAL, and it runs with automatic
-    checkpoints off, so the WAL is never restarted into its allocated
-    file and the file's size is the WAL's logical end until the
-    truncating checkpoint ``run_wal`` runs after the round. The delay
-    between messages ends early when ``stop`` appears."""
-    rng = random.Random(7)
-    wal = db_path + "-wal"
-    commits = 0
-    times: list[tuple[float, int]] = []
-    with closing(sqlite3.connect(db_path, isolation_level=None, timeout=30)) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA wal_autocheckpoint=0")
-        top = conn.execute("SELECT MAX(rowid) FROM messages").fetchone()[0]
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM bench_ballast")
-        conn.executemany(
-            "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))",
-            [(commit_bytes,)] * BALLAST_ROWS,
-        )
-        conn.execute("COMMIT")
-        # The state before any measured commit: it can only be the start.
-        times.append((time.monotonic(), os.stat(wal).st_size))
-        Path(stop + ".ready").touch()
-
-        def commit() -> None:
-            # COMMIT and its stamp under the order lock (``_ordered``):
-            # a commit is in a round's window only once it is durable,
-            # and its frames are in the size.
-            with _ordered(order):
-                conn.execute("COMMIT")
-                times.append((time.monotonic(), os.stat(wal).st_size))
-
-        while not os.path.exists(stop):
-            conn.execute("BEGIN IMMEDIATE")
-            flipped = conn.execute(
-                "UPDATE messages SET seen = 1 - seen WHERE rowid = ?", (rng.randint(1, top),)
-            ).rowcount
-            if flipped != 1:
-                raise RuntimeError(f"writer updated {flipped} messages, not 1")
-            commit()
-            conn.execute("BEGIN IMMEDIATE")
-            cur = conn.execute(
-                "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
-            )
-            conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - BALLAST_ROWS,))
-            commit()
-            commits += 2
-            resume = time.monotonic() + interval
-            while not os.path.exists(stop):
-                remaining = resume - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(0.05, remaining))
-    return {"commits": commits, "commit_times": times}
-
-
 # --- orchestration ------------------------------------------------------
 
 
@@ -1483,128 +1362,6 @@ def write_request(
         "request_bytes_base64": len(b64),
         "request_bytes_packed": len(packed),
         "max_identity_bytes": max((len(b) for b in ids), default=0),
-    }
-
-
-def wal_window(commits: list[tuple[float, int]], start: float, end: float) -> tuple[int, int, int]:
-    """The WAL size after the last commit stamped at or before ``start``,
-    after the last one stamped in ``(start, end]``, and how many were:
-    one boundary (the writer's post-commit stamps) for the sizes and
-    the count. The file only grows meanwhile, so the size after a
-    commit is the largest so far."""
-    at_start = max((size for when, size in commits if when <= start), default=0)
-    inside = [size for when, size in commits if start < when <= end]
-    return at_start, max(inside, default=at_start), len(inside)
-
-
-def run_wal(
-    db_path: str,
-    kind: str,
-    k: int,
-    request: str,
-    commit_bytes: int,
-    interval: float,
-    hold_s: float = 0.0,
-    worst_first: bool = False,
-) -> dict:
-    """WAL growth while one reconcile round holds its snapshot under a
-    concurrent writer, and whether a TRUNCATE checkpoint then reclaims
-    it. Every size and count comes from the writer's own post-commit
-    records (``phase_writer``), split at the round's window by the same
-    timestamps, so no commit is counted without its frames or the
-    reverse; the order lock (``_ordered``) keeps every commit wholly on
-    one side of each window boundary."""
-    wal = Path(db_path + "-wal")
-    stop = Path(db_path + ".stop")
-    ready = Path(str(stop) + ".ready")
-    order = db_path + ".order"
-    stop.unlink(missing_ok=True)
-    ready.unlink(missing_ok=True)
-
-    def size() -> int:
-        try:
-            return wal.stat().st_size
-        except FileNotFoundError:
-            return 0
-
-    with closing(sqlite3.connect(db_path, timeout=30)) as conn:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    writer = subprocess.Popen(
-        [
-            sys.executable,
-            __file__,
-            "_phase",
-            "writer",
-            json.dumps(
-                {
-                    "db_path": db_path,
-                    "stop": str(stop),
-                    "commit_bytes": commit_bytes,
-                    "interval": interval,
-                    "order": order,
-                }
-            ),
-        ],
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    # Whatever happens below, the writer is stopped and reaped before
-    # this returns or raises: left running, it commits until the disk
-    # fills.
-    try:
-        # The writer's ballast in its steady state, then three seconds of
-        # commits before the round.
-        deadline = time.monotonic() + 600
-        while not ready.exists():
-            if writer.poll() is not None or time.monotonic() > deadline:
-                raise RuntimeError("the WAL writer did not reach its steady state")
-            time.sleep(0.05)
-        time.sleep(3)
-        try:
-            result = _child(
-                "reconcile",
-                db_path=db_path,
-                kind=kind,
-                k=k,
-                request=request,
-                hold_s=hold_s,
-                worst_first=worst_first,
-                order=order,
-            )
-        except RuntimeError as exc:  # raised after the writer stops (finally)
-            raise RuntimeError("reconcile round failed") from exc
-    finally:
-        stop.touch()
-        try:
-            out, _ = writer.communicate(timeout=60)
-        except subprocess.TimeoutExpired:
-            writer.kill()
-            out, _ = writer.communicate()
-        stop.unlink()
-        ready.unlink(missing_ok=True)
-        Path(order).unlink(missing_ok=True)
-    writer_out = json.loads(out)
-    at_start, at_end, overlapping = wal_window(
-        writer_out["commit_times"], result["started_at"], result["ended_at"]
-    )
-    with closing(sqlite3.connect(db_path, timeout=30)) as conn:
-        busy, log_pages, ckpt_pages = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-    return {
-        "commit_bytes": commit_bytes,
-        "writer_interval_s": interval,
-        "hold_s": hold_s,
-        "wal_at_transaction_start_bytes": at_start,
-        "wal_max_during_transaction_bytes": at_end,
-        "commits_during_transaction": overlapping,
-        # WAL growth over the transaction per overlapping commit: the
-        # bytes one such commit leaves retained.
-        "wal_bytes_per_commit": (at_end - at_start) // overlapping if overlapping else None,
-        "writer_commits_total": writer_out["commits"],
-        # The WAL window's own duration, any hold included, so it covers
-        # the same commits and growth as the figures above.
-        "reader_transaction_s": round(result["ended_at"] - result["started_at"], 3),
-        "checkpoint_after": {"busy": busy, "log_pages": log_pages, "checkpointed": ckpt_pages},
-        "wal_after_checkpoint_bytes": size(),
     }
 
 
@@ -1702,25 +1459,6 @@ def run(args: argparse.Namespace) -> dict:
         )
         report["reconcile"][kind] = {"request": req}
         report["reconcile"][kind].update(_reconcile_runs(db, kind, request, req, args))
-    if args.wal:
-        report["wal"] = [
-            {
-                "kind": kind,
-                **run_wal(
-                    db,
-                    kind,
-                    max(args.k),
-                    str(work / f"request-{kind}.json"),
-                    commit_bytes,
-                    interval,
-                    args.wal_hold,
-                    args.all_extras,
-                ),
-            }
-            for kind in ("messages", "occurrences")
-            for commit_bytes in args.writer_commit_bytes
-            for interval in args.writer_interval
-        ]
     return report
 
 
@@ -1839,8 +1577,6 @@ MAX_ATTACHMENTS = 10_000 - 2
 MAX_EXTRACTED_CHARS = 10_000_000
 # ``message_id`` and ``_wide_digits`` stay unique below this.
 MAX_MESSAGES = 2**30
-# SQLite's default largest blob (``SQLITE_MAX_LENGTH``).
-MAX_BLOB = 1_000_000_000
 # The most digits an upload holds: built in memory (430 MB packed),
 # over 16 times the proposed caps.
 MAX_UPLOAD = 10_000_000
@@ -1971,34 +1707,6 @@ ARGS: tuple[Arg, ...] = (
         0,
         MAX_UPLOAD,
         help="also time parsing each upload shape at this many digests (0: skip)",
-    ),
-    Arg("wal", "flag", False, help="also measure WAL growth under a writer"),
-    Arg(
-        "writer_commit_bytes",
-        "ints",
-        None,
-        # randomblob() makes at least one byte.
-        1,
-        MAX_BLOB,
-        absent="131072 with --wal",
-        help="ballast bytes per message (its second writer commit) (--wal only)",
-    ),
-    Arg(
-        "writer_interval",
-        "floats",
-        None,
-        0,
-        absent="0,0.1 with --wal",
-        help="seconds between writer messages (--wal only)",
-    ),
-    Arg(
-        "wal_hold",
-        "float",
-        None,
-        0,
-        absent="0 with --wal",
-        help="seconds the WAL round keeps its transaction open after its work "
-        "(--wal only; smoke test)",
     ),
 )
 
@@ -2188,10 +1896,6 @@ _RULES: tuple = (
     ),
     (lambda a: True, _chunk_problem),
     (
-        lambda a: not a.wal and a.explicit_wal,
-        lambda a: "--writer-commit-bytes, --writer-interval and --wal-hold need --wal",
-    ),
-    (
         lambda a: a.repeat > 1 and a.repeat % (6 if a.filtered else 2),
         lambda a: (
             f"--repeat {a.repeat} cannot balance the run orders: use 1 or a multiple "
@@ -2236,9 +1940,6 @@ def check_args(args: argparse.Namespace) -> argparse.Namespace:
     args.explicit_extras = args.extras is not None
     args.explicit_missing = args.missing is not None
     args.explicit_references = args.references is not None
-    args.explicit_wal = any(
-        getattr(args, n) is not None for n in ("writer_commit_bytes", "writer_interval", "wal_hold")
-    )
     if args.extras is None:
         args.extras = 0 if args.upload_total is not None else 100
     if args.missing is None:
@@ -2247,16 +1948,10 @@ def check_args(args: argparse.Namespace) -> argparse.Namespace:
         args.references = 100_000 if args.records.startswith("cardinality") else 0
     if args.repeat is None:
         args.repeat = 6 if args.filtered else 2
-    if args.writer_commit_bytes is None:
-        args.writer_commit_bytes = [128 * 1024]
-    if args.writer_interval is None:
-        args.writer_interval = [0.0, 0.1]
-    if args.wal_hold is None:
-        args.wal_hold = 0.0
     for applies, problem in _RULES:
         if applies(args) and (message := problem(args)):
             raise SystemExit(message)
-    for name in ("explicit_extras", "explicit_missing", "explicit_references", "explicit_wal"):
+    for name in ("explicit_extras", "explicit_missing", "explicit_references"):
         delattr(args, name)
     return args
 
@@ -2288,7 +1983,6 @@ def main(argv: list[str] | None = None) -> dict:
             "reconcile": phase_reconcile,
             "filtered": phase_filtered,
             "request_shape": phase_request_shape,
-            "writer": phase_writer,
         }
         out = phases[argv[1]](**json.loads(argv[2]))
         print(json.dumps(out))

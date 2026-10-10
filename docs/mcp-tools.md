@@ -1609,7 +1609,9 @@ here when it ships.
 No figures are recorded yet: the measurement on the indexer's rows is
 tracked in
 [#1469](https://github.com/marshalltech81/protonmail-local-ai/issues/1469),
-and the limits it proposes will be stated here from those figures.
+and the limits it proposes will be stated here from those figures. WAL
+retention under a concurrent writer, the other part of this sizing, is
+[#1476](https://github.com/marshalltech81/protonmail-local-ai/issues/1476).
 
 **The benchmark.** `mcp-server/scripts/reconcile_bench.py` builds a
 synthetic index (generated values only, never mail) whose tables mirror
@@ -1635,9 +1637,7 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
   records in the same transaction, with request and response bytes;
 - with `--filtered`, filtered predicates (participant, subject, body
   text, authority, dates) against one production page of the same
-  query;
-- with `--wal`, WAL growth while a second process commits during a
-  round's snapshot.
+  query.
 
 Run it inside the mcp-server image so SQLite and Python match the
 server's; `--help` lists every option:
@@ -1646,7 +1646,7 @@ server's; `--help` lists every option:
 docker build -t mcp-bench mcp-server
 docker run --rm --entrypoint python \
   -v "$PWD/mcp-server/scripts:/app/scripts:ro" mcp-bench \
-  scripts/reconcile_bench.py --messages 50000 --identity typical --wal --filtered
+  scripts/reconcile_bench.py --messages 50000 --identity typical --filtered
 ```
 
 Run it only while the live indexer is idle: a busy indexer shares the
