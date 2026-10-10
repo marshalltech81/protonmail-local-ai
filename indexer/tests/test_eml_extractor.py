@@ -155,7 +155,7 @@ class TestDispatch:
 
         assert (
             reprocess_reruns_extraction(
-                extractors.NO_EXTRACTOR_ERROR, NO_EXTRACTOR_MODULE, content_type, filename
+                extractors.NO_EXTRACTOR_ERROR, NO_EXTRACTOR_MODULE, content_type, filename, None
             )
             is reruns
         )

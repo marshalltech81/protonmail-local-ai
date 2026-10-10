@@ -2163,11 +2163,13 @@ class Database:
         occurrence whose cached extraction is an "OCR disabled" result
         and for which ``qualifies`` holds. ``qualifies`` gets one row per
         occurrence with the filepath, filename, MIME type, the cached
-        error and the row's extractor module."""
+        error, the row's extractor module and its recorded extractor
+        (``NULL`` when unstamped, #1415)."""
         return self._stream_filepaths(
             """
             SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
-                   e.extractor_module, a.attachment_occurrence_id AS occurrence_id,
+                   e.extractor_module, e.extractor,
+                   a.attachment_occurrence_id AS occurrence_id,
                    a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
@@ -2196,7 +2198,8 @@ class Database:
         return self._stream_filepaths(
             """
             SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
-                   e.extractor_module, a.attachment_occurrence_id AS occurrence_id,
+                   e.extractor_module, e.extractor,
+                   a.attachment_occurrence_id AS occurrence_id,
                    a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id

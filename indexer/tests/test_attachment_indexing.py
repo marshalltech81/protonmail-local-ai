@@ -1703,7 +1703,7 @@ class TestLegacyOle2CacheRows:
             )
             self._store_v0_row(db, attachment)
             assert attachment_indexing.reprocess_reruns_extraction(
-                LEGACY_OLE2_ERROR, "", content_type, filename
+                LEGACY_OLE2_ERROR, "", content_type, filename, None
             )
             plan = prepare_attachment_writes(
                 db=db, **_kwargs(attachment, claimant_id="message@example.com")
@@ -2024,7 +2024,7 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
 
     dotx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
     for content_type, filename in ((dotx_mime, "a.bin"), ("application/octet-stream", "a.dotx")):
-        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename)
+        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename, None)
         db = _setup_db_for_attachment(tmp_path / filename)
         attachment = _attachment(out.getvalue(), filename=filename, content_type=content_type)
         db.store_attachment_extraction(
@@ -2068,7 +2068,7 @@ def test_cached_no_extractor_row_for_a_powerpoint_variant_is_re_extracted(tmp_pa
     else:
         payload = _retyped_deck(main_type, _deck(_boxes(fact)))
     for content_type, filename in ((mime, "a.bin"), ("application/octet-stream", f"a{ext}")):
-        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename)
+        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename, None)
         db = _setup_db_for_attachment(tmp_path / filename)
         attachment = _attachment(payload, filename=filename, content_type=content_type)
         db.store_attachment_extraction(
@@ -2425,7 +2425,7 @@ class TestPermanentFailureCacheRows:
 
         build, content_type, filename, module = self._CASES[case]
         _, error, _ = build(monkeypatch)
-        assert not reprocess_reruns_extraction(error, module, content_type, filename)
+        assert not reprocess_reruns_extraction(error, module, content_type, filename, None)
 
     def test_a_later_extractor_version_still_refreshes_the_row(self, tmp_path, monkeypatch):
         """The row carries the extractor stamp, so a version bump (for
@@ -2704,7 +2704,7 @@ def test_cached_no_extractor_row_for_a_ppt_is_re_extracted(tmp_path, monkeypatch
     payload = _OLE2 + b"synthetic deck bytes"
     for content_type, filename in ((_PPT_MIME, "a.bin"), ("application/octet-stream", "a.ppt")):
         # The row an earlier release wrote is the '' module's (#928).
-        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename)
+        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename, None)
         seen = _stub_ppt_reader(monkeypatch, tmp_path / filename, b"SYNTHETIC_PPT_FACT")
         db = _setup_db_for_attachment(tmp_path / filename)
         attachment = _attachment(payload, filename=filename, content_type=content_type)
@@ -3056,13 +3056,14 @@ class TestOccurrenceTextComplete:
             attachment_id=attachment.content_hash,
             extractor_module=_module(attachment),
             extraction_status=STATUS_UNSUPPORTED,
-            extractor=None,
+            extractor="image@5",
             extracted_text=None,
             extraction_error="OCR disabled (INDEXER_OCR_ENABLED=false)",
         )
         plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
+        assert plan.cached
         self._apply(db, plan)
-        assert self._row(db, plan) == (0, None)
+        assert self._row(db, plan) == (0, "image@5")
 
     def test_a_payload_a_parse_cap_emptied_is_zero(self, tmp_path, monkeypatch):
         db = _setup_db_for_attachment(tmp_path)
