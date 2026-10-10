@@ -749,7 +749,8 @@ and falls back to a subject-only vector.
 
 **Message body assembly (#295, #298):** a message's body text is every
 non-blank inline `text/plain` and `text/html` part outside attachments
-(HTML through html2text), in document order, separated by a blank line.
+(HTML through html2text, in the extractor child: "HTML conversion"
+below), in document order, separated by a blank line.
 The parts of a `multipart/alternative` are renderings of one body, so
 it contributes a single child: the first carrying non-blank plain text,
 else the first carrying any text. A whitespace-only plain alternative
@@ -916,7 +917,7 @@ semantics, `0` a known loss, `NULL` not assessed, with no default:
 | `subject_complete` | the subject was cut (`subject_length`) | phase 1, with the row |
 | `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete` | an `address_*` parser cap fired while that role's headers were read, or an entry yielded no storable address (`address_unparsed`); all three when the header scan stopped (`address_fields`); From also for a repeated `From`, whose later headers are not parsed | phase 1, with the row |
 | `attachments_manifest_complete` | a cap stopped the walk or left an attached email unwalked (`attached_depth`, `attached_fields`, `transport_decode`, `transport_lossy`, `decoded_bytes`, `container_serialize`, `mime_parts`) | phase 1, with the row |
-| `body_complete` | text parts were left out of the body (`body_parts`, `mime_parts`) | phase 2c, in the transaction that commits the body chunks |
+| `body_complete` | text parts were left out of the body (`body_parts`, `html_body`, `mime_parts`) | phase 2c, in the transaction that commits the body chunks |
 
 `_write_message_record` writes the phase-1 columns from the parse and
 resets `body_complete` to `NULL` on every write, and
@@ -1625,8 +1626,8 @@ took 3 to 5 s in the image, and html2text on 32 MB of HTML took 18 to
 payload nested past Python's recursion limit (about 1,000 levels) is
 recorded `failed` as `RecursionError`.
 
-All three, and the extractor child below (OOXML, images and attached
-emails), run through one subprocess runner (`extractors/_runner.py`).
+All three, and the extractor child below (OOXML, images, attached
+emails and HTML), run through one subprocess runner (`extractors/_runner.py`).
 It starts every tool through `extractors/_launcher.py` (`python -I`),
 which lowers its own address space (`RLIMIT_AS`) and CPU time
 (`RLIMIT_CPU`) to the limits the extractor passes, caps glibc at two
@@ -1662,7 +1663,8 @@ reserved encrypted-deck status is the one exception, below) records
 log or `last_error`.
 
 The Python extractor child (`extractors/extractor_child.py
-<module>`, for the OOXML formats, `.xls`, images and attached emails) reports its result in a
+<module>`, for the OOXML formats, `.xls`, images, attached emails and
+HTML) reports its result in a
 framed protocol the runner parses as it arrives (#1291): `P` lines for
 progress, passed to the dispatcher's progress callback as they are
 read so a long extraction can refresh the heartbeat; a `C <name>` line
@@ -1699,6 +1701,7 @@ The limits on every external program the indexer runs:
 | Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
 | extractor child, OOXML (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
 | extractor child, attached emails (`message/rfc822`, `application/eml`, `.eml`) | 1 GiB | 60 s | 75 s |
+| extractor child, HTML (`html` attachments, and a message's HTML body parts) | 1 GiB | 60 s | 75 s |
 | extractor child, PIL and Tesseract (images), each process | 1,605 MiB | 4 × `INDEXER_OCR_TIMEOUT_SECONDS` + 30 s (270 s) | pages × (OCR timeout + 10 s) + 30 s (1,430 s) |
 | Tesseract (scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
 | Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |
@@ -1914,6 +1917,74 @@ about 0.09 s per image (0.23 s against 0.14 s in process for a small
 screenshot). The text is byte-identical to the in-process extraction,
 so #1292 did not bump `image`.
 
+**HTML conversion (#1294).** html2text has no per-input bound of its
+own, so every HTML conversion the indexer runs goes through the
+extractor child (PLAN.md decision 42): `html.py` starts
+`extractor_child.py html <length> ...`, whose `html_child.py` converts
+each document with a fresh converter (`ignore_links`, `ignore_images`,
+no body wrap). The `html` attachment extractor sends one document, its
+payload. The parser sends every `text/html` body part of one message
+to one child once its MIME walk ends, so a message costs one launch
+whatever its number of HTML parts; the attached-email extractor's body
+walk already runs in its own child and converts there. The documents
+cross as one payload file with their byte lengths as the child's
+arguments (one to 200, ASCII digits, adding up to the file's size;
+anything else is `ValueError` in the child), and come back in the text
+frame, each stripped (as the dispatcher and the parser strip them) and
+prefixed by its length in characters and a colon; a broken prefix or a
+count that does not match is `ChildOutputError`. The stripped texts
+share a budget of 10,000,000 characters: the text that crosses it is
+cut there and the documents after it are not converted. A lone
+surrogate, which UTF-8 cannot carry (a UTF-7 part can decode to one),
+is replaced by `?` before a body part crosses, and the count is logged
+at WARNING (`HTML body text held <n> lone surrogates; converted as ?`),
+rate limited; like any decoder replacement it does not mark the body
+incomplete (#1315). In process the surrogate stayed in the body and
+the chunker's UTF-8 encode then failed the message.
+
+An attachment the child cannot convert is recorded `failed` by type,
+as for the other child extractors, and one the budget cut reports the
+`html_text_chars` cap (the dispatcher's default 2,000,000-character
+cap cuts first). For a message body, a conversion the child cannot
+finish (one of its limits, an error in html2text, broken output) leaves
+every HTML part of the message without text, and the budget leaves the
+part that crossed it cut and the later ones without text. Either is
+logged at WARNING, rate limited, with the type name and counts only
+(`HTML body conversion failed (<type>); the text of <n> HTML parts is
+left out`); the parts the body could have kept are counted under the
+`html_body` parse cap, which clears `body_complete`; and the rest of the
+message is indexed. An `OSError` while starting the child (no process
+or scratch space left) fails the parse instead, so the queue retries
+the message.
+
+The limits are those of the attached-email child, whose body walk runs
+the same html2text: 1 GiB of address space, 60 s of CPU, killed after
+75 s. Plainly measured in the indexer image, child peak RSS and CPU
+time for one synthetic 50 MB HTML body (the `INDEXER_PARSE_MAX_BYTES`
+default) of each shape: plain paragraphs 247 MB and 2.3 s, tables
+357 MB and 11.7 s, nested tables 195 MB and 16.7 s, dense entities
+249 MB and 13.9 s, CJK text 205 MB and 1.4 s, `<pre>` 410 MB and 6.5 s,
+unclosed `<b>` 322 MB and 37 s, unclosed `<div>` 692 MB and 29 s, list
+items 553 MB and 25 s, `<br>` lines under 200 nested blockquotes
+352 MB and 36 s. All of these complete, most at the text budget (50 MB
+of plain paragraphs is about 51,000,000 characters). 50 MB of `<hr>`
+(about 92,000,000 characters of output) and 50 MB of bytes that are
+not UTF-8 fail with `MemoryError` at the limit, and so does a 32 MB
+attachment of bytes that are not UTF-8 (950 MB in process). 1 GiB is
+2.5 times the largest peak of the shapes that complete; 60 s is 1.6
+times the slowest.
+
+Starting the child adds about 58 ms to the parse of a message with any
+HTML part (median of 30 in the image; 71 ms for twenty HTML parts in
+one message), where a small body converted in process in well under
+1 ms, so a full reparse of 33,000 messages costs up to about 32 more
+minutes, less for messages with no HTML part. The text of a document
+inside the limits and the budget is byte-identical to the in-process
+conversion: `indexer/tests/test_html_child.py` compares the two over a
+catalogue of synthetic shapes through the real child, and the parser
+pin and `make baseline` are unchanged, so `html`
+keeps no version and nothing is re-extracted or re-parsed.
+
 PDFs labelled as images (#1415): a payload under an image label
 (an `image/*` type or an image extension) that starts with `%PDF-`
 runs the PDF extractor, not the image extractor, which cannot read it.
@@ -2104,7 +2175,7 @@ anything else stays `failed`. The row is keyed by the module that
 raised the error (#928), so it is served only to occurrences that run
 that module on the bytes; an occurrence whose label runs another
 extractor has its own row and extracts. It is stamped with the
-extractor version (`pdf@5`), so a later version bump, for example one
+extractor version (`pdf@6`), so a later version bump, for example one
 that raises a budget, refreshes it; the bumps that came with the
 `pdf`, `xlsx` and `pptx` mappings (`pdf@5`, `xlsx@6`, `pptx@3`)
 refreshed the `failed` rows the previous versions wrote, since the
@@ -2124,6 +2195,11 @@ A pypdf limit hit inside one page's text extraction (a `/ToUnicode`
 map over its size limit, for example) is not one of these: like any
 per-page error, that page is counted in `pdf_pages_failed` (and OCR'd
 when OCR is on) and the other pages' text is kept.
+
+The PDF extractor is version 6 with pypdf 6.20.0: stream decoding limits
+and malformed page-tree recovery changed, so cached PDF results from
+earlier extractor versions are re-extracted once. The usual OCR-disabled
+and dead-letter rules still apply.
 
 The parsing libraries log and warn with values read from the
 attachment (pypdf's font dictionaries and encoding names, openpyxl's
@@ -3550,7 +3626,7 @@ covers is docs only.
 
 | Boundary and threat | Controls in place | Shared assumptions | Accepted limitations and pending decisions | Locked by |
 | --- | --- | --- | --- | --- |
-| **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools and the `xls`, `docx`, `pptx`, `xlsx` and `image` extractors run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. One pass of one message may start at most a budget of extraction processes and seconds on attachments the cache cannot serve; the rest are deferred to later passes, between other mail (`indexer/src/attachment_indexing.py` `ExtractionBudget`, #1236). Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | `pdf` and `html` (with body HTML conversion) still run in-process until #1293 and #1294; `text` stays in-process by decision 42. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_image_child.py`; `indexer/tests/test_extraction_budget.py`; `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
+| **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools, the `xls`, `docx`, `pptx`, `xlsx`, `eml`, `image` and `html` extractors and the HTML conversion of message bodies run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. One pass of one message may start at most a budget of extraction processes and seconds on attachments the cache cannot serve; the rest are deferred to later passes, between other mail (`indexer/src/attachment_indexing.py` `ExtractionBudget`, #1236). Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | `pdf` still runs in-process until #1293; `text` stays in-process by decision 42. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_image_child.py`; `indexer/tests/test_html_child.py`; `indexer/tests/test_extraction_budget.py`; `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
 | **Secrets.** The Bridge password, provider API keys or the MCP token reach the repository, `docker inspect`, a log, or another local account. | Each secret is a Docker secret read from `.secrets/` (the `secrets` section of `docker-compose.yml`). `scripts/validate-env.sh`, which `make up` runs first, requires mode 600 on every secret file (`require_mode_600`) and rejects the API keys and `MCP_AUTH_TOKEN` in `.env` (`reject_secret_in_env`). `.gitignore` excludes `.env`, `.secrets/` and `*.pem`; the `detect-secrets` pre-commit hook also runs in CI (`lint.yml`). Clients get the token from a file, never an argument (`scripts/mcp-auth-headers.sh`; `mcp-server/src/stdio_adapter.py` refuses a group- or other-readable file). | Every secret rests on the operator's account and mode 600 on the host's disk: processes running as the operator are trusted (see [Endpoint authentication](#endpoint-authentication)). | Secrets are stored unencrypted on the host's disk. A plain `docker compose up` skips `validate-env.sh`. | `scripts/tests/validate_env_test.sh` (`loose_secret_mode_fails`, `loose_mcp_token_mode_fails`, `api_key_in_env_fails`, `mcp_token_in_env_fails`); `mcp-server/tests/test_stdio_adapter.py` `test_group_or_other_access_fails_closed`; `mcp-server/tests/test_http_transport.py` `test_tokens_stay_out_of_the_log`; Semgrep `shell-xtrace-enabled`. The `.gitignore` entries and the `detect-secrets` hook are docs only. <!-- pragma: allowlist secret --> |
 | **Network exposure.** Another machine, another local account or a web page reaches the MCP endpoint, or a container other than mbsync logs in to Bridge. | Only `mcp-server` publishes a port, `127.0.0.1:${MCP_PORT:-3000}` (`docker-compose.yml`). mbsync alone joins `bridge-net` and alone mounts the `bridge_pass` secret. No service shares the host's network namespace. `mcp-server/src/main.py`: `_HostOriginGuard` rejects a bad Host (421) or Origin (403), and `_StaticBearerTokenVerifier` checks the bearer token with `hmac.compare_digest` before any session exists. `docker-compose.hardened.yml` makes `app-net` internal. | The loopback bind keeps other machines out; the token is what stops other local accounts. | The bearer token is the only caller-authentication control against another local account, and it does not separate code running as the operator. `app-net` is not internal by default, so the indexer and mcp-server can reach remote providers. No network control limits Bridge's port to mbsync: on macOS `host.docker.internal` reaches the host's loopback from any container, so only the Bridge password, which mbsync alone mounts, keeps the others from logging in. | `scripts/tests/compose_test.sh` (ports and `bridge-net` membership on every overlay combination); Semgrep `compose-port-on-other-service`, `compose-port-not-loopback`, `compose-bridge-net-member`, `compose-host-namespace`; `mcp-server/tests/test_http_transport.py` (`test_missing_token_is_unauthorized`, `test_wrong_token_is_unauthorized`, `test_empty_token_fails_closed`, `test_compare_is_constant_time`, `test_streamable_http_rejects_other_host`, `test_streamable_http_rejects_other_origin`). |
 | **Bridge TLS.** Another listener on the Bridge app's loopback port (another local account while the app is down) receives the Bridge password, or the connection falls back to plaintext. | `mbsync/entrypoint.sh` `extract_bridge_cert` connects over implicit TLS only, with no STARTTLS or plaintext fallback, and checks the certificate against the required `BRIDGE_CERT_FINGERPRINT` (`verify_expected_fingerprint`) and then the pin in `mbsync-state` (`verify_cert_pin`) on every start, before the first sync sends the password. With `BRIDGE_CERT_PIN_ROTATE=true` a changed certificate that matches the fingerprint replaces the pin instead of failing. The certificate lives on tmpfs at `/tmp/mbsync/bridge-cert.pem`, which isync uses as `CertificateFile` with `TLSType IMAPS` (`mbsync/mbsyncrc.template`). `validate-env.sh` refuses a missing or malformed fingerprint. The template is pull-only: `Sync Pull`, `Expunge None`. | The fingerprint check, the pin and isync's `CertificateFile` all check the certificate extracted at start. On first boot or during a rotation the pin is written from that certificate, so a fingerprint taken from the wrong certificate passes all three; after that, the pin also refuses a certificate other than the pinned one. | Pull-only sync is one configuration control, the template's settings. isync's own validity and host name checks run on each sync, not at startup. `BRIDGE_CERT_PIN_ROTATE=true` stays in effect until mbsync is recreated with it false, and while it does the pin check does not stop a certificate change; the fingerprint check still does. | `mbsync/tests/entrypoint_test.sh` (`mismatch_is_refused_without_rotation`, `first_boot_with_another_expected_fingerprint_is_refused_unpinned`, `missing_expected_fingerprint_is_refused_at_startup`, `config_keeps_sync_safety`); `mbsync/tests/tls_check.sh`; `mbsync/tests/layout_check.sh`; `scripts/tests/validate_env_test.sh` `missing_bridge_cert_fingerprint_fails`; Semgrep `shell-tls-verification-disabled`. |

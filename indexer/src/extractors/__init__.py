@@ -645,6 +645,9 @@ class ExtractionResult:
 # that only with a raised OCR page limit or crafted input — owner
 # exception, 2026-10-08, no bump (bumping would reset completeness and
 # re-OCR with new failure modes).
+# html (no version): moved to the limited child with body HTML
+# conversion (#1294); the text of a document inside the limits and the
+# 10,000,000-char budget is unchanged, so nothing is re-run.
 # image 4: converts frames in modes Pillow cannot write as PNG (CMYK,
 # ...) to RGB (#1400). Those images were recorded ``failed``, and a
 # failed row is re-run only when its bytes are extracted again, so the
@@ -693,12 +696,15 @@ class ExtractionResult:
 # eml 3: a uuencode body part of an attached email with no ``end`` line
 # last (cut in transit) is incomplete (#1402); text unchanged, same
 # re-run of the cached ``eml`` rows.
+# pdf 6: pypdf 6.20 changes stream decoding limits and malformed page-tree
+# recovery. Re-run cached PDF results once so those changes reach existing
+# attachments, preserving the usual OCR-disabled and dead-letter rules.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
     "eml": 3,
     "image": 6,
-    "pdf": 5,
+    "pdf": 6,
     "ppt": 2,
     "pptx": 3,
     "text": 3,

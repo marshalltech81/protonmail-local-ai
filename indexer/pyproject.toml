@@ -6,13 +6,13 @@ dependencies = [
     "html2text==2025.4.15",
     "sqlite-vec==0.1.9",
     "watchdog==6.0.0",
-    "tenacity==9.1.4",
+    "tenacity==9.2.1",
     # Official OpenAI SDK for the operator-supplied OpenAI-compatible
     # ``/v1/embeddings`` endpoint. Operator-supplied compat servers
     # (LM Studio / vLLM / mlx_lm.server / TEI / DeepInfra / OpenRouter)
     # target the SDK as their reference client by design, so pointing
     # the SDK at them via ``base_url`` is the supported path.
-    "openai==3.26.0",
+    "openai==3.28.0",
     # Real BPE tokenizer for chunk-size estimation. Counting chunk tokens
     # with a char-count heuristic undercounts CJK / URL / Base64 / code
     # text by 4-6×, producing chunks that blow past the embed model's
@@ -20,12 +20,12 @@ dependencies = [
     # is the upstream HuggingFace tokenizer for ``Qwen/Qwen3-Embedding-8B``
     # (the schema-default embedding model). If the embed model is
     # changed, the bundled tokenizer file must be updated to match.
-    "tokenizers==0.23.2",
+    "tokenizers==0.23.3",
     # Attachment text extraction. Each library is required
     # by exactly one extractor module under src/extractors/; lazy import
     # there means a missing one downgrades to ``unsupported`` rather
     # than crashing the indexer.
-    "pypdf==6.19.0",               # digital PDF text layer
+    "pypdf==6.20.0",               # digital PDF text layer
     "cryptography==50.0.2",        # pypdf AES decryption (owner-password-only PDFs)
     "pdf2image==1.17.0",           # render PDF pages → PIL.Image (needs Poppler)
     "pytesseract==0.3.13",         # OCR via Tesseract binary

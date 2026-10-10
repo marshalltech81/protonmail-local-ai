@@ -17,7 +17,6 @@ import logging
 
 import pytest
 from fastmcp import Client, FastMCP
-from mcp.shared.exceptions import MCPError as McpError
 from mcp.types import CallToolResult
 from pydantic import BaseModel
 from src.lib.argument_validation import ArgumentValidationLog, DropArgumentModelWarning
@@ -254,11 +253,15 @@ def test_a_body_validation_error_keeps_fastmcp_line(caplog, fastmcp_filter):
         return str(_Body.model_validate({"count": "not a number"}))
 
     server.add_middleware(ArgumentValidationLog(server))
-    # fastmcp answers a body's pydantic error as a protocol error.
-    with caplog.at_level(logging.INFO), pytest.raises(McpError):
-        _call_all(server, [("broken", "", {})])
+    # FastMCP 4.1 wraps body validation failures as tool execution errors.
+    with caplog.at_level(logging.INFO):
+        [result] = _call_all(server, [("broken", "", {})])
+    assert result.is_error
     warnings = _warnings(caplog)
-    assert any(w.startswith(_FASTMCP_LINE) for w in warnings)
+    assert any(
+        r.levelno == logging.ERROR and r.getMessage().startswith("Error calling tool")
+        for r in caplog.records
+    )
     assert not any("rejected invalid argument" in w for w in warnings)
 
 
