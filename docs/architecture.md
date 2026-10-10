@@ -954,7 +954,12 @@ writes the occurrence's chunks, so they roll back with them.
   escape nor a soft line break, and for a uuencode part (all four
   aliases) whose decode fell back to the transport text (#1288; one
   linear scan of the part's text, behind the same per-message byte
-  budgets; a truncation that leaves valid encoding stays undetectable).
+  budgets) or whose last non-blank line is not `end` (#1402: a body cut
+  off before its `end` line, or with text after it that the decoder
+  never reads; only the last 1,024 characters are read, so a trailing
+  blank run or a last line longer than that also counts. A second
+  complete block still ends with `end` and is not detected. Any other
+  truncation that leaves valid encoding stays undetectable).
   For
   a base64 attached email, whose transport form the parser decodes
   leniently, the same text is decoded once more through the stdlib leaf
@@ -1575,7 +1580,8 @@ lost bytes: a body text part's (`eml_body_decode`), a nested email's
 base64 or quoted-printable (`eml_nested_messages`; a quoted-printable
 `=` that is neither an escape nor a soft line break, #1288), and a body
 text part's quoted-printable or uuencode (the same `=` rule, or a
-uuencode decode that fell back to its transport text). A body text
+uuencode decode that fell back to its transport text or whose last
+non-blank line is not `end`, #1402). A body text
 part in any other encoding that is not identity (an unknown value) is
 kept as decoded but counted as `eml_body_decode` too, since a
 malformed one comes back as its transport text. A body
