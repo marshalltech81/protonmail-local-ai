@@ -186,17 +186,45 @@ class TestDifferentialCatalogue:
         assert msg.body_text == _in_process(decoded).strip()
 
     @real_child
-    def test_a_lone_surrogate_crosses_as_a_question_mark(self, tmp_path):
+    def test_a_lone_surrogate_crosses_as_a_question_mark(self, tmp_path, caplog):
         """A UTF-7 part can decode to a lone surrogate, which UTF-8 cannot
         carry: it crosses as ``?``. In process the surrogate stayed in the
-        body, whose UTF-8 encode (the chunker's) then failed."""
-        data = b"<p>a +2DQ- b</p>"
+        body, whose UTF-8 encode (the chunker's) then failed. The
+        replacement is logged with its count (review round 1); like any
+        decoder replacement it does not mark the body incomplete (#1315)."""
+        caplog.set_level("DEBUG")
+        data = b"<p>a +2DQ- b +2DQ-</p><p>" + MARKER.encode() + b"</p>"
         decoded = parser._safe_decode(data, "utf-7")
         assert "\ud834" in decoded
         with pytest.raises(UnicodeEncodeError):
             _in_process(decoded).encode("utf-8")
         msg, _ = _parse(tmp_path, _message(("text/html; charset=utf-7", data)))
-        assert msg.body_text == "a ? b"
+        assert msg.body_text.startswith("a ? b ?")
+        assert msg.parse_caps == {}
+        assert msg.body_complete is True
+        lines = [
+            (r.levelname, r.getMessage()) for r in caplog.records if r.name == "indexer.parser"
+        ]
+        assert ("WARNING", "HTML body text held 2 lone surrogates; converted as ?") in lines
+        assert MARKER not in caplog.text
+
+    def test_no_surrogate_no_line(self, tmp_path, caplog):
+        caplog.set_level("DEBUG")
+        _parse(tmp_path, _message(("text/html", b"<p>plain</p>")))
+        assert "lone surrogates" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("text", "expected", "count"),
+        [
+            ("", "", 0),
+            ("abc \U0001f600", "abc \U0001f600", 0),
+            ("\ud800", "?", 1),
+            ("a\udfffb\ud834", "a?b?", 2),
+            ("\ud83d\ude00", "??", 2),
+        ],
+    )
+    def test_lone_surrogates_are_replaced_and_counted(self, text, expected, count):
+        assert html.replace_lone_surrogates(text) == (expected, count)
 
 
 class TestOneChildPerMessage:

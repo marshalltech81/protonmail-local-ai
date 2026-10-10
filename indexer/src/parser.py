@@ -1892,10 +1892,27 @@ def _convert_html_parts(
     WARNING, rate limited, with the failure's type name and counts, and
     the parts the body could have kept are counted under ``html_body``,
     which marks the body incomplete. The rest of the message is indexed
-    as usual. ``OSError`` from starting the child (no process or scratch
+    as usual. A lone surrogate, which cannot cross to the child as UTF-8,
+    is replaced by ``?`` first and the count logged. ``OSError`` from starting the child (no process or scratch
     space left) propagates, so the queue retries the message."""
+    sources: list[str] = []
+    surrogates = 0
+    for _, html in parts:
+        source, replaced = html_conversion.replace_lone_surrogates(html)
+        sources.append(source)
+        surrogates += replaced
+    if surrogates:
+        # A character replacement, not a loss (#1315): counted and logged,
+        # the body stays complete. In process the surrogate failed the
+        # message at chunking (#1447 is the plain-text case).
+        warn_rate_limited(
+            log,
+            "HTML body text held %d lone surrogates; converted as ?",
+            surrogates,
+            attachment=False,
+        )
     try:
-        texts, cut = html_conversion.convert_bodies([html for _, html in parts])
+        texts, cut = html_conversion.convert_bodies(sources)
     except html_conversion.CHILD_FAILURES as exc:
         texts, cut = [], False
         reason = exc.type_name if isinstance(exc, ChildError) else type(exc).__name__

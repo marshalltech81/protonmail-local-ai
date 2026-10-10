@@ -1935,8 +1935,11 @@ prefix or a count that does not match is `ChildOutputError`. The texts
 share a budget of 10,000,000 characters: the text that crosses it is
 cut there and the documents after it are not converted. A lone
 surrogate, which UTF-8 cannot carry (a UTF-7 part can decode to one),
-crosses as `?`; in process it stayed in the body and the chunker's
-UTF-8 encode then failed the message.
+is replaced by `?` before a body part crosses, and the count is logged
+at WARNING (`HTML body text held <n> lone surrogates; converted as ?`),
+rate limited; like any decoder replacement it does not mark the body
+incomplete (#1315). In process the surrogate stayed in the body and
+the chunker's UTF-8 encode then failed the message.
 
 An attachment the child cannot convert is recorded `failed` by type,
 as for the other child extractors, and one the budget cut reports the

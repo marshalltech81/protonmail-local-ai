@@ -37,13 +37,15 @@ documents after it are not converted, reported as the ``CAP_TEXT`` cap.
 ``extract`` returns the converter's text as it did in process (the
 dispatcher strips it); ``convert_bodies`` too (the parser strips each).
 A lone surrogate, which UTF-8 cannot hold (a UTF-7 body can decode to
-one), crosses as ``?``; in process it was kept, and the chunker's UTF-8
-encode then failed the message.
+one), is replaced by ``?`` before a body crosses
+(``replace_lone_surrogates``), and the parser logs the count; in process
+it was kept, and the chunker's UTF-8 encode then failed the message.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Sequence
 
 import html2text
@@ -101,6 +103,9 @@ CHILD_FAILURES: tuple[type[Exception], ...] = (
 
 # Characters of a length prefix the parent reads before its colon.
 _MAX_PREFIX_DIGITS = 18
+
+# A surrogate code point, which in a ``str`` is always a lone one.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
 def html_to_text(source: str) -> str:
@@ -163,10 +168,16 @@ def split_texts(framed: str, count: int) -> list[str]:
     return texts
 
 
+def replace_lone_surrogates(text: str) -> tuple[str, int]:
+    """``text`` with each lone surrogate, which UTF-8 cannot carry,
+    replaced by ``?``, and how many there were. One linear pass."""
+    return _LONE_SURROGATE.subn("?", text)
+
+
 def convert_bodies(bodies: Sequence[str]) -> tuple[list[str], bool]:
     """Convert a message's HTML body parts in one child (``convert``).
-    A lone surrogate, which UTF-8 cannot carry, crosses as ``?``."""
-    return convert([body.encode("utf-8", errors="replace") for body in bodies])
+    The bodies hold no lone surrogate (``replace_lone_surrogates``)."""
+    return convert([body.encode("utf-8") for body in bodies])
 
 
 def extract(
