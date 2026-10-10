@@ -817,6 +817,7 @@ def test_absent_and_zero_are_resolved_as_the_table_says(bench, changes, name, ab
         ({"--records": "mixed", "--missing-from": "worst", "--missing": "7"}, "can leave out 6"),
         ({"--per-message": "0"}, "can leave out 0 occurrences"),
         ({"--upload-total": "100,100"}, "holds 275 members"),
+        ({"--k": "100,100"}, "distinct"),
         ({"--references": "5"}, "cardinality records only"),
         ({"--filtered": None, "--chunk-tokens": "19"}, "at least 20"),
         ({"--filtered": None, "--extracted-chars": "5"}, "excludes --extracted-chars"),
@@ -935,6 +936,23 @@ def test_certificate_count_time_excludes_the_connection_setup(bench):
     assert src.index("t_open = time.perf_counter()") < src.index("count_sql, params")
     assert '"count_s": t_count - t_open' in src
     assert '"total_s": t_end - t0' in src
+
+
+def test_round_measures_only_the_reconcile_algorithm(bench):
+    import inspect
+
+    src = inspect.getsource(bench.phase_reconcile)
+    t0 = src.index("t0 = time.perf_counter()")
+    # The benchmark-only choice of worst-case records is made before
+    # the timed region, not inside the round.
+    assert src.index("bench_worst") < t0
+    assert src.count("bench_worst") == 1
+    # The diff keeps no set of the server's hashes: each scanned hash is
+    # discarded from the upload, so memory is bounded by the upload.
+    assert "server.add(" not in src
+    assert "client.discard(h)" in src
+    # RSS is sampled before the per-record sizes are serialized again.
+    assert src.index("rss = _rss_kib()") < src.index('"record_bytes_max"')
 
 
 def test_round_parse_time_excludes_the_request_file_read(bench):

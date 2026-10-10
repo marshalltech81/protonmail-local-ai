@@ -1618,7 +1618,12 @@ synthetic index (generated values only, never mail) whose tables mirror
 indexer schema v11 and hold the rows the indexer writes for the
 messages the benchmark renders
 (`indexer/tests/test_reconcile_bench_fidelity.py` indexes those files
-with the indexer and compares every row). Each step runs in a fresh
+with the indexer and compares every row). `--identity utf8x4` is the
+exception: its 4,009-byte claimant IDs are a stress shape the parser
+cannot produce
+([#1424](https://github.com/marshalltech81/protonmail-local-ai/issues/1424)),
+which the fidelity test therefore does not cover, so its figures
+do not size any limit. Each step runs in a fresh
 child process on the server's own read-only connection and with the
 server's own predicate compiler (unfiltered, Trash is left out), and
 records are read and serialized with the server's own `query_messages`

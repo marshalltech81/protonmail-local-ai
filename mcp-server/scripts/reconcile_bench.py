@@ -1045,6 +1045,17 @@ def phase_reconcile(
     # The server holds the request body before it parses it: the file
     # read is outside every timing.
     request_body = Path(request).read_bytes()
+    # ``worst_first`` is the benchmark's own choice of which records to
+    # return, not part of the reconcile algorithm, so it is made here,
+    # outside every timing: the lowest ``k`` worst-case identities of
+    # this kind in the matching set (byte order, as the scan's).
+    targets: list[str] = []
+    if worst_first:
+        # ``scan`` is the server compiler's SQL; values stay bound.
+        sql = f"SELECT identity FROM bench_worst WHERE identity IN ({scan})"  # nosec B608
+        with closing(_ro(db_path)) as conn:
+            rows = conn.execute(sql + " ORDER BY identity LIMIT ?", [*params, k])
+            targets = [row[0] for row in rows]
     t0 = time.perf_counter()
     client = set(unpack_hashes(request_body))
     t_parse = time.perf_counter()
@@ -1058,29 +1069,28 @@ def phase_reconcile(
         t_snapshot = time.perf_counter()
         count = conn.execute(count_sql, params).fetchone()[0]
         digest = hashlib.sha256(CERT_DOMAIN)
-        server: set[bytes] = set()
         missing: list[str] = []
-        others: list[str] = []
-        worst = (
-            {row[0] for row in conn.execute("SELECT identity FROM bench_worst")}
-            if worst_first
-            else set()
-        )
         missing_total = 0
+        scanned = 0
+        # Each scanned hash the upload holds is discarded from it, so
+        # what remains are the extras and no set of the server's hashes
+        # is kept: the diff's memory is bounded by the upload.
         for identity in _sorted_identities(conn, scan, params, method):
             b = identity.encode()
             digest.update(len(b).to_bytes(8, "big") + b)
             h = identity_hash(b)
-            server.add(h)
-            if h not in client:
+            scanned += 1
+            if h in client:
+                client.discard(h)
+            else:
                 missing_total += 1
-                if worst_first and identity not in worst:
-                    if len(others) < k:
-                        others.append(identity)
-                elif len(missing) < k:
+                if len(missing) < k:
                     missing.append(identity)
-        missing = (missing + others)[:k]
-        extras = sorted(client - server)
+        if targets:
+            # Worst-case records first, then the lowest others (K items).
+            chosen = set(targets)
+            missing = (targets + [m for m in missing if m not in chosen])[:k]
+        extras = sorted(client)
         t_diff = time.perf_counter()
         records, read = _materialize(conn, kind, missing)
         t_records = time.perf_counter()
@@ -1095,9 +1105,12 @@ def phase_reconcile(
     }
     body = json.dumps(response, separators=(",", ":"), ensure_ascii=False).encode()
     t_end = time.perf_counter()
+    # Sampled before the per-record sizes below serialize each record
+    # again, work the response path does not do.
+    rss = _rss_kib()
     return {
         "count": count,
-        "scanned": len(server),
+        "scanned": scanned,
         "missing_total": missing_total,
         "returned": len(records),
         **read,
@@ -1115,7 +1128,7 @@ def phase_reconcile(
         "records_s": t_records - t_diff,
         "transaction_s": t_records - t_snapshot,
         "total_s": t_end - t0,
-        "rss_kib": _rss_kib(),
+        "rss_kib": rss,
     }
 
 
@@ -1610,7 +1623,11 @@ ARGS: tuple[Arg, ...] = (
     Arg("messages", "int", 50_000, 1, MAX_MESSAGES, help="messages in the corpus"),
     Arg("per_message", "int", 3, 0, MAX_ATTACHMENTS, help="PDF attachments per message"),
     Arg(
-        "identity", "choice", "typical", choices=("typical", "ascii998", "ascii998common", "utf8x4")
+        "identity",
+        "choice",
+        "typical",
+        choices=("typical", "ascii998", "ascii998common", "utf8x4"),
+        help="Message-ID shape (utf8x4: a stress shape the parser cannot produce, #1424)",
     ),
     Arg(
         "records",
@@ -1853,6 +1870,10 @@ def _chunk_problem(args: argparse.Namespace) -> str | None:
 # Combinations: (applies, problem) pairs, each ``problem`` a message or
 # ``None``, checked in order once every value is in range.
 _RULES: tuple = (
+    (
+        lambda a: len(set(a.k)) != len(a.k),
+        lambda a: "--k values must be distinct (each K is one result)",
+    ),
     (
         lambda a: a.upload_total is not None and a.explicit_extras,
         lambda a: "--extras and --upload-total exclude each other (the total sets the extras)",
