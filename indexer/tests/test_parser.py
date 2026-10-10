@@ -6272,3 +6272,40 @@ class TestTransferDecodeLossDetection:
         start = time.perf_counter()
         assert parser_module._QP_BAD_ESCAPE_BYTES.search(b"=" * 2_000_000 + b"=3D") is not None
         assert time.perf_counter() - start < 2.0
+
+    @pytest.mark.parametrize("walk", [False, True], ids=["attachment_leaf", "walk_body_part"])
+    def test_a_uuencoded_part_is_decoded_once(self, tmp_path, monkeypatch, walk):
+        """Review round 1 on #1398: the fallback check reuses the decode
+        the parser already made. A uuencoded payload expands 31:1, so a
+        second decode doubled the memory and time of a crafted one."""
+        import email.message as stdlib_message
+
+        decodes: list[int] = []
+        real = stdlib_message._decode_uu
+
+        def counting(data):
+            decodes.append(len(data))
+            return real(data)
+
+        monkeypatch.setattr(stdlib_message, "_decode_uu", counting)
+        data = b"begin 644 f\n" + _uu_lines(b"SYNTHETIC_TEXT_MARKER " * 8) + b"`\nend\n"
+        if walk:
+            part = parser_module.email.message_from_bytes(
+                b"Content-Type: text/plain\r\nContent-Transfer-Encoding: x-uuencode\r\n\r\n" + data
+            )
+            body_walk = parser_module.BodyWalk()
+            parser_module._extract_body_and_attachments(part, walk=body_walk)
+            assert body_walk.decode_lost_parts == 0
+        else:
+            path = tmp_path / "u.eml"
+            path.write_bytes(
+                _with_attachment(
+                    b"Content-Type: application/octet-stream\r\n"
+                    b"Content-Transfer-Encoding: x-uuencode\r\n",
+                    data,
+                )
+            )
+            msg = parse_email(path)
+            assert msg is not None
+            assert msg.attachments[0].payload_complete is True
+        assert len(decodes) == 1

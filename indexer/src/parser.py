@@ -325,12 +325,16 @@ _QP_BAD_ESCAPE_BYTES = re.compile(rb"=(?![0-9A-Fa-f]{2}|\r?\n)")
 _UU_ENCODINGS = frozenset({"x-uuencode", "uuencode", "uue", "x-uue"})
 
 
-def _uu_decode_fell_back(part: email.message.Message) -> bool:
+def _uu_decode_fell_back(part: email.message.Message, decoded: bytes | None) -> bool:
     """Whether the stdlib's uuencode decode of this leaf part gave up and
     returned the transport text unchanged (no ``begin`` line, a blank
     line before ``end``): the decoded bytes then equal the payload bytes,
     which a real decode, shorter by a quarter, never does. A payload with
-    non-ASCII text is not valid uuencode and counts as failed (#1288)."""
+    non-ASCII text is not valid uuencode and counts as failed (#1288).
+    ``decoded`` is the bytes ``_decoded_payload`` already returned for
+    this part; decoding again would double the work of a payload that
+    expands 31:1 (review round 1 on #1398). Only a caller with no
+    decode yet passes ``None``."""
     payload = part.get_payload()
     if not isinstance(payload, str):
         return False
@@ -338,17 +342,21 @@ def _uu_decode_fell_back(part: email.message.Message) -> bool:
         raw = payload.encode("ascii", "surrogateescape")
     except UnicodeEncodeError:
         return True
-    return part.get_payload(decode=True) == raw
+    if decoded is None:
+        decoded = _decoded_payload(part)
+    return decoded == raw
 
 
-def _decode_lost_bytes(part: email.message.Message) -> bool:
+def _decode_lost_bytes(part: email.message.Message, decoded: bytes | None = None) -> bool:
     """Whether decoding this leaf part's payload (``_decoded_payload``,
     which fills ``part.defects``) lost bytes (#1242, review round 2 on
     #1286). Base64 records a defect; quoted-printable and uuencode record
     none, so they are checked here (#1288): a quoted-printable ``=`` that
     is no escape or soft break, and a uuencode decode that fell back to
     the transport text. A truncation that leaves valid encoding is not
-    detectable."""
+    detectable. ``decoded`` is the part's decoded payload when the
+    caller has it (uuencode compares against it rather than decoding
+    again)."""
     if any(isinstance(d, _DECODE_LOSS_DEFECTS) for d in part.defects):
         return True
     encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
@@ -356,7 +364,7 @@ def _decode_lost_bytes(part: email.message.Message) -> bool:
         payload = part.get_payload()
         return isinstance(payload, str) and _QP_BAD_ESCAPE_TEXT.search(payload) is not None
     if encoding in _UU_ENCODINGS:
-        return _uu_decode_fell_back(part)
+        return _uu_decode_fell_back(part, decoded)
     return False
 
 
@@ -1624,7 +1632,7 @@ def _extract_body_and_attachments(
                 transport_lost=transport_lost,
             )
             # Read once: it scans the payload (#1288).
-            leaf_lost = not part.is_multipart() and _decode_lost_bytes(part)
+            leaf_lost = not part.is_multipart() and _decode_lost_bytes(part, payload)
             if (
                 module is not None
                 and not part.is_multipart()
@@ -1756,7 +1764,9 @@ def _extract_body_and_attachments(
         # an encoding not decoded here (anything unknown can come back as
         # its transport text), counts as lossy in a body-only walk
         # (review rounds 3 and 5 on #1311, #1288).
-        if walk is not None and (_decode_lost_bytes(part) or _transfer_decode_unchecked(part)):
+        if walk is not None and (
+            _decode_lost_bytes(part, payload) or _transfer_decode_unchecked(part)
+        ):
             decode_lossy.append((len(nodes) - 1, not is_html))
         if (
             walk is not None
