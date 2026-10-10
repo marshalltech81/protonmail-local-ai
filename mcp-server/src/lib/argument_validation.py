@@ -35,8 +35,8 @@ class ArgumentValidationLog(Middleware):
 
     FastMCP raises its ``ValidationError`` only for a call whose
     arguments fail the model; a pydantic error from the tool's own body
-    reaches the chain as a plain pydantic ``ValidationError`` and is not
-    counted. Each rejected field of the call is recorded once under
+    is wrapped by FastMCP as a tool execution error and is not counted.
+    Each rejected field of the call is recorded once under
     ``<tool>.<field>``: the tool and field names come from the
     registered tools, never from the request, so a location naming
     anything else (an unexpected argument) is recorded as ``other``. The
@@ -119,8 +119,8 @@ class DropArgumentModelWarning(logging.Filter):
 
     fastmcp logs the line inside the ``except`` block handling its own
     ``ValidationError``, so the exception being handled tells the two
-    uses of the line apart: the same text is logged for a pydantic error
-    raised by a tool's body, which is kept. Other records pass.
+    uses of the line apart. Tool-body failures are logged separately as
+    errors and pass through this filter. Other records pass.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:

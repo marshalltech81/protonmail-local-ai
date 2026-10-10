@@ -26,7 +26,7 @@ must be bumped so cached rows re-extract.
 
 - **Tool:** `cff-src/generate-cff-pdf.py`, run with
   `uv run cff-src/generate-cff-pdf.py` from this directory. Its inline
-  script metadata pins `fonttools==4.66.1` and `pypdf==6.19.0`, and uv
+  script metadata pins `fonttools==4.66.1` and `pypdf==6.20.0`, and uv
   runs it in its own environment: fontTools is not an indexer dependency
   and does not touch `indexer/uv.lock`. The output is byte-for-byte
   reproducible with those versions.
@@ -40,7 +40,7 @@ must be bumped so cached rows re-extract.
   never runs).
 - **What extracts:** without fontTools, pypdf falls back to
   StandardEncoding and returns the ROT13 text as `success` /
-  `pdf-digital@5`; with fontTools 4.66.1 it returns the sentence.
+  `pdf-digital@6`; with fontTools 4.66.1 it returns the sentence.
 - **Metadata:** no document information dictionary (`writer.metadata =
   None`, so pypdf writes no `/Producer`), no XMP stream and no `/ID`.
   `TestCffFontPdf` checks the metadata and the font shape on every run.
