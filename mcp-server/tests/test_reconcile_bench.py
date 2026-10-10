@@ -747,6 +747,11 @@ def _ns(**kw):
         "records": "typical",
         "per_message": 3,
         "messages": 10,
+        "missing_from": "spread",
+        "chunk_tokens": 40,
+        "chunks": 1,
+        "wal": False,
+        "writer_commit_bytes": [131072],
     }
     return argparse.Namespace(**{**base, **kw})
 
@@ -780,3 +785,38 @@ def test_all_extras_needs_enough_worst_records_for_k(bench):
         bench._require_balanced_repeat(
             _ns(all_extras=True, records="mixed", upload_total=[100, 300], messages=1000)
         )
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"missing_from": "worst", "records": "typical"},
+        {"filtered": True, "repeat": 6, "chunk_tokens": 3},
+        {"chunks": 0},
+        {"wal": True, "writer_commit_bytes": [1024, -1]},
+    ],
+)
+def test_incompatible_arguments_are_refused_before_building(bench, kw):
+    with pytest.raises(SystemExit):
+        bench._require_balanced_repeat(_ns(**kw))
+
+
+def test_chunk_ids_are_production_sized_digests(bench, tmp_path):
+    db = tmp_path / "chunkids.db"
+    bench.build(db, 10, 1, "ascii998", "typical", chunks=2)
+    with closing(sqlite3.connect(db)) as conn:
+        ids = [r[0] for r in conn.execute("SELECT chunk_id FROM message_chunks")]
+    assert len(ids) == 20 and len(set(ids)) == 20
+    assert all(len(i) == 64 and set(i) <= set("0123456789abcdef") for i in ids)
+
+
+def test_common_prefix_claimants_share_998_bytes_and_stay_distinct(bench, tmp_path):
+    db = tmp_path / "common.db"
+    bench.build(db, 12, 1, "ascii998common", "typical")
+    with closing(sqlite3.connect(db)) as conn:
+        cids = [r[0] for r in conn.execute("SELECT claimant_id FROM messages")]
+        threads = {r[0] for r in conn.execute("SELECT thread_id FROM messages")}
+    assert len(set(cids)) == 12
+    assert len({c[:998] for c in cids}) == 1
+    assert all(len(c.encode()) == 998 + 17 for c in cids)
+    assert len(threads) > 1

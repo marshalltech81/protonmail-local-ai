@@ -212,11 +212,25 @@ def message_id(i: int, identity: str) -> str:
         # Three base-1024 digits as four-byte characters keep IDs unique.
         digits = [chr(0x10000 + (i >> s & 0x3FF)) for s in (20, 10, 0)]
         return "".join(digits) + "\U0001f600" * (MESSAGE_ID_MAX_CHARS - 3)
+    if identity == "ascii998common":
+        # One maximum-length Message-ID claimed by every file: claimant
+        # IDs share their first 998 bytes and differ in the hash suffix.
+        return "c" * (MESSAGE_ID_MAX_CHARS - len(_DOMAIN)) + _DOMAIN
     raise ValueError(f"unknown identity width {identity!r}")
 
 
-def claimant_of(mid: str) -> str:
-    return f"{mid}#{hashlib.sha256(mid.encode()).hexdigest()[:16]}"
+def _thread_identity(identity: str) -> str:
+    """The width whose IDs name threads and In-Reply-To: the common
+    prefix shape would put every message in one thread."""
+    return "typical" if identity == "ascii998common" else identity
+
+
+def claimant_of(mid: str, i: int | None = None) -> str:
+    """The claimant ID: the Message-ID plus ``#`` and 16 hex digits of a
+    hash (the file's bytes in production); ``i`` distinguishes files that
+    claim the same Message-ID."""
+    salt = mid if i is None else f"{mid}\0{i}"
+    return f"{mid}#{hashlib.sha256(salt.encode()).hexdigest()[:16]}"
 
 
 def _folder(i: int) -> str:
@@ -276,7 +290,7 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
             # 255-byte name limit) to about 3.5 KB of the 4,096-byte path.
             "folder": "/".join([_WIDE * 63] * 14),
         }
-    previous = message_id(i - 1, identity)
+    previous = message_id(i - 1, _thread_identity(identity))
     base = {
         "subject": f"Synthetic subject {i}",
         "in_reply_to": previous,
@@ -389,8 +403,8 @@ def build(
             name_rows, chunk_rows, fts_rows, worst_rows = [], [], [], []
             for i in order[start : start + batch]:
                 mid = message_id(i, identity)
-                cid = claimant_of(mid)
-                tid = message_id(i - i % 4, identity)
+                cid = claimant_of(mid, i if identity == "ascii998common" else None)
+                tid = message_id(i - i % 4, _thread_identity(identity))
                 at = f"20{10 + i % 15:02d}-{1 + i % 12:02d}-{1 + i % 28:02d}T{i % 24:02d}:{i % 60:02d}:00+00:00"
                 shape = _shape(i, identity, records, references)
                 folder = shape.get("folder") or _folder(i)
@@ -435,7 +449,7 @@ def build(
                     fts_rows.append((rowid, body))
                     chunk_rows.append(
                         (
-                            f"{cid}:{c}",
+                            hashlib.sha256(f"{cid}\0{c}".encode()).hexdigest(),
                             cid,
                             tid,
                             c,
@@ -1398,7 +1412,7 @@ def _fill_thread(filters: dict, identity: str) -> dict:
     """``filters`` with a ``thread_id`` placeholder set to the corpus's
     first thread (message 0's root)."""
     if "thread_id" in filters and filters["thread_id"] is None:
-        return {"thread_id": message_id(0, identity)}
+        return {"thread_id": message_id(0, _thread_identity(identity))}
     return filters
 
 
@@ -1514,6 +1528,16 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
                 f"--all-extras: {worst} worst-case messages and {worst * args.per_message} "
                 f"occurrences cannot fill K = {max(args.k)}; raise --messages or --per-message"
             )
+    if args.missing_from == "worst" and args.missing and args.records != "mixed":
+        raise SystemExit("--missing-from worst with --missing needs --records mixed")
+    if args.filtered and args.chunk_tokens < 20:
+        raise SystemExit(
+            "--filtered needs --chunk-tokens of at least 20 (sparse chunks hide FTS5 growth)"
+        )
+    if args.chunks < 1 or args.chunk_tokens < 1:
+        raise SystemExit("--chunks and --chunk-tokens must be at least 1")
+    if args.wal and any(b < 0 for b in args.writer_commit_bytes):
+        raise SystemExit("--writer-commit-bytes must not be negative")
     if any(k < 1 for k in args.k):
         raise SystemExit(f"--k {args.k}: every K must be at least 1")
     if args.repeat is None:
@@ -1547,7 +1571,9 @@ def main(argv: list[str] | None = None) -> dict:
     p.add_argument("--workdir", default="/tmp/reconcile-bench")
     p.add_argument("--messages", type=int, default=50_000)
     p.add_argument("--per-message", type=int, default=3, help="attachment occurrences per message")
-    p.add_argument("--identity", choices=("typical", "ascii998", "utf8x4"), default="typical")
+    p.add_argument(
+        "--identity", choices=("typical", "ascii998", "ascii998common", "utf8x4"), default="typical"
+    )
     p.add_argument(
         "--records", choices=("typical", "worst", "mixed", "cardinality"), default="typical"
     )

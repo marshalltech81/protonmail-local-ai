@@ -1957,6 +1957,17 @@ run has no such insert.
   reached 2.8 times (7.6 times in the earlier runs, stream first).
   Streaming messages was proposed on a 4,009-byte ID shape the parser
   cannot produce.
+  Claimant IDs that share their first 998 bytes (many files claiming
+  one maximum-length Message-ID, `--identity ascii998common`) were
+  measured only at 20,000 messages and 3 occurrences each: collect
+  stayed faster (certificate 0.04 s against 0.61 s on messages, 0.89 s
+  against 1.66 s on occurrences; rounds 0.07 s against 0.12 s and 0.84 s
+  against 1.07 s at K = 100), as for distinct prefixes (0.04 s and 0.9 s
+  against 1.02 s and 2.67 s); the cap-sized run used distinct prefixes
+  and the common-prefix shape was not repeated at the caps. The
+  cap-sized run also used `message_chunks` IDs of about 1 KB; the
+  benchmark now uses the 64-character digest the indexer writes, and no
+  reconcile step reads that table.
 - **Filtered queries:** no bound is proposed or claimed. The work of
   a filtered predicate per message is not bounded by the message-count
   cap (a message can carry the parser's maximum of chunks, participant
