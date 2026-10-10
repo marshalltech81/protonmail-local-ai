@@ -5183,6 +5183,24 @@ class TestLegacyOfficeLabels:
         assert calls == []
         assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text
 
+    def test_a_legacy_only_payload_is_cached_under_its_legacy_module(self):
+        """#1227: the ``unsupported`` row for bytes that are neither OLE2 nor
+        ZIP is keyed by the legacy module, so an OOXML-labelled occurrence of
+        the same bytes (cache key ``docx``) still runs its own extractor."""
+        from src.extractors import extraction_module
+
+        payload = b"{\\rtf1 SYNTHETIC_RTF_MARKER}"
+        assert extraction_module("application/msword", "a.doc", payload) == "doc"
+        assert extraction_module("application/octet-stream", "a.xls", payload) == "xls"
+        assert (
+            extraction_module(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "a.docx",
+                payload,
+            )
+            == "docx"
+        )
+
     def test_ole2_payload_with_a_legacy_label_reaches_the_legacy_extractor(self, monkeypatch):
         """#935: a genuine ``.doc`` / ``.xls`` goes to the legacy extractor
         (#694 recorded it ``unsupported``)."""

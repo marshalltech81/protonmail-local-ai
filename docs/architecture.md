@@ -1454,9 +1454,13 @@ Legacy Office types (#694, #935, #957): `application/msword` / `.doc`,
 / `.ppt` select the `doc`, `xls` and `ppt` extractors. The container
 decides which one runs: a genuine legacy
 binary is an OLE2 compound file (it starts with `D0 CF 11 E0 A1 B1 1A
-E1`) and goes to the legacy extractor; any other payload goes to the
-DOCX or XLSX extractor, as a best effort for OOXML files mislabelled as
-a legacy type. `.ppt` has no OOXML fallback: a `.ppt`-labelled payload
+E1`) and goes to the legacy extractor; a ZIP payload goes to the DOCX or
+XLSX extractor, as a best effort for OOXML files mislabelled as a legacy
+type. A payload that is neither OLE2 nor ZIP (an RTF file, for one) is
+recorded `unsupported` ("not an OLE2 or OOXML container", #1227) without
+running anything, and its row is keyed under the legacy module, so an
+occurrence with an OOXML label of the same bytes still runs its own
+extractor. `.ppt` has no OOXML fallback: a `.ppt`-labelled payload
 that is not OLE2 is recorded `unsupported` ("not an OLE2 compound file
 (labelled legacy .ppt)") without running anything, and that row is
 served for later `.ppt` occurrences. An OLE2 payload whose label

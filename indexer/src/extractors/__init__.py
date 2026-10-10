@@ -1168,6 +1168,10 @@ def extraction_module(content_type: str, filename: str, payload: bytes) -> str |
     selected = _resolve_extractor(content_type, filename)[0]
     if selected is None:
         return None
+    # A legacy label with bytes no reader takes (#1227) stays under its own
+    # module: under the OOXML module it would share a row with an OOXML label.
+    if selected in _LEGACY_TO_OOXML and not payload.startswith((*_ZIP_SIGNATURES, _OLE2_SIGNATURE)):
+        return selected
     return _route_container(selected, payload) or selected
 
 
