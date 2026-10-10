@@ -1550,7 +1550,9 @@ def run_wal(
         # bytes one such commit leaves retained.
         "wal_bytes_per_commit": (at_end - at_start) // overlapping if overlapping else None,
         "writer_commits_total": writer_out["commits"],
-        "reader_transaction_s": round(result["transaction_s"], 3),
+        # The WAL window's own duration, any hold included, so it covers
+        # the same commits and growth as the figures above.
+        "reader_transaction_s": round(result["ended_at"] - result["started_at"], 3),
         "checkpoint_after": {"busy": busy, "log_pages": log_pages, "checkpointed": ckpt_pages},
         "wal_after_checkpoint_bytes": size(),
     }

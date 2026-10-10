@@ -665,6 +665,9 @@ def test_chunk_rows_carry_every_production_column(bench, tmp_path):
 def test_report_and_wal_results_record_the_artificial_hold(report):
     assert "wal_hold" in report["config"]
     assert all("hold_s" in w for w in report["wal"])
+    # The reported transaction is the WAL window, hold included, so
+    # its duration matches the commits and growth counted in it.
+    assert all(w["reader_transaction_s"] >= w["hold_s"] == 1.0 for w in report["wal"])
 
 
 def test_worst_fields_are_parser_reachable(bench):
