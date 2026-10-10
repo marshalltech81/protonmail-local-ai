@@ -98,6 +98,7 @@ def cardinality(bench, tmp_path_factory):
             "1",
             "--extracted-chars",
             "100",
+            "--filtered",
         ]
     )
 
@@ -343,3 +344,34 @@ def test_build_leaves_no_planner_statistics(bench, tmp_path):
             ).fetchone()[0]
             == 0
         )
+
+
+def test_where_expressions_reach_the_certificate(report):
+    # The explicit ``where`` expression is compiled as query_messages
+    # compiles it, so the page and the certificate count the same set.
+    rows = [r for r in report["filtered"]["messages"] if "where" in r["filters"]]
+    assert len(rows) == 2
+    for row in rows:
+        assert row["count"] == row["page_total"]
+
+
+def test_where_expressions_use_the_node_cap(bench):
+    from src.lib.predicates import MAX_WHERE_NODES
+
+    for case in (c for c in bench.MESSAGE_FILTERS if "where" in c):
+        assert len(bench._where_leaves(case["where"])) <= MAX_WHERE_NODES + 1
+    assert len(bench._WHERE_LEAVES) == MAX_WHERE_NODES
+
+
+def test_attachment_scan_rejects_where(bench):
+    with pytest.raises(ValueError):
+        bench.scan_sql("occurrences", {"where": {"all": bench._WHERE_LEAVES[:1]}})
+
+
+def test_filtered_runs_cover_high_cardinality_participants(cardinality):
+    # Every message carries the most participant rows the indexer
+    # accepts, so the participant and name predicates visit them all.
+    rows = cardinality["filtered"]["messages"]
+    assert rows
+    for row in rows:
+        assert row["count"] == row["page_total"]

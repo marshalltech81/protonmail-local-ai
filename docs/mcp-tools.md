@@ -1855,7 +1855,16 @@ retries on its next pass.
   matches nothing and one that matches all, MIME type, extraction status
   `success` and `none`, one thread) cost a collected certificate 0.5 to
   1.03 times one page, and a streamed one up to 3.1 times (the filename
-  that matches nothing).
+  that matches nothing). An explicit `where`
+  expression (`query_messages` only; the node cap of 16 spent on
+  combined and negated address, display-name and body-word leaves, flat
+  and in an `any` group) on the same 50,000 messages cost a certificate
+  0.13 to 0.16 times one page at 1,000 and 47,500 matches (0.7 to 1.0 s
+  against 5.2 to 6.5 s for the page). With 300 messages that each carry
+  10,000 participant rows, participant and name predicates took a
+  certificate 0.7 to 2.3 s against a page of 1.7 to 10.0 s; no
+  certificate cost more than its page. Those are 3 million
+  participant rows; a cap-sized set of such messages was not built.
 
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,

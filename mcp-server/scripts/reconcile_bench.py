@@ -466,10 +466,11 @@ def scan_sql(kind: str, filters: dict | None = None) -> tuple[str, str, list]:
     ``filters`` (``query_messages`` keyword arguments; none by default),
     from the server's own predicate compiler, as ``query_messages`` and
     ``query_attachments`` build them."""
-    from src.lib.predicates import compile_leaves, query_messages_leaves
-    from src.lib.sqlite import _ATTACHMENT_FROM, _attachment_clauses
+    from src.lib.predicates import query_messages_leaves
+    from src.lib.sqlite import _ATTACHMENT_FROM, _attachment_clauses, _message_expression
 
     filters = dict(filters or {})
+    where = _where_leaves(filters.pop("where", None))
     # query_attachments' own filters, compiled by its own helper.
     own = {
         name: filters.pop(name, None)
@@ -492,12 +493,17 @@ def scan_sql(kind: str, filters: dict | None = None) -> tuple[str, str, list]:
             "flagged",
         )
     )
-    where_sql, params = compile_leaves(query_messages_leaves(**{**none, **filters}))
+    leaves = query_messages_leaves(**{**none, **filters})
+    # The flat leaves and the explicit ``where`` expression, ANDed as
+    # ``query_messages`` does (``_message_expression``).
+    where_sql, params = _message_expression(leaves, where)
     if kind == "messages":
         if any(v is not None for v in own.values()):
             raise ValueError("attachment filters apply to occurrences only")
         frm, ident = "FROM messages m", "m.claimant_id"
     else:
+        if where:
+            raise ValueError("where applies to messages only")
         _, clauses, clause_params = _attachment_clauses(**own)
         where_sql = " AND ".join([where_sql, *clauses])
         params = [*params, *clause_params]
@@ -505,6 +511,16 @@ def scan_sql(kind: str, filters: dict | None = None) -> tuple[str, str, list]:
     count = f"SELECT COUNT(*) {frm} WHERE {where_sql}"  # nosec B608
     scan = f"SELECT {ident} {frm} WHERE {where_sql}"  # nosec B608
     return count, scan, params
+
+
+def _where_leaves(spec: dict | None) -> list:
+    """The normalized ``where`` leaves of a request ``spec`` (the tool's
+    ``{"all": [...]}`` shape), as ``query_messages`` receives them."""
+    if not spec:
+        return []
+    from src.lib.predicates import Where, normalize_where
+
+    return normalize_where(Where.model_validate(spec))
 
 
 def identity_hash(identity: bytes) -> bytes:
@@ -762,6 +778,32 @@ def phase_reconcile(
 # subject substring (casefold of every subject), body words (FTS5),
 # authority class (entity join) and a date range. ``nobody`` matches
 # nothing, so its scan visits every participant and name for no result.
+def _wl(leaf: str, value: str, negate: bool = False, role: str = "from") -> dict:
+    item = {"leaf": leaf, "value": value, "negate": negate}
+    if leaf != "body_words":
+        item["role"] = role
+    return item
+
+
+_WHERE_LEAVES: list[dict] = [
+    _wl("address_contains", "nobody", True, "to"),
+    _wl("display_name_contains", "nobody", True, "cc"),
+    _wl("address_or_name_contains", "from0.7", True, "visible_recipient"),
+    _wl("domain_is", "bench.example", False, "from"),
+    _wl("address_is", "to1.3@bench.example", True, "to"),
+    _wl("body_words", "gamma4242", True),
+    _wl("body_words", "alpha7"),
+    _wl("address_contains", "cc0", False, "cc"),
+    _wl("address_contains", "from0", role="from"),
+    _wl("display_name_contains", "person", False, "to"),
+    _wl("body_words", "beta12", True),
+    _wl("address_or_name_contains", "to1", role="to"),
+    _wl("domain_is", "nowhere.example", True, "cc"),
+    _wl("body_words", "delta99", True),
+    _wl("address_contains", "x.example", True, "visible_recipient"),
+    _wl("display_name_contains", "person 1", role="to"),
+]
+
 MESSAGE_FILTERS: tuple[dict, ...] = (
     {"participant": "nobody"},
     {"participant": "from0.7"},
@@ -771,6 +813,11 @@ MESSAGE_FILTERS: tuple[dict, ...] = (
     {"text": "alpha7"},
     {"authority_class": "vendor"},
     {"date_from": "2015-01-01", "date_to": "2015-12-31"},
+    # Explicit ``where`` expressions (``query_messages`` only): the node
+    # cap of 16 spent on combined and negated address, display-name and
+    # body-word leaves, which scan participant rows and the FTS index.
+    {"where": {"all": _WHERE_LEAVES}},
+    {"where": {"all": [{"any": _WHERE_LEAVES[:8]}, *_WHERE_LEAVES[8:15]]}},
 )
 # ``query_attachments`` takes the message leaves except subject, body
 # text and authority, plus its own: a filename substring (casefolded,
@@ -800,7 +847,8 @@ def phase_filtered(db_path: str, kind: str, filters: dict) -> dict:
     db = Database(db_path)
     t0 = time.perf_counter()
     if kind == "messages":
-        page = db.query_messages(limit=1, **filters)
+        rest = {k: v for k, v in filters.items() if k != "where"}
+        page = db.query_messages(limit=1, where=_where_leaves(filters.get("where")), **rest)
     else:
         page = db.query_attachments(limit=1, **filters)
     page_s = time.perf_counter() - t0
