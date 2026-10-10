@@ -281,6 +281,9 @@ class TestRealChild:
         """The real child returns what the in-process run returns, through
         the launcher, with the format's limits."""
         payload = _payload(module, f"{MARKER} Café crème, Zürich")
+        # Counters left by earlier tests would add N frames ahead of the
+        # text in the in-process run (#1324).
+        extractors.drain_counters()
         expected = extractor_child.run(module, payload)
         result = _extract(module, payload)
         assert result.status == STATUS_SUCCESS
