@@ -1606,6 +1606,16 @@ Design A); this section records the measurement that sizes that design
 before any protocol code exists. The protocol itself will be documented
 here when it ships.
 
+**Pending re-measurement.** The figures below were taken on an earlier
+synthetic corpus whose rows differed from what the indexer writes
+(thread headers and dates, insertion order and commit cadence, file
+paths and flags, entities, chunk sizes, attachment rows and chunks).
+The benchmark now builds the indexer's rows
+(`indexer/tests/test_reconcile_bench_fidelity.py` checks them) and
+every figure here is being measured again on it; until then they
+describe the earlier corpus only, and some of the commands below use
+options that changed.
+
 **How it was measured.** `mcp-server/scripts/reconcile_bench.py` builds
 a synthetic index (generated values only, never mail) on the schema the
 server reads (the tables mirror indexer schema v10, with the v9

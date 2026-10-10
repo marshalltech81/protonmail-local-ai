@@ -28,9 +28,12 @@ Run it inside the mcp-server image (docs/mcp-tools.md, "Certifying a
 paged run: sizing"). The tables mirror the indexer's ``messages``,
 ``message_participants``, ``message_participant_names``,
 ``message_chunks`` and ``message_chunks_fts``, ``entities``,
-``attachments``, ``attachment_extractions`` and ``pending_deletions``
-with the indexes the measured statements use; other tables are left
-out because no measured statement reads them.
+``attachments``, ``attachments_fts``, ``attachment_extractions`` and
+``pending_deletions`` with all their indexes, and hold the rows the
+indexer writes for the messages ``render_eml`` describes
+(indexer/tests/test_reconcile_bench_fidelity.py indexes those files
+with the indexer and compares). Other tables (threads, vectors, the
+queue) are left out because no measured statement reads them.
 """
 
 from __future__ import annotations
@@ -47,11 +50,15 @@ import sqlite3
 import statistics
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Iterable
 from contextlib import closing
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from email.header import Header
+from email.utils import format_datetime, formataddr
 from pathlib import Path
+from urllib.parse import quote
 
 # ``src`` is the mcp-server package: one directory up from this file in
 # the repository and in the image (mounted at /app/scripts).
@@ -133,6 +140,8 @@ CREATE TABLE message_chunks (
     kind          TEXT NOT NULL
 );
 CREATE INDEX idx_message_chunks_claimant ON message_chunks(claimant_id);
+CREATE INDEX idx_message_chunks_thread ON message_chunks(thread_id);
+CREATE INDEX idx_message_chunks_attachment ON message_chunks(attachment_id);
 CREATE INDEX idx_message_chunks_fts_rowid ON message_chunks(fts_rowid);
 CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
     text, content='', contentless_delete=1, tokenize='porter unicode61'
@@ -145,6 +154,7 @@ CREATE TABLE entities (
     authority_class TEXT NOT NULL DEFAULT 'unclassified',
     authority_rule  TEXT
 );
+CREATE INDEX idx_entities_organization ON entities(organization_id);
 CREATE INDEX idx_entities_authority ON entities(authority_class);
 CREATE TABLE attachments (
     attachment_occurrence_id TEXT PRIMARY KEY,
@@ -185,6 +195,14 @@ CREATE TABLE pending_deletions (
     thread_id   TEXT NOT NULL,
     marked_at   TEXT NOT NULL
 );
+CREATE INDEX idx_pending_deletions_thread ON pending_deletions(thread_id);
+CREATE VIRTUAL TABLE attachments_fts USING fts5(
+    filename,
+    content_type,
+    content='',
+    contentless_delete=1,
+    tokenize='porter unicode61'
+);
 -- Writer ballast for the WAL phase: stands for the chunk and vector
 -- rows an indexer commit writes.
 CREATE TABLE bench_ballast (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
@@ -200,9 +218,11 @@ _DOMAIN = "@bench.example"
 
 
 def message_id(i: int, identity: str) -> str:
-    """Synthetic Message-ID ``i`` in one of three widths: ``typical``
-    (about 50 ASCII characters), ``ascii998`` (998 ASCII characters) or
-    ``utf8x4`` (998 four-byte characters, the UTF-8 upper bound)."""
+    """Synthetic Message-ID ``i`` in one of four widths: ``typical``
+    (about 50 ASCII characters), ``ascii998`` (998 ASCII characters),
+    ``ascii998common`` (one 998-character ID every file claims) or
+    ``utf8x4`` (998 four-byte characters, a stress shape the parser
+    cannot produce, #1424)."""
     if identity == "typical":
         return f"{hashlib.sha256(str(i).encode()).hexdigest()[:32]}.{i}{_DOMAIN}"
     if identity == "ascii998":
@@ -219,17 +239,21 @@ def message_id(i: int, identity: str) -> str:
     raise ValueError(f"unknown identity width {identity!r}")
 
 
-def file_hash(mid: str, i: int | None = None) -> str:
-    """The synthetic stand-in for a file's SHA-256 (``content_hash``);
-    ``i`` distinguishes files that claim the same Message-ID."""
-    salt = mid if i is None else f"{mid}\0{i}"
-    return hashlib.sha256(salt.encode()).hexdigest()
+def claimant_of(mid: str, raw: bytes) -> str:
+    """The claimant ID of a file holding ``raw`` that claims ``mid``:
+    the Message-ID plus ``#`` and the first 16 hex digits of the file's
+    SHA-256 (indexer/src/parser.py ``claimant_id``)."""
+    return f"{mid}#{hashlib.sha256(raw).hexdigest()[:16]}"
 
 
-def claimant_of(mid: str, i: int | None = None) -> str:
-    """The claimant ID: the Message-ID plus ``#`` and the first 16 hex
-    digits of the file's hash, as in production."""
-    return f"{mid}#{file_hash(mid, i)[:16]}"
+def sent_at(i: int) -> datetime:
+    """Message ``i``'s Date (and, outside Sent, its Received) time.
+    Threads of four share their root's time plus one hour per reply, so
+    a reply is never older than its parent: the indexer's first index
+    runs oldest first and joins a reply only to an indexed parent."""
+    r = i - i % 4
+    root = datetime(2010 + r % 15, 1 + r % 12, 1 + r % 28, r % 24, r % 60, tzinfo=UTC)
+    return root + timedelta(hours=i % 4)
 
 
 def _folder(i: int) -> str:
@@ -239,65 +263,83 @@ def _folder(i: int) -> str:
     return "Trash" if r == 0 else "Sent" if r < 3 else "Archive" if r < 8 else "INBOX"
 
 
+def disk_folder(folder: str) -> str:
+    """The directory mbsync writes ``folder`` to under ``SubFolders
+    Legacy``: each component after the first gets a leading dot (the
+    parser's ``_derive_folder`` removes them)."""
+    return "/.".join(folder.split("/"))
+
+
 # The parser's per-message address cap (indexer/src/parser.py
 # ``MAX_MESSAGE_ADDRESSES``): at most this many participant rows.
 MAX_MESSAGE_ADDRESSES = 10_000
 # indexer/src/parser.py ``MAX_EXTRA_PARTICIPANT_NAMES``.
 MAX_EXTRA_PARTICIPANT_NAMES = 1_000
+# indexer/src/database.py ``MAX_ENTITY_PARTICIPANTS_PER_MESSAGE``.
+MAX_ENTITY_PARTICIPANTS_PER_MESSAGE = 200
 # A four-byte character: the most UTF-8 bytes a character-clipped field
 # can carry per character.
 _WIDE = "\U0001f600"
+# Linux ``HOST_NAME_MAX``: the longest host name in an mbsync file name.
+_HOST_MAX = 64
 
 
 def _mixed_worst(i: int) -> bool:
     """Whether message ``i`` carries worst-case records under
-    ``--records mixed``: one in fifty, so a large corpus stays buildable
-    while every record a round returns can be worst-case."""
+    ``--records mixed``: one in fifty, never a thread root, so a large
+    corpus stays buildable while every record a round returns can be
+    worst-case."""
     return i % 50 == 1
 
 
+def _wide_digits(i: int) -> str:
+    """``i`` as three four-byte characters, so wide fields stay unique."""
+    return "".join(chr(0x10000 + (i >> s & 0x3FF)) for s in (20, 10, 0))
+
+
 def _shape(i: int, identity: str, records: str, references: int) -> dict:
-    """The response-record fields of message ``i`` for one ``records``
-    shape (``build``)."""
+    """The header fields of message ``i`` for one ``records`` shape
+    (``build``). Every value is one the parser stores as given (the
+    fidelity test parses ``render_eml`` and compares)."""
     if records == "mixed":
         records = "worst" if _mixed_worst(i) else "typical"
+    parent = message_id(i - 1, identity) if i % 4 else None
     if records == "worst":
         # Fields the parser stores and the tools return, past their
         # clips: four-byte characters only where a header's RFC 2047
         # encoded-word or a decoded name can carry them (subject,
         # display names, filename); addresses, Message-IDs and the MIME
         # type are ASCII, and an address holds an ``@``
-        # (``canonical_addr`` drops one without).
+        # (``canonical_addr`` drops one without). In-Reply-To names a
+        # message outside the corpus and References end with the parent,
+        # which the threader then finds, so the message stays in its
+        # thread. The subject is unique, so no subject fallback merges
+        # two threads.
         wide = _WIDE * 501
-        ascii_id = "i" * 998
-        people = [
-            (role, f"{p:02d}{role}" + "a" * (590 - len(role)) + "@x.example", wide)
-            for role in ("from", "to", "cc")
-            for p in range(11)
-        ]
-        # A reply (every message but the thread root) names its thread's
-        # previous message first, so the production threader would place
-        # it where ``build`` does; the rest of the References are junk.
-        previous = message_id(i - 1, identity) if i % 4 else ascii_id
+        absent = "i" * MESSAGE_ID_MAX_CHARS
         return {
-            "subject": _WIDE * 2000,
-            "in_reply_to": previous,
-            "references": [previous] + [ascii_id] * 10,
-            "people": people,
-            "file_name": f"{i:012d}" + "f" * (255 - 12),
-            "filename": wide,
+            "subject": _wide_digits(i) + _WIDE * 1997,
+            "in_reply_to": absent,
+            "references": [absent] * 10 + [parent or absent],
+            "people": [
+                (role, f"{p:02d}{role}" + "a" * (590 - len(role)) + "@x.example", wide)
+                for role in ("from", "to", "cc")
+                for p in range(11)
+            ],
+            "host": "h" * _HOST_MAX,
+            # The extension routes the payload to the PDF extractor
+            # whatever its MIME type, so the occurrence has text.
+            "filename": _WIDE * 497 + ".pdf",
             "content_type": "application/" + "x" * 600,
-            # The full Maildir path and the folder derived from it are
-            # stored and returned unclipped: nested folders of 63
-            # four-byte characters (252 bytes, under a file system's
-            # 255-byte name limit) to about 3.5 KB of the 4,096-byte path.
+            # Nested folders of 63 four-byte characters (252 bytes,
+            # under a file system's 255-byte name limit; isync 1.5
+            # writes decoded UTF-8 names) to about 3.5 KB of path.
             "folder": "/".join([_WIDE * 63] * 14),
         }
-    previous = message_id(i - 1, identity) if i % 4 else None
     base = {
         "subject": f"Synthetic subject {i}",
-        "in_reply_to": previous,
-        "file_name": f"{i}.bench:2,S",
+        "in_reply_to": parent,
+        "host": "bench",
         "filename": "file.pdf",
         "content_type": "application/pdf",
     }
@@ -313,19 +355,19 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
         counts = (("from", 1), ("to", 4_999), ("cc", unique - 5_000))
         return {
             **base,
-            "references": [f"r{n}@x.example" for n in range(references)],
+            "references": [f"r{n}@x.example" for n in range(references)]
+            + ([parent] if parent else []),
             "people": [
                 (role, f"{role}{p}@x.example", f"Person {p}")
                 for role, n in counts
                 for p in range(n)
             ],
-            # The parser also keeps up to MAX_EXTRA_PARTICIPANT_NAMES
-            # further names of one address: name rows only.
+            # Further names of one address, after its first: name rows only.
             "extra_names": [("to", "to0@x.example", f"Alias {n}") for n in range(extra)],
         }
     return {
         **base,
-        "references": [previous] if previous else [],
+        "references": [parent] if parent else [],
         "people": [
             ("from", f"from0.{i % 500}{_DOMAIN}", "Person 0"),
             ("to", f"to0.{i % 500}{_DOMAIN}", "Person 0"),
@@ -335,23 +377,183 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
     }
 
 
+def file_name(i: int, host: str) -> str:
+    """mbsync's Maildir file name for message ``i`` (``<time>.<pid>_<n>.
+    <host>,U=<uid>:2,<flags>``): seen (``S``) on every other message."""
+    flags = "S" if i % 2 else ""
+    return f"{1_700_000_000 + i}.{1000 + i % 9000}_{i + 1}.{host},U={i + 1}:2,{flags}"
+
+
+def maildir_path(i: int, identity: str, records: str, root: str = "/maildir") -> str:
+    """Message ``i``'s file under the Maildir ``root``."""
+    shape = _shape(i, identity, records, 0)
+    folder = shape.get("folder") or _folder(i)
+    return f"{root}/{disk_folder(folder)}/cur/{file_name(i, shape['host'])}"
+
+
 # Words per synthetic body chunk: at least the 20 tokens a chunk of real
 # mail carries (AGENTS.md: sparse chunks hid FTS5 segment growth, #1262).
 BODY_TOKENS = 40
-# Distinct filler words, so the FTS index carries a realistic vocabulary.
+# Distinct filler words (``w1000`` to ``w5999``, five tokens each), so
+# the FTS index carries a realistic vocabulary.
 _VOCABULARY = 5000
+# The indexer's default chunk budgets (indexer/src/main.py
+# ``INDEXER_CHUNK_TARGET_TOKENS`` / ``INDEXER_CHUNK_MAX_TOKENS``): a
+# chunk closes once it reaches the target; none exceeds the maximum.
+CHUNK_TARGET_TOKENS = 1000
+CHUNK_MAX_TOKENS = 1500
+# Words of extracted text per attachment payload.
+ATTACHMENT_WORDS = 40
 
 
-def _body(i: int, chunk: int = 0, tokens: int = BODY_TOKENS) -> str:
-    """Message ``i``'s body chunk ``chunk``: for chunk 0 ``alpha<i % 50>``
+def _filler(seed: int, n: int, base: int) -> list[str]:
+    return [f"w{1000 + (seed * 7919 + (base + j) * 104729) % _VOCABULARY}" for j in range(n)]
+
+
+def _paragraph(i: int, chunk: int, words: int) -> str:
+    """Body chunk ``chunk`` of message ``i``: for chunk 0 ``alpha<i % 50>``
     (in every fiftieth body) and ``gamma<i>`` (in this body only), then
-    filler words drawn from ``_VOCABULARY``, ``tokens`` words in all."""
+    filler words, ``words`` words in all."""
     lead = [f"alpha{i % 50}", f"gamma{i}"] if chunk == 0 else []
-    base = chunk * tokens
-    filler = [
-        f"w{(i * 7919 + (base + j) * 104729) % _VOCABULARY}" for j in range(tokens - len(lead))
+    return " ".join([*lead, *_filler(i, words - len(lead), chunk * words)])
+
+
+def attachment_text(i: int, k: int) -> str:
+    """The text of message ``i``'s ``k``-th payload, as its extractor
+    returns it."""
+    return " ".join([f"doc{i}", f"part{k}", *_filler(i + k, ATTACHMENT_WORDS - 2, 7)])
+
+
+def token_estimate(text: str) -> int:
+    """The indexer's token estimate (its bundled tokenizer) of text made
+    of this benchmark's words: one token for the letters of a word and
+    one per digit (the fidelity test checks it against the tokenizer)."""
+    return sum(1 + sum(c.isdigit() for c in word) for word in text.split())
+
+
+def chunk_layout(paragraphs: list[str]) -> list[tuple[str, int, int]]:
+    """``(text, char_start, char_end)`` of each chunk the indexer cuts
+    from a body of ``paragraphs`` joined by blank lines: one paragraph a
+    chunk while each holds from ``CHUNK_TARGET_TOKENS`` to
+    ``CHUNK_MAX_TOKENS`` tokens, or the whole body when it holds at most
+    ``CHUNK_MAX_TOKENS`` (``bench_args`` refuses anything else)."""
+    if len(paragraphs) == 1:
+        return [(paragraphs[0], 0, len(paragraphs[0]))]
+    out, offset = [], 0
+    for p in paragraphs:
+        out.append((p, offset, offset + len(p)))
+        offset += len(p) + 2
+    return out
+
+
+def pdf_payload(text: str) -> bytes:
+    """A one-page PDF whose text layer is ``text`` (ASCII words)."""
+    stream = f"BT /F1 10 Tf 20 700 Td ({text}) Tj ET".encode()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
     ]
-    return " ".join([*lead, *filler])
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for n, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % n + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objects) + 1,
+        xref,
+    )
+    return bytes(out)
+
+
+def _mailbox(address: str, name: str | None) -> str:
+    """One address with its display name; a non-ASCII name as RFC 2047
+    encoded-words of at most 75 characters, folded, as a mail client
+    writes it (the parser leaves a longer encoded-word undecoded)."""
+    if name and not name.isascii():
+        return f"{Header(name, 'utf-8').encode()} <{address}>"
+    return formataddr((name or "", address))
+
+
+def _address_header(people: list[tuple[str, str, str | None]], role: str) -> str:
+    return ",\n ".join(_mailbox(address, name) for r, address, name in people if r == role)
+
+
+def render_eml(
+    i: int,
+    identity: str,
+    records: str,
+    references: int = 0,
+    chunks: int = 1,
+    words: int = BODY_TOKENS,
+    per_message: int = 0,
+) -> bytes:
+    """The Maildir file of message ``i``: the bytes the benchmark's row
+    for ``i`` stands for. ``build`` hashes them for the claimant ID and
+    ``content_hash`` and stores their length; the fidelity test parses
+    them with the indexer and compares every stored value."""
+    shape = _shape(i, identity, records, references)
+    when = format_datetime(sent_at(i))
+    folder = shape.get("folder") or _folder(i)
+    people = [*shape["people"], *shape.get("extra_names", [])]
+    head = []
+    if folder != "Sent":
+        # Delivery time: sent mail carries no Received header.
+        head.append(f"Received: from relay.bench.example by mx.bench.example; {when}")
+    head += [f"Date: {when}", f"Message-ID: <{message_id(i, identity)}>"]
+    if shape["in_reply_to"]:
+        head.append(f"In-Reply-To: <{shape['in_reply_to']}>")
+    if shape["references"]:
+        head.append("References: " + "\n ".join(f"<{r}>" for r in shape["references"]))
+    subject = shape["subject"]
+    if not subject.isascii():
+        subject = Header(subject, "utf-8").encode()
+    head.append(f"Subject: {subject}")
+    for role, name in (("from", "From"), ("to", "To"), ("cc", "Cc")):
+        value = _address_header(people, role)
+        if value:
+            head.append(f"{name}: {value}")
+    head.append("MIME-Version: 1.0")
+    body = "\n\n".join(_paragraph(i, c, words) for c in range(chunks)) + "\n"
+    text_part = "Content-Type: text/plain; charset=us-ascii\nContent-Transfer-Encoding: 7bit\n"
+    if not per_message:
+        return ("\n".join(head) + "\n" + text_part + "\n" + body).encode()
+    boundary = f"bench-{i}"
+    parts = [text_part + "\n" + body]
+    for k in range(per_message):
+        payload = base64.encodebytes(pdf_payload(attachment_text(i, k))).decode()
+        name = quote(shape["filename"], safe="")
+        parts.append(
+            f"Content-Type: {shape['content_type']}\n"
+            f"Content-Disposition: attachment; filename*=utf-8''{name}\n"
+            "Content-Transfer-Encoding: base64\n\n" + payload
+        )
+    head.append(f'Content-Type: multipart/mixed; boundary="{boundary}"')
+    mime = "".join(f"--{boundary}\n{p}\n" for p in parts) + f"--{boundary}--\n"
+    return ("\n".join(head) + "\n\n" + mime).encode()
+
+
+def authority(address: str) -> tuple[str, str | None]:
+    """The class and rule the indexer's rules give ``address`` under the
+    benchmark's rules file: about one From address in five listed as
+    ``vendor`` (``[vendor] addresses = [...]``), every other address and
+    every domain unclassified."""
+    local = address.split("@")[0].lstrip("0123456789")
+    if local.startswith("from") and hashlib.sha256(address.encode()).digest()[0] % 5 == 0:
+        return "vendor", f"address:{address}"
+    return "unclassified", None
+
+
+# The extractor stamp, ``extractor_module`` and per-result fields the
+# indexer stores for a payload its PDF extractor reads in full.
+PDF_MODULE = "pdf"
+PDF_EXTRACTOR = "pdf-digital@5"
 
 
 def build(
@@ -364,177 +566,212 @@ def build(
     extracted_chars: int = 0,
     chunks: int = 1,
     chunk_tokens: int = BODY_TOKENS,
-    commit_each: bool = False,
 ) -> dict:
-    """Write the synthetic index: ``messages`` rows in shuffled insert
-    order, threads of four, ``per_message`` attachment occurrences each.
+    """Write the synthetic index as the indexer would from the files
+    ``render_eml`` describes: one transaction per message, oldest first
+    (the order of a first index), threads of four, ``per_message`` PDF
+    attachments each.
 
-    ``records`` sets the response-record fields: ``typical``; ``worst``,
-    every character-clipped field past its clip with what the parser can
-    store (four-byte characters in the subject, display names and
-    filename; ASCII addresses with an ``@``, IDs and MIME type; 11
-    participants per role and 11 references; a nested Maildir path);
-    ``mixed``, one message in fifty ``worst``; ``cardinality``, the most
-    rows a record can carry (``MAX_MESSAGE_ADDRESSES`` uniquely named
-    addresses, the parser's cap, and ``references`` References entries,
-    which the parser does not cap by count); or ``cardinality_names``,
-    the same cap spent on ``MAX_MESSAGE_ADDRESSES`` minus
+    ``records`` sets the header fields: ``typical``; ``worst``, every
+    character-clipped field past its clip with what the parser can store
+    (four-byte characters in the subject, display names and filename;
+    ASCII addresses with an ``@``, IDs and MIME type; 11 participants
+    per role and 11 references; a nested Maildir path); ``mixed``, one
+    message in fifty ``worst``; ``cardinality``, the most rows a record
+    can carry (``MAX_MESSAGE_ADDRESSES`` uniquely named addresses, the
+    parser's cap, and ``references`` References entries, which the
+    parser does not cap by count); or ``cardinality_names``, the same
+    cap spent on ``MAX_MESSAGE_ADDRESSES`` minus
     ``MAX_EXTRA_PARTICIPANT_NAMES`` unique addresses plus that many
     repeats of one address carrying further names.
 
-    Every message gets ``chunks`` body chunks of ``chunk_tokens`` words
-    each (``_body``; the parser splits a large message into roughly
-    1,000-token chunks), its display names in ``message_participant_names``,
-    completeness flags of 1 so every filter decides, and each From
-    address a person entity (every fifth address in order ``vendor``, the rest
-    ``unclassified``). ``extracted_chars`` above 0 stores that many
-    four-byte characters of extracted text on every extraction row
-    (the indexer's default cap is 2,000,000 characters); 0 leaves it
-    NULL."""
-    rng = random.Random(1218)
-    order = list(range(messages))
-    rng.shuffle(order)
+    Every message has ``chunks`` body paragraphs of ``chunk_tokens``
+    words, which the indexer cuts into that many chunks
+    (``chunk_layout``). ``extracted_chars`` above 0 is a stress shape:
+    every extraction row then holds that many four-byte characters
+    instead of its payload's text, and the attachment chunks that text
+    would yield are not built (``bench_args`` refuses it with
+    ``--filtered``, the only step that reads chunks)."""
     t0 = time.perf_counter()
-    with closing(sqlite3.connect(db_path)) as conn:
+    # A first index queues every file at its message time and takes
+    # them oldest first (path order breaks ties).
+    order = sorted(range(messages), key=lambda i: (sent_at(i), maildir_path(i, identity, records)))
+    indexed = datetime(2026, 1, 1, tzinfo=UTC)
+    stress_text = _WIDE * extracted_chars if extracted_chars else None
+    min_tokens = max_tokens = None
+    n_chunks = n_parts = n_names = n_att_fts = 0
+    entities: set[str] = set()
+    with closing(sqlite3.connect(db_path, isolation_level=None)) as conn:
         conn.executescript(_SCHEMA)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        batch = 2000 if not records.startswith("cardinality") and not extracted_chars else 10
-        if commit_each:
-            # The indexer commits one message at a time, so FTS5 creates
-            # and merges segments per message.
-            batch = 1
-        text = _WIDE * extracted_chars if extracted_chars else None
-        min_tokens = chunk_tokens
-        n_chunks = n_parts = n_names = 0
-        for start in range(0, messages, batch):
-            msg_rows, part_rows, att_rows, ext_rows = [], [], [], []
-            name_rows, chunk_rows, fts_rows, worst_rows = [], [], [], []
-            for i in order[start : start + batch]:
-                mid = message_id(i, identity)
-                variant = i if identity == "ascii998common" else None
-                cid = claimant_of(mid, variant)
-                tid = message_id(i - i % 4, identity)
-                at = f"20{10 + i % 15:02d}-{1 + i % 12:02d}-{1 + i % 28:02d}T{i % 24:02d}:{i % 60:02d}:00+00:00"
-                shape = _shape(i, identity, records, references)
-                folder = shape.get("folder") or _folder(i)
-                worst = records == "mixed" and _mixed_worst(i)
-                if worst:
-                    worst_rows.append((cid,))
-                msg_rows.append(
-                    (
-                        cid,
-                        mid,
-                        tid,
-                        f"/maildir/{folder}/cur/{shape['file_name']}",
-                        folder,
-                        shape["subject"],
-                        at,
-                        at,
-                        shape["in_reply_to"],
-                        json.dumps(shape["references"]),
-                        1 if per_message else 0,
-                        4096 + i,
-                        file_hash(mid, variant),
-                        at,
-                        at,
-                        i % 2,
-                        # More than one From makes the sender ambiguous.
-                        1 if sum(r == "from" for r, _, _ in shape["people"]) > 1 else 0,
-                    )
-                )
-                part_rows += [(cid, role, address, name) for role, address, name in shape["people"]]
-                name_rows += [
-                    (cid, role, address, name)
-                    for role, address, name in shape["people"]
-                    if name is not None
-                ] + [
-                    (cid, role, address, name)
-                    for role, address, name in shape.get("extra_names", [])
-                ]
-                for c in range(chunks):
-                    body = _body(i, c, chunk_tokens)
-                    min_tokens = min(min_tokens, len(body.split()))
-                    # Production inserts without a rowid, in insertion order.
-                    rowid = n_chunks + 1
-                    fts_rows.append((rowid, body))
-                    chunk_rows.append(
-                        (
-                            hashlib.sha256(f"{cid}\0{c}".encode()).hexdigest(),
-                            cid,
-                            tid,
-                            c,
-                            body,
-                            c * len(body),
-                            (c + 1) * len(body),
-                            len(body.split()),
-                            at,
-                            rowid,
-                            None,
-                            "body",
-                        )
-                    )
-                    n_chunks += 1
-                for k in range(per_message):
-                    payload = hashlib.sha256(f"{i}:{k}".encode()).hexdigest()
-                    occurrence = hashlib.sha256(f"{cid}\0{payload}\0{k}".encode()).hexdigest()
-                    att_rows.append(
-                        (
-                            occurrence,
-                            cid,
-                            payload,
-                            tid,
-                            shape["filename"],
-                            shape["content_type"],
-                            1000 + k,
-                            at,
-                        )
-                    )
-                    ext_rows.append((payload, text, at))
-                    if worst:
-                        worst_rows.append((occurrence,))
-            conn.executemany(
+        for n, i in enumerate(order):
+            at = sent_at(i).isoformat()
+            now = (indexed + timedelta(milliseconds=50 * n)).isoformat()
+            shape = _shape(i, identity, records, references)
+            raw = render_eml(i, identity, records, references, chunks, chunk_tokens, per_message)
+            mid = message_id(i, identity)
+            cid = claimant_of(mid, raw)
+            tid = message_id(i - i % 4, identity)
+            folder = shape.get("folder") or _folder(i)
+            path = maildir_path(i, identity, records)
+            conn.execute("BEGIN")
+            conn.execute(
                 "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
-                "subject, sent_at, occurred_at, in_reply_to, references_json, has_attachments, "
-                "size_bytes, content_hash, indexed_at, first_indexed_at, sent_at_status, "
-                "seen, sender_ambiguous, "
-                "participant_names_complete, subject_complete, from_addresses_complete, "
-                "to_addresses_complete, cc_addresses_complete, attachments_manifest_complete, "
-                "body_complete) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, "
-                "1, 1, 1, 1, 1, 1, 1)",
-                msg_rows,
+                "subject, sent_at, sent_at_status, occurred_at, in_reply_to, references_json, "
+                "has_attachments, size_bytes, content_hash, indexed_at, first_indexed_at, "
+                "seen, flagged, replied, sender_ambiguous, participant_names_complete, "
+                "subject_complete, from_addresses_complete, to_addresses_complete, "
+                "cc_addresses_complete, attachments_manifest_complete, body_complete, caps_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, "
+                "1, 1, 1, 1, 1, 1, 1, '{}')",
+                (
+                    cid,
+                    mid,
+                    tid,
+                    path,
+                    folder,
+                    shape["subject"],
+                    at,
+                    None if folder == "Sent" else at,
+                    shape["in_reply_to"],
+                    json.dumps(shape["references"]),
+                    1 if per_message else 0,
+                    len(raw),
+                    hashlib.sha256(raw).hexdigest(),
+                    now,
+                    now,
+                    i % 2,
+                ),
+            )
+            # One participant row per (role, address), named by its first
+            # display name; every distinct name in the name rows.
+            part_rows: dict[tuple[str, str], str | None] = {}
+            name_rows: dict[tuple[str, str, str], None] = {}
+            for role, address, name in [*shape["people"], *shape.get("extra_names", [])]:
+                part_rows.setdefault((role, address), name)
+                if name is not None:
+                    name_rows.setdefault((role, address, name))
+            conn.executemany(
+                "INSERT INTO message_participants VALUES (?, ?, ?, ?)",
+                [(cid, role, address, name) for (role, address), name in part_rows.items()],
+            )
+            conn.executemany(
+                "INSERT INTO message_participant_names VALUES (?, ?, ?, ?)",
+                [(cid, *row) for row in name_rows],
             )
             n_parts += len(part_rows)
             n_names += len(name_rows)
-            conn.executemany("INSERT INTO message_participants VALUES (?, ?, ?, ?)", part_rows)
-            conn.executemany("INSERT INTO message_participant_names VALUES (?, ?, ?, ?)", name_rows)
-            conn.executemany("INSERT INTO message_chunks_fts (rowid, text) VALUES (?, ?)", fts_rows)
-            conn.executemany("INSERT INTO bench_worst (identity) VALUES (?)", worst_rows)
-            conn.executemany(
-                "INSERT INTO message_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", chunk_rows
-            )
-            conn.executemany(
-                "INSERT INTO attachments (attachment_occurrence_id, claimant_id, attachment_id, "
-                "thread_id, filename, content_type, size_bytes, seen_at, extractor_module) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pdf')",
-                att_rows,
-            )
-            conn.executemany(
-                "INSERT INTO attachment_extractions (attachment_id, extractor_module, "
-                "extraction_status, extractor, extracted_text, extracted_at) "
-                "VALUES (?, 'pdf', 'success', 'pdf', ?, ?)",
-                ext_rows,
-            )
-            conn.commit()
-        conn.execute(
-            "INSERT INTO entities (entity_id, kind, canonical_key, authority_class) "
-            "SELECT 'e:' || address, 'person', address, "
-            "CASE WHEN n % 5 = 0 THEN 'vendor' ELSE 'unclassified' END "
-            "FROM (SELECT address, row_number() OVER (ORDER BY address) AS n "
-            "FROM (SELECT DISTINCT address FROM message_participants WHERE role = 'from'))"
-        )
-        conn.commit()
+            # Person entities for the first distinct addresses (authors
+            # first), each with its organization.
+            for address in list(dict.fromkeys(a for _, a in part_rows))[
+                :MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+            ]:
+                if address in entities:
+                    continue
+                entities.add(address)
+                domain = address.rpartition("@")[2]
+                conn.execute(
+                    "INSERT OR IGNORE INTO entities (entity_id, kind, canonical_key, "
+                    "organization_id, authority_class, authority_rule) "
+                    "VALUES (?, 'organization', ?, NULL, 'unclassified', NULL)",
+                    (f"org:{domain}", domain),
+                )
+                conn.execute(
+                    "INSERT INTO entities (entity_id, kind, canonical_key, organization_id, "
+                    "authority_class, authority_rule) VALUES (?, 'person', ?, ?, ?, ?)",
+                    (f"person:{address}", address, f"org:{domain}", *authority(address)),
+                )
+            paragraphs = [_paragraph(i, c, chunk_tokens) for c in range(chunks)]
+            chunk_rows = [
+                (cid, None, "body", c, text, start, end)
+                for c, (text, start, end) in enumerate(chunk_layout(paragraphs))
+            ]
+            for k in range(per_message):
+                text = attachment_text(i, k)
+                payload = pdf_payload(text)
+                attachment_id = hashlib.sha256(payload).hexdigest()
+                occurrence = hashlib.sha256(
+                    f"{cid}\0{attachment_id}\0{shape['filename']}\0{k}".encode()
+                ).hexdigest()
+                n_att_fts += 1
+                conn.execute(
+                    "INSERT INTO attachments_fts (rowid, filename, content_type) VALUES (?, ?, ?)",
+                    (n_att_fts, shape["filename"], shape["content_type"]),
+                )
+                conn.execute(
+                    "INSERT INTO attachments (attachment_occurrence_id, claimant_id, "
+                    "attachment_id, thread_id, filename, content_type, size_bytes, seen_at, "
+                    "fts_rowid, extractor_module, text_complete, text_extractor) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                    (
+                        occurrence,
+                        cid,
+                        attachment_id,
+                        tid,
+                        shape["filename"],
+                        shape["content_type"],
+                        len(payload),
+                        now,
+                        n_att_fts,
+                        PDF_MODULE,
+                        PDF_EXTRACTOR,
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO attachment_extractions (attachment_id, extractor_module, "
+                    "extraction_status, extractor, extracted_text, extracted_at, "
+                    "ocr_pages_skipped, text_complete) VALUES (?, ?, 'success', ?, ?, ?, 0, 1)",
+                    (attachment_id, PDF_MODULE, PDF_EXTRACTOR, stress_text or text, now),
+                )
+                if not stress_text:
+                    chunk_rows.append(
+                        (
+                            f"{cid}::{attachment_id}",
+                            attachment_id,
+                            "attachment",
+                            0,
+                            text,
+                            0,
+                            len(text),
+                        )
+                    )
+            for index, (pk, attachment_id, kind, c, text, start, end) in enumerate(chunk_rows):
+                tokens = token_estimate(text)
+                if kind == "body":
+                    min_tokens = tokens if min_tokens is None else min(min_tokens, tokens)
+                    max_tokens = tokens if max_tokens is None else max(max_tokens, tokens)
+                n_chunks += 1
+                # Production inserts without a rowid, in insertion order.
+                conn.execute(
+                    "INSERT INTO message_chunks_fts (rowid, text) VALUES (?, ?)", (n_chunks, text)
+                )
+                digest = hashlib.sha256(f"{pk}\0{c}\0".encode() + text.encode()).hexdigest()
+                conn.execute(
+                    "INSERT INTO message_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        digest,
+                        cid,
+                        tid,
+                        c,
+                        text,
+                        start,
+                        end,
+                        tokens,
+                        now,
+                        n_chunks,
+                        attachment_id,
+                        kind,
+                    ),
+                )
+            if records == "mixed" and _mixed_worst(i):
+                conn.execute("INSERT INTO bench_worst (identity) VALUES (?)", (cid,))
+                conn.executemany(
+                    "INSERT INTO bench_worst (identity) SELECT attachment_occurrence_id "
+                    "FROM attachments WHERE claimant_id = ?",
+                    [(cid,)],
+                )
+            conn.execute("COMMIT")
         # No ANALYZE: neither the indexer nor the server runs it (nor
         # PRAGMA optimize), so a deployed index has no sqlite_stat1 and
         # the planner works without statistics, as it does here.
@@ -543,6 +780,7 @@ def build(
         "build_s": round(time.perf_counter() - t0, 2),
         "db_bytes": db_path.stat().st_size,
         "body_tokens_min": min_tokens,
+        "body_tokens_max": max_tokens,
         "chunks": n_chunks,
         "participant_rows": n_parts,
         "name_rows": n_names,
@@ -785,13 +1023,6 @@ def _sorted_identities(
     return ids
 
 
-def _file_size(path: str) -> int:
-    try:
-        return os.stat(path).st_size
-    except FileNotFoundError:
-        return 0
-
-
 def phase_reconcile(
     db_path: str,
     kind: str,
@@ -858,8 +1089,6 @@ def phase_reconcile(
         # Still inside the transaction: its frames are retained until the
         # rollback.
         ended_at = time.monotonic()
-        # The WAL as the window closes, so the last commits are measured.
-        wal_at_end = _file_size(db_path + "-wal")
         conn.rollback()
     response = {
         "complete": missing_total <= k,
@@ -893,7 +1122,6 @@ def phase_reconcile(
         "total_s": t_end - t0,
         "started_at": started_at,
         "ended_at": ended_at,
-        "wal_at_end_bytes": wal_at_end,
         "rss_kib": _rss_kib(),
     }
 
@@ -931,7 +1159,7 @@ _WHERE_LEAVES: list[dict] = [
 
 # Sixteen terms (the cap, ``_MAX_TEXT_TERMS``), each common in the
 # vocabulary: every term compiles to its own FTS subquery.
-_TERMS = " ".join(f"w{n}" for n in range(16))
+_TERMS = " ".join(f"w{n}" for n in range(1000, 1016))
 
 MESSAGE_FILTERS: tuple[dict, ...] = (
     {"text": _TERMS},
@@ -1057,10 +1285,16 @@ def phase_request_shape(path: str, shape: str) -> dict:
 def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) -> dict:
     """A concurrent writer: until ``stop`` exists, commit transactions
     that flip eight messages' ``seen`` and append ``commit_bytes`` of
-    ballast, as the indexer's steady-state batch of eight would."""
+    ballast, as the indexer's steady-state batch of eight would.
+
+    After each commit it records the time and the WAL file's size, so a
+    window's commit count and its WAL sizes come from the same records:
+    only this process writes the WAL, and the file never shrinks until
+    a truncating checkpoint, which ``run_wal`` runs after the round."""
     rng = random.Random(7)
+    wal = db_path + "-wal"
     commits = 0
-    times: list[float] = []
+    times: list[tuple[float, int]] = []
     with closing(sqlite3.connect(db_path, isolation_level=None, timeout=30)) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -1078,8 +1312,8 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
             conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - 64,))
             conn.execute("COMMIT")
             # Stamped after the commit: a commit is in a round's window
-            # only once it is durable.
-            times.append(time.monotonic())
+            # only once it is durable, and its frames are in the size.
+            times.append((time.monotonic(), os.stat(wal).st_size))
             commits += 1
             if interval:
                 time.sleep(interval)
@@ -1116,15 +1350,18 @@ def write_request(
     extras: int,
     out: Path,
     missing_from: str = "spread",
-    upload_total: int = 0,
+    upload_total: int | None = None,
     all_extras: bool = False,
 ) -> dict:
     """The client's upload: the SHA-256 of every matching identity but
     ``missing`` of them, plus ``extras`` hashes the server does not
     hold. ``missing_from`` ``spread`` leaves members out evenly;
     ``worst`` leaves out worst-case ones (``--records mixed``), so every
-    record a round returns is worst-case. Also sizes the same upload as
-    base64."""
+    record a round returns is worst-case. ``upload_total`` (``None``:
+    no total) fills the upload with extras to that many digests;
+    ``all_extras`` uploads no member. Also sizes the same upload as
+    base64. The arguments were checked against the corpus before it was
+    built (``check_args``); a corpus that disagrees is a benchmark bug."""
     count_sql, scan, params = scan_sql(kind)
     with closing(_ro(db_path)) as conn:
         conn.execute("BEGIN")
@@ -1136,12 +1373,8 @@ def write_request(
         candidates = [n for n, b in enumerate(ids) if b in worst]
     else:
         candidates = list(range(len(ids)))
-    # Every mode leaves out exactly ``missing`` members or refuses.
     if len(candidates) < missing and not all_extras:
-        raise ValueError(
-            f"--missing-from {missing_from}: {len(candidates)} {kind} can be left out, "
-            f"--missing asks for {missing}; build more with --messages or lower --missing"
-        )
+        raise RuntimeError(f"{kind}: {len(candidates)} can be left out, not {missing}")
     if missing_from == "worst":
         skip = set(candidates[:missing])
     else:
@@ -1152,12 +1385,9 @@ def write_request(
         # The accepted worst upload: no member, only hashes the server
         # does not hold; every member is missing.
         held = []
-    if upload_total and len(held) > upload_total:
-        raise ValueError(
-            f"--upload-total {upload_total}: the upload holds {len(held)} members before any "
-            "extras; raise it or leave more members out with --missing"
-        )
-    if upload_total:
+    if upload_total is not None and len(held) > upload_total:
+        raise RuntimeError(f"{kind}: {len(held)} members held, over the total {upload_total}")
+    if upload_total is not None:
         # Fill the upload to ``upload_total`` digests (a set cap) with
         # extras, the largest request the cap accepts.
         extras = max(0, upload_total - len(held))
@@ -1180,6 +1410,17 @@ def write_request(
     }
 
 
+def wal_window(commits: list[tuple[float, int]], start: float, end: float) -> tuple[int, int, int]:
+    """The WAL size after the last commit stamped at or before ``start``,
+    after the last one stamped in ``(start, end]``, and how many were:
+    one boundary (the writer's post-commit stamps) for the sizes and
+    the count. The file only grows meanwhile, so the size after a
+    commit is the largest so far."""
+    at_start = max((size for when, size in commits if when <= start), default=0)
+    inside = [size for when, size in commits if start < when <= end]
+    return at_start, max(inside, default=at_start), len(inside)
+
+
 def run_wal(
     db_path: str,
     kind: str,
@@ -1192,7 +1433,10 @@ def run_wal(
 ) -> dict:
     """WAL growth while one reconcile round holds its snapshot under a
     concurrent writer, and whether a TRUNCATE checkpoint then reclaims
-    it."""
+    it. Every size and count comes from the writer's own post-commit
+    records (``phase_writer``), split at the round's window by the same
+    timestamps, so no commit is counted without its frames or the
+    reverse."""
     wal = Path(db_path + "-wal")
     stop = Path(db_path + ".stop")
     stop.unlink(missing_ok=True)
@@ -1227,38 +1471,20 @@ def run_wal(
     # this returns or raises: left running, it commits until the disk
     # fills.
     try:
-        warm_max = 0
-        deadline = time.perf_counter() + 3
-        while time.perf_counter() < deadline:
-            warm_max = max(warm_max, size())
-            time.sleep(0.01)
-        result: dict = {}
-        failure: list[BaseException] = []
-
-        def reader() -> None:
-            try:
-                result.update(
-                    _child(
-                        "reconcile",
-                        db_path=db_path,
-                        kind=kind,
-                        k=k,
-                        request=request,
-                        hold_s=hold_s,
-                        worst_first=worst_first,
-                    )
-                )
-            except BaseException as exc:  # re-raised below, after the writer stops
-                failure.append(exc)
-
-        t = threading.Thread(target=reader)
-        samples: list[tuple[float, int]] = []
-        t.start()
-        while t.is_alive():
-            samples.append((time.monotonic(), size()))
-            time.sleep(0.005)
-        if failure:
-            raise RuntimeError("reconcile round failed") from failure[0]
+        # Three seconds of steady state before the round.
+        time.sleep(3)
+        try:
+            result = _child(
+                "reconcile",
+                db_path=db_path,
+                kind=kind,
+                k=k,
+                request=request,
+                hold_s=hold_s,
+                worst_first=worst_first,
+            )
+        except RuntimeError as exc:  # raised after the writer stops (finally)
+            raise RuntimeError("reconcile round failed") from exc
     finally:
         stop.touch()
         try:
@@ -1268,28 +1494,21 @@ def run_wal(
             out, _ = writer.communicate()
         stop.unlink()
     writer_out = json.loads(out)
-    # The WAL when the round's transaction began, its largest size
-    # while the transaction was open, and the writer commits that
-    # landed in that interval.
-    start, end = result["started_at"], result["ended_at"]
-    at_start = max((s for when, s in samples if when <= start), default=0)
-    in_window = [s for when, s in samples if start <= when <= end] + [result["wal_at_end_bytes"]]
-    overlapping = sum(1 for t in writer_out["commit_times"] if start < t < end)
+    at_start, at_end, overlapping = wal_window(
+        writer_out["commit_times"], result["started_at"], result["ended_at"]
+    )
     with closing(sqlite3.connect(db_path, timeout=30)) as conn:
         busy, log_pages, ckpt_pages = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
     return {
         "commit_bytes": commit_bytes,
         "writer_interval_s": interval,
         "hold_s": hold_s,
-        "wal_steady_max_bytes": warm_max,
         "wal_at_transaction_start_bytes": at_start,
-        "wal_max_during_transaction_bytes": max(in_window, default=0),
+        "wal_max_during_transaction_bytes": at_end,
         "commits_during_transaction": overlapping,
         # WAL growth over the transaction per overlapping commit: the
         # bytes one such commit leaves retained.
-        "wal_bytes_per_commit": (
-            (max(in_window, default=0) - at_start) // overlapping if overlapping else None
-        ),
+        "wal_bytes_per_commit": (at_end - at_start) // overlapping if overlapping else None,
         "writer_commits_total": writer_out["commits"],
         "reader_transaction_s": round(result["transaction_s"], 3),
         "checkpoint_after": {"busy": busy, "log_pages": log_pages, "checkpointed": ckpt_pages},
@@ -1304,24 +1523,9 @@ def run(args: argparse.Namespace) -> dict:
     for suffix in ("", "-wal", "-shm"):
         Path(f"{db_path}{suffix}").unlink(missing_ok=True)
     report: dict = {
+        # Every argument (the workload), and the software that ran it.
         "config": {
-            "messages": args.messages,
-            "occurrences_per_message": args.per_message,
-            "identity": args.identity,
-            "records": args.records,
-            "repeat": args.repeat,
-            "references": args.references,
-            "extracted_chars": args.extracted_chars,
-            "chunks": args.chunks,
-            "chunk_tokens": args.chunk_tokens,
-            "commit_each": args.commit_each,
-            "missing": args.missing,
-            "missing_from": args.missing_from,
-            "extras": args.extras,
-            "upload_total": args.upload_total,
-            "all_extras": args.all_extras,
-            "k": args.k,
-            "wal_hold": args.wal_hold,
+            **{a.name: getattr(args, a.name) for a in ARGS if a.name != "workdir"},
             "sqlite": sqlite3.sqlite_version,
             "python": sys.version.split()[0],
         },
@@ -1335,7 +1539,6 @@ def run(args: argparse.Namespace) -> dict:
             args.extracted_chars,
             args.chunks,
             args.chunk_tokens,
-            args.commit_each,
         ),
     }
     db = str(db_path)
@@ -1402,7 +1605,7 @@ def run(args: argparse.Namespace) -> dict:
             args.extras,
             request,
             args.missing_from,
-            args.upload_total[0 if kind == "messages" else 1] if args.upload_total else 0,
+            None if args.upload_total is None else args.upload_total[kind == "occurrences"],
             args.all_extras,
         )
         report["reconcile"][kind] = {"request": req}
@@ -1528,62 +1731,383 @@ def _reconcile_runs(db: str, kind: str, request: Path, req: dict, args: argparse
     return out
 
 
-def _require_balanced_repeat(args: argparse.Namespace) -> None:
-    """Refuse a repeat count that cannot balance the run orders: the
-    two-way orders (scan method, K) need an even count and the
-    three-way filtered rotation a multiple of three. One repeat is a
-    single, unbalanced run and is allowed."""
-    if args.missing < 0 or args.extras < 0 or any(t < 1 for t in args.upload_total or []):
-        raise SystemExit(
-            "--missing and --extras must not be negative and --upload-total at least 1"
-        )
-    if args.all_extras and (not args.upload_total or min(args.upload_total) < 1):
-        raise SystemExit("--all-extras needs a positive --upload-total for both kinds")
-    if args.per_message < 0 or args.messages < 1:
-        raise SystemExit("--per-message must not be negative and --messages must be at least 1")
-    if args.all_extras and args.records != "mixed":
-        raise SystemExit("--all-extras needs --records mixed (the worst-case records it returns)")
-    if args.all_extras:
-        # Every round returns K worst-case records of each kind.
-        worst = sum(1 for i in range(args.messages) if _mixed_worst(i))
-        if worst < max(args.k) or worst * args.per_message < max(args.k):
-            raise SystemExit(
-                f"--all-extras: {worst} worst-case messages and {worst * args.per_message} "
-                f"occurrences cannot fill K = {max(args.k)}; raise --messages or --per-message"
+# --- arguments -----------------------------------------------------------
+#
+# Every argument is one row of ``ARGS``. ``parse_args`` builds the parser
+# from the table and ``check_args`` checks every value against its row,
+# then every combination in ``_RULES``, before anything is built.
+
+# indexer/src/parser.py ``_DEFAULT_PARSE_MAX_BYTES``: a larger file is
+# not indexed.
+PARSE_MAX_BYTES = 50_000_000
+# indexer/src/parser.py ``MAX_WALKED_PARTS``, less the multipart root
+# and the body part: the most attachment parts the parser reaches.
+MAX_ATTACHMENTS = 10_000 - 2
+# The extractors' text cap when the indexer's own is off.
+MAX_EXTRACTED_CHARS = 10_000_000
+# ``message_id`` and ``_wide_digits`` stay unique below this.
+MAX_MESSAGES = 2**30
+# SQLite's default largest blob (``SQLITE_MAX_LENGTH``).
+MAX_BLOB = 1_000_000_000
+
+
+@dataclass(frozen=True)
+class Arg:
+    """One command-line argument: ``kind`` is ``int``, ``float``,
+    ``ints`` or ``floats`` (comma-separated, ``length`` values when
+    set), ``choice``, ``flag`` or ``path``; ``low`` and ``high`` bound
+    each number (``None``: no bound of its own; ``_RULES`` may bound it
+    by the corpus); ``absent`` says what leaving it out means."""
+
+    name: str
+    kind: str
+    default: object = None
+    low: float | None = None
+    high: float | None = None
+    choices: tuple[str, ...] = ()
+    length: int | None = None
+    absent: str = ""
+    help: str = ""
+
+    @property
+    def flag(self) -> str:
+        return "--" + self.name.replace("_", "-")
+
+
+ARGS: tuple[Arg, ...] = (
+    Arg("workdir", "path", "/tmp/reconcile-bench", help="where the index is built"),
+    Arg("messages", "int", 50_000, 1, MAX_MESSAGES, help="messages in the corpus"),
+    Arg("per_message", "int", 3, 0, MAX_ATTACHMENTS, help="PDF attachments per message"),
+    Arg(
+        "identity", "choice", "typical", choices=("typical", "ascii998", "ascii998common", "utf8x4")
+    ),
+    Arg(
+        "records",
+        "choice",
+        "typical",
+        choices=("typical", "worst", "mixed", "cardinality", "cardinality_names"),
+    ),
+    Arg(
+        "references",
+        "int",
+        None,
+        0,
+        absent="100,000 with cardinality records, else none",
+        help="References entries per message (cardinality records only)",
+    ),
+    Arg(
+        "extracted_chars",
+        "int",
+        0,
+        0,
+        MAX_EXTRACTED_CHARS,
+        help="stress: four-byte characters on every extraction row instead of its text (0: none)",
+    ),
+    Arg("chunks", "int", 1, 1, help="body chunks per message"),
+    Arg("chunk_tokens", "int", BODY_TOKENS, 2, CHUNK_MAX_TOKENS // 5, help="words per body chunk"),
+    Arg("k", "ints", [100, 500, 1000, 2000, 5000], 1, help="records per round"),
+    Arg(
+        "missing",
+        "int",
+        None,
+        0,
+        absent="5,000 (none with --all-extras)",
+        help="members the upload leaves out",
+    ),
+    Arg(
+        "missing_from",
+        "choice",
+        "spread",
+        choices=("spread", "worst"),
+        help="which members the upload leaves out (worst: the mixed corpus's worst records)",
+    ),
+    Arg(
+        "extras",
+        "int",
+        None,
+        0,
+        absent="100 (with --upload-total: what fills the total)",
+        help="hashes the client holds that the server does not",
+    ),
+    Arg(
+        "upload_total",
+        "ints",
+        None,
+        1,
+        length=2,
+        absent="no total",
+        help="messages,occurrences: fill each upload to this many digests with extras",
+    ),
+    Arg(
+        "all_extras",
+        "flag",
+        False,
+        help="the upload holds no member: --upload-total digests, all extras "
+        "(the accepted worst case), and a round returns worst-case records first",
+    ),
+    Arg(
+        "repeat",
+        "int",
+        None,
+        1,
+        absent="2, or 6 with --filtered",
+        help="runs of each step: 1, or a multiple of 2 (6 with --filtered)",
+    ),
+    Arg("filtered", "flag", False, help="also time filtered predicates"),
+    Arg(
+        "request_shapes",
+        "int",
+        0,
+        0,
+        help="also time parsing each upload shape at this many digests (0: skip)",
+    ),
+    Arg("wal", "flag", False, help="also measure WAL growth under a writer"),
+    Arg(
+        "writer_commit_bytes",
+        "ints",
+        None,
+        0,
+        MAX_BLOB,
+        absent="131072 with --wal",
+        help="ballast bytes per writer commit (--wal only)",
+    ),
+    Arg(
+        "writer_interval",
+        "floats",
+        None,
+        0,
+        absent="0,0.1 with --wal",
+        help="seconds between writer commits (--wal only)",
+    ),
+    Arg(
+        "wal_hold",
+        "float",
+        None,
+        0,
+        absent="0 with --wal",
+        help="seconds the WAL round keeps its transaction open after its work "
+        "(--wal only; smoke test)",
+    ),
+)
+
+
+def _number_list(kind: str):
+    convert = int if kind == "ints" else float
+
+    def parse(text: str) -> list:
+        return [convert(x) for x in text.split(",")]
+
+    return parse
+
+
+def _matching(messages: int, records: str) -> int:
+    """Messages the unfiltered predicate matches: all but Trash (every
+    twentieth, from message 0), and every one for ``worst`` records,
+    which sit in a nested folder."""
+    return messages if records == "worst" else messages - (messages + 19) // 20
+
+
+def _worst(messages: int) -> int:
+    """``--records mixed`` worst-case messages (``_mixed_worst``); none
+    is in Trash."""
+    return len(range(1, messages, 50))
+
+
+def _paragraph_tokens(args: argparse.Namespace) -> list[int]:
+    """The token estimate of every distinct body paragraph shape: chunk
+    0 depends on the digits of ``i`` and ``i % 50``, so the first, the
+    last and the first two-digit ``i % 50`` message cover its range."""
+    probes = {0, args.messages - 1, min(10, args.messages - 1)}
+    shapes = [_paragraph(i, 0, args.chunk_tokens) for i in probes]
+    if args.chunks > 1:
+        shapes.append(_paragraph(0, 1, args.chunk_tokens))
+    return [token_estimate(text) for text in shapes]
+
+
+def _largest_file(args: argparse.Namespace) -> int:
+    """The largest Maildir file of the corpus: message 1 (worst-case
+    under ``mixed``) and the last (its widest IDs)."""
+    return max(
+        len(
+            render_eml(
+                i,
+                args.identity,
+                args.records,
+                args.references,
+                args.chunks,
+                args.chunk_tokens,
+                args.per_message,
             )
-    if args.missing_from == "worst" and args.missing and args.records != "mixed":
-        raise SystemExit("--missing-from worst with --missing needs --records mixed")
-    if args.filtered and args.chunk_tokens < 20:
-        raise SystemExit(
-            "--filtered needs --chunk-tokens of at least 20 (sparse chunks hide FTS5 growth)"
         )
-    if args.wal and not all(
-        math.isfinite(x) and x >= 0 for x in [*args.writer_interval, args.wal_hold]
-    ):
-        raise SystemExit("--writer-interval and --wal-hold must be finite and not negative")
-    if args.extracted_chars < 0 or args.request_shapes < 0:
-        raise SystemExit("--extracted-chars and --request-shapes must not be negative")
-    if args.references < 0:
-        raise SystemExit("--references must not be negative")
-    if args.chunks < 1 or args.chunk_tokens < 2:
-        raise SystemExit(
-            "--chunks must be at least 1 and --chunk-tokens at least 2 (the lead terms)"
+        for i in {min(1, args.messages - 1), args.messages - 1}
+    )
+
+
+def _missing_problem(args: argparse.Namespace) -> str | None:
+    members = _matching(args.messages, args.records)
+    for kind, scale in (("messages", 1), ("occurrences", args.per_message)):
+        pool = (_worst(args.messages) if args.missing_from == "worst" else members) * scale
+        if args.missing > pool:
+            return (
+                f"--missing {args.missing}: --missing-from {args.missing_from} can leave out "
+                f"{pool} {kind}; build more with --messages or lower --missing"
+            )
+        if args.upload_total is not None and not args.all_extras:
+            total = args.upload_total[kind == "occurrences"]
+            if members * scale - args.missing > total:
+                return (
+                    f"--upload-total {total}: the {kind} upload holds "
+                    f"{members * scale - args.missing} members before any extras; raise it "
+                    "or leave more members out with --missing"
+                )
+    return None
+
+
+def _all_extras_problem(args: argparse.Namespace) -> str | None:
+    worst = _worst(args.messages)
+    if worst < max(args.k) or worst * args.per_message < max(args.k):
+        return (
+            f"--all-extras: {worst} worst-case messages and {worst * args.per_message} "
+            f"occurrences cannot fill K = {max(args.k)}; raise --messages or --per-message"
         )
-    if args.wal and any(b < 0 for b in args.writer_commit_bytes):
-        raise SystemExit("--writer-commit-bytes must not be negative")
-    if any(k < 1 for k in args.k):
-        raise SystemExit(f"--k {args.k}: every K must be at least 1")
+    return None
+
+
+def _chunk_problem(args: argparse.Namespace) -> str | None:
+    tokens = _paragraph_tokens(args)
+    low = CHUNK_TARGET_TOKENS if args.chunks > 1 else 1
+    if min(tokens) < low or max(tokens) > CHUNK_MAX_TOKENS:
+        return (
+            f"--chunks {args.chunks} --chunk-tokens {args.chunk_tokens}: paragraphs of "
+            f"{min(tokens)} to {max(tokens)} tokens; the indexer cuts one chunk per paragraph "
+            f"only from {low} to {CHUNK_MAX_TOKENS} tokens"
+        )
+    return None
+
+
+# Combinations: (applies, problem) pairs, each ``problem`` a message or
+# ``None``, checked in order once every value is in range.
+_RULES: tuple = (
+    (
+        lambda a: a.upload_total is not None and a.explicit_extras,
+        lambda a: "--extras and --upload-total exclude each other (the total sets the extras)",
+    ),
+    (
+        lambda a: a.all_extras,
+        lambda a: (
+            "--all-extras needs --upload-total"
+            if a.upload_total is None
+            else "--all-extras needs --records mixed (the worst-case records it returns)"
+            if a.records != "mixed"
+            else "--all-extras excludes --missing and --missing-from worst (it holds no member)"
+            if a.explicit_missing or a.missing_from == "worst"
+            else _all_extras_problem(a)
+        ),
+    ),
+    (
+        lambda a: a.missing_from == "worst" and a.missing and a.records != "mixed",
+        lambda a: "--missing-from worst with --missing needs --records mixed",
+    ),
+    (lambda a: not a.all_extras, _missing_problem),
+    (
+        lambda a: a.explicit_references and not a.records.startswith("cardinality"),
+        lambda a: "--references applies to cardinality records only",
+    ),
+    (
+        lambda a: a.filtered and a.chunk_tokens < 20,
+        lambda a: "--filtered needs --chunk-tokens of at least 20 (sparse chunks hide FTS5 growth)",
+    ),
+    (
+        lambda a: a.filtered and a.extracted_chars,
+        lambda a: "--filtered excludes --extracted-chars (its attachment chunks are not built)",
+    ),
+    (lambda a: True, _chunk_problem),
+    (
+        lambda a: not a.wal and a.explicit_wal,
+        lambda a: "--writer-commit-bytes, --writer-interval and --wal-hold need --wal",
+    ),
+    (
+        lambda a: a.repeat > 1 and a.repeat % (6 if a.filtered else 2),
+        lambda a: (
+            f"--repeat {a.repeat} cannot balance the run orders: use 1 or a multiple "
+            f"of {6 if a.filtered else 2}"
+        ),
+    ),
+    (
+        lambda a: True,
+        lambda a: (
+            f"a message of {_largest_file(a)} bytes is over the indexer's {PARSE_MAX_BYTES}-byte "
+            "file limit; lower --references, --chunks, --chunk-tokens or --per-message"
+            if _largest_file(a) > PARSE_MAX_BYTES
+            else None
+        ),
+    ),
+)
+
+
+def check_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Check every argument against its ``ARGS`` row, fill in what an
+    absent one means, then check every combination (``_RULES``) against
+    the corpus the arguments describe. Raises ``SystemExit`` naming the
+    first problem; nothing has been built."""
+    for arg in ARGS:
+        value = getattr(args, arg.name)
+        if value is None or arg.kind in ("path", "flag", "choice"):
+            continue
+        values = value if arg.kind in ("ints", "floats") else [value]
+        if arg.length is not None and len(values) != arg.length:
+            raise SystemExit(f"{arg.flag} takes {arg.length} values")
+        for v in values:
+            if isinstance(v, float) and not math.isfinite(v):
+                raise SystemExit(f"{arg.flag} must be finite")
+            if arg.low is not None and v < arg.low:
+                raise SystemExit(f"{arg.flag} must be at least {arg.low}")
+            if arg.high is not None and v > arg.high:
+                raise SystemExit(f"{arg.flag} must be at most {arg.high}")
+    args.explicit_extras = args.extras is not None
+    args.explicit_missing = args.missing is not None
+    args.explicit_references = args.references is not None
+    args.explicit_wal = any(
+        getattr(args, n) is not None for n in ("writer_commit_bytes", "writer_interval", "wal_hold")
+    )
+    if args.extras is None:
+        args.extras = 0 if args.upload_total is not None else 100
+    if args.missing is None:
+        args.missing = 0 if args.all_extras else 5000
+    if args.references is None:
+        args.references = 100_000 if args.records.startswith("cardinality") else 0
     if args.repeat is None:
         args.repeat = 6 if args.filtered else 2
-    if args.repeat < 1:
-        raise SystemExit(f"--repeat {args.repeat}: use 1 or a multiple of 2 (6 with --filtered)")
-    if args.repeat == 1:
-        return
-    step = 6 if args.filtered else 2
-    if args.repeat % step:
-        raise SystemExit(
-            f"--repeat {args.repeat} cannot balance the run orders: use 1 or a multiple of {step}"
-        )
+    if args.writer_commit_bytes is None:
+        args.writer_commit_bytes = [128 * 1024]
+    if args.writer_interval is None:
+        args.writer_interval = [0.0, 0.1]
+    if args.wal_hold is None:
+        args.wal_hold = 0.0
+    for applies, problem in _RULES:
+        if applies(args) and (message := problem(args)):
+            raise SystemExit(message)
+    for name in ("explicit_extras", "explicit_missing", "explicit_references", "explicit_wal"):
+        delattr(args, name)
+    return args
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse ``argv`` with a parser built from ``ARGS`` (a value of the
+    wrong type exits there) and check it (``check_args``)."""
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    for arg in ARGS:
+        help_text = arg.help + (f" (absent: {arg.absent})" if arg.absent else "")
+        if arg.kind == "flag":
+            p.add_argument(arg.flag, action="store_true", help=help_text)
+        elif arg.kind == "choice":
+            p.add_argument(arg.flag, choices=arg.choices, default=arg.default, help=help_text)
+        else:
+            convert = {"int": int, "float": float, "path": str}.get(arg.kind) or _number_list(
+                arg.kind
+            )
+            p.add_argument(arg.flag, type=convert, default=arg.default, help=help_text)
+    return check_args(p.parse_args(argv))
 
 
 def main(argv: list[str] | None = None) -> dict:
@@ -1600,101 +2124,7 @@ def main(argv: list[str] | None = None) -> dict:
         out = phases[argv[1]](**json.loads(argv[2]))
         print(json.dumps(out))
         return out
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--workdir", default="/tmp/reconcile-bench")
-    p.add_argument("--messages", type=int, default=50_000)
-    p.add_argument("--per-message", type=int, default=3, help="attachment occurrences per message")
-    p.add_argument(
-        "--identity", choices=("typical", "ascii998", "ascii998common", "utf8x4"), default="typical"
-    )
-    p.add_argument(
-        "--records",
-        choices=("typical", "worst", "mixed", "cardinality", "cardinality_names"),
-        default="typical",
-    )
-    p.add_argument(
-        "--upload-total",
-        type=lambda s: [int(x) for x in s.split(",")],
-        default=None,
-        help="messages,occurrences: fill each upload to this many digests with extras "
-        "(both values)",
-    )
-    p.add_argument(
-        "--missing-from",
-        choices=("spread", "worst"),
-        default="spread",
-        help="which members the upload leaves out (worst: the mixed corpus's worst records)",
-    )
-    p.add_argument(
-        "--references",
-        type=int,
-        default=100_000,
-        help="References entries per message (cardinality)",
-    )
-    p.add_argument(
-        "--k", type=lambda s: [int(x) for x in s.split(",")], default=[100, 500, 1000, 2000, 5000]
-    )
-    p.add_argument("--missing", type=int, default=5000, help="members the client upload leaves out")
-    p.add_argument(
-        "--extras", type=int, default=100, help="hashes the client holds that the server does not"
-    )
-    p.add_argument(
-        "--repeat",
-        type=int,
-        default=None,
-        help="runs of each step (default 2, or 6 with --filtered; see the balance rule)",
-    )
-    p.add_argument("--wal", action="store_true", help="also measure WAL growth under a writer")
-    p.add_argument(
-        "--writer-commit-bytes",
-        type=lambda s: [int(x) for x in s.split(",")],
-        default=[128 * 1024],
-    )
-    p.add_argument(
-        "--chunks",
-        type=int,
-        default=1,
-        help="body chunks per message (the parser splits large mail)",
-    )
-    p.add_argument("--chunk-tokens", type=int, default=BODY_TOKENS, help="words per body chunk")
-    p.add_argument(
-        "--commit-each",
-        action="store_true",
-        help="commit each message on its own, as the indexer does (default: batches of 2,000)",
-    )
-    p.add_argument(
-        "--all-extras",
-        action="store_true",
-        help="the upload holds no member: --upload-total digests, all extras "
-        "(the accepted worst case), and a round returns worst-case records first",
-    )
-    p.add_argument("--filtered", action="store_true", help="also time filtered predicates")
-    p.add_argument(
-        "--extracted-chars",
-        type=int,
-        default=0,
-        help="four-byte characters of extracted text per extraction row (0: none)",
-    )
-    p.add_argument(
-        "--request-shapes",
-        type=int,
-        default=0,
-        help="also time parsing each upload shape at this many digests (0: skip)",
-    )
-    p.add_argument(
-        "--writer-interval", type=lambda s: [float(x) for x in s.split(",")], default=[0.0, 0.1]
-    )
-    p.add_argument(
-        "--wal-hold",
-        type=float,
-        default=0.0,
-        help="seconds the WAL round keeps its transaction open after its work (smoke test only)",
-    )
-    args = p.parse_args(argv)
-    if args.upload_total is not None and len(args.upload_total) != 2:
-        p.error("--upload-total takes two values: messages,occurrences")
-    _require_balanced_repeat(args)
-    report = run(args)
+    report = run(parse_args(argv))
     print(json.dumps(report, indent=2))
     return report
 

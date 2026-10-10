@@ -5,6 +5,7 @@ import importlib.util
 import json
 import math
 import sqlite3
+import sys
 import time
 from contextlib import closing
 from pathlib import Path
@@ -17,13 +18,19 @@ from tests.conftest import _build_schema
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "reconcile_bench.py"
 
 
-@pytest.fixture(scope="module")
-def bench():
+def _load():
+    # Registered before it runs: a dataclass looks its module up there.
     spec = importlib.util.spec_from_file_location("reconcile_bench", _SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules["reconcile_bench"] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(scope="module")
+def bench():
+    return _load()
 
 
 @pytest.mark.parametrize("identity", ["typical", "ascii998", "utf8x4"])
@@ -34,7 +41,7 @@ def test_message_id_widths(bench, identity):
         assert all(len(i) == bench.MESSAGE_ID_MAX_CHARS for i in ids)
     if identity == "utf8x4":
         # The UTF-8 upper bound: four bytes a character, plus the suffix.
-        assert len(bench.claimant_of(ids[0]).encode()) == 4 * 998 + 17
+        assert len(bench.claimant_of(ids[0], b"file").encode()) == 4 * 998 + 17
 
 
 @pytest.fixture(scope="module")
@@ -97,8 +104,6 @@ def cardinality(bench, tmp_path_factory):
             "0",
             "--repeat",
             "1",
-            "--extracted-chars",
-            "100",
             "--filtered",
         ]
     )
@@ -162,7 +167,8 @@ def test_cardinality_records_read_every_stored_row(bench, cardinality):
     for k, round_ in cardinality["reconcile"]["messages"]["stream"].items():
         assert round_["returned"] == int(k)
         assert round_["participant_rows"] == int(k) * bench.MAX_MESSAGE_ADDRESSES
-        assert round_["references"] == int(k) * 1000
+        # 1,000 entries each, plus the parent on a reply.
+        assert int(k) * 1000 <= round_["references"] <= int(k) * 1001
 
 
 def test_wal_is_reclaimed_after_the_round(report):
@@ -174,7 +180,7 @@ def test_wal_is_reclaimed_after_the_round(report):
         # in the WAL, beyond what the steady state can reuse.
         assert (
             wal["wal_max_during_transaction_bytes"]
-            >= commits * wal["commit_bytes"] - wal["wal_steady_max_bytes"]
+            >= commits * wal["commit_bytes"] - wal["wal_at_transaction_start_bytes"]
         )
         assert wal["checkpoint_after"]["busy"] == 0
         assert wal["wal_after_checkpoint_bytes"] == 0
@@ -218,9 +224,7 @@ def test_filtered_certificate_counts_what_a_page_counts(report):
     vendor = next(
         r for r in report["filtered"]["messages"] if r["filters"] == {"authority_class": "vendor"}
     )
-    # Every worst-case message has eleven From participants, so its
-    # sender is ambiguous and no authority class decides it.
-    assert vendor["count"] == vendor["page_total"] == 0
+    assert vendor["count"] > 0
     # Body chunks carry at least the 20 tokens real mail does, so the
     # text filters run over a realistic FTS index.
     assert report["build"]["body_tokens_min"] >= 20
@@ -240,10 +244,34 @@ def test_request_shapes_count_their_elements(report):
     assert shapes["packed"]["bytes"] < shapes["hex_array"]["bytes"]
 
 
-def test_occurrence_rounds_read_rows_with_extracted_text(cardinality):
+@pytest.fixture(scope="module")
+def extracted(bench, tmp_path_factory):
+    work = tmp_path_factory.mktemp("extracted")
+    return bench.main(
+        [
+            "--workdir",
+            str(work),
+            "--messages",
+            "40",
+            "--per-message",
+            "1",
+            "--k",
+            "3,10",
+            "--missing",
+            "10",
+            "--repeat",
+            "1",
+            "--extracted-chars",
+            "100",
+        ]
+    )
+
+
+def test_occurrence_rounds_read_rows_with_extracted_text(extracted):
     # Every extraction row carries 100 four-byte characters of text the
     # round never returns: a record still costs well under its text.
-    for round_ in cardinality["reconcile"]["occurrences"]["stream"].values():
+    assert extracted["config"]["extracted_chars"] == 100
+    for round_ in extracted["reconcile"]["occurrences"]["stream"].values():
         assert round_["returned"] > 0
         assert round_["record_bytes_max"] < 4 * 100 * 4
 
@@ -398,9 +426,9 @@ def terms(bench, tmp_path_factory):
             "--per-message",
             "1",
             "--chunks",
-            "6",
+            "3",
             "--chunk-tokens",
-            "30",
+            "210",
             "--filtered",
             "--k",
             "3",
@@ -444,8 +472,11 @@ def test_cardinality_corpus_stores_names_for_every_participant(bench, cardinalit
 
 
 def test_chunk_and_term_cardinality_is_built_and_queried(bench, terms):
-    assert terms["build"]["chunks"] == 60 * 6
-    assert terms["build"]["body_tokens_min"] == 30
+    # Three body chunks and one attachment chunk a message, each body
+    # chunk at the indexer's chunk target or above.
+    assert terms["build"]["chunks"] == 60 * (3 + 1)
+    assert bench.CHUNK_TARGET_TOKENS <= terms["build"]["body_tokens_min"]
+    assert terms["build"]["body_tokens_max"] <= bench.CHUNK_MAX_TOKENS
     rows = [
         r
         for r in terms["filtered"]["messages"]
@@ -555,15 +586,6 @@ def test_wal_commits_are_stamped_by_the_writer_after_they_commit(report):
         assert wal["commits_during_transaction"] <= wal["writer_commits_total"]
 
 
-def test_missing_worst_beyond_the_worst_members_is_rejected(bench, tmp_path):
-    db = tmp_path / "few.db"
-    bench.build(db, 60, 1, "typical", "mixed")  # one worst message in fifty
-    with pytest.raises(
-        ValueError, match="--missing-from worst: .* can be left out, --missing asks for 50"
-    ):
-        bench.write_request(str(db), "messages", 50, 0, tmp_path / "r.json", "worst")
-
-
 def test_writer_commits_carry_no_instrumentation_row(bench, tmp_path):
     db = tmp_path / "plain2.db"
     bench.build(db, 20, 1, "typical", "typical")
@@ -592,62 +614,21 @@ def test_k_and_method_order_alternate_across_repeats(bench):
     ]
 
 
-@pytest.mark.parametrize("mode", ["spread", "worst"])
-def test_missing_beyond_the_available_members_is_rejected_in_every_mode(bench, tmp_path, mode):
-    db = tmp_path / f"short-{mode}.db"
-    bench.build(db, 60, 1, "typical", "mixed")
-    with pytest.raises(ValueError, match=f"--missing-from {mode}: .* can be left out"):
-        bench.write_request(str(db), "messages", 500, 0, tmp_path / "r.json", mode)
-
-
-def test_upload_total_below_the_retained_members_is_rejected(bench, tmp_path):
-    db = tmp_path / "total.db"
-    bench.build(db, 60, 1, "typical", "typical")
-    with pytest.raises(ValueError, match="--upload-total 10: the upload holds"):
-        bench.write_request(str(db), "messages", 2, 0, tmp_path / "r.json", "spread", 10)
-
-
-def test_report_config_records_every_workload_dimension(report, cardinality):
-    keys = {
-        "references",
-        "extracted_chars",
-        "chunks",
-        "chunk_tokens",
-        "missing",
-        "missing_from",
-        "extras",
-        "upload_total",
-        "all_extras",
-        "k",
-    }
-    assert keys <= set(report["config"])
-    assert cardinality["config"]["extracted_chars"] == 100
+def test_report_config_records_every_workload_dimension(bench, report, cardinality):
+    # Every argument but the work directory, as it was resolved.
+    keys = {a.name for a in bench.ARGS} - {"workdir"}
+    assert keys == set(report["config"]) - {"sqlite", "python"}
     assert cardinality["config"]["references"] == 1000
-
-
-def test_commit_each_builds_the_same_corpus_one_message_per_transaction(bench, tmp_path):
-    a, b = tmp_path / "a.db", tmp_path / "b.db"
-    bench.build(a, 30, 1, "typical", "typical", chunks=2)
-    built = bench.build(b, 30, 1, "typical", "typical", chunks=2, commit_each=True)
-    assert built["chunks"] == 60
-    counts = []
-    for db in (a, b):
-        with closing(sqlite3.connect(db)) as conn:
-            counts.append(
-                (
-                    conn.execute("SELECT COUNT(*) FROM message_chunks").fetchone()[0],
-                    conn.execute("SELECT COUNT(*) FROM message_chunks_fts").fetchone()[0],
-                )
-            )
-    assert counts[0] == counts[1] == (60, 60)
+    assert report["config"]["writer_interval"] == [0.005]
 
 
 def test_fts_rowids_follow_insertion_order(bench, tmp_path):
     db = tmp_path / "rowids.db"
-    bench.build(db, 30, 1, "typical", "typical", chunks=2, commit_each=True)
+    bench.build(db, 30, 1, "typical", "typical", chunks=2)
     with closing(sqlite3.connect(db)) as conn:
         ids = [r[0] for r in conn.execute("SELECT fts_rowid FROM message_chunks ORDER BY rowid")]
-    assert ids == list(range(1, 61))
+    # Two body chunks and one attachment chunk a message.
+    assert ids == list(range(1, 91))
 
 
 def test_worst_records_carry_the_full_nested_maildir_path(bench, tmp_path):
@@ -656,29 +637,8 @@ def test_worst_records_carry_the_full_nested_maildir_path(bench, tmp_path):
     with closing(sqlite3.connect(db)) as conn:
         folder, filepath = conn.execute("SELECT folder, filepath FROM messages LIMIT 1").fetchone()
     assert len(folder.encode()) > 3_000 and folder.count("/") == 13
-    assert filepath.startswith(f"/maildir/{folder}/cur/")
-    assert len(filepath.encode()) <= 4_096 + 600  # the folder path plus the 255-byte file name
-
-
-@pytest.mark.parametrize(
-    ("argv", "ok"),
-    [
-        (["--repeat", "1"], True),
-        (["--repeat", "2"], True),
-        (["--repeat", "3"], False),
-        (["--repeat", "2", "--filtered"], False),
-        (["--repeat", "6", "--filtered"], True),
-        (["--repeat", "1", "--filtered"], True),
-    ],
-)
-def test_repeat_count_must_balance_the_orders(bench, argv, ok):
-
-    ns = _ns(repeat=int(argv[1]), filtered="--filtered" in argv)
-    if ok:
-        bench._require_balanced_repeat(ns)
-    else:
-        with pytest.raises(SystemExit, match="cannot balance"):
-            bench._require_balanced_repeat(ns)
+    assert filepath.startswith(f"/maildir/{bench.disk_folder(folder)}/cur/")
+    assert len(filepath.encode()) < 4_096  # Linux PATH_MAX
 
 
 def test_collect_scan_time_includes_ordering_and_hashing(bench, tmp_path):
@@ -688,30 +648,18 @@ def test_collect_scan_time_includes_ordering_and_hashing(bench, tmp_path):
     assert r["fetch_s"] <= r["scan_s"] <= r["total_s"]
 
 
-def test_upload_total_needs_both_values(bench, tmp_path):
-    with pytest.raises(SystemExit):
-        bench.main(["--workdir", str(tmp_path), "--messages", "10", "--upload-total", "100"])
-
-
 def test_chunk_rows_carry_every_production_column(bench, tmp_path):
     db = tmp_path / "cols.db"
     bench.build(db, 10, 1, "typical", "typical", chunks=2)
     with closing(sqlite3.connect(db)) as conn:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(message_chunks)")]
         row = conn.execute(
-            "SELECT char_start, char_end, token_est, chunked_at FROM message_chunks "
+            "SELECT char_start, char_end, token_est, chunked_at, text FROM message_chunks "
             "WHERE chunk_index = 1 LIMIT 1"
         ).fetchone()
     for name in ("char_start", "char_end", "token_est", "chunked_at"):
         assert name in cols
-    assert row[1] > row[0] > 0 and row[2] == 40 and row[3]
-
-
-@pytest.mark.parametrize("repeat", [0, -2])
-def test_nonpositive_repeat_is_refused(bench, repeat):
-
-    with pytest.raises(SystemExit):
-        bench._require_balanced_repeat(_ns(repeat=repeat))
+    assert row[1] > row[0] > 0 and row[2] == bench.token_estimate(row[4]) and row[3]
 
 
 def test_report_and_wal_results_record_the_artificial_hold(report):
@@ -727,94 +675,12 @@ def test_worst_fields_are_parser_reachable(bench):
     assert max(len(a) for _, a, _ in shape["people"]) > 500
 
 
-@pytest.mark.parametrize("k", [[0], [100, 0], [-5]])
-def test_nonpositive_k_is_refused(bench, k):
-
-    with pytest.raises(SystemExit):
-        bench._require_balanced_repeat(_ns(repeat=2, k=k))
-
-
-def _ns(**kw):
-    import argparse
-
-    base = {
-        "repeat": 2,
-        "filtered": False,
-        "k": [100],
-        "missing": 5,
-        "extras": 0,
-        "upload_total": None,
-        "all_extras": False,
-        "records": "typical",
-        "per_message": 3,
-        "messages": 10,
-        "missing_from": "spread",
-        "chunk_tokens": 40,
-        "chunks": 1,
-        "references": 0,
-        "writer_interval": [0.0],
-        "wal_hold": 0.0,
-        "extracted_chars": 0,
-        "request_shapes": 0,
-        "wal": False,
-        "writer_commit_bytes": [131072],
-    }
-    return argparse.Namespace(**{**base, **kw})
-
-
-@pytest.mark.parametrize(
-    "kw",
-    [
-        {"missing": -1},
-        {"extras": -1},
-        {"upload_total": [100, -1]},
-        {"upload_total": [0, 300]},
-        {"all_extras": True},
-        {"all_extras": True, "records": "mixed", "upload_total": [0, 0]},
-        {"per_message": -1},
-        {"messages": 0},
-        {"all_extras": True, "records": "worst"},
-    ],
-)
-def test_invalid_upload_shapes_are_refused_before_building(bench, kw):
-    with pytest.raises(SystemExit):
-        bench._require_balanced_repeat(_ns(**kw))
-
-
-def test_all_extras_with_mixed_records_is_accepted(bench):
-    bench._require_balanced_repeat(
-        _ns(all_extras=True, records="mixed", upload_total=[100, 300], messages=6000)
-    )
-
-
-def test_all_extras_needs_enough_worst_records_for_k(bench):
-    with pytest.raises(SystemExit, match="cannot fill K = 100"):
-        bench._require_balanced_repeat(
-            _ns(all_extras=True, records="mixed", upload_total=[100, 300], messages=1000)
-        )
-
-
-@pytest.mark.parametrize(
-    "kw",
-    [
-        {"missing_from": "worst", "records": "typical"},
-        {"filtered": True, "repeat": 6, "chunk_tokens": 3},
-        {"chunks": 0},
-        {"chunk_tokens": 1},
-        {"wal": True, "writer_commit_bytes": [1024, -1]},
-    ],
-)
-def test_incompatible_arguments_are_refused_before_building(bench, kw):
-    with pytest.raises(SystemExit):
-        bench._require_balanced_repeat(_ns(**kw))
-
-
 def test_chunk_ids_are_production_sized_digests(bench, tmp_path):
     db = tmp_path / "chunkids.db"
     bench.build(db, 10, 1, "ascii998", "typical", chunks=2)
     with closing(sqlite3.connect(db)) as conn:
         ids = [r[0] for r in conn.execute("SELECT chunk_id FROM message_chunks")]
-    assert len(ids) == 20 and len(set(ids)) == 20
+    assert len(ids) == 30 and len(set(ids)) == 30  # two body chunks and one attachment
     assert all(len(i) == 64 and set(i) <= set("0123456789abcdef") for i in ids)
 
 
@@ -848,17 +714,6 @@ def test_alternate_names_trade_participants_within_the_address_budget(bench, tmp
     assert built["name_rows"] == 3 * bench.MAX_MESSAGE_ADDRESSES
 
 
-def test_negative_references_are_refused_before_building(bench):
-    with pytest.raises(SystemExit):
-        bench._require_balanced_repeat(_ns(references=-1))
-
-
-@pytest.mark.parametrize("kw", [{"extracted_chars": -1}, {"request_shapes": -1}])
-def test_negative_workload_sizes_are_refused_before_building(bench, kw):
-    with pytest.raises(SystemExit):
-        bench._require_balanced_repeat(_ns(**kw))
-
-
 def test_wal_windows_use_the_monotonic_clock(bench):
     import inspect
 
@@ -866,19 +721,6 @@ def test_wal_windows_use_the_monotonic_clock(bench):
         src = inspect.getsource(fn)
         assert "time.time()" not in src
     assert "time.monotonic()" in inspect.getsource(bench.phase_writer)
-
-
-@pytest.mark.parametrize(
-    "kw",
-    [
-        {"wal": True, "writer_interval": [-1.0]},
-        {"wal": True, "wal_hold": float("nan")},
-        {"wal": True, "writer_interval": [float("inf")]},
-    ],
-)
-def test_invalid_wal_timing_arguments_are_refused_before_building(bench, kw):
-    with pytest.raises(SystemExit):
-        bench._require_balanced_repeat(_ns(**kw))
 
 
 def test_threads_of_four_start_at_a_root_without_a_reply_chain(bench, tmp_path):
@@ -898,23 +740,249 @@ def test_threads_of_four_start_at_a_root_without_a_reply_chain(bench, tmp_path):
         assert roots[mid][0] == bench.message_id(i - i % 4, "typical")
 
 
-def test_wal_window_includes_the_size_at_its_close(report):
-    for wal in report["wal"]:
-        assert wal["wal_max_during_transaction_bytes"] >= wal["wal_at_transaction_start_bytes"]
+# --- the argument table --------------------------------------------------
+
+# A small valid run; each case below changes it.
+_BASE = {"--messages": "300", "--per-message": "1", "--missing": "10", "--repeat": "1", "--k": "3"}
+
+# What a boundary value of an argument needs beside it to be valid, so
+# the case tests that argument's own bound and nothing else.
+_WITH = {
+    "messages": {"low": {"--missing": "0", "--k": "1"}},
+    "per_message": {"low": {"--missing": "0"}},
+    "references": {"*": {"--records": "cardinality", "--messages": "3", "--missing": "0"}},
+    "upload_total": {
+        "low": {
+            "--all-extras": None,
+            "--records": "mixed",
+            "--missing": None,
+            "--k": "1",
+        }
+    },
+    "writer_commit_bytes": {"*": {"--wal": None}},
+    "writer_interval": {"*": {"--wal": None}},
+    "wal_hold": {"*": {"--wal": None}},
+}
 
 
-def test_worst_records_keep_their_assigned_thread_and_flag_ambiguous_senders(bench, tmp_path):
+def _argv(changes: dict) -> list[str]:
+    options = {**_BASE}
+    for flag, value in changes.items():
+        if value is None and flag in options:
+            del options[flag]
+        else:
+            options[flag] = value
+    argv = []
+    for flag, value in options.items():
+        argv += [flag] if value is None else [flag, value]
+    return argv
+
+
+def _boundary_cases():
+    module = _load()
+    cases = []
+    for arg in module.ARGS:
+        if arg.kind not in ("int", "float", "ints", "floats"):
+            continue
+        step = 1 if arg.kind in ("int", "ints") else 0.001
+        fmt = (lambda v: str(int(v))) if arg.kind in ("int", "ints") else str
+        with_ = _WITH.get(arg.name, {})
+        for which, bound, sign in (("low", arg.low, -1), ("high", arg.high, 1)):
+            if bound is None:
+                continue
+            extra = {**with_.get("*", {}), **with_.get(which, {})}
+            value = fmt(bound)
+            if arg.length:
+                value = ",".join([value] * arg.length)
+            cases.append(pytest.param(arg.flag, value, extra, True, id=f"{arg.name}-{which}"))
+            beyond = fmt(bound + sign * step)
+            if arg.length:
+                beyond = ",".join([beyond] * arg.length)
+            cases.append(pytest.param(arg.flag, beyond, extra, False, id=f"{arg.name}-{which}-out"))
+        # A value of the wrong type stops argparse.
+        cases.append(pytest.param(arg.flag, "x", with_.get("*", {}), False, id=f"{arg.name}-type"))
+    return cases
+
+
+@pytest.mark.parametrize(("flag", "value", "extra", "ok"), _boundary_cases())
+def test_every_numeric_argument_is_checked_at_its_bounds(bench, flag, value, extra, ok):
+    argv = _argv({**extra, flag: value})
+    if ok:
+        bench.parse_args(argv)
+    else:
+        with pytest.raises(SystemExit):
+            bench.parse_args(argv)
+
+
+def test_the_parser_offers_exactly_the_table(bench):
+    import argparse
+
+    seen = []
+    real = argparse.ArgumentParser.add_argument
+
+    def record(self, *names, **kw):
+        seen.extend(n for n in names if n.startswith("--") and n != "--help")
+        return real(self, *names, **kw)
+
+    argparse.ArgumentParser.add_argument = record
+    try:
+        bench.parse_args(_argv({}))
+    finally:
+        argparse.ArgumentParser.add_argument = real
+    assert seen == [a.flag for a in bench.ARGS]
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_floats_must_be_finite(bench, value):
+    with pytest.raises(SystemExit, match="finite"):
+        bench.parse_args([*_argv({"--wal": None}), f"--wal-hold={value}"])
+
+
+@pytest.mark.parametrize("value", ["5", "5,6,7"])
+def test_upload_total_takes_two_values(bench, value):
+    with pytest.raises(SystemExit, match="takes 2 values"):
+        bench.parse_args(_argv({"--upload-total": value, "--missing": None}))
+
+
+@pytest.mark.parametrize(
+    ("changes", "name", "absent", "zero"),
+    [
+        # Absent and zero differ: absent takes the stated default.
+        ({}, "extras", 100, 0),
+        ({"--missing": None, "--messages": "6000"}, "missing", 5000, 0),
+        ({"--repeat": None}, "repeat", 2, None),
+        ({"--repeat": None, "--filtered": None}, "repeat", 6, None),
+        (
+            {"--records": "cardinality", "--messages": "3", "--missing": "0"},
+            "references",
+            100_000,
+            0,
+        ),
+        ({"--wal": None}, "wal_hold", 0.0, 0.0),
+        ({}, "extracted_chars", 0, 0),
+        ({}, "request_shapes", 0, 0),
+    ],
+)
+def test_absent_and_zero_are_resolved_as_the_table_says(bench, changes, name, absent, zero):
+    assert getattr(bench.parse_args(_argv(changes)), name) == absent
+    flag = "--" + name.replace("_", "-")
+    if zero is None:
+        with pytest.raises(SystemExit):
+            bench.parse_args(_argv({**changes, flag: "0"}))
+    else:
+        assert getattr(bench.parse_args(_argv({**changes, flag: "0"})), name) == zero
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"--upload-total": "500,500", "--extras": "3"}, "exclude each other"),
+        ({"--all-extras": None, "--records": "mixed", "--missing": None}, "needs --upload-total"),
+        ({"--all-extras": None, "--upload-total": "5,5", "--missing": None}, "--records mixed"),
+        ({"--all-extras": None, "--upload-total": "5,5", "--records": "mixed"}, "excludes"),
+        (
+            {
+                "--all-extras": None,
+                "--upload-total": "5,5",
+                "--records": "mixed",
+                "--missing": None,
+                "--missing-from": "worst",
+            },
+            "excludes",
+        ),
+        (
+            {
+                "--all-extras": None,
+                "--upload-total": "5,5",
+                "--records": "mixed",
+                "--missing": None,
+                "--k": "100",
+            },
+            "cannot fill K = 100",
+        ),
+        ({"--missing-from": "worst"}, "needs --records mixed"),
+        ({"--missing": "286"}, "can leave out 285 messages"),
+        ({"--records": "mixed", "--missing-from": "worst", "--missing": "7"}, "can leave out 6"),
+        ({"--per-message": "0"}, "can leave out 0 occurrences"),
+        ({"--upload-total": "100,100"}, "holds 275 members"),
+        ({"--references": "5"}, "cardinality records only"),
+        ({"--filtered": None, "--chunk-tokens": "19"}, "at least 20"),
+        ({"--filtered": None, "--extracted-chars": "5"}, "excludes --extracted-chars"),
+        ({"--chunks": "2"}, "one chunk per paragraph"),
+        ({"--chunk-tokens": "300", "--messages": str(2**30)}, "one chunk per paragraph"),
+        ({"--writer-commit-bytes": "5"}, "need --wal"),
+        ({"--writer-interval": "0.5"}, "need --wal"),
+        ({"--wal-hold": "1"}, "need --wal"),
+        ({"--repeat": "3"}, "cannot balance"),
+        ({"--repeat": "2", "--filtered": None}, "cannot balance"),
+        (
+            {
+                "--records": "cardinality",
+                "--references": "3000000",
+                "--messages": "3",
+                "--missing": "0",
+            },
+            "file limit",
+        ),
+    ],
+)
+def test_forbidden_combinations_are_refused_before_building(bench, tmp_path, changes, message):
+    with pytest.raises(SystemExit, match=message):
+        bench.parse_args(_argv({**changes, "--workdir": str(tmp_path)}))
+    assert not list(tmp_path.iterdir())
+
+
+def test_the_largest_accepted_combinations_pass(bench):
+    bench.parse_args(_argv({"--chunks": "3", "--chunk-tokens": "250"}))
+    bench.parse_args(
+        _argv(
+            {
+                "--all-extras": None,
+                "--upload-total": "5,5",
+                "--records": "mixed",
+                "--missing": None,
+                "--k": "6",
+            }
+        )
+    )
+    bench.parse_args(_argv({"--records": "mixed", "--missing-from": "worst", "--missing": "6"}))
+
+
+def test_wal_window_takes_sizes_and_count_from_the_same_commits(bench):
+    commits = [(1.0, 100), (2.0, 200), (3.0, 350), (4.0, 500), (5.0, 650)]
+    # A commit stamped exactly at the start belongs before the window;
+    # one stamped at the end, inside it.
+    assert bench.wal_window(commits, 2.0, 4.0) == (200, 500, 2)
+    assert bench.wal_window(commits, 2.5, 2.6) == (200, 200, 0)
+    assert bench.wal_window(commits, 0.5, 1.0) == (0, 100, 1)
+
+
+def test_build_commits_each_message_on_its_own(bench, tmp_path, monkeypatch):
+    statements: list[str] = []
+    real = bench.sqlite3.connect
+
+    def traced(*args, **kwargs):
+        conn = real(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(bench.sqlite3, "connect", traced)
+    bench.build(tmp_path / "cadence.db", 12, 1, "typical", "typical")
+    assert statements.count("COMMIT") == 12 and statements.count("BEGIN") == 12
+
+
+def test_worst_replies_name_their_parent_last_and_one_sender(bench, tmp_path):
     db = tmp_path / "worst-threads.db"
     bench.build(db, 12, 1, "ascii998", "worst")
     with closing(sqlite3.connect(db)) as conn:
         rows = conn.execute(
-            "SELECT message_id, thread_id, in_reply_to, references_json, sender_ambiguous "
-            "FROM messages"
+            "SELECT message_id, thread_id, references_json, sender_ambiguous FROM messages"
         ).fetchall()
-    for mid, tid, reply, refs, ambiguous in rows:
-        assert ambiguous == 1  # eleven From participants
+    for mid, tid, refs, ambiguous in rows:
+        # One From header with eleven authors: not ambiguous (the parser
+        # flags a repeated From header or an incomplete scan only).
+        assert ambiguous == 0
         i = next(n for n in range(12) if bench.message_id(n, "ascii998") == mid)
         if i % 4:
-            assert reply == bench.message_id(i - 1, "ascii998")
-            assert json.loads(refs)[0] == reply
+            assert json.loads(refs)[-1] == bench.message_id(i - 1, "ascii998")
         assert tid == bench.message_id(i - i % 4, "ascii998")
