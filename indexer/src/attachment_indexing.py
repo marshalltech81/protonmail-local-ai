@@ -49,6 +49,7 @@ from .extractors import (
     CAP_EXTRACTED_CHARS,
     CAP_OCR_PAGES,
     CONTAINER_IDENTIFICATION_VERSION,
+    CONTAINER_SIGNATURE_VERSION,
     LEGACY_OLE2_ERROR,
     NON_OLE2_PPT_ERROR,
     NOT_OLE2_OR_OOXML_ERROR,
@@ -566,17 +567,20 @@ def cap_bootstrap_due(row: Mapping[str, Any], *, ocr_enabled: bool) -> bool:
 
 
 def _identifier_version(identifier: str) -> int:
-    """``container@2`` -> 2; 0 for a value with no version, as the
-    sweep's SQL reads it."""
+    """``container@2`` or ``none@2`` -> 2; 0 for a value with no
+    version, as the sweep's SQL reads it."""
     _, _, version = identifier.partition("@")
     return int(version) if version.isdigit() else 0
 
 
 def identification_due(row: Mapping[str, Any], *, ocr_enabled: bool) -> bool:
     """Whether a cached row's container certification is due (#1416):
-    it has no ``identifier`` (cached before schema v12) or one an older
-    identification version wrote. '' (a payload with neither the OLE2
-    nor a ZIP signature) and a newer version (after a rollback) are not.
+    it has no ``identifier`` (cached before schema v12), a negative one
+    (``none@<n>``, a payload with neither the OLE2 nor a ZIP signature)
+    checked against an older signature set (``CONTAINER_SIGNATURE_VERSION``,
+    owner decision on #1416, 2026-10-10), or any other an older
+    identification version wrote (``CONTAINER_IDENTIFICATION_VERSION``).
+    A newer version (after a rollback) is not.
     Never a ``too_large`` row, which no dispatch reached, and, while OCR
     is off, never a row an OCR extractor wrote, as
     ``extractors.stale_extractor_module`` keeps one. The startup sweep
@@ -590,19 +594,29 @@ def identification_due(row: Mapping[str, Any], *, ocr_enabled: bool) -> bool:
     identifier = row["identifier"]
     if identifier is None:
         return True
-    return identifier != "" and _identifier_version(identifier) < CONTAINER_IDENTIFICATION_VERSION
+    if _is_negative(identifier):
+        return _identifier_version(identifier) < CONTAINER_SIGNATURE_VERSION
+    return _identifier_version(identifier) < CONTAINER_IDENTIFICATION_VERSION
+
+
+def _is_negative(identifier: str) -> bool:
+    """Whether ``identifier`` is a negative certification (``none@<n>``)."""
+    return identifier.startswith("none@")
 
 
 def identification_refreshes(row: Mapping[str, Any], payload: bytes, *, ocr_enabled: bool) -> bool:
     """Whether the lookup re-extracts a cached row for its container
     certification (#1416): ``identification_due``, except a row with no
-    identifier whose payload starts with neither the OLE2 nor a ZIP
-    signature (a constant-size check). That row's result is kept: the
-    apply phase records '' on it
+    identifier or a negative one whose payload starts with neither the
+    OLE2 nor a ZIP signature (a constant-size check). That row's result
+    is kept: the apply phase stamps it ``NOT_CONTAINER_IDENTIFIER``
     (``Database.certify_extraction_identifier``)."""
     if not identification_due(row, ocr_enabled=ocr_enabled):
         return False
-    return row["identifier"] is not None or has_container_prefix(payload)
+    identifier = row["identifier"]
+    if identifier is None or _is_negative(identifier):
+        return has_container_prefix(payload)
+    return True
 
 
 def _cache_hit_short_circuits(
@@ -1199,9 +1213,11 @@ def _write_occurrence(
             purged = purged_extractions.get((plan.attachment.content_hash, module))
             if purged is not None:
                 db.restore_attachment_extraction(purged)
-        # A cache hit on a row with no identifier whose payload has neither
-        # the OLE2 nor a ZIP signature: no identification applies, so the
-        # row is certified '' and kept (#1416). A no-op on any other row.
+        # A cache hit on a row with no identifier, or a negative one checked
+        # against an older signature set, whose payload has neither the
+        # OLE2 nor a ZIP signature: no identification applies, so the row
+        # is stamped ``NOT_CONTAINER_IDENTIFIER`` and kept (#1416). A no-op
+        # on any other row.
         if not has_container_prefix(plan.attachment.payload):
             db.certify_extraction_identifier(plan.attachment.content_hash, module)
     # Whether the chunks written below hold all of this occurrence's

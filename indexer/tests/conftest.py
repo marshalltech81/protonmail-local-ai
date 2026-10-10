@@ -156,11 +156,78 @@ def make_zip(*member_names: str, contents: bytes = b"") -> bytes:
     return buffer.getvalue()
 
 
-def make_ooxml_names(kind: str) -> tuple[str, ...]:
-    """The member names identification (#1416) reads for an OOXML
-    package of ``kind`` (``docx``, ``xlsx`` or ``pptx``)."""
-    main = {"docx": "word/document.xml", "xlsx": "xl/workbook.xml", "pptx": "ppt/presentation.xml"}
-    return ("[Content_Types].xml", "_rels/.rels", main[kind])
+# OPC metadata of a synthetic OOXML package (#1416): its content types
+# and package relationships, which identification reads (owner decision
+# on #1416, 2026-10-10).
+OPC_CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+OPC_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+OFFICE_DOCUMENT_REL = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+)
+WORD_MAIN_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+WORKBOOK_MAIN_CT = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+PRESENTATION_MAIN_CT = (
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+)
+OOXML_MAIN_PARTS = {
+    "docx": ("word/document.xml", WORD_MAIN_CT),
+    "xlsx": ("xl/workbook.xml", WORKBOOK_MAIN_CT),
+    "pptx": ("ppt/presentation.xml", PRESENTATION_MAIN_CT),
+}
+
+
+def make_package(members: dict[str, bytes]) -> bytes:
+    """A synthetic ZIP of ``members`` (name to contents, stored), with a
+    fixed timestamp."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        for name, contents in members.items():
+            archive.writestr(zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0)), contents)
+    return buffer.getvalue()
+
+
+def ooxml_content_types(
+    overrides: dict[str, str] | None = None, defaults: dict[str, str] | None = None
+) -> bytes:
+    """``[Content_Types].xml`` with ``defaults`` (extension to content
+    type; ``rels`` and ``xml`` by default) and ``overrides`` (part name to
+    content type)."""
+    if defaults is None:
+        defaults = {
+            "rels": "application/vnd.openxmlformats-package.relationships+xml",
+            "xml": "application/xml",
+        }
+    lines = [f'<Types xmlns="{OPC_CONTENT_TYPES_NS}">']
+    lines += [f'<Default Extension="{e}" ContentType="{t}"/>' for e, t in defaults.items()]
+    lines += [f'<Override PartName="{n}" ContentType="{t}"/>' for n, t in (overrides or {}).items()]
+    lines.append("</Types>")
+    return "".join(lines).encode()
+
+
+def ooxml_rels(
+    *targets: str, rel_type: str = OFFICE_DOCUMENT_REL, mode: str | None = None
+) -> bytes:
+    """``_rels/.rels`` with one relationship of ``rel_type`` per target."""
+    attr = "" if mode is None else f' TargetMode="{mode}"'
+    rels = "".join(
+        f'<Relationship Id="rId{i}" Type="{rel_type}" Target="{t}"{attr}/>'
+        for i, t in enumerate(targets, 1)
+    )
+    return f'<Relationships xmlns="{OPC_RELATIONSHIPS_NS}">{rels}</Relationships>'.encode()
+
+
+def make_ooxml(kind: str, *extra: str, contents: bytes = b"") -> bytes:
+    """A minimal OOXML package of ``kind`` (``docx``, ``xlsx`` or
+    ``pptx``) at its conventional main part, with its content types and
+    root relationship, plus ``extra`` members holding ``contents``."""
+    part, content_type = OOXML_MAIN_PARTS[kind]
+    members = {
+        "[Content_Types].xml": ooxml_content_types({f"/{part}": content_type}),
+        "_rels/.rels": ooxml_rels(f"/{part}"),
+        part: b"<root/>",
+    }
+    members.update(dict.fromkeys(extra, contents))
+    return make_package(members)
 
 
 def count_pending_deletions(db: Database) -> int:

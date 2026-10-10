@@ -33,9 +33,11 @@ from src.database import EMBEDDING_DIM, Database
 from src.extractors import (
     AMBIGUOUS_CONTAINER_ERROR,
     CONTAINER_IDENTIFIER,
+    CONTAINER_SIGNATURE_VERSION,
     ENCRYPTED_OFFICE_ERROR,
     EXTRACTOR_VERSIONS,
     LEGACY_OLE2_ERROR,
+    NOT_CONTAINER_IDENTIFIER,
     OLE2_NOT_OFFICE_ERROR,
     PERMANENT_FAILURE_ERRORS,
     STATUS_EMPTY,
@@ -55,7 +57,19 @@ from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_message, make_mock_embedder, make_ole2, make_thread, make_zip
+from tests.conftest import (
+    WORD_MAIN_CT,
+    WORKBOOK_MAIN_CT,
+    make_message,
+    make_mock_embedder,
+    make_ole2,
+    make_ooxml,
+    make_package,
+    make_thread,
+    make_zip,
+    ooxml_content_types,
+    ooxml_rels,
+)
 
 MARKER = "SYNTHETIC_1416_MARKER"
 _UNIT_VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
@@ -72,7 +86,21 @@ _ZIP_MAIN = {
 
 
 def _ooxml(kind: str, *extra: str) -> bytes:
-    return make_zip("[Content_Types].xml", "_rels/.rels", _ZIP_MAIN[kind], *extra)
+    return make_ooxml(kind, *extra)
+
+
+# A package both Word and Excel would read: its root relationship names a
+# Word main part and its content types a workbook.
+_WORD_AND_WORKBOOK = make_package(
+    {
+        "[Content_Types].xml": ooxml_content_types(
+            {"/word/document.xml": WORD_MAIN_CT, "/xl/workbook.xml": WORKBOOK_MAIN_CT}
+        ),
+        "_rels/.rels": ooxml_rels("/word/document.xml"),
+        "word/document.xml": b"<root/>",
+        "xl/workbook.xml": b"<root/>",
+    }
+)
 
 
 # --------------------------------------------------------------------------
@@ -137,19 +165,22 @@ class TestIdentification:
     @pytest.mark.parametrize(
         ("names", "token"),
         [
-            (("[Content_Types].xml", _ZIP_MAIN["docx"]), "docx"),
-            (("[Content_Types].xml", _ZIP_MAIN["xlsx"]), "xlsx"),
-            (("[Content_Types].xml", _ZIP_MAIN["pptx"]), "pptx"),
-            (("[CONTENT_TYPES].XML", "Word/Document.XML"), "docx"),
-            (("[Content_Types].xml", "word/document2.xml"), "ooxml"),
-            (("[Content_Types].xml", _ZIP_MAIN["docx"], _ZIP_MAIN["xlsx"]), "ambiguous"),
+            # Names alone decide nothing past "is a package": with no
+            # readable metadata the kind is not named (owner decision on
+            # #1416, 2026-10-10; ``test_ooxml_identification``).
+            (("[Content_Types].xml", _ZIP_MAIN["docx"]), "ooxml"),
+            (("[CONTENT_TYPES].XML", "Word/Document.XML"), "ooxml"),
             ((_ZIP_MAIN["docx"],), "zip-other"),
             (("mimetype", "content.xml"), "zip-other"),
             ((), "zip-other"),
         ],
     )
-    def test_zip_member_names_decide(self, names, token):
+    def test_zip_member_names_alone_name_no_kind(self, names, token):
         assert container_child.extract_text(make_zip(*names)) == (token, [])
+
+    @pytest.mark.parametrize("kind", sorted(_ZIP_MAIN))
+    def test_a_package_names_its_kind(self, kind):
+        assert container_child.extract_text(_ooxml(kind)) == (kind, [])
 
     @pytest.mark.parametrize(
         "lead", [b"", b"PK\x07\x08", b"PK00"], ids=["local-header", "spanned", "spanning-temp"]
@@ -166,13 +197,20 @@ class TestIdentification:
         assert (result.status, result.identifier) == (STATUS_SUCCESS, CONTAINER_IDENTIFIER)
         assert stubbed_extractors == ["docx"]
 
-    def test_no_member_is_opened(self, monkeypatch):
-        """Only the central directory is read: no member is decompressed."""
-        payload = make_zip(*_ooxml_names("docx"), contents=b"x" * 4096)
-        opened = MagicMock(side_effect=AssertionError("a member was opened"))
-        monkeypatch.setattr(zipfile.ZipFile, "open", opened)
+    def test_only_the_two_metadata_members_are_opened(self, monkeypatch):
+        """Of the members, only ``[Content_Types].xml`` and ``_rels/.rels``
+        are read (owner decision on #1416, 2026-10-10)."""
+        payload = _ooxml("docx", "word/media/big.bin")
+        opened: list[str] = []
+        real = zipfile.ZipFile.open
+
+        def recording(self, name, *args, **kwargs):
+            opened.append(name if isinstance(name, str) else name.filename)
+            return real(self, name, *args, **kwargs)
+
+        monkeypatch.setattr(zipfile.ZipFile, "open", recording)
         assert container_child.extract_text(payload) == ("docx", [])
-        opened.assert_not_called()
+        assert sorted(opened) == ["[Content_Types].xml", "_rels/.rels"]
 
     def test_ole2_bytes_are_never_read_as_a_file_name(self, monkeypatch):
         """olefile reads ``bytes`` shorter than 1,536 as a file name; the
@@ -189,10 +227,6 @@ class TestIdentification:
             container_child.extract_text(container.OLE2_SIGNATURE + MARKER.encode())
         assert not isinstance(raised.value, FileNotFoundError)
         assert seen == [io.BytesIO]
-
-
-def _ooxml_names(kind: str) -> tuple[str, ...]:
-    return ("[Content_Types].xml", _ZIP_MAIN[kind])
 
 
 # --------------------------------------------------------------------------
@@ -316,8 +350,7 @@ class TestWorkGuard:
     @pytest.mark.parametrize("members", [10, 11])
     def test_zip_entries_are_charged(self, monkeypatch, members):
         monkeypatch.setattr(container_child, "_MAX_DIRECTORY_ENTRIES", 10)
-        names = (*_ooxml_names("xlsx"), *(f"m{i}" for i in range(members - 2)))
-        payload = make_zip(*names)
+        payload = _ooxml("xlsx", *(f"m{i}" for i in range(members - 3)))
         if members > 10:
             with pytest.raises(container_child.ContainerDirectoryBudgetError):
                 container_child.extract_text(payload)
@@ -462,7 +495,7 @@ class TestDispatch:
             (make_ole2("Contents", trailer=MARKER.encode()), OLE2_NOT_OFFICE_ERROR),
             (make_ole2("EncryptionInfo", "EncryptedPackage"), ENCRYPTED_OFFICE_ERROR),
             (make_ole2("WordDocument", "PowerPoint Document"), AMBIGUOUS_CONTAINER_ERROR),
-            (_ooxml("docx", _ZIP_MAIN["pptx"]), AMBIGUOUS_CONTAINER_ERROR),
+            (_WORD_AND_WORKBOOK, AMBIGUOUS_CONTAINER_ERROR),
             (make_zip(f"{MARKER}.txt"), ZIP_NOT_OFFICE_ERROR),
             (b"PK\x05\x06" + bytes(18), ZIP_NOT_OFFICE_ERROR),
         ],
@@ -548,12 +581,12 @@ class TestDispatch:
 
     def test_other_payloads_keep_the_labels_dispatch(self, stubbed_extractors):
         """A payload with neither signature is dispatched by its label as
-        before, and certified ''; a ``too_large`` one is not dispatched."""
+        before, and certified ``none@``; a ``too_large`` one is not dispatched."""
         result = extract(content_type="text/plain", filename="a.txt", payload=b"plain words")
         assert (result.status, result.extractor, result.identifier) == (
             STATUS_SUCCESS,
             "text@3",
-            "",
+            NOT_CONTAINER_IDENTIFIER,
         )
         too_large = extract(
             content_type="image/png", filename="a.png", payload=make_ole2(*_WORD), max_bytes=10
@@ -608,7 +641,19 @@ def test_the_cache_namespace_is_the_labels(stubbed_extractors):
 
 
 _STATUSES = (STATUS_SUCCESS, STATUS_EMPTY, STATUS_UNSUPPORTED, STATUS_FAILED, STATUS_TOO_LARGE)
-_IDENTIFIERS = (None, "", "container@0", CONTAINER_IDENTIFIER, "container@2", "container@x")
+_IDENTIFIERS = (
+    None,
+    "",
+    "container@0",
+    CONTAINER_IDENTIFIER,
+    "container@99",
+    "container@x",
+    "none@0",
+    NOT_CONTAINER_IDENTIFIER,
+    "none@99",
+    "none@x",
+    "none",
+)
 _STAMPS = ("doc@2", "pdf-ocr@5", "image-ocr@6", None)
 
 
@@ -665,12 +710,14 @@ def test_the_sweep_sql_and_the_lookup_select_the_same_rows(catalogue_db, ocr_ena
     assert found == expected
     # The lookup re-extracts exactly the due rows of a container payload,
     # and of a payload with neither signature only those it cannot
-    # certify '' (a row with an identifier of an older version).
+    # certify ``none@`` (a row a container identification certified).
     for row in rows:
         due = identification_due(row, ocr_enabled=ocr_enabled)
         assert identification_refreshes(row, make_ole2(), ocr_enabled=ocr_enabled) is due
         plain = identification_refreshes(row, b"plain words", ocr_enabled=ocr_enabled)
-        assert plain is (due and row["identifier"] is not None)
+        identifier = row["identifier"]
+        negative = identifier is None or identifier.startswith("none@")
+        assert plain is (due and not negative)
 
 
 def test_the_catalogue_is_written_out_by_hand():
@@ -685,10 +732,17 @@ def test_the_catalogue_is_written_out_by_hand():
     assert due(STATUS_UNSUPPORTED, None)
     assert due(STATUS_FAILED, "container@0")
     assert due(STATUS_FAILED, "container@x")
-    assert not due(STATUS_SUCCESS, "")
     assert not due(STATUS_SUCCESS, CONTAINER_IDENTIFIER)
+    # A negative certification is versioned by the signature set, not by
+    # the identification version (owner decision on #1416, 2026-10-10).
+    assert not due(STATUS_SUCCESS, NOT_CONTAINER_IDENTIFIER)
+    assert due(STATUS_SUCCESS, f"none@{CONTAINER_SIGNATURE_VERSION - 1}")
+    assert due(STATUS_SUCCESS, "none@x")
+    # The unversioned stamp of an earlier build is not trusted.
+    assert due(STATUS_SUCCESS, "")
     # A newer version, after a rollback, is kept.
-    assert not due(STATUS_SUCCESS, "container@2")
+    assert not due(STATUS_SUCCESS, "container@99")
+    assert not due(STATUS_SUCCESS, "none@99")
     # No dispatch reached a ``too_large`` row.
     assert not due(STATUS_TOO_LARGE, None)
     # OCR text is kept while OCR is off, whatever the module.
@@ -696,6 +750,26 @@ def test_the_catalogue_is_written_out_by_hand():
     assert not due(STATUS_SUCCESS, None, "image-ocr@6", ocr=False)
     assert due(STATUS_SUCCESS, None, "pdf-ocr@5", ocr=True)
     assert due(STATUS_SUCCESS, None, "doc@2", ocr=False)
+
+
+def test_the_signature_set_is_pinned_to_its_version():
+    """The negative certification ``none@<n>`` holds only while the
+    signature set it was checked against holds. A change to
+    ``_CONTAINER_SIGNATURES`` must bump ``CONTAINER_SIGNATURE_VERSION``
+    (and this pin), so every row certified against the old set is checked
+    again; removing a signature also changes what identification does, so
+    it bumps ``CONTAINER_IDENTIFICATION_VERSION`` as well."""
+    assert (CONTAINER_SIGNATURE_VERSION, extractors._CONTAINER_SIGNATURES) == (
+        1,
+        (
+            b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
+            b"PK\x03\x04",
+            b"PK\x05\x06",
+            b"PK\x07\x08",
+            b"PK00PK\x03\x04",
+        ),
+    )
+    assert NOT_CONTAINER_IDENTIFIER == f"none@{CONTAINER_SIGNATURE_VERSION}"
 
 
 # --------------------------------------------------------------------------
@@ -779,9 +853,44 @@ class TestLookup:
         calls, plan = self._run(db, attachment, monkeypatch)
         assert (calls, plan.cached) == (0, True)
         row = self._row(db, attachment, "text")
-        assert (row["identifier"], row["extracted_text"]) == ("", f"{MARKER} cached")
+        assert (row["identifier"], row["extracted_text"]) == (
+            NOT_CONTAINER_IDENTIFIER,
+            f"{MARKER} cached",
+        )
         # Certified: served again with no write needed.
         assert self._run(db, attachment, monkeypatch)[0] == 0
+
+    def test_an_older_negative_certification_is_restamped_and_kept(self, db, monkeypatch):
+        """A row certified against an older signature set whose payload
+        still carries no signature keeps its result and is stamped with the
+        current version, with no extraction (owner decision on #1416)."""
+        attachment = _attachment(b"plain words", "a.txt", "text/plain")
+        older = f"none@{CONTAINER_SIGNATURE_VERSION - 1}"
+        self._store(db, attachment, "text", status=STATUS_SUCCESS, identifier=older, stamp="text@3")
+        calls, plan = self._run(db, attachment, monkeypatch)
+        assert (calls, plan.cached) == (0, True)
+        row = self._row(db, attachment, "text")
+        assert (row["identifier"], row["extracted_text"]) == (
+            NOT_CONTAINER_IDENTIFIER,
+            f"{MARKER} cached",
+        )
+
+    def test_a_newer_negative_certification_is_left(self, db, monkeypatch):
+        """After a rollback, a stamp of a newer signature set is kept."""
+        attachment = _attachment(b"plain words", "a.txt", "text/plain")
+        newer = f"none@{CONTAINER_SIGNATURE_VERSION + 1}"
+        self._store(db, attachment, "text", status=STATUS_SUCCESS, identifier=newer, stamp="text@3")
+        assert self._run(db, attachment, monkeypatch)[0] == 0
+        assert self._row(db, attachment, "text")["identifier"] == newer
+
+    def test_a_container_under_an_older_negative_certification_is_extracted(self, db, monkeypatch):
+        """A payload certified ``none@`` against an older signature set that
+        now carries a signature is identified and extracted again."""
+        attachment = _attachment(make_ole2(*_WORD), "a.txt", "text/plain")
+        older = f"none@{CONTAINER_SIGNATURE_VERSION - 1}"
+        self._store(db, attachment, "text", status=STATUS_SUCCESS, identifier=older, stamp="text@3")
+        calls, plan = self._run(db, attachment, monkeypatch)
+        assert (calls, plan.cached) == (1, False)
 
     @pytest.mark.parametrize(
         ("status", "error"),
@@ -807,7 +916,12 @@ class TestLookup:
 
     @pytest.mark.parametrize(
         ("identifier", "refreshed"),
-        [("container@0", True), (CONTAINER_IDENTIFIER, False), ("container@2", False)],
+        [
+            ("container@0", True),
+            (CONTAINER_IDENTIFIER, False),
+            ("container@1", True),
+            ("container@99", False),
+        ],
     )
     def test_an_older_version_is_refreshed_and_a_newer_kept(
         self, db, monkeypatch, identifier, refreshed
@@ -967,10 +1081,11 @@ class TestStartupSweep:
         ]
         assert line.levelno == logging.INFO
         assert line.getMessage() == (
-            "container identification sweep (version 1): 4 message(s) with an attachment "
-            "result cached before its OLE2 / ZIP container certification or under an older "
-            "identification version; re-queued 3, already queued 0, skipped 1 dead-lettered "
-            "(run make requeue-dead to refresh them)."
+            "container identification sweep (version 2, signature set 1): 4 message(s) with "
+            "an attachment result cached before its OLE2 / ZIP container certification, under "
+            "an older identification version or checked against an older signature set; "
+            "re-queued 3, already queued 0, skipped 1 dead-lettered (run make requeue-dead to "
+            "refresh them)."
         )
 
         while self._queued(db):
@@ -987,7 +1102,7 @@ class TestStartupSweep:
         }
         assert rows == {
             "image": (STATUS_SUCCESS, f"doc@{EXTRACTOR_VERSIONS['doc']}", CONTAINER_IDENTIFIER),
-            "text": (STATUS_SUCCESS, "text@3", ""),
+            "text": (STATUS_SUCCESS, "text@3", NOT_CONTAINER_IDENTIFIER),
         }
         assert "doc words" in self._words(db, paths["first"])
         assert "doc words" in self._words(db, paths["second"])
@@ -1016,7 +1131,7 @@ class TestStartupSweep:
         identifiers = {
             r[0] for r in db._conn.execute("SELECT identifier FROM attachment_extractions")
         }
-        assert identifiers == {CONTAINER_IDENTIFIER, ""}
+        assert identifiers == {CONTAINER_IDENTIFIER, NOT_CONTAINER_IDENTIFIER}
         assert main._requeue_stale_extractions(db, queue) == 0
 
     def test_extraction_off_leaves_the_rows(self, mailbox, monkeypatch):

@@ -99,6 +99,7 @@ from .entities import (
 )
 from .extractors import (
     CONTAINER_IDENTIFICATION_VERSION,
+    CONTAINER_SIGNATURE_VERSION,
     DEFAULT_MAX_BYTES,
     ExtractionResult,
     drain_suppressed_lines,
@@ -2940,7 +2941,8 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     #1418). They get their own INFO line with
     the three settings and the counts. A row whose container
     certification is due (no ``identifier``, cached before schema v12,
-    or one an older identification version wrote) is re-queued, while
+    a negative one checked against an older signature set, or one an
+    older identification version wrote) is re-queued, while
     OCR is off never one an OCR extractor wrote and never a ``too_large``
     one (``attachment_indexing.identification_due``, #1416); the
     lookup certifies or re-extracts it, which ends it. Those get their
@@ -3069,11 +3071,13 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         identification_outcomes["queued"] += filepath in identification_paths
     if identification_paths:
         log.info(
-            "container identification sweep (version %d): %d message(s) with an attachment "
-            "result cached before its OLE2 / ZIP container certification or under an older "
-            "identification version; re-queued %d, already queued %d, skipped %d "
-            "dead-lettered (run make requeue-dead to refresh them).",
+            "container identification sweep (version %d, signature set %d): %d message(s) "
+            "with an attachment result cached before its OLE2 / ZIP container certification, "
+            "under an older identification version or checked against an older signature "
+            "set; re-queued %d, already queued %d, skipped %d dead-lettered (run make "
+            "requeue-dead to refresh them).",
             CONTAINER_IDENTIFICATION_VERSION,
+            CONTAINER_SIGNATURE_VERSION,
             len(identification_paths),
             identification_outcomes["queued"],
             identification_outcomes["already_queued"],

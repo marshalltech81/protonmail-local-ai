@@ -33,8 +33,10 @@ from .entities import (
 )
 from .extractors import (
     CONTAINER_IDENTIFICATION_VERSION,
+    CONTAINER_SIGNATURE_VERSION,
     LEGACY_OLE2_ERROR,
     NO_EXTRACTOR_ERROR,
+    NOT_CONTAINER_IDENTIFIER,
     OCR_DISABLED_ERROR,
     SCANNED_PDF_OCR_DISABLED_ERROR,
     warn_rate_limited,
@@ -163,8 +165,9 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # (``migrations/0011_extraction_cap_record.sql``).
 # v12 (#1416): ``attachment_extractions.identifier`` records how a
 # cached result's payload was certified: ``container@<version>`` when
-# its OLE2 or ZIP directory was identified before dispatch, '' when it
-# starts with neither signature, NULL on rows cached before it; the
+# its OLE2 or ZIP directory was identified before dispatch,
+# ``none@<signature-set version>`` when it starts with neither signature
+# (owner decision on #1416, 2026-10-10), NULL on rows cached before it; the
 # migration queues a reparse, whose lookup certifies or refreshes each
 # row (``migrations/0012_extraction_identifier.sql``).
 SCHEMA_VERSION = 12
@@ -254,9 +257,11 @@ _CAP_BOOTSTRAP_QUERY = _CAP_REFRESH_SQL.format(arm=_CAP_BOOTSTRAP_SQL)
 # The startup sweep's identification arm (#1416), the SQL twin of
 # ``attachment_indexing.identification_due``; a differential test runs a
 # catalogue of rows through both. A row is due when it has no identifier
-# (cached before schema v12) or one an older identification version
-# wrote (``container@<n>``, n below the current version); '' (a payload
-# with no OLE2 or ZIP signature) and a newer version never are. Never a
+# (cached before schema v12), a negative one (``none@<n>``, a payload with
+# no OLE2 or ZIP signature) checked against an older signature set (n
+# below ``CONTAINER_SIGNATURE_VERSION``), or any other an older
+# identification version wrote (``container@<n>``, n below the current
+# version); a newer version never is. Never a
 # ``too_large`` row, which no dispatch reached (a raised byte cap
 # re-extracts it through its own arm), and, while OCR is off, never a
 # row an OCR extractor wrote (an ``-ocr`` stamp before ``@``), so its
@@ -273,7 +278,9 @@ _IDENTIFICATION_REFRESH_QUERY = """
                THEN substr(e.extractor, 1, instr(e.extractor, '@') - 1)
                ELSE COALESCE(e.extractor, '') END, -4) <> '-ocr')
       AND (e.identifier IS NULL
-           OR (e.identifier <> ''
+           OR (substr(e.identifier, 1, 5) = 'none@'
+               AND CAST(substr(e.identifier, 6) AS INTEGER) < :signature_version)
+           OR (substr(e.identifier, 1, 5) <> 'none@'
                AND CAST(substr(e.identifier, instr(e.identifier, '@') + 1) AS INTEGER)
                    < :version))
 """
@@ -882,8 +889,9 @@ class Database:
             -- cached before schema v11).
             -- ``identifier`` is how the payload's container was certified
             -- (#1416): ``container@<version>`` when its OLE2 or ZIP
-            -- directory was identified before dispatch, '' when it starts
-            -- with neither signature, NULL when unknown (a ``too_large``
+            -- directory was identified before dispatch,
+            -- ``none@<signature-set version>`` when it starts with neither
+            -- signature, NULL when unknown (a ``too_large``
             -- result, or a row cached before schema v12).
             CREATE TABLE attachment_extractions (
                 attachment_id      TEXT NOT NULL,
@@ -2383,7 +2391,11 @@ class Database:
         replaces the row for any of them."""
         return self._stream_filepaths(
             _IDENTIFICATION_REFRESH_QUERY,
-            {"ocr_enabled": int(ocr_enabled), "version": CONTAINER_IDENTIFICATION_VERSION},
+            {
+                "ocr_enabled": int(ocr_enabled),
+                "version": CONTAINER_IDENTIFICATION_VERSION,
+                "signature_version": CONTAINER_SIGNATURE_VERSION,
+            },
             lambda _row: True,
             assessed,
         )
@@ -2504,19 +2516,28 @@ class Database:
 
     @_synchronized
     def certify_extraction_identifier(self, attachment_id: str, extractor_module: str) -> None:
-        """Record '' as the ``identifier`` of a cached row that has none,
-        for a payload the lookup found starting with neither the OLE2 nor
-        a ZIP signature (#1416): no identification applies to it, so its
+        """Record ``NOT_CONTAINER_IDENTIFIER`` as the ``identifier`` of a
+        cached row that has none, or a negative one (``none@<n>``) checked
+        against an older signature set, for a payload the lookup found
+        starting with neither the OLE2 nor a ZIP signature (#1416, owner
+        decision 2026-10-10): no identification applies to it, so its
         result is kept as it is and the sweep's identification arm no
-        longer selects it. A row with an identifier is left as it is."""
+        longer selects it. Any other row is left as it is."""
         cur = self._conn.cursor()
         started = False
         try:
             started = self._begin_if_needed(cur)
             cur.execute(
-                "UPDATE attachment_extractions SET identifier = '' "
-                "WHERE attachment_id = ? AND extractor_module = ? AND identifier IS NULL",
-                (attachment_id, extractor_module),
+                "UPDATE attachment_extractions SET identifier = ? "
+                "WHERE attachment_id = ? AND extractor_module = ? AND (identifier IS NULL "
+                "OR (substr(identifier, 1, 5) = 'none@' "
+                "AND CAST(substr(identifier, 6) AS INTEGER) < ?))",
+                (
+                    NOT_CONTAINER_IDENTIFIER,
+                    attachment_id,
+                    extractor_module,
+                    CONTAINER_SIGNATURE_VERSION,
+                ),
             )
             self._commit_if_started(started)
         except Exception:

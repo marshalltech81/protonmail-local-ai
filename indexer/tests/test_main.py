@@ -29,6 +29,7 @@ from openai import APIStatusError
 from src import main, parser
 from src.database import EMBEDDING_DIM, Database
 from src.embed_identity import CALIBRATION_TEXT
+from src.extractors import NOT_CONTAINER_IDENTIFIER
 from src.maildir import SyncStamp
 from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
@@ -4483,7 +4484,7 @@ class TestRequeueOcrDisabledExtractions:
                 error=None,
                 text_complete=True,
                 # Neither payload is OLE2 or ZIP (#1416).
-                identifier="",
+                identifier=NOT_CONTAINER_IDENTIFIER,
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -4658,7 +4659,7 @@ class TestRequeueNewlyDispatchedExtensions:
                 text="photo words",
                 error=None,
                 text_complete=True,
-                identifier="",
+                identifier=NOT_CONTAINER_IDENTIFIER,
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)

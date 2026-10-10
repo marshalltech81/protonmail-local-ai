@@ -36,6 +36,7 @@ from src.attachment_indexing import (
 from src.chunker import l2_normalize
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import (
+    NOT_CONTAINER_IDENTIFIER,
     STATUS_FAILED,
     STATUS_SUCCESS,
     ExtractionResult,
@@ -103,7 +104,7 @@ class LaunchingExtractor:
                 extractor=stamp,
                 text=None,
                 error="SyntheticError",
-                identifier="",
+                identifier=NOT_CONTAINER_IDENTIFIER,
             )
         return ExtractionResult(
             status=STATUS_SUCCESS,
@@ -117,7 +118,7 @@ class LaunchingExtractor:
             ),
             error=None,
             text_complete=True,
-            identifier="",
+            identifier=NOT_CONTAINER_IDENTIFIER,
         )
 
 
@@ -759,7 +760,11 @@ class TestContinuation:
                     "no_extractor": (STATUS_UNSUPPORTED, NO_EXTRACTOR_ERROR),
                 }[refresh]
                 return ExtractionResult(
-                    status=status, extractor=None, text=None, error=error, identifier=""
+                    status=status,
+                    extractor=None,
+                    text=None,
+                    error=error,
+                    identifier=NOT_CONTAINER_IDENTIFIER,
                 )
             return real_call(**kwargs)
 

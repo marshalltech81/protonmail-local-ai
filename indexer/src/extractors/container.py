@@ -71,8 +71,20 @@ OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 #   whole 32 MiB payload (292 MiB unlimited) fails at the address-space
 #   limit (``MemoryError``) in 0.6 s.
 #
+# OOXML metadata reads (owner decision on #1416, 2026-10-10; CPU time
+# includes the child's start-up): a package of 50,000 members listing a
+# content type for each (6.6 MB of metadata, at the directory budget):
+# 94 MiB, 0.42 s, 112 MiB; a deflate bomb inflating to 64 MiB is
+# rejected by the guard in 0.16 s; 8 MiB of metadata as one attribute,
+# as 100,000 elements, as 100,000 nested elements or stored
+# incompressible: 35 to 67 MiB and 0.21 to 0.63 s, under 96 MiB; an
+# entity expansion is refused in 0.22 s. The costliest crafted shape,
+# one element of a million attributes inside the 8 MiB cap (expat
+# builds them before the parser reports the element), takes 295 MiB and
+# 2.5 s unlimited and fails at this limit (``MemoryError``) in 2.8 s.
+#
 # 256 MiB is over twice the largest benign need at the default payload
-# cap; 5 CPU seconds is over six times the slowest crafted read and 20
+# cap; 5 CPU seconds is twice the slowest crafted read and over ten
 # times the slowest benign one.
 CHILD_MAX_ADDRESS_SPACE_BYTES = 256 * 1024 * 1024
 CHILD_MAX_CPU_SECONDS = 5

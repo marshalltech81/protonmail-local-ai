@@ -581,11 +581,12 @@ class ExtractionResult:
     ``identifier`` (#1416) records how the payload's container was
     certified: ``CONTAINER_IDENTIFIER`` when it starts with an OLE2 or
     ZIP signature and its directory was identified
-    (``container.identify``) before dispatch, ``""`` when it starts with
-    neither, so no identification applies to it, and ``None`` when no
+    (``container.identify``) before dispatch, ``NOT_CONTAINER_IDENTIFIER``
+    when it starts with neither signature of the current set, so no
+    identification applies to it, and ``None`` when no
     dispatch ran (``too_large``). Kept on the cached row
     (``attachment_extractions.identifier``): a row with none, or one an
-    older identification version certified, is refreshed
+    older identification or signature-set version certified, is refreshed
     (``attachment_indexing.identification_due``).
     """
 
@@ -903,14 +904,25 @@ ZIP_NOT_OFFICE_ERROR = "ZIP archive with no Word, Excel or PowerPoint document"
 AMBIGUOUS_CONTAINER_ERROR = "container holds more than one Word, Excel or PowerPoint document"
 
 # The container-identification version (#1416): stamped on every cached
-# row of an OLE2 or ZIP payload as ``container@<version>``, and ``""`` on
-# a row whose payload starts with neither signature. Bump it when a
+# row of an OLE2 or ZIP payload as ``container@<version>``. Bump it when a
 # change makes ``container.identify`` name another extractor for the
 # same bytes: every row certified by an older version is refreshed
 # (``attachment_indexing.identification_due``), and a row a newer
-# version certified is kept after a rollback.
-CONTAINER_IDENTIFICATION_VERSION = 1
+# version certified is kept after a rollback. 2: an OOXML package's kind
+# is read from its content types and root relationship, not its member
+# names (owner decision on #1416, 2026-10-10).
+CONTAINER_IDENTIFICATION_VERSION = 2
 CONTAINER_IDENTIFIER = f"container@{CONTAINER_IDENTIFICATION_VERSION}"
+
+# The version of the signature set (``_CONTAINER_SIGNATURES``) a payload
+# is checked against, stamped as ``none@<version>`` on a cached row whose
+# payload starts with none of them (owner decision on #1416,
+# 2026-10-10). Bump it with any change to the set: a row certified
+# against an older set is checked again, re-extracted if its payload now
+# carries a signature and otherwise restamped with its result kept.
+# ``test_the_signature_set_is_pinned_to_its_version`` pins the pair.
+CONTAINER_SIGNATURE_VERSION = 1
+NOT_CONTAINER_IDENTIFIER = f"none@{CONTAINER_SIGNATURE_VERSION}"
 
 # ``unsupported`` errors for an extractor exception the same bytes always
 # repeat in that extractor (#931), so a ``failed`` row would only re-run
@@ -1118,7 +1130,7 @@ def extract(
     )
     if result.status == STATUS_TOO_LARGE:
         return result
-    identifier = CONTAINER_IDENTIFIER if has_container_prefix(payload) else ""
+    identifier = CONTAINER_IDENTIFIER if has_container_prefix(payload) else NOT_CONTAINER_IDENTIFIER
     return replace(result, identifier=identifier)
 
 

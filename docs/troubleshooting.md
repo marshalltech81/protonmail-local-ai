@@ -1399,13 +1399,15 @@ Queue and maintenance (all INFO unless noted):
   `INDEXER_OCR_TIMEOUT_SECONDS` of OCR plus its render, so keep
   `INDEXER_MESSAGE_TIMEOUT_SECONDS` (the stall guard, per attachment)
   above that, or the indexer restarts mid-extraction.
-- `container identification sweep (version <n>): <n> message(s) with an
-  attachment result cached before its OLE2 / ZIP container certification
-  or under an older identification version; re-queued <n>, already
-  queued <n>, skipped <n> dead-lettered (run make requeue-dead to refresh
+- `container identification sweep (version <n>, signature set <n>): <n>
+  message(s) with an attachment result cached before its OLE2 / ZIP
+  container certification, under an older identification version or
+  checked against an older signature set; re-queued <n>, already queued
+  <n>, skipped <n> dead-lettered (run make requeue-dead to refresh
   them).` (INFO), at startup when cached attachment results have no
-  container certification (every result cached before schema v12, once)
-  or one an older identification version wrote (#1416). Every message
+  container certification (every result cached before schema v12, once),
+  one an older identification version wrote, or a "not a container"
+  certification made against an older signature set (#1416). Every message
   using such a result is re-queued once; its pass checks the first
   bytes: a file that is not OLE2 or ZIP keeps its result and is
   certified, and an OLE2 or ZIP file is identified by its directory and

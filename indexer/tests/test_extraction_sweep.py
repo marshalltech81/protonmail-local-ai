@@ -13,7 +13,12 @@ import threading
 import pytest
 from src import database, main
 from src.database import EMBEDDING_DIM, Database
-from src.extractors import EXTRACTOR_VERSIONS, NO_EXTRACTOR_ERROR, OCR_DISABLED_ERROR
+from src.extractors import (
+    EXTRACTOR_VERSIONS,
+    NO_EXTRACTOR_ERROR,
+    NOT_CONTAINER_IDENTIFIER,
+    OCR_DISABLED_ERROR,
+)
 from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 
 from tests.conftest import make_message, make_thread
@@ -112,7 +117,8 @@ def _occurrences(db: Database, filepath: str, rows: list[tuple]) -> None:
     db._conn.executemany(
         "INSERT OR IGNORE INTO attachment_extractions (attachment_id, extractor_module, "
         "extraction_status, extractor, extracted_text, extraction_error, extracted_at, "
-        "identifier) VALUES (?, ?, ?, NULL, NULL, ?, '2026-01-01', '')",
+        "identifier) VALUES (?, ?, ?, NULL, NULL, ?, '2026-01-01', "
+        f"'{NOT_CONTAINER_IDENTIFIER}')",
         [(aid, module, status, error) for aid, _n, _c, _z, module, status, error in rows],
     )
     db._conn.commit()
@@ -375,9 +381,9 @@ def test_identification_arm_reads_bounded_batches(mailbox, monkeypatch, caplog):
         if r.getMessage().startswith("container identification sweep")
     ]
     assert line == (
-        "container identification sweep (version 1): 5 message(s) with an attachment result "
-        "cached before its OLE2 / ZIP container certification or under an older "
-        "identification version; re-queued 3, already queued 1, skipped 1 dead-lettered "
-        "(run make requeue-dead to refresh them)."
+        "container identification sweep (version 2, signature set 1): 5 message(s) with an "
+        "attachment result cached before its OLE2 / ZIP container certification, under an "
+        "older identification version or checked against an older signature set; re-queued "
+        "3, already queued 1, skipped 1 dead-lettered (run make requeue-dead to refresh them)."
     )
     assert MARKER not in caplog.text

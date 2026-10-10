@@ -2,13 +2,14 @@
 -- container was certified. An OLE2 or ZIP payload is now identified by
 -- its directory before dispatch, whatever its label, so a row cached
 -- for one before this version may hold the wrong extractor's result.
--- ``container@<version>`` = the identification version that ran; '' =
--- the payload starts with neither signature, so none applies; NULL =
+-- ``container@<version>`` = the identification version that ran;
+-- ``none@<version>`` = the payload starts with no signature of that
+-- signature-set version, so none applies; NULL =
 -- unknown (every row cached before this version, and ``too_large``).
 
 -- No default: every existing row starts NULL. The bytes are not in the
 -- database, so the migration cannot tell; the reparse below sends every
--- occurrence through the cache lookup once, which stamps '' on a row
+-- occurrence through the cache lookup once, which stamps none@ on a row
 -- whose payload has neither signature (its result kept) and identifies
 -- and re-extracts the rest. Unchanged chunks keep their vectors; text a
 -- re-identified container now yields is embedded as new chunks. A

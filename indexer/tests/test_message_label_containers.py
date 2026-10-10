@@ -302,7 +302,12 @@ def test_the_reparse_replaces_the_old_occurrence_and_embeds_the_new_text(tmp_pat
     row, chunks and vectors go, and the container's text is extracted and
     embedded once (#1375, #1416)."""
     from src import attachment_indexing, parser
-    from src.extractors import CONTAINER_IDENTIFIER, ExtractionResult, has_container_prefix
+    from src.extractors import (
+        CONTAINER_IDENTIFIER,
+        NOT_CONTAINER_IDENTIFIER,
+        ExtractionResult,
+        has_container_prefix,
+    )
 
     from tests.test_stale_occurrences import StalePipeline
 
@@ -316,7 +321,9 @@ def test_the_reparse_replaces_the_old_occurrence_and_embeds_the_new_text(tmp_pat
             text=f"{hashlib.sha256(payload).hexdigest()} {words}",
             error=None,
             text_complete=True,
-            identifier=CONTAINER_IDENTIFIER if has_container_prefix(payload) else "",
+            identifier=CONTAINER_IDENTIFIER
+            if has_container_prefix(payload)
+            else NOT_CONTAINER_IDENTIFIER,
         )
 
     monkeypatch.setattr(attachment_indexing, "extract_attachment", fake_extract)

@@ -18,7 +18,9 @@ from dataclasses import replace
 
 import pytest
 from src.extractors import (
+    CONTAINER_IDENTIFIER,
     DOCX_PACKAGE_BUDGET_ERROR,
+    NOT_CONTAINER_IDENTIFIER,
     NOT_OLE2_OR_OOXML_ERROR,
     PPTX_PACKAGE_BUDGET_ERROR,
     STATUS_EMPTY,
@@ -30,7 +32,7 @@ from src.extractors import (
     extract,
 )
 
-from tests.conftest import make_ole2, make_ooxml_names, make_zip
+from tests.conftest import make_ole2, make_ooxml
 
 
 class TestDispatchByMime:
@@ -287,7 +289,7 @@ class TestFailedOutcomesAreLogged:
             text=None,
             error="ValueError",
             text_complete=False,
-            identifier="",
+            identifier=NOT_CONTAINER_IDENTIFIER,
         )
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
         assert record.levelname == "WARNING"
@@ -323,7 +325,7 @@ class TestFailedOutcomesAreLogged:
             text=None,
             error="zip member declares 300 uncompressed bytes (cap 4)",
             text_complete=False,
-            identifier="container@1",
+            identifier=CONTAINER_IDENTIFIER,
         )
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
         assert record.levelname == "WARNING"
@@ -2034,6 +2036,16 @@ class TestXlsxEagerPartBudget:
     _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     @staticmethod
+    def _identified_as_xlsx(monkeypatch) -> None:
+        """For a test counting the XLSX extractor's reads. Container
+        identification reads the package's two metadata members in a child
+        process of its own, under its own guard
+        (``test_ooxml_identification``), so it is stubbed there."""
+        from src.extractors import container
+
+        monkeypatch.setattr(container, "identify", lambda _payload: container.XLSX)
+
+    @staticmethod
     def _openpyxl_calls(monkeypatch) -> tuple[list[int], list[int]]:
         """Count workbook loads and pre-pass readers."""
         import openpyxl
@@ -2048,6 +2060,7 @@ class TestXlsxEagerPartBudget:
         from src.extractors import XLSX_EAGER_BUDGET_ERROR as xlsx_budget_error
         from src.extractors import xlsx
 
+        self._identified_as_xlsx(monkeypatch)
         loads, readers = self._openpyxl_calls(monkeypatch)
         reads = _MemberReads(monkeypatch)
         result = extract(content_type=self._XLSX, filename="book.xlsx", payload=payload)
@@ -2286,6 +2299,7 @@ class TestXlsxEagerPartBudget:
         payload = _zip_parts(parts)
         assert len(payload) < 200_000
 
+        self._identified_as_xlsx(monkeypatch)
         tracemalloc.start()
         started = time.monotonic()
         try:
@@ -3702,7 +3716,7 @@ class TestPermanentFailuresAreUnsupported:
             text=None,
             error=PDF_LIMIT_ERROR,
             text_complete=False,
-            identifier="",
+            identifier=NOT_CONTAINER_IDENTIFIER,
         )
         assert PDF_LIMIT_ERROR == "PDF structure exceeds pypdf limits"
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
@@ -3751,7 +3765,7 @@ class TestPermanentFailuresAreUnsupported:
             text=None,
             error=error,
             text_complete=False,
-            identifier="container@1",
+            identifier=CONTAINER_IDENTIFIER,
         )
         assert opened[0] == 0
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
@@ -3859,7 +3873,7 @@ class TestPermanentFailuresAreUnsupported:
         if module_name in streams:
             payload = make_ole2(streams[module_name])
         if module_name == "xlsx":
-            payload = make_zip(*make_ooxml_names("xlsx"))
+            payload = make_ooxml("xlsx")
 
         result = extract(
             content_type="application/octet-stream", filename=filename, payload=payload
@@ -5428,7 +5442,7 @@ class TestBinaryPayloadLabelledAsText:
             text=None,
             error=BINARY_AS_TEXT_ERROR,
             text_complete=False,
-            identifier="",
+            identifier=NOT_CONTAINER_IDENTIFIER,
         )
         assert calls == []
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -6312,7 +6326,7 @@ class TestPptxExtractor:
             text_complete=True,
             # The dispatcher's character cap did not cut it (#1418).
             extracted_chars_cap=0,
-            identifier="container@1",
+            identifier=CONTAINER_IDENTIFIER,
         )
         assert calls == ["pptx"]
 
@@ -7895,6 +7909,16 @@ _UNREPORTED_CAPS = {
     "src.extractors.container_child:_MAX_DIRECTORY_ENTRIES": (
         "a directory over it fails identification (ContainerDirectoryBudgetError): a failed "
         "row with its rate-limited WARNING, counted as failed="
+    ),
+    "src.extractors.container_child:_MAX_METADATA_BYTES": (
+        "an OOXML package's metadata members over it (compressed or decompressed) fail "
+        "identification (ContainerDirectoryBudgetError): a failed row with its "
+        "rate-limited WARNING, counted as failed="
+    ),
+    "src.extractors.container_child:_MAX_METADATA_ELEMENTS": (
+        "an OOXML package's metadata members of more XML elements fail identification "
+        "(ContainerDirectoryBudgetError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
     ),
 }
 

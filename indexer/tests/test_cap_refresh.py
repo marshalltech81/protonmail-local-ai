@@ -31,6 +31,7 @@ from src.attachment_indexing import (
 from src.database import EMBEDDING_DIM, CompletenessClearing, Database
 from src.extractors import (
     CAP_COLUMNS,
+    NOT_CONTAINER_IDENTIFIER,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
@@ -1004,7 +1005,7 @@ class TestOcrOffToOn:
                 digital_pages_cap=caps[1],
                 extracted_chars_cap=caps[2],
                 # A PDF: no container identification applies (#1416).
-                identifier="",
+                identifier=NOT_CONTAINER_IDENTIFIER,
             )
             found[name] = (attachment, msg.claimant_id)
         yield db, queue, found
@@ -1028,7 +1029,7 @@ class TestOcrOffToOn:
             ocr_pages_cap=0,
             digital_pages_cap=0,
             extracted_chars_cap=0,
-            identifier="",
+            identifier=NOT_CONTAINER_IDENTIFIER,
         )
         extractor = MagicMock(return_value=fresh)
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
