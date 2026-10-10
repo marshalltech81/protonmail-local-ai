@@ -651,12 +651,20 @@ _DECOYS = {
 def test_decoy_reaches_the_answering_model(case_id: str, records: dict[str, dict]) -> None:
     """Review round 6: a decoy case tests nothing unless the out-of-scope
     sibling's passage is in the prompt the model received."""
-    # Only a passage shown whole offers the decoy's value (#1183): a cut
-    # passage may have lost it, as the #910 shape test also requires.
-    supplied = {
-        p["message_id"] for p in _DETAILS[case_id]["passages"].values() if not p["truncated"]
-    }
-    assert message_id_of(_DECOYS[case_id]) in supplied, (case_id, sorted(supplied))
+    # The decoy's value must sit in a passage of the decoy message shown
+    # whole (#1183): a cut passage may have lost it, and another passage
+    # of the same message may not carry it (#1409).
+    decoy = message_id_of(_DECOYS[case_id])
+    shown = [
+        p["text"]
+        for p in _DETAILS[case_id]["passages"].values()
+        if p["message_id"] == decoy and not p["truncated"]
+    ]
+    assert shown, (case_id, decoy)
+    # Where the case names the decoy's value, one whole passage must carry it.
+    values = next(c for c in CASES if c.id == case_id).must_not_include
+    if values:
+        assert any(all(v in text for v in values) for text in shown), (case_id, values)
 
 
 # Each #910 attachment-layer case's shape, as the (message, source)
