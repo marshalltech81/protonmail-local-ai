@@ -1618,7 +1618,7 @@ options that changed.
 
 **How it was measured.** `mcp-server/scripts/reconcile_bench.py` builds
 a synthetic index (generated values only, never mail) on the schema the
-server reads (the tables mirror indexer schema v10, with the v9
+server reads (the tables mirror indexer schema v11, with the v9
 `extraction_deferred_at` column; the figures before "Combined worst case"
 below were taken on the v8 layout, which lacks it), and runs each step in a fresh child
 process, on the server's own read-only connection and with the server's

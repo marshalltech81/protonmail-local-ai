@@ -1990,11 +1990,29 @@ def _paragraph_tokens(args: argparse.Namespace) -> list[int]:
     ]
 
 
+def _references_bytes(count: int) -> int:
+    """The exact size of ``count`` cardinality References entries as
+    ``render_eml`` joins them (``<rN@x.example>`` with ``"\\n "``
+    between), computed without building them."""
+    if count == 0:
+        return 0
+    digits, width, start = 0, 1, 0
+    while start < count:
+        end = min(count, 10**width)
+        digits += (end - start) * width
+        start, width = end, width + 1
+    return len("<r@x.example>") * count + digits + 2 * (count - 1)
+
+
 def _file_floor(args: argparse.Namespace) -> int:
     """A lower bound on one message's file size, computed without
-    rendering it: each References entry takes at least 16 bytes, each
-    body word six and each attachment part 1,000."""
-    return 16 * args.references + 6 * args.chunks * args.chunk_tokens + 1000 * args.per_message
+    rendering it: the References entries' exact bytes, six bytes per
+    body word and 1,000 per attachment part."""
+    return (
+        _references_bytes(args.references)
+        + 6 * args.chunks * args.chunk_tokens
+        + 1000 * args.per_message
+    )
 
 
 def _largest_file(args: argparse.Namespace) -> int:

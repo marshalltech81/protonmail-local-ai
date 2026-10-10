@@ -1070,6 +1070,30 @@ def test_file_floor_is_below_every_file(bench, changes):
     assert 0 < bench._file_floor(args) <= bench._largest_file(args)
 
 
+def test_oversized_references_are_refused_without_rendering(bench, tmp_path, monkeypatch):
+    # 2,500,000 entries render a References header of about 54 MB, over
+    # the file limit: the floor must count the header's exact bytes so
+    # the refusal comes before any message is rendered.
+    rendered = []
+    monkeypatch.setattr(bench, "render_eml", lambda *a, **k: rendered.append(a) or "")
+    argv = {
+        "--records": "cardinality",
+        "--references": "2500000",
+        "--messages": "3",
+        "--missing": "0",
+        "--workdir": str(tmp_path),
+    }
+    with pytest.raises(SystemExit, match="file limit"):
+        bench.parse_args(_argv(argv))
+    assert rendered == []
+
+
+@pytest.mark.parametrize("references", [1, 9, 10, 11, 99, 100, 12_345])
+def test_file_floor_counts_the_references_header_exactly(bench, references):
+    header = "References: " + "\n ".join(f"<r{n}@x.example>" for n in range(references))
+    assert bench._references_bytes(references) == len(header) - len("References: ")
+
+
 def test_writer_delay_ends_when_stop_appears(bench, tmp_path):
     db = tmp_path / "delay.db"
     bench.build(db, 8, 0, "typical", "typical")
