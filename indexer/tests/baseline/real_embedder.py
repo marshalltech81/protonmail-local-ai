@@ -30,7 +30,8 @@ afresh.
 Every provider request, retries and the calibration request included,
 counts against ``--max-requests``. The request that would exceed it is
 not sent: the run stops and exits ``EXIT_INCONCLUSIVE`` (3), and no
-floor is checked, so a capped run is never a pass.
+floor is checked, so a capped run is never a pass. ``--max-runtime-secs``
+bounds the whole run the same way (``deadline``).
 
 Configuration comes from the environment, as for the indexer:
 ``EMBED_BASE_URL`` (a URL or ``default``), ``EMBED_MODEL`` and the
@@ -43,7 +44,7 @@ steps):
 
     uv run python -m tests.baseline.real_embedder <out_dir> <golden.json> \\
         --cache-dir <dir> --secrets-dir <dir> [--repeats N] \\
-        [--max-requests N] [--batch-size N]
+        [--max-requests N] [--max-runtime-secs N] [--batch-size N]
 """
 
 import argparse
@@ -52,13 +53,15 @@ import json
 import math
 import os
 import re
+import signal
 import sqlite3
 import stat
 import sys
 import time
 import urllib.parse
 from array import array
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -89,12 +92,37 @@ class UsageError(ValueError):
 
 
 class EmbedBudgetExhausted(BaseException):
-    """The request cap is reached; the next request was not sent.
+    """A cap is reached: the request cap (the next request was not
+    sent) or the runtime cap (``deadline``). ``cap`` names it.
 
     A ``BaseException`` so the indexer's ``except Exception`` handlers
     (outage probes, per-message fallbacks) cannot absorb it into a
     deferred job: the run stops at once and reports inconclusive.
     """
+
+    def __init__(self, cap: str) -> None:
+        super().__init__(cap)
+        self.cap = cap
+
+
+@contextmanager
+def deadline(seconds: int) -> Iterator[None]:
+    """Raise ``EmbedBudgetExhausted`` in the main thread once ``seconds``
+    have passed. The HTTP timeouts bound each socket operation, not a
+    whole request, so a provider that trickles bytes could otherwise keep
+    a paid run going indefinitely; the alarm interrupts a blocked read
+    (PEP 475 re-raises the handler's exception)."""
+
+    def expire(signum: int, frame: object) -> None:
+        raise EmbedBudgetExhausted(f"the runtime cap ({seconds} s)")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 @dataclass(frozen=True)
@@ -135,6 +163,8 @@ ARGUMENTS: tuple[Argument, ...] = (
     Argument("--max-requests", "flag", "int", minimum=1, maximum=1000, default="250"),
     # The indexer's own default (``EMBED_BATCH_SIZE``).
     Argument("--batch-size", "flag", "int", minimum=1, maximum=2048, default="64"),
+    # A fresh five-repeat run took under three minutes.
+    Argument("--max-runtime-secs", "flag", "int", minimum=60, maximum=14400, default="1800"),
     Argument("EMBED_BASE_URL", "env", "url"),
     Argument("EMBED_MODEL", "env", "text"),
     Argument("EMBED_MODE", "env", "choice", default="openai", choices=("openai",)),
@@ -149,6 +179,7 @@ class Settings:
     repeats: int
     max_requests: int
     batch_size: int
+    max_runtime_secs: int
     base_url: str
     model: str
     api_key: str = field(repr=False)
@@ -197,6 +228,18 @@ def _check(arg: Argument, raw: str | None, errors: list[str]) -> Any:
                 return None
             if "@" in parts.netloc:
                 errors.append(f"{arg.name} must not embed credentials (user:pass@host)")
+                return None
+            # A query string or fragment could carry a credential, and the
+            # embedder's error messages quote the URL whole.
+            if parts.query or parts.fragment or "?" in url or "#" in url:
+                errors.append(f"{arg.name} must not carry a query string or fragment")
+                return None
+            if parts.hostname == "host.docker.internal":
+                errors.append(
+                    f"{arg.name} names host.docker.internal, which only containers resolve;"
+                    " this build runs on the host, so use http://127.0.0.1:<port>/v1"
+                    " for a host-side server"
+                )
                 return None
             return url
         case "new_dir":
@@ -247,6 +290,7 @@ def validate(raw: Mapping[str, str | None]) -> Settings:
         repeats=values["--repeats"],
         max_requests=values["--max-requests"],
         batch_size=values["--batch-size"],
+        max_runtime_secs=values["--max-runtime-secs"],
         base_url=values["EMBED_BASE_URL"],
         model=values["EMBED_MODEL"],
         api_key=values["--secrets-dir"],
@@ -287,7 +331,7 @@ class RequestMeter:
     def wrap(self, create: Callable[..., Any]) -> Callable[..., Any]:
         def metered(*args: Any, **kwargs: Any) -> Any:
             if self.requests >= self.max_requests:
-                raise EmbedBudgetExhausted
+                raise EmbedBudgetExhausted(f"the request cap ({self.max_requests})")
             self.requests += 1
             try:
                 response = create(*args, **kwargs)
@@ -324,11 +368,9 @@ def embedding_identity(settings: Settings, role: str) -> dict[str, object]:
     )
     return {
         "role": role,
+        # The whole destination: the table refuses userinfo, a query
+        # string and a fragment, the parts ``sanitize_endpoint`` drops.
         "endpoint": sanitize_endpoint(settings.base_url),
-        # The sanitised endpoint drops a query string, which can select
-        # another deployment; the digest keeps the whole URL apart
-        # without holding it.
-        "base_url_sha256": hashlib.sha256(settings.base_url.encode("utf-8")).hexdigest(),
         "model": settings.model,
         "dimensions": EMBEDDING_DIM,
         # The SDK asks for base64 (float32) when no format is given.
@@ -617,10 +659,11 @@ def main_cli(argv: list[str], env: Mapping[str, str]) -> int:
         return EXIT_USAGE
     meter = RequestMeter(settings.max_requests)
     try:
-        report = run(settings, meter)
-    except EmbedBudgetExhausted:
+        with deadline(settings.max_runtime_secs):
+            report = run(settings, meter)
+    except EmbedBudgetExhausted as exc:
         print(
-            f"real-embedder baseline: INCONCLUSIVE: the request cap ({settings.max_requests})"
+            f"real-embedder baseline: INCONCLUSIVE: {exc.cap}"
             f" was reached before the build finished; no floor was checked"
             f" ({_spend(meter, started)})",
             file=sys.stderr,

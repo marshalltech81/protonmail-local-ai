@@ -47,7 +47,7 @@ help:
 	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository, then the image gates (needs trivy and the built images)"
 	@echo "  trivy-images Run the CI Trivy image gates of .github/workflows/docker.yml on the built indexer, mcp-server and mbsync images (needs trivy, make build)"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
-	@echo "  baseline-real-embedder  Opt-in retrieval floors on the synthetic corpus with the real EMBED_* model (sends synthetic text only; REAL_EMBED_ARGS=\"--repeats N --max-requests N --batch-size N\")"
+	@echo "  baseline-real-embedder  Opt-in retrieval floors on the synthetic corpus with the real EMBED_* model (sends synthetic text only; REAL_EMBED_ARGS=\"--repeats N --max-requests N --max-runtime-secs N --batch-size N\")"
 	@echo "  eval-answers Opt-in answer-quality run of the intelligence tools on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
 	@echo "  eval-answers-compare  Compare two answer-evaluation reports (BASELINE=... CANDIDATE=...)"
 	@echo "  clean        Remove all containers and volumes (destructive)"
@@ -393,9 +393,9 @@ baseline: sync-indexer sync-mcp
 # repeat and reports ranking flips, vector variation and spend. Only
 # the synthetic corpus and questions are sent. Vectors are cached in
 # REAL_EMBED_CACHE (git-ignored), so a rerun with nothing changed sends
-# no requests. REAL_EMBED_ARGS passes --repeats, --max-requests and
-# --batch-size; a run that reaches the request cap exits 3
-# (inconclusive), never a pass. It calls a paid provider, so it is
+# no requests. REAL_EMBED_ARGS passes --repeats, --max-requests,
+# --max-runtime-secs and --batch-size; a run that reaches the request or
+# runtime cap exits 3 (inconclusive), never a pass. It calls a paid provider, so it is
 # never part of `make test` or CI.
 REAL_EMBED_CACHE ?= $(CURDIR)/.real-embedder-cache
 REAL_EMBED_SECRETS ?= $(CURDIR)/.secrets

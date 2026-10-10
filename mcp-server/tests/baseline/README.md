@@ -114,6 +114,8 @@ gate, unchanged.
 
 ```bash
 set -a; . ./.env; set +a     # EMBED_BASE_URL, EMBED_MODEL (EMBED_MODE, if set, must be openai)
+# The build runs on the host: for a host-side server, override a
+# host.docker.internal URL, e.g. EMBED_BASE_URL=http://127.0.0.1:8001/v1
 make baseline-real-embedder  # key read from .secrets/embed_api_key.txt (mode 600)
 make baseline-real-embedder REAL_EMBED_ARGS="--repeats 5 --max-requests 600"
 ```
@@ -128,8 +130,7 @@ make baseline-real-embedder REAL_EMBED_ARGS="--repeats 5 --max-requests 600"
    `.real-embedder-cache/`, git-ignored, mode 700/600) under the text
    together with every text of the request it was sent in (the
    provider's vector can depend on its batch neighbours), the repeat
-   number, the endpoint (and a digest of the whole base URL, query
-   string included), model, batch size, dimensions, SDK version and
+   number, the endpoint, model, batch size, dimensions, SDK version and
    encoding. A rerun with nothing changed sends no requests; a corpus
    edit re-sends every request whose texts it changed, whole, as a
    fresh build would. Delete the cache to measure the variation afresh.
@@ -159,7 +160,15 @@ provider's Retry-After, else 2 and 4 seconds), and the report counts
 the retries. The request
 that would pass the cap is not sent: the build exits 3 and prints
 INCONCLUSIVE, and no floor is checked, so a capped run is never a pass.
-All arguments are checked against one table before anything is built.
+The whole run is also bounded by `--max-runtime-secs` (60 to 14,400,
+default 1,800): the HTTP timeouts bound each socket operation, not a
+whole request, so a provider that keeps a response trickling could
+otherwise hold a paid run open. Reaching it is inconclusive in the same
+way (exit 3). All arguments are checked against one table before
+anything is built; the table refuses an `EMBED_BASE_URL` with userinfo,
+a query string or a fragment (the embedder's error messages quote the
+URL), and one naming `host.docker.internal`, which only containers
+resolve.
 
 **Semantic questions** (`semantic` in `golden.json`) are paraphrases
 sharing few words with their evidence ("teeth cleaned" for the dental

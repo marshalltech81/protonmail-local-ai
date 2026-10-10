@@ -4,14 +4,20 @@ The provider is the loopback hash-embedding service (``embed_server``),
 so nothing leaves the machine and nothing is spent.
 """
 
+import contextlib
 import json
+import signal
+import socket
 import stat
+import threading
+import time
 from pathlib import Path
 
 import httpx2
 import pytest
 from openai import APIStatusError
 from src.database import EMBEDDING_DIM
+from src.embedder import OpenAIEmbedder
 
 from tests.baseline import embed_server
 from tests.baseline import real_embedder as re_mod
@@ -99,6 +105,13 @@ def _kind_cases(arg):
                 ("ftp://provider.example/v1", False),
                 ("not a url", False),
                 (f"https://user:{_URL_MARK}@provider.example/v1", False),
+                # Review round 3: a query string or fragment could carry a
+                # credential into an error message, and only containers
+                # resolve host.docker.internal.
+                (f"https://provider.example/v1?key={_URL_MARK}", False),
+                (f"https://provider.example/v1#{_URL_MARK}", False),
+                ("http://host.docker.internal:8001/v1", False),
+                ("http://127.0.0.1:8001/v1", True),
             ]
         case "new_dir":
             return [
@@ -187,6 +200,7 @@ def test_validate_applies_defaults_and_resolves_default_url(tmp_path):
     raw["EMBED_BASE_URL"] = "default"
     settings = validate(raw)
     assert (settings.repeats, settings.max_requests, settings.batch_size) == (2, 250, 64)
+    assert settings.max_runtime_secs == 1800
     assert settings.base_url == "https://api.openai.com/v1"
     assert settings.api_key == _KEY
     assert _KEY not in repr(settings)
@@ -208,6 +222,72 @@ def test_parse_reads_flags_positionals_and_env(tmp_path):
         {"EMBED_BASE_URL": "https://provider.example/v1", "EMBED_MODEL": "m"},
     )
     assert settings.repeats == 3 and settings.model == "m"
+
+
+def test_runtime_cap_bounds_the_run_and_reports_inconclusive(tmp_path, monkeypatch, capsys):
+    """Review round 3: the table's runtime cap reaches the deadline, and
+    reaching it is inconclusive, never a pass."""
+    seen = []
+
+    @contextlib.contextmanager
+    def deadline(seconds):
+        seen.append(seconds)
+        yield
+
+    def run(settings, meter):
+        raise EmbedBudgetExhausted("the runtime cap (90 s)")
+
+    monkeypatch.setattr(re_mod, "deadline", deadline)
+    monkeypatch.setattr(re_mod, "run", run)
+    raw = _valid_raw(tmp_path)
+    argv = [raw["out_dir"], raw["golden"], "--cache-dir", raw["--cache-dir"]]
+    argv += ["--secrets-dir", raw["--secrets-dir"], "--max-runtime-secs", "90"]
+    env = {"EMBED_BASE_URL": "http://127.0.0.1:9/v1", "EMBED_MODEL": "m"}
+    assert main_cli(argv, env) == EXIT_INCONCLUSIVE
+    assert seen == [90]
+    err = capsys.readouterr().err
+    assert "INCONCLUSIVE: the runtime cap (90 s) was reached" in err
+
+
+def test_deadline_interrupts_a_response_that_never_finishes():
+    """A provider that keeps a response alive by trickling bytes never
+    trips the per-operation HTTP timeout; the deadline still ends the
+    request, and the alarm is cleared afterwards."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    stop = threading.Event()
+    trickled = []
+
+    def serve():
+        conn, _ = listener.accept()
+        with conn:
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+            while not stop.is_set():
+                conn.sendall(b" ")
+                trickled.append(1)
+                time.sleep(0.1)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{listener.getsockname()[1]}/v1"
+    embedder = OpenAIEmbedder(url, "m", api_key="unauthenticated", request_timeout=5.0)
+    started = time.monotonic()
+    try:
+        with pytest.raises(EmbedBudgetExhausted, match="runtime cap"):
+            with re_mod.deadline(1):
+                embedder.embed_batch(["synthetic"])
+    finally:
+        stop.set()
+        embedder.client.close()
+        thread.join(timeout=5)
+        listener.close()
+    elapsed = time.monotonic() - started
+    # Bytes kept arriving past the 5 s read timeout's reach, yet the run
+    # ended at the deadline.
+    assert elapsed < 4 and len(trickled) >= 5
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
 
 def test_usage_error_exits_2_without_echoing_values(tmp_path, capsys):
@@ -328,18 +408,18 @@ def test_cache_key_covers_text_repeat_and_identity(tmp_path, change):
             cache.close()
 
 
-def test_identity_keeps_the_whole_base_url_as_a_digest(tmp_path):
-    """Review round 2: two base URLs that differ only in their query
-    string are different destinations and must not share cached
-    vectors; the identity holds a digest, not the URL."""
+@pytest.mark.parametrize(
+    "url",
+    [v for a in ARGUMENTS if a.kind == "url" for v, ok in _kind_cases(a) if ok and "://" in v],
+)
+def test_identity_endpoint_is_the_whole_accepted_url(tmp_path, url):
+    """The cache identity names the endpoint through ``sanitize_endpoint``;
+    every URL the table accepts survives it whole (review rounds 2-3),
+    so two destinations never share cached vectors."""
     raw = _valid_raw(tmp_path)
-    raw["EMBED_BASE_URL"] = f"https://gw.example/v1?deployment={_URL_MARK}"
-    one = re_mod.embedding_identity(validate(raw), "chunk")
-    raw["EMBED_BASE_URL"] = "https://gw.example/v1?deployment=other"
-    other = re_mod.embedding_identity(validate(raw), "chunk")
-    assert one["endpoint"] == other["endpoint"] == "https://gw.example/v1"
-    assert one["base_url_sha256"] != other["base_url_sha256"]
-    assert _URL_MARK not in json.dumps(one)
+    raw["EMBED_BASE_URL"] = url
+    settings = validate(raw)
+    assert re_mod.embedding_identity(settings, "chunk")["endpoint"] == url.rstrip("/")
 
 
 def test_identity_names_every_setting_that_decides_a_vector(tmp_path):
@@ -349,7 +429,6 @@ def test_identity_names_every_setting_that_decides_a_vector(tmp_path):
     expected = {
         "role",
         "endpoint",
-        "base_url_sha256",
         "model",
         "dimensions",
         "encoding_format",
@@ -467,7 +546,7 @@ def test_one_at_a_time_caches_each_vector_before_the_next_request(tmp_path):
     def send(texts, *, on_batch_complete=None):
         sent.append(list(texts))
         if texts == ["b"]:
-            raise EmbedBudgetExhausted
+            raise EmbedBudgetExhausted("the request cap (1)")
         return [[1.0, 0.0] for _ in texts]
 
     embedder = CachedEmbedder(send, cache, repeat=1, one_at_a_time=True)
