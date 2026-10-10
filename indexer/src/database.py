@@ -20,6 +20,7 @@ from pathlib import Path
 
 import sqlite_vec
 
+from . import vector_sums
 from .chunker import l2_normalize, truncate_to_tokens
 from .entities import (
     PERSON_PREFIX,
@@ -148,7 +149,12 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # v9 (#1236): ``attachments.extraction_deferred_at`` marks an occurrence
 # whose extraction the per-message budget deferred to a later pass, NULL
 # otherwise; no reparse (``migrations/0009_attachment_extraction_deferral.sql``).
-SCHEMA_VERSION = 9
+# v10 (#1356): ``thread_vector_sums`` keeps each thread's exact running
+# sum of its chunk vectors and their count (``vector_sums``), so the
+# thread vector is derived without reading every chunk vector; no
+# reparse, the rows are filled inline and by a backfill sweep
+# (``migrations/0010_thread_vector_sums.sql``).
+SCHEMA_VERSION = 10
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -195,6 +201,17 @@ SWEEP_FETCH_ROWS = 1000
 # rows, just no new entities, so one crafted message cannot drive an
 # unbounded number of entity writes.
 MAX_ENTITY_PARTICIPANTS_PER_MESSAGE = 200
+
+
+class _SumDeltas(dict[str, tuple[list[int], int]]):
+    """Per thread, the change one write makes to its chunk-vector sum and
+    count (#1356): ``add`` each stored vector the write inserts (sign
+    +1) or deletes (sign -1), then ``Database._apply_thread_sum_deltas``."""
+
+    def add(self, thread_id: str, blob: bytes, sign: int) -> None:
+        units = vector_sums.vector_units(blob)
+        delta, count = self.get(thread_id, ([0] * len(units), 0))
+        self[thread_id] = (vector_sums.add_units(delta, units, sign), count + sign)
 
 
 class CompletenessClearing:
@@ -636,6 +653,19 @@ class Database:
             CREATE VIRTUAL TABLE threads_vec USING vec0(
                 thread_id TEXT PRIMARY KEY,
                 embedding FLOAT[{EMBEDDING_DIM}]
+            );
+
+            -- The exact running sum of the thread's chunk vectors and
+            -- their count (#1356, ``vector_sums``): ``sum`` is in units of
+            -- 2**-149 in the ``encoding_version`` encoding. Missing for a
+            -- thread not yet filled (the first write that touches it, or
+            -- the backfill sweep, fills it).
+            CREATE TABLE thread_vector_sums (
+                thread_id        TEXT PRIMARY KEY,
+                count            INTEGER NOT NULL CHECK (count >= 0),
+                encoding_version INTEGER NOT NULL,
+                sum              BLOB NOT NULL,
+                FOREIGN KEY (thread_id) REFERENCES threads(thread_id) ON DELETE CASCADE
             );
 
             -- Per-message chunks (precision retrieval)
@@ -1208,10 +1238,9 @@ class Database:
                 f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
         # Storage invariant: every vector in ``threads_vec`` is unit-norm
-        # so cosine similarity equals dot product downstream. Callers
-        # like Phase 1 seed (``mean_vector(existing_chunks)``) pass
-        # non-unit means; normalize at the boundary so no caller has to
-        # remember. The placeholder all-zero seed survives — see
+        # so cosine similarity equals dot product downstream. A caller
+        # may pass a non-unit vector; normalize at the boundary so no
+        # caller has to remember. The placeholder all-zero seed survives — see
         # ``l2_normalize``.
         embedding = l2_normalize(embedding)
 
@@ -1357,6 +1386,15 @@ class Database:
                     merged_display_subject,
                 ),
             )
+
+            if not existing:
+                # A new thread has no chunks yet: its chunk-vector sum
+                # starts empty, so no write ever fills it (#1356).
+                cur.execute(
+                    "INSERT INTO thread_vector_sums (thread_id, count, encoding_version, sum) "
+                    "VALUES (?, 0, ?, ?) ON CONFLICT(thread_id) DO NOTHING",
+                    (thread.thread_id, vector_sums.ENCODING_VERSION, vector_sums.encode([])),
+                )
 
             # Update message→thread mapping for all messages
             for msg in thread.messages:
@@ -1527,7 +1565,10 @@ class Database:
         All inserts / deletes across ``message_chunks``,
         ``message_chunks_fts`` and ``message_chunks_vec`` happen inside
         one transaction so the three indexes never disagree about which
-        chunks exist for a (message, slice) pair.
+        chunks exist for a (message, slice) pair. The chunk-vector sums
+        of the threads whose chunks change (``thread_id`` for an insert,
+        a deleted row's own thread) are updated in the same transaction
+        (#1356); a call that inserts and deletes nothing reads no vector.
         """
         # A body slice holds message-text kinds, an attachment slice
         # only ``attachment`` chunks (#646).
@@ -1542,13 +1583,13 @@ class Database:
 
             if attachment_id is None:
                 existing_rows = cur.execute(
-                    "SELECT chunk_id, fts_rowid FROM message_chunks "
+                    "SELECT chunk_id, fts_rowid, thread_id FROM message_chunks "
                     "WHERE claimant_id = ? AND attachment_id IS NULL",
                     (claimant_id,),
                 ).fetchall()
             else:
                 existing_rows = cur.execute(
-                    "SELECT chunk_id, fts_rowid FROM message_chunks "
+                    "SELECT chunk_id, fts_rowid, thread_id FROM message_chunks "
                     "WHERE claimant_id = ? AND attachment_id = ?",
                     (claimant_id, attachment_id),
                 ).fetchall()
@@ -1561,8 +1602,15 @@ class Database:
 
             to_delete = existing_ids - incoming_ids if delete_missing else set()
             to_insert = [c for c in chunks if c.chunk_id not in existing_ids]
+            row_threads = {row["chunk_id"]: row["thread_id"] for row in existing_rows}
+            deltas = _SumDeltas()
 
             for chunk_id in to_delete:
+                old_vec = cur.execute(
+                    "SELECT embedding FROM message_chunks_vec WHERE chunk_id = ?", (chunk_id,)
+                ).fetchone()
+                if old_vec is not None:
+                    deltas.add(row_threads[chunk_id], old_vec[0], -1)
                 fts_rowid = existing_fts_rowids.get(chunk_id)
                 if fts_rowid is not None:
                     cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (fts_rowid,))
@@ -1597,10 +1645,12 @@ class Database:
                     (chunk.text,),
                 )
                 fts_rowid = cur.lastrowid
+                stored = sqlite_vec.serialize_float32(normalized)
                 cur.execute(
                     "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
-                    (chunk.chunk_id, sqlite_vec.serialize_float32(normalized)),
+                    (chunk.chunk_id, stored),
                 )
+                deltas.add(thread_id, stored, 1)
                 cur.execute(
                     """
                     INSERT INTO message_chunks
@@ -1625,6 +1675,7 @@ class Database:
                     ),
                 )
 
+            self._apply_thread_sum_deltas(cur, deltas)
             self._commit_if_started(started)
         except Exception:
             self._rollback_if_started(started)
@@ -2174,118 +2225,184 @@ class Database:
     def replace_thread_vector(self, thread_id: str, embedding: list[float]) -> None:
         """Replace the row in ``threads_vec`` for ``thread_id``.
 
-        Used by the reconciler reap path to rewrite a thread vector as the
-        mean of newly-emitted chunk vectors, without going through the
+        Used by Phase 2c to write the thread's chunk mean
+        (``thread_chunk_mean``) or its subject fallback, without going through the
         full ``upsert_thread`` path (which requires a materialized
         ``Thread`` and would also rewrite the FTS row, body_text, and
         every metadata field unnecessarily). Validates the embedding
         dimension so a misconfigured embed model fails loud here rather
         than as a cryptic vec0 insert error.
         """
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            self._write_thread_vector(cur, thread_id, embedding)
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+    @staticmethod
+    def _write_thread_vector(cur: sqlite3.Cursor, thread_id: str, embedding: list[float]) -> None:
+        """Replace ``thread_id``'s ``threads_vec`` row on ``cur``, in the
+        caller's transaction."""
         if len(embedding) != EMBEDDING_DIM:
             raise ValueError(
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
                 f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
         # Storage invariant — see the matching note in ``upsert_thread``.
-        # Phase 2c writes ``mean_vector(chunk_embs)`` here, which is
-        # generally non-unit; normalize at the boundary.
+        # A caller may pass a non-unit vector; normalize at the boundary
+        # (a no-op on ``vector_sums.thread_vector``, already normalized).
         embedding = l2_normalize(embedding)
+        cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
+        cur.execute(
+            "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
+            (thread_id, sqlite_vec.serialize_float32(embedding)),
+        )
+
+    # -------------------------------------------------------------------------
+    # Thread vector sums (#1356): the exact running sum of each thread's
+    # chunk vectors and their count, so the thread vector is derived
+    # without reading every chunk vector of the thread (``vector_sums``).
+    #
+    # The sum covers the ``message_chunks`` rows whose ``thread_id`` is
+    # the thread and that have a ``message_chunks_vec`` row, the set the
+    # thread-wide read joined. Every write that inserts or deletes chunk
+    # vectors applies ``S += new - old`` and the count change in its own
+    # transaction (``replace_message_chunks``, ``_delete_chunks_in_batches``).
+    # Moving a message to another thread in ``message_thread_map`` does
+    # not move its chunk rows, so it changes no sum. A thread created by
+    # ``upsert_thread`` starts with an empty sum; a thread from before v10
+    # is filled the first time a write touches it, in that write's
+    # transaction (one thread-wide read in its lifetime), or by the
+    # backfill sweep.
+    # -------------------------------------------------------------------------
+
+    def _compute_thread_sums(self, thread_id: str) -> tuple[list[int], int]:
+        """The exact sum and count of ``thread_id``'s chunk vectors, read
+        from every one of them: the thread-wide read the stored sums
+        replace. Only an inline fill, the backfill and the check run it.
+        Rows are streamed, so memory holds one vector at a time."""
+        total = [0] * EMBEDDING_DIM
+        count = 0
+        for row in self._conn.execute(
+            "SELECT v.embedding FROM message_chunks c "
+            "JOIN message_chunks_vec v ON v.chunk_id = c.chunk_id "
+            "WHERE c.thread_id = ?",
+            (thread_id,),
+        ):
+            total = vector_sums.add_units(total, vector_sums.vector_units(row[0]))
+            count += 1
+        return total, count
+
+    def _read_thread_sums(
+        self, cur: sqlite3.Cursor, thread_id: str
+    ) -> tuple[list[int], int] | None:
+        """The stored sum and count of ``thread_id``, or ``None`` when it
+        has no row, or a row this code cannot read (then it is refilled
+        from the chunk vectors)."""
+        row = cur.execute(
+            "SELECT count, encoding_version, sum FROM thread_vector_sums WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["encoding_version"] == vector_sums.ENCODING_VERSION:
+            try:
+                return vector_sums.decode(row["sum"], EMBEDDING_DIM), row["count"]
+            except ValueError:
+                pass
+        log.warning("thread vector sums: an unreadable row is recomputed")
+        return None
+
+    @staticmethod
+    def _write_thread_sums(
+        cur: sqlite3.Cursor, thread_id: str, total: list[int], count: int
+    ) -> None:
+        cur.execute(
+            "INSERT INTO thread_vector_sums (thread_id, count, encoding_version, sum) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET "
+            "count = excluded.count, encoding_version = excluded.encoding_version, "
+            "sum = excluded.sum",
+            (thread_id, count, vector_sums.ENCODING_VERSION, vector_sums.encode(total)),
+        )
+
+    def _thread_sums(self, cur: sqlite3.Cursor, thread_id: str) -> tuple[list[int], int]:
+        """The sum and count of ``thread_id``, filled inline when it has
+        no row. Runs in the caller's transaction."""
+        state = self._read_thread_sums(cur, thread_id)
+        if state is None:
+            state = self._compute_thread_sums(thread_id)
+            self._write_thread_sums(cur, thread_id, *state)
+        return state
+
+    def _apply_thread_sum_deltas(self, cur: sqlite3.Cursor, deltas: _SumDeltas) -> None:
+        """Apply each thread's ``S += new - old`` and count change, after
+        the chunk rows were written in the same transaction. A thread
+        without a row is filled from its chunk vectors as they are now,
+        which already include the change. A count that would go negative
+        or an empty sum that is not zero means a write was missed: the
+        thread is recomputed and a warning logged."""
+        for thread_id, (delta, count_delta) in deltas.items():
+            state = self._read_thread_sums(cur, thread_id)
+            if state is None:
+                total, count = self._compute_thread_sums(thread_id)
+            else:
+                total = vector_sums.add_units(state[0], delta)
+                count = state[1] + count_delta
+                if count < 0 or (count == 0 and any(total)):
+                    log.warning(
+                        "thread vector sums: a running sum disagreed with its "
+                        "chunks and is recomputed"
+                    )
+                    total, count = self._compute_thread_sums(thread_id)
+            self._write_thread_sums(cur, thread_id, total, count)
+
+    @_synchronized
+    def thread_chunk_mean(self, thread_id: str) -> list[float] | None:
+        """The thread vector derived from ``thread_id``'s chunk vectors
+        (``vector_sums.thread_vector``), or ``None`` when it has none (the
+        caller keeps its chunkless fallback). Fills the thread's sums when
+        it has no row, in the caller's transaction when there is one."""
         cur = self._conn.cursor()
         started = False
         try:
             started = self._begin_if_needed(cur)
-            cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
-            cur.execute(
-                "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
-                (thread_id, sqlite_vec.serialize_float32(embedding)),
-            )
+            total, count = self._thread_sums(cur, thread_id)
             self._commit_if_started(started)
         except Exception:
             self._rollback_if_started(started)
             raise
+        return vector_sums.thread_vector(total, count) if count else None
 
     @_synchronized
-    def get_chunk_embeddings_for_messages(self, claimant_ids: list[str]) -> list[list[float]]:
-        """Return every chunk embedding for the given ``claimant_ids``.
-
-        Used by the reconciler's reap path to compute a survivor-only
-        thread vector after a partial reap: the caller passes the
-        surviving claimant IDs, gets back their chunk embeddings, and
-        means them with ``chunker.mean_vector``. Skipping the reaped
-        messages here (rather than after a thread-wide fetch) keeps the
-        reconciler's pre-transaction read cheap on threads with a long
-        tail of historical messages.
-        """
-        if not claimant_ids:
-            return []
-        placeholders = ",".join(["?"] * len(claimant_ids))
-        # Composed SQL is a fixed SELECT; user values are bound through
-        # ``?`` placeholders. nosec B608.
-        # ``ORDER BY c.chunk_id`` pins read order so ``mean_vector`` sums
-        # in a deterministic sequence. Float64 addition is not associative,
-        # so without this an idempotent replay can rewrite ``threads_vec``
-        # with a marginally different blob, churning WAL pages.
-        sql = (
-            "SELECT v.embedding AS embedding "
-            "FROM message_chunks c "
-            "JOIN message_chunks_vec v ON v.chunk_id = c.chunk_id "
-            f"WHERE c.claimant_id IN ({placeholders}) "  # nosec B608
-            "ORDER BY c.chunk_id"
-        )
-        rows = self._conn.execute(sql, list(claimant_ids)).fetchall()
-        result: list[list[float]] = []
-        for row in rows:
-            blob = row["embedding"]
-            count = len(blob) // 4
-            result.append(list(struct.unpack(f"{count}f", blob)))
-        return result
-
-    @_synchronized
-    def get_phase1_seed_state(self, thread_id: str) -> tuple[list[list[float]], list[float] | None]:
+    def get_phase1_seed_state(
+        self, thread_id: str
+    ) -> tuple[list[float] | None, list[float] | None]:
         """Combined fetch for the batched indexer's Phase 1 seed selection.
 
-        Returns ``(chunk_embeddings, prior_thread_vector)`` so the caller
-        applies the three-case priority chain:
-        non-empty chunks → ``mean(chunks)``; empty chunks + non-zero
-        prior → prior; else → zero placeholder.
+        Returns ``(chunk_mean, prior_thread_vector)`` so the caller
+        applies the three-case priority chain: a chunk mean → that mean;
+        no chunk vectors + non-zero prior → prior; else → zero
+        placeholder. Both are ``None`` for a thread that does not exist
+        yet (the new-thread fast path, one primary-key read).
 
-        Folds three reads into one method body (PK existence check + chunk
-        embeddings JOIN + ``threads_vec`` lookup) under a single lock
-        acquisition. The previous shape ran the chunk-embeddings fetch and the
-        ``threads_vec`` lookup as separate calls after the existence check, each
-        re-entering the ``_synchronized`` RLock and adding Python frames
-        per Phase 1 message — measurable on a 50-message batch. The
-        ``LEFT JOIN`` from ``threads`` collapses the PK check and the
-        chunk fetch into a single statement: zero rows means no thread
-        (new-thread fast path); one row with NULL ``chunk_emb`` means
-        thread exists but is chunkless; N rows means N chunk vectors,
-        ordered by ``chunk_id`` so the downstream mean is deterministic.
+        The chunk mean is derived from the thread's stored sums
+        (``thread_chunk_mean``), filled here in its own transaction when
+        the thread has no row, so no chunk vector is read once it has
+        one. The prior vector is read only for a thread without chunk
+        vectors.
         """
-        rows = self._conn.execute(
-            """
-            SELECT v.embedding AS chunk_emb
-            FROM threads t
-            LEFT JOIN message_chunks c ON c.thread_id = t.thread_id
-            LEFT JOIN message_chunks_vec v ON v.chunk_id = c.chunk_id
-            WHERE t.thread_id = ?
-            ORDER BY c.chunk_id
-            """,
-            (thread_id,),
-        ).fetchall()
-        if not rows:
-            return [], None
-        chunk_embeddings: list[list[float]] = []
-        for row in rows:
-            blob = row["chunk_emb"]
-            if blob is None:
-                # Thread exists but has no chunks — the LEFT JOIN emits a
-                # single NULL-bearing row in that case. Don't mistake it
-                # for an empty embedding.
-                continue
-            count = len(blob) // 4
-            chunk_embeddings.append(list(struct.unpack(f"{count}f", blob)))
-
+        if (
+            self._conn.execute("SELECT 1 FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+            is None
+        ):
+            return None, None
+        chunk_mean = self.thread_chunk_mean(thread_id)
+        if chunk_mean is not None:
+            return chunk_mean, None
         vec_row = self._conn.execute(
             "SELECT embedding FROM threads_vec WHERE thread_id = ?",
             (thread_id,),
@@ -2295,8 +2412,158 @@ class Database:
             blob = vec_row["embedding"]
             count = len(blob) // 4
             prior_vec = list(struct.unpack(f"{count}f", blob))
+        return None, prior_vec
 
-        return chunk_embeddings, prior_vec
+    @_synchronized
+    def thread_has_chunks_outside(self, thread_id: str, claimant_ids: list[str]) -> bool:
+        """Whether ``thread_id`` has a chunk row of a message not in
+        ``claimant_ids``: whether its chunk sum stays non-empty once
+        those messages are removed. The reaper asks it before a partial
+        reap, to choose between the chunk mean and the subject fallback.
+        Reads chunk IDs, never vectors."""
+        row = self._conn.execute(
+            "SELECT 1 FROM message_chunks WHERE thread_id = ? "
+            "AND claimant_id NOT IN (SELECT value FROM json_each(?)) LIMIT 1",
+            (thread_id, json.dumps(claimant_ids)),
+        ).fetchone()
+        return row is not None
+
+    def _fill_thread_sums_if_missing(self, thread_id: str) -> int | None:
+        """Fill one thread's sums in its own transaction when it still
+        has no row and still exists. Returns the chunk vectors read, or
+        ``None`` when nothing was filled."""
+        with self._lock:
+            cur = self._conn.cursor()
+            started = False
+            try:
+                started = self._begin_if_needed(cur)
+                if (
+                    cur.execute(
+                        "SELECT 1 FROM threads t WHERE t.thread_id = ? AND NOT EXISTS "
+                        "(SELECT 1 FROM thread_vector_sums s WHERE s.thread_id = t.thread_id)",
+                        (thread_id,),
+                    ).fetchone()
+                    is None
+                ):
+                    self._commit_if_started(started)
+                    return None
+                total, count = self._compute_thread_sums(thread_id)
+                self._write_thread_sums(cur, thread_id, total, count)
+                self._commit_if_started(started)
+            except Exception:
+                self._rollback_if_started(started)
+                raise
+        return count
+
+    def fill_missing_thread_vector_sums(
+        self, *, max_threads: int, max_rows: int
+    ) -> tuple[int, int, int]:
+        """One bounded batch of the backfill sweep: fill the sums of up to
+        ``max_threads`` threads that have no row, stopping once
+        ``max_rows`` chunk vectors were read (a thread is always filled
+        whole, so one larger thread can exceed it). Progress is the rows
+        themselves, so an interrupted sweep resumes where it stopped.
+        Each thread is its own transaction; the lock is released between
+        them. Returns ``(filled, rows_read, remaining)``."""
+        with self._lock:
+            thread_ids = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT t.thread_id FROM threads t WHERE NOT EXISTS "
+                    "(SELECT 1 FROM thread_vector_sums s WHERE s.thread_id = t.thread_id) "
+                    "LIMIT ?",
+                    (max_threads,),
+                )
+            ]
+        filled = rows_read = 0
+        for thread_id in thread_ids:
+            if rows_read >= max_rows:
+                break
+            read = self._fill_thread_sums_if_missing(thread_id)
+            if read is not None:
+                filled += 1
+                rows_read += read
+        with self._lock:
+            remaining = self._conn.execute(
+                "SELECT COUNT(*) FROM threads t WHERE NOT EXISTS "
+                "(SELECT 1 FROM thread_vector_sums s WHERE s.thread_id = t.thread_id)"
+            ).fetchone()[0]
+        return filled, rows_read, remaining
+
+    def reconcile_thread_vector_sums(self, thread_id: str) -> tuple[bool, int]:
+        """Recompute ``thread_id``'s sum and count exactly from its chunk
+        vectors and, when the stored row differs (or is missing or
+        unreadable), repair it and rewrite the thread vector from the
+        recomputed sum, all in one transaction. A thread without chunk
+        vectors keeps its stored vector (its chunkless fallback). Returns
+        ``(repaired, rows_read)``; a thread that no longer exists is
+        ``(False, 0)``."""
+        with self._lock:
+            cur = self._conn.cursor()
+            started = False
+            try:
+                started = self._begin_if_needed(cur)
+                if (
+                    cur.execute(
+                        "SELECT 1 FROM threads WHERE thread_id = ?", (thread_id,)
+                    ).fetchone()
+                    is None
+                ):
+                    self._commit_if_started(started)
+                    return False, 0
+                stored = cur.execute(
+                    "SELECT count, encoding_version, sum FROM thread_vector_sums "
+                    "WHERE thread_id = ?",
+                    (thread_id,),
+                ).fetchone()
+                total, count = self._compute_thread_sums(thread_id)
+                expected = (count, vector_sums.ENCODING_VERSION, vector_sums.encode(total))
+                if stored is not None and tuple(stored) == expected:
+                    self._commit_if_started(started)
+                    return False, count
+                self._write_thread_sums(cur, thread_id, total, count)
+                if count:
+                    self._write_thread_vector(
+                        cur, thread_id, vector_sums.thread_vector(total, count)
+                    )
+                self._commit_if_started(started)
+            except Exception:
+                self._rollback_if_started(started)
+                raise
+        return True, count
+
+    def reconcile_thread_vector_sums_batch(
+        self, *, after: str | None, max_threads: int, max_rows: int
+    ) -> tuple[int, int, int, str | None]:
+        """Check the next filled threads in ``thread_id`` order after
+        ``after`` (from the start when ``None``) with
+        ``reconcile_thread_vector_sums``, up to ``max_threads`` threads,
+        stopping once ``max_rows`` chunk vectors were read. Returns
+        ``(checked, repaired, rows_read, cursor)``: pass ``cursor`` as
+        the next ``after``; it is ``None`` once the last thread was
+        checked, so the next batch starts over."""
+        with self._lock:
+            thread_ids = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT thread_id FROM thread_vector_sums WHERE thread_id > ? "
+                    "ORDER BY thread_id LIMIT ?",
+                    (after or "", max_threads),
+                )
+            ]
+        checked = repaired = rows_read = 0
+        cursor: str | None = None
+        for thread_id in thread_ids:
+            if rows_read >= max_rows:
+                break
+            fixed, read = self.reconcile_thread_vector_sums(thread_id)
+            checked += 1
+            repaired += int(fixed)
+            rows_read += read
+            cursor = thread_id
+        if cursor is not None and cursor == thread_ids[-1] and len(thread_ids) < max_threads:
+            cursor = None
+        return checked, repaired, rows_read, cursor
 
     @_synchronized
     def find_zero_vector_chunkless_thread_filepaths(self) -> list[str]:
@@ -2420,11 +2687,10 @@ class Database:
         """Return True iff at least one chunk row exists for ``thread_id``.
 
         Cheap existence check for the subject-fallback gate in the
-        batched indexer's Phase 2a. ``get_thread_chunk_embeddings`` is
-        the wrong tool for that check — it loads, blob-unpacks, and
-        copies every chunk vector for the thread just so the caller
-        can take ``bool(list)``. On chatty threads with hundreds of
-        chunks that's wasted I/O on a hot per-message path.
+        batched indexer's Phase 2a. Reading the thread's chunk vectors
+        (or filling its chunk-vector sum) is the wrong tool for that
+        check: on chatty threads with hundreds of chunks that's wasted
+        I/O on a hot per-message path.
         """
         row = self._conn.execute(
             "SELECT 1 FROM message_chunks WHERE thread_id = ? LIMIT 1",
@@ -2432,48 +2698,20 @@ class Database:
         ).fetchone()
         return row is not None
 
-    @_synchronized
-    def get_thread_chunk_embeddings(self, thread_id: str) -> list[list[float]]:
-        """Return every chunk embedding stored for ``thread_id``.
-
-        The indexer averages these to produce the thread-level vector,
-        so coarse thread retrieval and precise chunk retrieval both
-        derive from the same per-chunk source data. Returns an empty
-        list when the thread has no chunks yet (a thread whose only
-        message had an empty body, or where every embed previously
-        failed).
-        """
-        # ``ORDER BY c.chunk_id`` pins read order — see the matching note
-        # in ``get_chunk_embeddings_for_messages`` for why a deterministic
-        # mean read matters.
-        rows = self._conn.execute(
-            """
-            SELECT v.embedding AS embedding
-            FROM message_chunks c
-            JOIN message_chunks_vec v ON v.chunk_id = c.chunk_id
-            WHERE c.thread_id = ?
-            ORDER BY c.chunk_id
-            """,
-            (thread_id,),
-        ).fetchall()
-        # sqlite-vec stores embeddings as packed float32. Each row's
-        # ``embedding`` blob is ``EMBEDDING_DIM * 4`` bytes; unpack to a
-        # plain Python list so the caller can mean-pool without depending
-        # on numpy.
-        result: list[list[float]] = []
-        for row in rows:
-            blob = row["embedding"]
-            count = len(blob) // 4
-            result.append(list(struct.unpack(f"{count}f", blob)))
-        return result
-
     def _delete_chunks_in_batches(
         self,
         cur: sqlite3.Cursor,
         rows: list[sqlite3.Row],
+        *,
+        track_sums: bool = True,
     ) -> None:
         """Bulk-delete the ``message_chunks_fts`` and ``message_chunks_vec``
-        rows for a list of ``(chunk_id, fts_rowid)`` results.
+        rows for a list of ``(chunk_id, fts_rowid, thread_id)`` results.
+
+        With ``track_sums`` the deleted vectors are read, one batch at a
+        time, and subtracted from their threads' chunk-vector sums in the
+        caller's transaction (#1356). A caller deleting the whole thread,
+        whose sums row goes with it, passes ``False``.
 
         Issuing one ``DELETE`` per chunk is correct but slow on threads
         with thousands of chunks (FTS5 contentless tables and vec0 each
@@ -2486,10 +2724,13 @@ class Database:
 
         chunk_ids: list[str] = []
         fts_rowids: list[int] = []
+        row_threads: dict[str, str] = {}
         for row in rows:
             chunk_ids.append(row["chunk_id"])
+            row_threads[row["chunk_id"]] = row["thread_id"]
             if row["fts_rowid"] is not None:
                 fts_rowids.append(row["fts_rowid"])
+        deltas = _SumDeltas()
 
         # SQLite default ``SQLITE_LIMIT_VARIABLE_NUMBER`` is 32766 in
         # 3.32+, well above 500. Smaller batches keep memory/log noise
@@ -2506,10 +2747,19 @@ class Database:
         for start in range(0, len(chunk_ids), batch_size):
             str_batch = chunk_ids[start : start + batch_size]
             placeholders = ",".join(["?"] * len(str_batch))
+            if track_sums:
+                for vec_row in cur.execute(
+                    f"SELECT chunk_id, embedding FROM message_chunks_vec "  # nosec B608
+                    f"WHERE chunk_id IN ({placeholders})",
+                    str_batch,
+                ).fetchall():
+                    deltas.add(row_threads[vec_row[0]], vec_row[1], -1)
             cur.execute(
                 f"DELETE FROM message_chunks_vec WHERE chunk_id IN ({placeholders})",  # nosec B608
                 str_batch,
             )
+        if deltas:
+            self._apply_thread_sum_deltas(cur, deltas)
 
     def _delete_chunks_for_message(self, cur: sqlite3.Cursor, claimant_id: str) -> None:
         """Drop every chunk row + FTS + vec entry for ``claimant_id``.
@@ -2518,7 +2768,7 @@ class Database:
         ``_remove_message_row`` and the reconciler's reap path.
         """
         rows = cur.execute(
-            "SELECT chunk_id, fts_rowid FROM message_chunks WHERE claimant_id = ?",
+            "SELECT chunk_id, fts_rowid, thread_id FROM message_chunks WHERE claimant_id = ?",
             (claimant_id,),
         ).fetchall()
         self._delete_chunks_in_batches(cur, rows)
@@ -2533,10 +2783,11 @@ class Database:
         semantics of ``delete_thread_completely``.
         """
         rows = cur.execute(
-            "SELECT chunk_id, fts_rowid FROM message_chunks WHERE thread_id = ?",
+            "SELECT chunk_id, fts_rowid, thread_id FROM message_chunks WHERE thread_id = ?",
             (thread_id,),
         ).fetchall()
-        self._delete_chunks_in_batches(cur, rows)
+        # The thread's sums row goes with it.
+        self._delete_chunks_in_batches(cur, rows, track_sums=False)
         cur.execute("DELETE FROM message_chunks WHERE thread_id = ?", (thread_id,))
 
     def _replace_fts_row(
@@ -3722,6 +3973,7 @@ class Database:
                 cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (row["fts_rowid"],))
                 self._mark_fts_scrub("threads_fts")
             cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
+            cur.execute("DELETE FROM thread_vector_sums WHERE thread_id = ?", (thread_id,))
             self._delete_chunks_for_thread(cur, thread_id)
             # Walk every message in the thread to drop its attachments
             # rows + FTS shadows. ``claimant_id``-keyed deletes from
@@ -3793,7 +4045,7 @@ class Database:
     def reap_thread_messages(
         self,
         thread,
-        embedding: list[float],
+        embedding: list[float] | None,
         reaped_claimant_ids: list[str],
         *,
         grace_cutoff: str | None = None,
@@ -3807,11 +4059,18 @@ class Database:
         ``message_thread_map`` and ``pending_deletions`` still hold rows
         for the reaped messages.
 
+        ``embedding`` is the thread's subject fallback, or ``None`` for
+        its chunk mean: the survivors' chunk-vector sum, once the reaped
+        messages' chunks are subtracted in this transaction (#1356).
+
         Returns the filepaths that were removed from the index (the files
         themselves stay on disk), or ``None``,
         changing nothing, when a reaped message is no longer tombstoned
         (the watcher restored it after the reaper read its tombstones) or,
-        with ``grace_cutoff``, its tombstone is newer than that.
+        with ``grace_cutoff``, its tombstone is newer than that, or when
+        ``embedding`` is ``None`` and no chunk vector survives (the thread
+        changed since the caller checked; the next pass embeds the
+        fallback).
 
         ``copy_paths`` are other paths holding the reaped messages' bytes;
         they are unmarked in the same transaction (see ``_unmark_paths``).
@@ -3834,6 +4093,14 @@ class Database:
                 fp = self._remove_message_row(cur, cid)
                 if fp is not None:
                     removed_filepaths.append(fp)
+            if embedding is None:
+                total, count = self._thread_sums(cur, thread.thread_id)
+                if not count:
+                    self._conn.rollback()
+                    return None
+                self._write_thread_vector(
+                    cur, thread.thread_id, vector_sums.thread_vector(total, count)
+                )
             self._prune_orphan_entities(cur, mentions)
             self._conn.commit()
         except Exception:
@@ -3841,22 +4108,22 @@ class Database:
             raise
         return removed_filepaths
 
-    def _rewrite_thread_row(self, cur: sqlite3.Cursor, thread, embedding: list[float]) -> None:
+    def _rewrite_thread_row(
+        self, cur: sqlite3.Cursor, thread, embedding: list[float] | None
+    ) -> None:
         """Replace a thread row and its FTS/vec entries using ``cur``.
 
         Used by ``reap_thread_messages`` so the rewrite participates in
         its larger transaction. The caller owns ``BEGIN`` / ``COMMIT`` /
-        ``ROLLBACK``.
+        ``ROLLBACK``. With ``embedding`` ``None`` the vec entry is left
+        for the caller, which writes the chunk mean once the reaped
+        chunks are gone.
         """
-        if len(embedding) != EMBEDDING_DIM:
+        if embedding is not None and len(embedding) != EMBEDDING_DIM:
             raise ValueError(
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
                 f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
-        # Storage invariant — see ``upsert_thread``. The reconciler reap
-        # path passes ``mean_vector(survivor_chunks)``, which is
-        # generally non-unit; normalize before the vec0 insert.
-        embedding = l2_normalize(embedding)
 
         participants_json = json.dumps(_dedupe_by_canonical(thread.participants))
         senders_json = json.dumps(
@@ -3931,11 +4198,8 @@ class Database:
         )
         self._replace_fts_row(cur, thread.thread_id, fts_subject, participants_json, body)
 
-        cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.thread_id,))
-        cur.execute(
-            "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
-            (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
-        )
+        if embedding is not None:
+            self._write_thread_vector(cur, thread.thread_id, embedding)
 
     @staticmethod
     def _participant_mentions(

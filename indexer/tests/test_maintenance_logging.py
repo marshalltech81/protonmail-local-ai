@@ -921,3 +921,123 @@ class TestOnMovedFailureLogsTypeOnly:
             (logging.ERROR, "update_filepath failed on rename: OperationalError")
         ]
         assert MARKER not in caplog.text
+
+
+class TestThreadVectorSums:
+    """#1356: the backfill's per-batch INFO counts and completion line,
+    the check's per-pass line and repair WARNING, and both steps' failure
+    and recovery lines."""
+
+    @staticmethod
+    def _legacy_db(tmp_path, n: int) -> Database:
+        from src.chunker import MessageChunk
+
+        from tests.conftest import make_message, make_thread
+
+        db = Database(tmp_path / "sums.db")
+        for t in range(n):
+            msg = make_message(message_id=f"m{t}@x", subject=MARKER, filepath=f"/m/{t}")
+            db.upsert_thread(make_thread(messages=[msg], thread_id=f"t{t}"), [0.0] * 4096)
+            chunk = MessageChunk(f"c{t}".ljust(64, "0"), 0, MARKER, 0, len(MARKER), 5)
+            vec = [0.0] * 4096
+            vec[t] = 1.0
+            db.replace_message_chunks(
+                claimant_id=f"m{t}@x",
+                thread_id=f"t{t}",
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: vec},
+            )
+        db._conn.execute("DELETE FROM thread_vector_sums")
+        db._conn.commit()
+        return db
+
+    def test_backfill_logs_each_batch_and_completion_once(
+        self, tmp_path, monkeypatch, caplog, clock
+    ):
+        caplog.set_level(logging.INFO)
+        db = self._legacy_db(tmp_path, 3)
+        monkeypatch.setattr(main, "VECTOR_SUMS_BATCH_THREADS", 2)
+        for _ in range(4):
+            main._run_vector_sums_backfill(db)
+        lines = [
+            (r.levelno, r.getMessage()) for r in _messages(caplog, "thread vector sums backfill")
+        ]
+        assert lines == [
+            (logging.INFO, "thread vector sums backfill: filled=2 vectors_read=2 remaining=1 ms=0"),
+            (logging.INFO, "thread vector sums backfill: filled=1 vectors_read=1 remaining=0 ms=0"),
+            (logging.INFO, "thread vector sums backfill: every thread is filled"),
+        ]
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_backfill_failure_and_recovery(self, tmp_path, monkeypatch, caplog, clock):
+        caplog.set_level(logging.INFO)
+        db = self._legacy_db(tmp_path, 1)
+        real = Database.fill_missing_thread_vector_sums
+
+        def failing(self, **kwargs):
+            raise sqlite3.OperationalError(MARKER)
+
+        monkeypatch.setattr(Database, "fill_missing_thread_vector_sums", failing)
+        main._run_vector_sums_backfill(db)
+        clock["t"] += 5
+        monkeypatch.setattr(Database, "fill_missing_thread_vector_sums", real)
+        main._run_vector_sums_backfill(db)
+        assert "thread vector sums backfill failed: OperationalError" in caplog.text
+        assert _recoveries(caplog) == [
+            "thread vector sums backfill recovered after 1 failure(s) over 5s"
+        ]
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_check_logs_each_pass_and_warns_on_a_repair(self, tmp_path, caplog, clock):
+        caplog.set_level(logging.INFO)
+        db = self._legacy_db(tmp_path, 2)
+        db.fill_missing_thread_vector_sums(max_threads=10, max_rows=10)
+        db._conn.execute("UPDATE thread_vector_sums SET count = 5 WHERE thread_id = 't1'")
+        db._conn.commit()
+        main._run_vector_sums_check(db)
+        main._run_vector_sums_check(db)
+        assert [
+            (r.levelno, r.getMessage())
+            for r in caplog.records
+            if "thread_vector_sums_check" in r.getMessage() or "repaired" in r.getMessage()
+        ] == [
+            (
+                logging.INFO,
+                "maintenance pass=thread_vector_sums_check ms=0 checked=2 repaired=1 "
+                "vectors_read=2",
+            ),
+            (
+                logging.WARNING,
+                "thread vector sums: repaired 1 thread(s) whose running sum differed "
+                "from a recompute",
+            ),
+            (
+                logging.INFO,
+                "maintenance pass=thread_vector_sums_check ms=0 checked=2 repaired=0 "
+                "vectors_read=2",
+            ),
+        ]
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_check_failure_and_recovery(self, tmp_path, monkeypatch, caplog, clock):
+        caplog.set_level(logging.INFO)
+        db = self._legacy_db(tmp_path, 1)
+        real = Database.reconcile_thread_vector_sums_batch
+
+        def failing(self, **kwargs):
+            raise sqlite3.OperationalError(MARKER)
+
+        monkeypatch.setattr(Database, "reconcile_thread_vector_sums_batch", failing)
+        main._run_vector_sums_check(db)
+        clock["t"] += 3
+        monkeypatch.setattr(Database, "reconcile_thread_vector_sums_batch", real)
+        main._run_vector_sums_check(db)
+        assert "thread vector sums check failed: OperationalError" in caplog.text
+        assert _recoveries(caplog) == [
+            "thread vector sums check recovered after 1 failure(s) over 3s"
+        ]
+        assert MARKER not in caplog.text
+        db.close()

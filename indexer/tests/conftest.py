@@ -122,6 +122,9 @@ def _reset_extractor_warning_budget(monkeypatch):
         monkeypatch.setattr(main, "_wal_busy_passes", 0)
         # And whether the heartbeat saw extraction deferrals (#1236).
         monkeypatch.setattr(main, "_extraction_deferrals_seen", False)
+        # And the thread vector sums backfill and check progress (#1356).
+        monkeypatch.setattr(main, "_vector_sums_backfill_done", False)
+        monkeypatch.setattr(main, "_vector_sums_check_cursor", None)
 
 
 @pytest.fixture(autouse=True)

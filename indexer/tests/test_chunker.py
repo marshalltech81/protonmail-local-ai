@@ -628,40 +628,6 @@ class TestFixtures:
         assert "café" in joined.lower()
 
 
-# ---------------------------------------------------------------------------
-# mean_vector — used by the indexer write path and the reconciler reap path
-# to derive a thread-level vector from its component chunk vectors.
-# ---------------------------------------------------------------------------
-
-
-class TestMeanVector:
-    def test_two_vectors_average_element_wise(self):
-        from src.chunker import mean_vector
-
-        result = mean_vector([[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]])
-        assert result == [1.0, 1.0, 1.0]
-
-    def test_single_vector_is_identity(self):
-        from src.chunker import mean_vector
-
-        v = [0.5, 0.25, -0.1]
-        assert mean_vector([v]) == v
-
-    def test_empty_list_raises(self):
-        import pytest
-        from src.chunker import mean_vector
-
-        with pytest.raises(ValueError, match="empty"):
-            mean_vector([])
-
-    def test_mismatched_dimensions_raises(self):
-        import pytest
-        from src.chunker import mean_vector
-
-        with pytest.raises(ValueError, match="dimension"):
-            mean_vector([[0.1, 0.2], [0.3, 0.4, 0.5]])
-
-
 def _prose_pin_body() -> str:
     """Prose that exercises every split path and every edge trim.
 

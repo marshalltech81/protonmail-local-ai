@@ -36,7 +36,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .chunker import mean_vector
 from .database import Database
 from .embedder import EmbeddingBackend, scrub_embed_error
 from .maildir import is_trashed, resolve_current_path
@@ -617,18 +616,15 @@ class Reconciler:
         )
 
         try:
-            # Recompute the thread vector as the mean of the survivors'
-            # chunk embeddings. Reading chunks for survivor claimant IDs
-            # excludes the reaped messages even though their chunk rows
-            # are still on disk at this point — the reap transaction
-            # below tears them down atomically. Falls back to embedding
-            # the subject line in the rare case that no survivor has
-            # any indexed chunks (e.g. all bodies empty).
-            survivor_claimant_ids = [r["claimant_id"] for r in survivor_rows]
-            survivor_chunks = self.db.get_chunk_embeddings_for_messages(survivor_claimant_ids)
-            if survivor_chunks:
-                embedding = mean_vector(survivor_chunks)
-            else:
+            # The thread vector is the mean of the survivors' chunk
+            # vectors: ``None`` here, and the reap transaction below
+            # derives it from the thread's chunk-vector sum once the
+            # reaped messages' chunks are subtracted (#1356), so no chunk
+            # vector is read for it. This only checks, by chunk ID, that
+            # a chunk survives. Falls back to embedding the subject line
+            # in the rare case that none does (e.g. all bodies empty).
+            embedding: list[float] | None = None
+            if not self.db.thread_has_chunks_outside(thread_id, sorted(dead_ids)):
                 # Fallback: the oldest SURVIVOR with a non-empty
                 # original-case subject (``Re:``/``Fwd:`` intact, which
                 # differs from ``rebuilt_thread.subject`` only by case /
@@ -671,8 +667,7 @@ class Reconciler:
         )
         if removed_filepaths is None:
             log.info(
-                "reaper: a message in a thread was restored since its tombstones "
-                "were read; retrying next pass",
+                "reaper: a thread changed since its tombstones were read; retrying next pass",
             )
             return False, False
         log.info(

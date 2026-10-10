@@ -5,7 +5,7 @@ This module splits a single message body into paragraph-packed chunks that
 can be stored, FTS-indexed, and embedded individually, so retrieval can
 reach the exact passage that answers a question. The chunk vectors also
 feed coarse thread discovery: a thread's vector is the mean of its chunk
-vectors (``mean_vector``), with a subject-only embedding as the fallback
+vectors (``vector_sums.thread_vector``), with a subject-only embedding as the fallback
 for a thread that has no chunks. Output is a pure
 function of the input: same body, same ``message_pk`` → byte-identical
 ``MessageChunk`` list across runs. That determinism is what makes an
@@ -113,37 +113,6 @@ def l2_normalize(vec: list[float]) -> list[float]:
     return [x / norm for x in vec]
 
 
-def mean_vector(vectors: list[list[float]]) -> list[float]:
-    """Element-wise mean of equal-length float vectors.
-
-    Lives here rather than in ``main.py`` so the reconciler's reap path
-    can reuse it to compute a survivor-only thread vector after a partial
-    reap. Pure Python so the indexer stays free of numpy at runtime —
-    per-thread fan-out is bounded (typically <100 chunks per thread) and
-    even at 4096-dim Qwen3-Embedding the per-thread aggregate is sub-ms.
-
-    The result is *not* L2-normalized — averaging unit vectors yields a
-    vector with norm < 1 in the general case. Callers that need to
-    enforce the ``threads_vec`` / ``message_chunks_vec`` unit-norm
-    invariant should pass through ``l2_normalize`` (the DB write
-    boundary in ``database.py`` does this automatically).
-
-    Raises ``ValueError`` on empty input or mismatched dimensions; the
-    caller chooses the fallback (typically embedding the subject line).
-    """
-    if not vectors:
-        raise ValueError("cannot mean an empty vector list")
-    dim = len(vectors[0])
-    if any(len(v) != dim for v in vectors):
-        raise ValueError("all vectors must have the same dimension")
-    sums = [0.0] * dim
-    for vec in vectors:
-        for i, value in enumerate(vec):
-            sums[i] += value
-    n = float(len(vectors))
-    return [s / n for s in sums]
-
-
 # What a chunk's text is (#646). A closed set, stored in
 # ``message_chunks.kind`` under a ``CHECK`` that lists the same values:
 #
@@ -191,8 +160,8 @@ def _load_tokenizer() -> Tokenizer:
     Cached because ``Tokenizer.from_file`` parses ~11 MB of JSON and
     builds the BPE merge tables; doing that per ``estimate_tokens``
     call would dominate the chunker's runtime. The lazy load also
-    keeps unit tests that never call ``estimate_tokens`` (``mean_vector``
-    / dataclass construction tests) free from any I/O.
+    keeps unit tests that never call ``estimate_tokens`` (dataclass
+    construction tests) free from any I/O.
     """
     return Tokenizer.from_file(str(_TOKENIZER_PATH))
 
