@@ -1789,40 +1789,56 @@ missing members all worst-case records: a 100-record message round took
 message records (159 MB) took 1.8 to 5.2 s at 757 MiB; a 1,000-record
 occurrence round (17.7 MB) took 10.7 s streamed (197 MiB) and 6.3 s
 collected (216 MiB). That run is not a guide to larger sets, so it was repeated at the
-caps ([#1395](https://github.com/marshalltech81/protonmail-local-ai/issues/1395)):
-200,000 messages and 600,000 occurrences built (a 44.9 GB database,
-2,469 s to build), 190,000 messages and 570,000 occurrences matching
-(5 % are in Trash), four-byte IDs, one message in fifty with worst-case
-records, uploads of exactly 200,000 and 600,000 digests (11,000 and
-31,000 of them extras), 1,000 missing members, all worst-case records,
-median of three runs.
+caps
+([#1395](https://github.com/marshalltech81/protonmail-local-ai/issues/1395)),
+with the largest accepted upload: 200,000 messages and 600,000
+occurrences built (a 44.9 GB database, 2,208 s to build), 190,000
+messages and 570,000 occurrences matching (5 % are in Trash), four-byte
+IDs (4,009 bytes), one message in fifty with worst-case records, and an
+upload of exactly 200,000 and 600,000 digests that holds no member (all
+200,000 and 600,000 are extras the server does not hold), so every
+member is missing and each round returns K worst-case records
+(`--all-extras`). Two runs of each step, the scan method that runs first
+alternating; the figure is the median of the two, which for two is
+their mean, so a cold and a warm run are blended.
 
-| Cap-sized | Certificate scan, stream / collect | Round, K = 100, stream / collect | Round, K = 1,000, stream / collect |
+| Cap-sized | Certificate (count and scan), stream / collect | Round, K = 100, stream / collect | Round, K = 1,000, stream / collect |
 |---|---|---|---|
-| Messages | 88.8 s, 85 MiB / 29.0 s, 823 MiB | 54.6 s, 224 MiB / 28.4 s, 1.56 GiB | 73.9 s, 799 MiB / 44.3 s, 1.56 GiB |
-| Occurrences | 817.8 s, 84 MiB / 224.6 s, 152 MiB | 353.8 s, 220 MiB / 163.7 s, 287 MiB | 351.7 s, 277 MiB / 169.1 s, 353 MiB |
+| Messages | 33.5 s, 84 MiB / 12.4 s, 823 MiB | 36.1 s, 322 MiB / 20.9 s, 1.58 GiB | 7.6 s, 903 MiB / 11.2 s, 1.58 GiB |
+| Occurrences | 302.7 s, 84 MiB / 160.4 s, 128 MiB | 298.7 s, 498 MiB / 160.4 s, 521 MiB | 296.9 s, 561 MiB / 164.0 s, 548 MiB |
 
-The responses were 16.6 MB (100 message records), 160 MB (1,000
-message records) and 19.1 MB (1,000 occurrence records). Under an
-unthrottled writer a message round (67 to 77 s) grew the WAL by 3.6 GB
-at 11,366 overlapping commits, and by 223 MB at ten commits a second;
-an occurrence round (344 to 365 s) by 5.7 GB at 17,897 commits, and by
-1.0 GB at ten a second. After each round the truncating checkpoint
-returned busy 0 and left the WAL at 0 bytes.
+The responses were 29.3 MB (100 message records), 172 MB (1,000
+message records), 41.9 MB (100 occurrence records) and 57.3 MB (1,000
+occurrence records), each with the extras (67 bytes each as hex).
+Under a concurrent writer at ten commits a second a streamed round
+(48 to 62 s on messages, 287 to 296 s on occurrences) grew the WAL by
+186 MB on messages and 859 MB on occurrences; unthrottled, by 5.2 GB
+(16,231 commits) and 21.0 GB (65,877 commits). After each round the
+truncating checkpoint returned busy 0 and left the WAL at 0 bytes.
 
-What the figures show: memory is not the ceiling (799 MiB at most with
+Stream against collect, with the order balanced: collect was faster on
+every row but one, by 1.7 to 2.7 times on messages at K = 100 and in the
+certificate, and by 1.8 to 1.9 times on occurrences. At K = 1,000 on
+messages stream was faster (7.6 s against 11.2 s): the stream and
+collect times of the same round differ more between a cold and a warm
+cache than between the methods, so the message-round times above are
+not a stable ranking. A cap-sized run taken with stream
+always first put collect at 2.2 times on occurrence rounds and 3.6 on
+the occurrence certificate; balanced they are 1.8 to 1.9 and 1.9.
+
+What the figures show: memory is not the ceiling (at most 903 MiB with
 the scan method proposed below, stream for messages and collect for
 occurrences; the collected message scan, not proposed, reached
-1.56 GiB). Time is. A round at the caps holds one read snapshot for 55
-to 74 s on messages and 164 to 169 s on occurrences with the proposed
-scan method (28 to 44 s and 352 s with the other). The indexer's
+1.58 GiB). Time is. A round at the caps holds one read snapshot for 7.6
+to 36 s on messages and 160 to 164 s on occurrences with the proposed
+scan method (11 to 21 s and 297 to 299 s with the other). The indexer's
 truncating checkpoint cannot finish for that long, and the WAL holds
-every frame written meanwhile (1.0 GB over a 365 s streamed occurrence
-round at ten commits a second). The cap of 600,000 occurrences
-therefore implies a snapshot of about three minutes per round on this
-corpus shape, and 200,000 messages one of about a minute; whether that
-is acceptable, or the caps should be lower, is an owner decision.
-Nothing here measures a larger set.
+every frame written meanwhile (0.86 GB over a 287 s streamed
+occurrence round at ten commits a second). A cap of 600,000 occurrences
+therefore implies a snapshot of nearly three minutes per round on this
+corpus shape; whether that snapshot time is acceptable, or the caps
+should be lower, is an owner decision. Nothing here measures a larger
+set.
 
 **Method notes.** Each scan method runs as its own process, but the page
 cache is the host's, so a method that always ran second would inherit
@@ -1886,8 +1902,8 @@ retries on its next pass.
 - **Scan method:** stream for messages (flat RSS whatever the ID width)
   and collect for occurrences, whose IDs are a fixed 64 bytes: the full
   collect round was 1.6 to 2.4 times faster on occurrences, for at most
-  76 MiB more peak RSS at the caps measured (2.1 times faster at the
-  cap-sized run), and a collected
+  23 MiB more peak RSS at the cap-sized run (1.8 to 1.9 times
+  faster there, order balanced), and a collected
   certificate stayed under one page's cost for every filter, where a
   streamed one reached 7.6 times.
 - **Filtered queries:** no further cap. With that scan method a
