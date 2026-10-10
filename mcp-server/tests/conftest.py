@@ -265,6 +265,23 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             alias     TEXT NOT NULL,
             PRIMARY KEY (entity_id, alias)
         );
+        -- The indexer's remaining indexes on the tables above (#1213): without
+        -- them SQLite plans the attachment lanes quadratically on some builds.
+        CREATE INDEX idx_threads_fts_rowid ON threads(fts_rowid);
+        CREATE INDEX idx_threads_subject_folder
+            ON threads(subject, folder, date_last, thread_id);
+        CREATE INDEX idx_message_thread_map_message ON message_thread_map(message_id);
+        CREATE INDEX idx_message_thread_map_filepath ON message_thread_map(filepath);
+        CREATE INDEX idx_message_thread_map_thread ON message_thread_map(thread_id);
+        CREATE INDEX idx_attachments_attachment_id ON attachments(attachment_id);
+        CREATE INDEX idx_attachments_thread ON attachments(thread_id);
+        CREATE INDEX idx_attachments_claimant ON attachments(claimant_id);
+        CREATE INDEX idx_attachments_fts_rowid ON attachments(fts_rowid);
+        CREATE INDEX idx_message_chunks_claimant ON message_chunks(claimant_id);
+        CREATE INDEX idx_message_chunks_thread ON message_chunks(thread_id);
+        CREATE INDEX idx_message_chunks_attachment ON message_chunks(attachment_id);
+        CREATE INDEX idx_message_chunks_fts_rowid ON message_chunks(fts_rowid);
+        CREATE INDEX idx_indexing_jobs_status_next ON indexing_jobs(status, next_attempt_at);
         """
     )
 
