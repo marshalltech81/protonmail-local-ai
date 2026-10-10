@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import hashlib
 import json
 import math
@@ -51,8 +52,8 @@ import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Iterable
-from contextlib import closing
+from collections.abc import Iterable, Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.header import Header
@@ -1027,6 +1028,24 @@ def _sorted_identities(
     return ids
 
 
+@contextmanager
+def _ordered(order: str) -> Iterator[None]:
+    """Hold the WAL measurement's order lock (an exclusive ``flock`` on
+    ``order``) for the block; no-op when ``order`` is empty. The writer
+    holds it across ``COMMIT`` and its stamp, the round across its
+    snapshot and each clock read that bounds its window, so every commit
+    falls wholly before or after each boundary."""
+    if not order:
+        yield
+        return
+    with open(order, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def phase_reconcile(
     db_path: str,
     kind: str,
@@ -1035,6 +1054,7 @@ def phase_reconcile(
     hold_s: float = 0.0,
     method: str = "stream",
     worst_first: bool = False,
+    order: str = "",
 ) -> dict:
     """One reconcile round: parse the packed upload, then in one read
     transaction count, scan (``method``, as ``phase_certificate``),
@@ -1061,8 +1081,9 @@ def phase_reconcile(
         # it starts, so a trivial read takes it, and the monotonic clock the
         # WAL phase lines up with its samples is read right after,
         # before the COUNT scan.
-        conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone()
-        started_at = time.monotonic()
+        with _ordered(order):
+            conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone()
+            started_at = time.monotonic()
         count = conn.execute(count_sql, params).fetchone()[0]
         digest = hashlib.sha256(CERT_DOMAIN)
         server: set[bytes] = set()
@@ -1095,7 +1116,8 @@ def phase_reconcile(
             time.sleep(hold_s)
         # Still inside the transaction: its frames are retained until the
         # rollback.
-        ended_at = time.monotonic()
+        with _ordered(order):
+            ended_at = time.monotonic()
         conn.rollback()
     response = {
         "complete": missing_total <= k,
@@ -1294,7 +1316,9 @@ def phase_request_shape(path: str, shape: str) -> dict:
 BALLAST_ROWS = 64
 
 
-def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) -> dict:
+def phase_writer(
+    db_path: str, stop: str, commit_bytes: int, interval: float, order: str = ""
+) -> dict:
     """A concurrent writer: until ``stop`` exists, commit transactions
     that flip eight messages' ``seen`` and append ``commit_bytes`` of
     ballast, as the indexer's steady-state batch of eight would.
@@ -1340,10 +1364,12 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
                 "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
             )
             conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - BALLAST_ROWS,))
-            conn.execute("COMMIT")
-            # Stamped after the commit: a commit is in a round's window
-            # only once it is durable, and its frames are in the size.
-            times.append((time.monotonic(), os.stat(wal).st_size))
+            # COMMIT and its stamp under the order lock (``_ordered``):
+            # a commit is in a round's window only once it is durable,
+            # and its frames are in the size.
+            with _ordered(order):
+                conn.execute("COMMIT")
+                times.append((time.monotonic(), os.stat(wal).st_size))
             commits += 1
             resume = time.monotonic() + interval
             while time.monotonic() < resume and not os.path.exists(stop):
@@ -1467,10 +1493,12 @@ def run_wal(
     it. Every size and count comes from the writer's own post-commit
     records (``phase_writer``), split at the round's window by the same
     timestamps, so no commit is counted without its frames or the
-    reverse."""
+    reverse; the order lock (``_ordered``) keeps every commit wholly on
+    one side of each window boundary."""
     wal = Path(db_path + "-wal")
     stop = Path(db_path + ".stop")
     ready = Path(str(stop) + ".ready")
+    order = db_path + ".order"
     stop.unlink(missing_ok=True)
     ready.unlink(missing_ok=True)
 
@@ -1494,6 +1522,7 @@ def run_wal(
                     "stop": str(stop),
                     "commit_bytes": commit_bytes,
                     "interval": interval,
+                    "order": order,
                 }
             ),
         ],
@@ -1521,6 +1550,7 @@ def run_wal(
                 request=request,
                 hold_s=hold_s,
                 worst_first=worst_first,
+                order=order,
             )
         except RuntimeError as exc:  # raised after the writer stops (finally)
             raise RuntimeError("reconcile round failed") from exc
@@ -1533,6 +1563,7 @@ def run_wal(
             out, _ = writer.communicate()
         stop.unlink()
         ready.unlink(missing_ok=True)
+        Path(order).unlink(missing_ok=True)
     writer_out = json.loads(out)
     at_start, at_end, overlapping = wal_window(
         writer_out["commit_times"], result["started_at"], result["ended_at"]

@@ -1621,8 +1621,10 @@ child process on the server's own read-only connection and with the
 server's own predicate compiler (unfiltered, Trash is left out), and
 records are read and serialized with the server's own `query_messages`
 and `query_attachments` helpers. Timings are plain `perf_counter`
-medians of `--repeat` runs, never a profiler; peak RSS is the child's
-`VmHWM`. It measures:
+medians of `--repeat` runs, never a profiler, taken with the page
+cache warm: the index was just built, and an untimed `COUNT(*)` of the
+matching messages runs before the first timed step, so no figure is a
+cold first query. Peak RSS is the child's `VmHWM`. It measures:
 
 - a certificate: `COUNT(*)`, then every matching identity (claimant ID
   or attachment occurrence) scanned, sorted and hashed in one read
@@ -1638,7 +1640,7 @@ medians of `--repeat` runs, never a profiler; peak RSS is the child's
   round's snapshot.
 
 Run it inside the mcp-server image so SQLite and Python match the
-server's; `--help` lists every option and its default:
+server's; `--help` lists every option:
 
 ```bash
 docker build -t mcp-bench mcp-server

@@ -1117,6 +1117,51 @@ def test_file_floor_counts_the_references_header_exactly(bench, references):
     assert bench._references_bytes(references) == len(header) - len("References: ")
 
 
+def test_writer_commits_and_stamps_only_under_the_order_lock(bench, tmp_path):
+    # The round takes its snapshot and reads its clock under the same
+    # lock the writer holds across COMMIT and its stamp, so no commit
+    # can fall between a snapshot and the time that marks it.
+    import fcntl
+    import threading
+
+    db = tmp_path / "order.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    order = tmp_path / "order.lock"
+    out: dict = {}
+    with open(order, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        writer = threading.Thread(
+            target=lambda: out.update(
+                bench.phase_writer(str(db), str(stop), 16, 0.0, order=str(order))
+            )
+        )
+        writer.start()
+        ready = Path(str(stop) + ".ready")
+        deadline = time.monotonic() + 30
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.3)
+        released = time.monotonic()
+        fcntl.flock(held, fcntl.LOCK_UN)
+    time.sleep(0.2)
+    stop.touch()
+    writer.join()
+    measured = out["commit_times"][1:]
+    assert out["commits"] > 0
+    assert all(when > released for when, _ in measured)
+
+
+def test_the_round_takes_its_snapshot_under_the_order_lock(bench):
+    import inspect
+
+    src = inspect.getsource(bench.phase_reconcile)
+    lock = src.index("with _ordered(order):")
+    assert lock < src.index('"SELECT 1 FROM messages LIMIT 1"') < src.index("started_at = ")
+    end = src.index("with _ordered(order):", lock + 1)
+    assert end < src.index("ended_at = ")
+
+
 def test_writer_delay_ends_when_stop_appears(bench, tmp_path):
     db = tmp_path / "delay.db"
     bench.build(db, 8, 0, "typical", "typical")
