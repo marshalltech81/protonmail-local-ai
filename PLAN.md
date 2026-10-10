@@ -910,6 +910,26 @@ superseded entries keep their number and one line.
     responsibility. Ruled out so far: request reconciliation and
     lifecycle statuses, and identifier extraction with cross-thread
     linking.
+45. **IMAP ingestion boundary (2026-10-10, #1346):** provider policy
+    owns connection and trust requirements, mailbox selection, roles,
+    source categories and the assessment of any optional provider
+    identity or provenance. The transport owns validated configuration
+    rendering, sync, Maildir layout and state, recovery and content-safe
+    diagnostics; mbsync and Maildir stay the first transport, behind the
+    bytes-plus-source-metadata seam (#1077). The core owns exact
+    evidence, threading, indexing, retrieval and citations, and never
+    requires a provider identity. Durable account scope and
+    connection or address coverage are distinct; sources, mailbox
+    occurrences and scoped collection observations are distinct. Unknown
+    metadata stays unknown, a failed or incomplete scan cannot establish
+    absence, and equal bytes do not establish one logical message. The
+    Proton path is extracted unchanged: rendered configuration,
+    environment variables, channel and store names, public interfaces,
+    every control and the pin-rotation semantics. New configuration or
+    state formats, collectors, role behaviour, reconciliation, renamed
+    channels or stores, any path around a Proton control (a synthetic
+    source included) and additional sources each need their own
+    decision; open parts stay in #1083, #1313, #1316 and #1317.
 
 ## Notes for Agents
 
