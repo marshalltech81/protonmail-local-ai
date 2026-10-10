@@ -1231,6 +1231,14 @@ Embedder retries and outages:
   after it is a request that failed all three attempts (see the ERROR
   lines below). When every retry line of a request was withheld, the
   recovery is withheld with them.
+- `batched embed failed (...): the provider is rate limiting;
+  deferring the whole batch of <n> message(s) without
+  splitting it` (WARNING): the whole batch request got a 429.
+  No message is blamed: the
+  batch is deferred without spending attempts and indexing pauses
+  (the `embedder unavailable` line follows, with the pause length,
+  which honours the provider's `Retry-After` up to 10 min). Other batch
+  failures (400 / 413 / 422, timeouts, 5xx) are still probed and split to find the bad input.
 - `embedder unavailable (...)` or `embedder rejected credentials or
   model (...)` (ERROR): a batch failed after its retries and a probe
   confirmed the embedder itself is down; indexing pauses (see "Tuning

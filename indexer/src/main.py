@@ -83,6 +83,8 @@ from .embedder import (
     EmbedResponseError,
     OpenAIEmbedder,
     classify_embed_failure,
+    embed_retry_after_seconds,
+    is_rate_limit_error,
     scrub_embed_error,
 )
 from .entities import (
@@ -2198,8 +2200,12 @@ class _EmbedOutageBreaker:
     def allow(self, now: float) -> bool:
         return now >= self.open_until
 
-    def record_failure(self, now: float) -> float:
-        """Open the breaker; returns the pause length in seconds."""
+    def record_failure(self, now: float, retry_after: float | None = None) -> float:
+        """Open the breaker; returns the pause length in seconds.
+
+        ``retry_after`` is a provider's ``Retry-After`` delay: the pause
+        is at least that long, bounded by ``cap_seconds``.
+        """
         if not self.consecutive_failures:
             self.outage_started = now
         self.consecutive_failures += 1
@@ -2207,6 +2213,8 @@ class _EmbedOutageBreaker:
             self.base_seconds * (2 ** (self.consecutive_failures - 1)),
             self.cap_seconds,
         )
+        if retry_after is not None:
+            delay = max(delay, min(retry_after, self.cap_seconds))
         self.open_until = now + delay
         return delay
 
@@ -2225,6 +2233,7 @@ class _EmbedOutageBreaker:
 # Deferral delay for an outage when no breaker is supplied (compat
 # shims and tests). Production always passes the main-loop breaker.
 _OUTAGE_DEFER_SECONDS = 30.0
+_OUTAGE_DEFER_CAP_SECONDS = 600.0
 
 _EMBED_PROBE_TEXT = "embedder health probe"
 
@@ -2259,9 +2268,12 @@ def _pause_embedding(
     queue: IndexingQueue,
     breaker: _EmbedOutageBreaker | None,
     exc: BaseException,
+    retry_after: float | None = None,
 ) -> None:
     """The embedder itself is failing: defer ``entries`` without
     spending attempts and open the breaker so draining stops.
+    ``retry_after`` is the provider's ``Retry-After`` (seconds), which
+    lengthens the pause up to the breaker's cap.
 
     A configuration error (or a probe the provider refuses outright)
     records ``operator_action_required``; anything else is an outage
@@ -2274,9 +2286,10 @@ def _pause_embedding(
         else ERROR_CLASS_RETRYABLE
     )
     err_repr = scrub_embed_error(exc)
-    delay = (
-        breaker.record_failure(time.monotonic()) if breaker is not None else _OUTAGE_DEFER_SECONDS
-    )
+    if breaker is not None:
+        delay = breaker.record_failure(time.monotonic(), retry_after)
+    else:
+        delay = max(_OUTAGE_DEFER_SECONDS, min(retry_after or 0.0, _OUTAGE_DEFER_CAP_SECONDS))
     for entry in entries:
         queue.defer(
             entry.row["filepath"],
@@ -2618,6 +2631,23 @@ def _drain_queue_batched(
             # ``EmbedResponseError``), trims SDK status errors to
             # type + status_code, and anything else to its type.
             err_repr = scrub_embed_error(e)
+            if is_rate_limit_error(e):
+                # Throttled: the whole request was refused for rate, so
+                # there is no bad input to isolate, and splitting it
+                # multiplies the request rate against a provider that
+                # is already pushing back (#1384). Back off and retry
+                # the whole batch, spending no attempts. A timeout, 408
+                # or connection error can depend on the request's size,
+                # so those keep the probe and the split below.
+                log.warning(
+                    "batched embed failed (%s): the provider is rate limiting; "
+                    "deferring the whole batch of %d message(s) without "
+                    "splitting it.",
+                    err_repr,
+                    len(survivors),
+                )
+                _pause_embedding(survivors, queue, breaker, e, embed_retry_after_seconds(e))
+                break
             probe_error = _probe_embedder(embedder)
             if probe_error is not None:
                 _pause_embedding(survivors, queue, breaker, probe_error)

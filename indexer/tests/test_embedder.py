@@ -1272,3 +1272,35 @@ class TestRetryLogging:
         # aggregate a WARNING.
         assert extractors.drain_extractor_counts()["warnings_suppressed"] == 0
         assert extractors.drain_suppressed_lines() == requests
+
+
+class TestEmbedRetryAfterSeconds:
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [("7", 7.0), ("0", 0.0), ("1.5", 1.5), ("-1", None), ("nan", None), ("soon", None)],
+    )
+    def test_reads_delta_seconds_only(self, header, expected):
+        from src.embedder import embed_retry_after_seconds
+
+        exc = APIStatusError(
+            message="429 error",
+            response=httpx2.Response(
+                429, headers={"Retry-After": header}, request=httpx2.Request("POST", "http://x")
+            ),
+            body=None,
+        )
+        assert embed_retry_after_seconds(exc) == expected
+
+    def test_absent_header_and_other_errors_give_none(self):
+        from src.embedder import embed_retry_after_seconds
+
+        assert embed_retry_after_seconds(_api_status_error(429)) is None
+        assert embed_retry_after_seconds(ValueError("x")) is None
+
+
+def test_is_rate_limit_error_is_429_only():
+    from src.embedder import is_rate_limit_error
+
+    assert is_rate_limit_error(_api_status_error(429)) is True
+    assert is_rate_limit_error(_api_status_error(408)) is False
+    assert is_rate_limit_error(ValueError("x")) is False

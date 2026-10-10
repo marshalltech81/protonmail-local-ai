@@ -272,6 +272,30 @@ def classify_embed_failure(exc: BaseException) -> str:
     return EMBED_FAILURE_UNCERTAIN
 
 
+def is_rate_limit_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is the provider's HTTP 429."""
+    return isinstance(exc, APIStatusError) and exc.status_code == 429
+
+
+def embed_retry_after_seconds(exc: BaseException) -> float | None:
+    """The provider's ``Retry-After`` delay in seconds, if it sent one.
+
+    Only the delta-seconds form is read; an HTTP-date, a non-numeric,
+    non-finite or negative value is treated as absent. Callers bound the
+    result before waiting on it.
+    """
+    if not isinstance(exc, APIStatusError):
+        return None
+    raw = exc.response.headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
 class EmbeddingBackend(Protocol):
     """Structural contract the embedder satisfies.
 
