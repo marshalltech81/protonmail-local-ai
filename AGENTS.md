@@ -728,8 +728,10 @@ under about 80 characters.
   5.5 at high effort and the panel continues; when the headless CLI is
   out of budget for both, the Claude side runs as an in-session
   subagent on the same prompt. The recommendation says which model
-  answered (owner, 2026-10-08). Each
-  assesses it independently and read-only against the code, then they
+  answered (owner, 2026-10-08). If the Codex seat is unavailable
+  (usage limit, outage), there is no fallback without the owner: ask
+  before the run continues, and never complete it with one reviewer.
+  Each assesses it independently and read-only against the code, then they
   exchange views until they agree or three rounds pass. Verify their
   file and line claims, and present one recommendation for the owner
   to approve: the option that gives the most accurate outcome first,

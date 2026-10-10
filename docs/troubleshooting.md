@@ -830,7 +830,8 @@ kind of reindex that needs depends on whether search data changes too:
   or threading. Its migration queues every indexed message with reason
   `reparse` at startup; the indexer re-reads each file and rewrites its
   per-message rows, with no embedding calls (attachment text comes from
-  the extraction cache). Search keeps working throughout; the data the
+  the extraction cache; a thread left with no chunk by a dropped
+  attachment occurrence embeds its subject once, #1375). Search keeps working throughout; the data the
   release adds is missing for a message until its reparse runs (after
   the release that added `sender_ambiguous`, `query_messages` counts
   such a message as `indeterminate` under a sender filter, or under an
@@ -864,8 +865,15 @@ kind of reindex that needs depends on whether search data changes too:
   in [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
 
 The release notes and the migration's header say which applies.
+A reparse also removes the attachment occurrences the current parser
+no longer produces (for example a row kept under a filename an earlier
+parser fix now decodes differently), with their filename search rows
+and, when no other occurrence of the message carries the same bytes,
+their chunks (#1375); the attachments line counts them as `dropped`.
 `make reparse` queues the same reparse by hand, for recovery (for
-example when a reparse's jobs were cleared another way). Messages that
+example when a reparse's jobs were cleared another way), and run once
+after upgrading to the release with #1375 it clears such leftovers
+from earlier parser fixes. Messages that
 already have a job keep it, and dead-lettered ones stay dead until
 `make requeue-dead`. It runs inside the indexer container, so the
 stack must be up:
@@ -1231,6 +1239,14 @@ Embedder retries and outages:
   after it is a request that failed all three attempts (see the ERROR
   lines below). When every retry line of a request was withheld, the
   recovery is withheld with them.
+- `batched embed failed (...): the provider is rate limiting;
+  deferring the whole batch of <n> message(s) without
+  splitting it` (WARNING): the whole batch request got a 429.
+  No message is blamed: the
+  batch is deferred without spending attempts and indexing pauses
+  (the `embedder unavailable` line follows, with the pause length,
+  which honours the provider's `Retry-After` up to 10 min). Other batch
+  failures (400 / 413 / 422, timeouts, 5xx) are still probed and split to find the bad input.
 - `embedder unavailable (...)` or `embedder rejected credentials or
   model (...)` (ERROR): a batch failed after its retries and a probe
   confirmed the embedder itself is down; indexing pauses (see "Tuning
@@ -1722,10 +1738,11 @@ only, never filenames or text (`make logs`):
     with whitespace, when the body keeps that part. A leading `From `
     envelope line, as in an mbox export, is not counted.
   - `eml_body_decode`: a body text part of an attached email whose
-    base64 decoding lost bytes, or any quoted-printable one, whose loss
-    cannot be detected yet, or one in an encoding not decoded here
-    (uuencode and its aliases, or an unknown value), which can come back
-    as its transport text (#922, #1288). Only a part the body keeps (or
+    base64 decoding lost bytes, a quoted-printable one with an `=` that
+    is neither an escape nor a soft line break, a uuencode one (any
+    alias) that fell back to its transport text, or one in an encoding
+    not decoded here (an unknown value), which can come back as its
+    transport text (#922, #1288). Only a part the body keeps (or
     would keep, had it decoded whole) counts; an alternative rendering
     set aside does not.
   - `eml_header_chars`, `eml_text_chars`, `eml_parts`, `eml_text_parts`,
@@ -1736,8 +1753,8 @@ only, never filenames or text (`make logs`):
     nested email left out (more than 20 levels deep, past 64 MB of
     transfer-decoded nested emails, or a transfer encoding that does
     not decode) or read with bytes lost (a malformed base64 encoding,
-    or any quoted-printable one, whose loss cannot be detected yet:
-    #1288), or left unread because no decoder here reads its transfer
+    or a quoted-printable one with an `=` that is neither an escape nor
+    a soft line break: #1288), or left unread because no decoder here reads its transfer
     encoding (uuencode and its aliases, or any other): only its
     `[Attached message, depth N]` label is indexed.
   - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
@@ -1774,7 +1791,7 @@ only, never filenames or text (`make logs`):
   here.
 - `attachments n=<total> success= failed= unsupported= too_large=
   ocr_disabled= empty= deferred= cached= deferred_messages=
-  deferred_resumed= pdf_pages_failed=
+  deferred_resumed= dropped= dropped_text= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
   ocr_capped_images= extractor_caps= parser_caps_messages=
   parser_recipients_merged_messages= parser_sender_ambiguous_messages=
@@ -1793,7 +1810,12 @@ only, never filenames or text (`make logs`):
   extraction budget (#1236), `deferred_messages` the messages committed
   with some deferred, and `deferred_resumed` previously deferred
   occurrences that resolved; a deferred attachment is extracted on a
-  later pass of its message, never dropped. A continuation pass skips
+  later pass of its message, never dropped. `dropped` counts stored
+  occurrences removed because the message's current parse no longer
+  produces them (#1375), and `dropped_text` those among them that took
+  the only searchable copy of their payload's text; a stale row beside
+  a surviving sibling is the former only, but `dropped_text` makes the
+  line a WARNING. A continuation pass skips
   the occurrences resolved in earlier passes, so they are not counted
   again.
   - When it is logged: during the initial index, with the timing summary
@@ -1878,7 +1900,7 @@ something searchable is lost:
 - The attachments inside a base64 or quoted-printable attached email
   are not read.
 - A base64 or quoted-printable attached email is decoded with bytes
-  lost, or possibly lost (`transport_lossy`).
+  lost (`transport_lossy`).
 - The container's own payload is emptied while an extractor would have
   read it: an attached email, whose text the `eml` extractor reads
   (#922), or for example a delivery report named `status.txt`.
@@ -1893,8 +1915,8 @@ with no extractor's file name) is not logged.
 | `attached_depth` | An attached email nested more than 20 levels deep (or 20 transfer-encoded levels) |
 | `attached_fields` | The same, once the message's attached emails exceed the per-message part and header budget |
 | `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read; or an attached email in another transfer encoding (uuencode and its aliases, or an unknown value), whose transport text is not extracted |
-| `transport_lossy` | A base64 attached email whose transport decoded with bytes lost, or any quoted-printable one, whose loss cannot be detected yet (#1288): its decoded text is kept and indexed but marked incomplete, and the attachments inside it are read, though one whose boundary was lost is missing, so the attachment list is incomplete |
-| `leaf_transport_lossy` | An attachment an extractor reads whose base64 decoding lost bytes, or an `application/eml` or `.eml` attachment in any transfer encoding other than base64 or none (quoted-printable, uuencode): its text is kept but marked incomplete. The attachments inside it are never read by the parser, so the attachment list is not affected |
+| `transport_lossy` | A base64 attached email whose transport decoded with bytes lost, or a quoted-printable one with an `=` that is neither an escape nor a soft line break (#1288): its decoded text is kept and indexed but marked incomplete, and the attachments inside it are read, though one whose boundary was lost is missing, so the attachment list is incomplete |
+| `leaf_transport_lossy` | An attachment an extractor reads whose base64, quoted-printable or uuencode decoding lost bytes (#1288), or an `application/eml` or `.eml` attachment in a transfer encoding nothing here decodes: its text is kept but marked incomplete. The attachments inside it are never read by the parser, so the attachment list is not affected |
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |

@@ -901,6 +901,19 @@ superseded entries keep their number and one line.
     every control enforcing a boundary, listed or not; the reference
     table of the controls, shared assumptions and accepted limits is
     `docs/architecture.md` "Trust Boundaries", documentation, not a test.
+44. **Retrieval, not case management (2026-10-08):** the MCP server
+    finds mail, lists it completely, and returns what is stored, with
+    honest counts and completeness. Grouping mail into matters, linking
+    threads by a shared identifier (for example a case or order number),
+    tracking requests and assigning statuses are the client's job. The
+    client can search for an identifier with `search_emails` or
+    `query_messages` `text=` and group the results itself. Neither search
+    is exhaustive for an identifier that appears only in subjects or
+    attachments, and neither verifies that the literal identifier occurs
+    in each result, so the precision of any grouping is the client's
+    responsibility. Ruled out so far: request reconciliation and
+    lifecycle statuses, and identifier extraction with cross-thread
+    linking.
 
 ## Notes for Agents
 

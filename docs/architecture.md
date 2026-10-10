@@ -168,7 +168,10 @@ mbsync writes one Maildir per Proton folder (`mbsync/mbsyncrc.template`):
   well as in its real folder. The channel's `Patterns` leave them out, so
   each message is synced and indexed once. A star still arrives, as the
   Maildir `F` flag on the real copy (`flagged` in the MCP tools); a label
-  does not. A custom folder named `Starred` is `Folders/Starred` and
+  does not. Labels are left out by project policy, not by a Bridge
+  restriction: the index does not model label membership apart from
+  physical folders, so a label copy would add duplicates it could not
+  describe. A custom folder named `Starred` is `Folders/Starred` and
   syncs.
 - **Names isync needs for itself:** a child folder named `uidvalidity`,
   `isyncuidmap.db`, `mbsyncstate`, `mbsyncstate.journal`, `mbsyncstate.new`
@@ -946,7 +949,13 @@ writes the occurrence's chunks, so they roll back with them.
   serialized (`Attachment.payload_complete`: `_attachment_payload` kept
   the empty payload after a parse cap, a failure, or for a container
   nested inside another attachment), and for a part whose base64
-  decode lost bytes (an invalid-character or invalid-length defect). For
+  decode lost bytes (an invalid-character or invalid-length defect), for
+  a quoted-printable part with an `=` that is neither a two-hex-digit
+  escape nor a soft line break, and for a uuencode part (all four
+  aliases) whose decode fell back to the transport text (#1288; one
+  linear scan of the part's text, behind the same per-message byte
+  budgets; a truncation that leaves valid encoding stays undetectable).
+  For
   a base64 attached email, whose transport form the parser decodes
   leniently, the same text is decoded once more through the stdlib leaf
   decoder only to read those defects (one linear pass behind the
@@ -958,10 +967,10 @@ writes the occurrence's chunks, so they roll back with them.
   An attached email's loss found this way is also counted as the
   `transport_lossy` parse cap, so it is logged (review round 7 on
   #1311); a leaf attachment's is not.
-  Quoted-printable and uuencode failures record no defect and are not
-  detected (#1288), so a quoted-printable attached email (`message/*`)
-  keeps its lenient decode but is always `0` (also counted as
-  `transport_lossy`), and one in any other
+  A quoted-printable attached email (`message/*`) keeps its lenient
+  decode and is `0` (also counted as `transport_lossy`) when its
+  transport text has an `=` that is neither an escape nor a soft line
+  break (#1288), and one in any other
   transfer encoding that is not identity or base64 (uuencode and its
   aliases, or an unknown value) keeps the empty payload, counted as the
   `transport_decode` parse cap when an extractor reads the attachment:
@@ -969,13 +978,15 @@ writes the occurrence's chunks, so they roll back with them.
   one an unserialized container gets, and the message's
   `attachments_manifest_complete` is cleared (review round 4 on #1311).
   An email carried as a leaf part the `eml` extractor reads
-  (`application/eml`, or any type named `.eml`) in any encoding other
-  than identity or base64 keeps its decode but is always `0`, counted
-  as `leaf_transport_lossy` (review round 8 on #1311), which leaves the
+  (`application/eml`, or any type named `.eml`) in an encoding nothing
+  here decodes (not identity, base64, quoted-printable or uuencode)
+  keeps its decode but is always `0`, and a leaf of any type whose
+  base64, quoted-printable or uuencode decode lost bytes is `0` too;
+  each is counted as `leaf_transport_lossy` (review round 8 on #1311,
+  #1288), which leaves the
   attachment list complete, since a leaf is never walked for
   attachments. An attached email's `transport_lossy` clears it: a
-  nested attachment whose boundary was lost is missing (round 13). Any other leaf
-  attachment in those encodings is unchanged.
+  nested attachment whose boundary was lost is missing (round 13).
 - For a `success` or `empty` result, the result's own
   `text_complete`, which the dispatcher sets: `0` when the attempt lost
   text (any `extractor_caps` cap, the `max_extracted_chars` cut, the
@@ -1561,12 +1572,13 @@ characters per header and 10,000,000 characters of text; a budget
 that cut the text is logged through the extractor-cap WARNING
 (`eml_*`) and marks the text incomplete, and so does a decode that
 lost bytes: a body text part's (`eml_body_decode`), a nested email's
-base64 (`eml_nested_messages`), and any body text part or nested email
-in quoted-printable, whose loss the standard library records nothing
-for (counted as lossy until #1288 detects it). A body text part in any
-other encoding that is not identity (uuencode and its aliases, or an
-unknown value) is kept as decoded but counted as `eml_body_decode`
-too, since a malformed one comes back as its transport text. A body
+base64 or quoted-printable (`eml_nested_messages`; a quoted-printable
+`=` that is neither an escape nor a soft line break, #1288), and a body
+text part's quoted-printable or uuencode (the same `=` rule, or a
+uuencode decode that fell back to its transport text). A body text
+part in any other encoding that is not identity (an unknown value) is
+kept as decoded but counted as `eml_body_decode` too, since a
+malformed one comes back as its transport text. A body
 text part counts only when the body keeps it, or would have kept it
 had it decoded whole: a loss in an alternative rendering set aside is
 not counted, and neither is its charset fallback (review round 8). A
@@ -2134,9 +2146,10 @@ in the seconds.
   same transaction and stays watched by the stall guard until it
   commits, so a crash there leaves the message charged and marked
   `interrupted`. A rolled-back pass leaves no mark and no continuation,
-  and is charged as an ordinary `db_write` failure. A deferral mark on an
-  occurrence the message's current parse no longer has (a parser change
-  dropped it) is cleared in the pass's commit. The continuation
+  and is charged as an ordinary `db_write` failure. An occurrence the
+  message's current parse no longer has (a parser change dropped it) is
+  deleted in the pass's commit, deferral mark included (#1375; see
+  *Reparse in place*). The continuation
   sorts behind the jobs already due, so continued messages and new mail
   take turns. It spends no attempt; a failure in a later pass does.
 - **Progress.** A continuation (a claimed job still carrying the
@@ -2725,8 +2738,14 @@ Failure isolation is preserved across phases:
 - Phase 1 error for one message → that message marked failed, the
   rest of the batch continues.
 - Phase 2a error (chunk/extract) → marked failed, batch continues.
-- Phase 2b (embed) error → a one-string health probe decides whose
-  fault it is:
+- Phase 2b (embed) error → a 429 on the whole batch is not any
+  message's fault and splitting it would multiply the request rate
+  against a throttling provider: the whole batch is deferred without
+  a probe or a split, `attempts` unchanged, a WARNING with the
+  message count is logged, and the breaker opens for its usual
+  backoff or the provider's `Retry-After` (seconds form), whichever
+  is longer, capped at the breaker's 10 min cap. Any other error: a one-string health probe
+  decides whose fault it is:
   - **Probe fails** (embedder down, rate-limited, or rejecting the
     key/model): every in-flight message is *deferred* — `attempts`
     unchanged, class `retryable` or `operator_action_required` — and
@@ -2899,7 +2918,9 @@ per-message rows through `upsert_thread`; Phase 2a finds every chunk ID
 already stored and queues nothing to embed; a chunkless thread keeps
 its stored subject-fallback vector instead of embedding it again (one
 still at the zero placeholder is repaired as usual). So a reparse
-makes no embedding call. Attachment text comes from the extraction
+makes no embedding call, except for a thread whose last chunk goes with
+a dropped attachment occurrence (#1375): its subject is embedded once
+for the thread vector. Attachment text comes from the extraction
 cache, unless the cached row is stale: an older extractor version, or
 (since v6) a `success` or `empty` row with no completeness record, which
 is re-extracted once; a chunk whose text is unchanged keeps its ID and
@@ -2912,6 +2933,29 @@ outcomes below). A reparse can drop addresses from a
 message's rows (the #1144 address budget), but the thread's
 `participants` and `senders` keep them until a reap or a rebuild
 (#1173).
+
+A pass (a reparse or any other) also removes the attachment
+occurrences the message's current parse no longer produces, for
+example a row indexed under a filename a later parser fix decodes
+differently (#1375). In phase 2c's transaction, after the parse's own
+occurrence writes, each such occurrence's `attachments` row (with any
+deferral mark) and `attachments_fts` row are deleted; the message's
+chunk slice of its payload is deleted only when no remaining
+occurrence of the message carries the same payload, with the deleted
+vectors subtracted from the thread's chunk-vector sum, and a cached
+extraction no remaining occurrence uses is purged in the same
+transaction. A later message of the same batch that was prepared
+against that cached row restores it unchanged (`extracted_at`
+included) when it writes its occurrence; if it fails to commit, or the
+process stops first, nothing is restored and the retry extracts again.
+The thread's `has_attachments` is recomputed from its messages. A continuation pass
+that drops an occurrence whose extractor module no surviving copy of
+the payload ran rebuilds the payload's slice from the surviving
+copies. Other messages' occurrences of the payload are untouched. This runs only while
+attachment extraction is on (with it off, a pass writes no occurrence
+rows and removes none). The attachments line counts the removed rows as
+`dropped`. `make reparse` clears leftovers from parser fixes released
+before this.
 
 The v4 migration (`0004_participant_names.sql`, #1140) is one: it
 creates `message_participant_names`, seeds it with each participant

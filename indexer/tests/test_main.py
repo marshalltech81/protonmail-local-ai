@@ -4535,7 +4535,7 @@ class TestRequeueOcrDisabledExtractions:
                 "WARNING",
                 "attachments n=2 success=0 failed=0 unsupported=0 too_large=0 "
                 "ocr_disabled=2 empty=0 deferred=0 cached=0 deferred_messages=0 "
-                "deferred_resumed=0 pdf_pages_failed=0 "
+                "deferred_resumed=0 dropped=0 dropped_text=0 pdf_pages_failed=0 "
                 "pdf_pages_unrecovered=0 ocr_capped_pdfs=0 ocr_pages_skipped=0 ocr_capped_images=0 "
                 "extractor_caps=0 parser_caps_messages=0 "
                 "parser_recipients_merged_messages=0 parser_sender_ambiguous_messages=0 "
@@ -7270,6 +7270,125 @@ class TestEmbedFailureHandling:
         assert queue.stats() == {"queued": 0, "dead": 0}
         assert _chunk_ids(db, "a@example.com")
         assert _chunk_ids(db, "b@example.com")
+
+    @staticmethod
+    def _rate_limit_error(retry_after: str | None = None):
+        import httpx2
+        from openai import APIStatusError
+
+        headers = {} if retry_after is None else {"Retry-After": retry_after}
+        return APIStatusError(
+            message="429 error",
+            response=httpx2.Response(
+                429, headers=headers, request=httpx2.Request("POST", "http://x")
+            ),
+            body=None,
+        )
+
+    def test_rate_limited_batch_backs_off_without_splitting(self, tmp_path, monkeypatch, caplog):
+        """A 429 on the whole batch has no bad input to isolate (#1384):
+        no probe and no per-message calls (they multiply the request
+        rate against a throttling provider). The batch is deferred
+        whole, attempts unchanged, and the backoff is logged."""
+        caplog.set_level(logging.INFO)
+        db, threader, queue, paths = self._setup(
+            tmp_path,
+            monkeypatch,
+            {"a": "alpha RATELIMIT_MARKER", "b": "beta RATELIMIT_MARKER"},
+        )
+        embedder = make_mock_embedder()
+        embedder.embed.side_effect = self._rate_limit_error()
+        breaker = main._EmbedOutageBreaker()
+
+        self._drain(db, embedder, threader, queue, breaker=breaker)
+
+        # One failed batch request; the probe and the split never ran.
+        assert embedder.embed.call_count == 1
+        assert not any(
+            c.args and c.args[0] == main._EMBED_PROBE_TEXT for c in embedder.embed.call_args_list
+        )
+        for p in paths.values():
+            row = self._row(db, p)
+            assert row["status"] == "queued"
+            assert row["attempts"] == 0
+            assert row["last_error_class"] == "retryable"
+        assert not breaker.allow(main.time.monotonic())
+        assert "individually" not in caplog.text
+        backoff = [r for r in caplog.records if "rate limit" in r.getMessage()]
+        assert backoff
+        assert all(r.levelno >= logging.WARNING for r in backoff)
+        assert "2 message(s)" in backoff[0].getMessage()
+        assert "RATELIMIT_MARKER" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [("120", 120), ("99999", 600), ("-5", 30), ("Wed, 21 Oct 2026 07:28:00 GMT", 30)],
+    )
+    def test_rate_limited_batch_honours_bounded_retry_after(
+        self, tmp_path, monkeypatch, header, expected
+    ):
+        """``Retry-After`` lengthens the pause, bounded by the breaker's
+        cap; a negative or HTTP-date value is ignored."""
+        db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})
+        embedder = make_mock_embedder()
+        embedder.embed.side_effect = self._rate_limit_error(header)
+        breaker = main._EmbedOutageBreaker()
+
+        before = main.time.monotonic()
+        self._drain(db, embedder, threader, queue, breaker=breaker)
+
+        assert breaker.open_until - before == pytest.approx(expected, abs=5)
+        assert self._row(db, paths["a"])["attempts"] == 0
+
+    @pytest.mark.parametrize("batch_error", [_status_error(408), _connection_error()])
+    def test_size_sensitive_batch_failure_still_splits(
+        self, tmp_path, monkeypatch, caplog, batch_error
+    ):
+        """A timeout, 408 or connection error on a full-sized batch may
+        depend on its size: the probe and the split still run, so
+        indexing can continue with smaller requests (Codex, #1386)."""
+        caplog.set_level(logging.INFO)
+        db, threader, queue, paths = self._setup(
+            tmp_path, monkeypatch, {"a": "alpha body", "b": "beta body"}
+        )
+        embedder = make_mock_embedder()
+        calls = {"n": 0}
+
+        def embed_batch(texts, **_kw):
+            calls["n"] += 1
+            if len(texts) > 1:
+                raise batch_error
+            return [_UNIT_VECTOR for _ in texts]
+
+        embedder.embed_batch.side_effect = embed_batch
+        embedder.embed.return_value = _UNIT_VECTOR
+        self._drain(db, embedder, threader, queue)
+
+        assert "individually" in caplog.text
+        assert _chunk_ids(db, "a@example.com")
+        assert _chunk_ids(db, "b@example.com")
+
+    def test_rejected_batch_still_splits_after_the_rate_limit_change(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A 400-class rejection can be one input's fault: the batch is
+        still split to isolate it."""
+        caplog.set_level(logging.INFO)
+        db, threader, queue, paths = self._setup(
+            tmp_path, monkeypatch, {"good": "fine text", "bad": "POISON input"}
+        )
+        embedder = make_mock_embedder()
+
+        def embed(text):
+            if "POISON" in text:
+                raise _status_error(400)
+            return _UNIT_VECTOR
+
+        embedder.embed.side_effect = embed
+        self._drain(db, embedder, threader, queue)
+
+        assert "individually" in caplog.text
+        assert _chunk_ids(db, "good@example.com")
 
     def test_rate_limit_on_real_requests_never_dead_letters(self, tmp_path, monkeypatch):
         """The tiny probe fits the provider's remaining capacity but the

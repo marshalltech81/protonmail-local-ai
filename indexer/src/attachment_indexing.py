@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import sqlite3
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -174,6 +175,15 @@ class AttachmentOutcomeCounts:
         with self._lock:
             self._counts["deferred_messages"] += 1
 
+    def record_dropped(self, n: int, slices: int) -> None:
+        """Stored occurrences a pass deleted because the message's
+        current parse no longer produces them, and how many of them took
+        a payload's searchable text with them (#1375)."""
+        if n:
+            with self._lock:
+                self._counts["dropped"] += n
+                self._counts["dropped_text"] += slices
+
     def drain(self) -> dict[str, int]:
         """Return every outcome's count plus ``cached`` and the extractor
         counts, and reset them."""
@@ -181,7 +191,14 @@ class AttachmentOutcomeCounts:
             counts, self._counts = self._counts, Counter()
         drained = {
             name: counts[name]
-            for name in (*ATTACHMENT_OUTCOMES, "cached", "deferred_messages", "deferred_resumed")
+            for name in (
+                *ATTACHMENT_OUTCOMES,
+                "cached",
+                "deferred_messages",
+                "deferred_resumed",
+                "dropped",
+                "dropped_text",
+            )
         }
         drained.update(drain_extractor_counts())
         return drained
@@ -198,6 +215,11 @@ _SUMMARY_FIELDS = (
     # resolved (#1236).
     "deferred_messages",
     "deferred_resumed",
+    # Stored occurrences deleted because the message's current parse no
+    # longer produces them (#1375), and how many of them took a payload's
+    # searchable text along (the latter is in ``_DEGRADED_FIELDS``).
+    "dropped",
+    "dropped_text",
     "pdf_pages_failed",
     "pdf_pages_unrecovered",
     "ocr_capped_pdfs",
@@ -234,6 +256,9 @@ _DEGRADED_FIELDS = (
     "extractor_caps",
     "parser_caps_messages",
     "warnings_suppressed",
+    # A dropped occurrence took the only searchable copy of its payload's
+    # text with it (#1375); a stale row beside a surviving sibling does not.
+    "dropped_text",
 )
 
 
@@ -831,6 +856,7 @@ def apply_attachment_writes(
     claimant_id: str,
     thread_id: str,
     db: Database,
+    purged_extractions: dict[tuple[str, str], sqlite3.Row] | None = None,
 ) -> None:
     """Persist a prepared attachment plan. DB writes only.
 
@@ -857,14 +883,25 @@ def apply_attachment_writes(
         # Deferred again; the stored row already records it (#1236).
         return
     if not plan.resolved_earlier:
-        _write_occurrence(plan, claimant_id=claimant_id, thread_id=thread_id, db=db)
+        _write_occurrence(
+            plan,
+            claimant_id=claimant_id,
+            thread_id=thread_id,
+            db=db,
+            purged_extractions=purged_extractions,
+        )
     if plan.deferred:
         return
     _write_slice(plan, claimant_id=claimant_id, thread_id=thread_id, db=db)
 
 
 def _write_occurrence(
-    plan: AttachmentWritePlan, *, claimant_id: str, thread_id: str, db: Database
+    plan: AttachmentWritePlan,
+    *,
+    claimant_id: str,
+    thread_id: str,
+    db: Database,
+    purged_extractions: dict[tuple[str, str], sqlite3.Row] | None,
 ) -> None:
     """The occurrence's row, its cached result and its completeness (or
     its deferral mark)."""
@@ -897,6 +934,13 @@ def _write_occurrence(
             ocr_pages_skipped=result.ocr_pages_skipped,
             text_complete=result.text_complete,
         )
+    elif purged_extractions:
+        # A cache hit whose row an earlier message of the batch purged
+        # (it dropped the last occurrence using it, #1375): put it back
+        # as it was, so this occurrence has its cached result.
+        purged = purged_extractions.get((plan.attachment.content_hash, module))
+        if purged is not None:
+            db.restore_attachment_extraction(purged)
     # Whether the chunks written below hold all of this occurrence's
     # text (#1242): in the caller's transaction, so it commits and rolls
     # back with them.

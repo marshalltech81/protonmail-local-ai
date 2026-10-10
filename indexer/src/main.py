@@ -83,6 +83,8 @@ from .embedder import (
     EmbedResponseError,
     OpenAIEmbedder,
     classify_embed_failure,
+    embed_retry_after_seconds,
+    is_rate_limit_error,
     scrub_embed_error,
 )
 from .entities import (
@@ -1490,9 +1492,10 @@ class _BatchedMsg:
     # pass (#1236): Phase 2c then continues the message instead of
     # marking it succeeded.
     deferred_attachments: int = 0
-    # Occurrences with a deferral mark this parse no longer has (a parser
-    # change dropped them): Phase 2c clears the marks (#1236).
-    obsolete_deferrals: list[str] = field(default_factory=list)
+    # Stored occurrences of the message this parse no longer produces (a
+    # parser change dropped or renamed them): Phase 2c deletes them, with
+    # any deferral mark (#1236, #1375).
+    stale_occurrences: list[str] = field(default_factory=list)
     parse_ms: float = 0.0
     thread_ms: float = 0.0
     phase1_ms: float = 0.0
@@ -1912,16 +1915,22 @@ def _phase2a_collect_chunks(
             # #1355). Each copy resolved earlier is read once per module,
             # from its cached row as it stands, and only adds its chunks;
             # a payload settles once, so this work stays linear.
-            state.obsolete_deferrals = sorted(
-                occurrence_id
-                for occurrence_id, (_, deferred) in occurrence_states.items()
-                if deferred and occurrence_id not in parsed_occurrences
-            )
+            state.stale_occurrences = sorted(set(occurrence_states) - parsed_occurrences)
             deferred_now = {plan.attachment.content_hash for plan in attach_plans if plan.deferred}
             resolved_now = {
                 plan.attachment.content_hash for plan in attach_plans if not plan.deferred
             }
-            for content_hash in sorted((resolved_now - deferred_now) & kept.keys()):
+            # A kept copy whose payload slice also holds chunks of a module
+            # only a now-stale occurrence ran is rebuilt the same way, so
+            # those chunks go with the occurrence (#1375).
+            stale_modules = db.get_attachment_payloads(msg.claimant_id, state.stale_occurrences)
+            shrunk_now = {
+                content_hash
+                for content_hash, modules in stale_modules.items()
+                if content_hash in kept
+                and modules - {extraction_cache_module(a) for _, a in kept[content_hash]}
+            }
+            for content_hash in sorted(((resolved_now | shrunk_now) - deferred_now) & kept.keys()):
                 served_modules: set[str] = set()
                 for occurrence_index, attachment in kept.pop(content_hash):
                     module = extraction_cache_module(attachment)
@@ -1953,15 +1962,27 @@ def _phase2a_collect_chunks(
                     add_plan(plan, attachment)
         elif INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
             # The parse has no attachments (a parser change may have
-            # dropped them all): any stored deferral mark is obsolete
-            # (Codex round 7 on #1355).
-            state.obsolete_deferrals = sorted(
-                occurrence_id
-                for occurrence_id, (_, deferred) in db.get_attachment_occurrence_states(
-                    msg.claimant_id
-                ).items()
-                if deferred
-            )
+            # dropped them all): every stored occurrence is stale
+            # (Codex round 7 on #1355, #1375).
+            state.stale_occurrences = sorted(db.get_attachment_occurrence_states(msg.claimant_id))
+        # Phase 2c deletes the message's chunk slice of each stale
+        # payload no parsed attachment carries (#1375). Only when no
+        # other chunk of the thread is left does that leave it chunkless,
+        # so the fallback below is reserved for that case.
+        if state.stale_occurrences:
+            parsed_payloads = {attachment.content_hash for attachment in msg.attachments}
+            dropped_chunk_ids: set[str] = set()
+            for content_hash in sorted(
+                db.get_attachment_payloads(msg.claimant_id, state.stale_occurrences).keys()
+                - parsed_payloads
+            ):
+                dropped_chunk_ids |= db.get_chunk_ids_for_message(
+                    msg.claimant_id, attachment_id=content_hash
+                )
+            if dropped_chunk_ids and not db.thread_has_chunks_not_in(
+                state.thread.thread_id, dropped_chunk_ids
+            ):
+                clears_chunks = True
         # A plan without text clears its attachment's chunk slice in
         # Phase 2c, unless another copy of the same bytes in this message
         # fills it: that copy counted the stored chunks as kept and
@@ -2076,6 +2097,7 @@ def _phase2c_commit_vectors(
     db: Database,
     vectors: list[list[float]],
     queue: IndexingQueue,
+    purged_extractions: dict[tuple[str, str], sqlite3.Row],
 ) -> tuple[bool, str | None]:
     """Phase 2c: per-message DB transaction for body + attachments + thread vec.
 
@@ -2123,7 +2145,15 @@ def _phase2c_commit_vectors(
                     claimant_id=msg.claimant_id,
                     thread_id=thread.thread_id,
                     db=db,
+                    purged_extractions=purged_extractions,
                 )
+            # After the parse's own occurrence writes, so a stale
+            # occurrence's payload slice goes only when no parsed
+            # occurrence carries it, and before the thread vector is
+            # derived from the sums the deletion updates (#1375).
+            dropped, dropped_slices = db.delete_attachment_occurrences(
+                msg.claimant_id, state.stale_occurrences, purged_extractions
+            )
             # Replace the Phase 1 seed thread vector. Three cases
             # mirror the old ``_seed_thread_embedding`` logic:
             #   1. Thread now has chunks (this message contributed
@@ -2144,8 +2174,6 @@ def _phase2c_commit_vectors(
                 db.replace_thread_vector(thread.thread_id, chunk_mean)
             elif state.subject_fallback_offset is not None:
                 db.replace_thread_vector(thread.thread_id, vectors[state.subject_fallback_offset])
-            for occurrence_id in state.obsolete_deferrals:
-                db.clear_attachment_extraction_deferral(occurrence_id)
             if continues:
                 # The refund of a lone survivor's charge is part of this
                 # transaction, and the charge stays watched until it
@@ -2165,6 +2193,7 @@ def _phase2c_commit_vectors(
     # Counted once committed, so a message prepared again after an
     # embedder outage is counted once (review round 1 on #884).
     record_committed_outcomes(state.attach_plans)
+    attachment_outcomes.record_dropped(dropped, dropped_slices)
     if continues:
         attachment_outcomes.record_deferred_message()
         _note_extraction_deferral()
@@ -2198,8 +2227,12 @@ class _EmbedOutageBreaker:
     def allow(self, now: float) -> bool:
         return now >= self.open_until
 
-    def record_failure(self, now: float) -> float:
-        """Open the breaker; returns the pause length in seconds."""
+    def record_failure(self, now: float, retry_after: float | None = None) -> float:
+        """Open the breaker; returns the pause length in seconds.
+
+        ``retry_after`` is a provider's ``Retry-After`` delay: the pause
+        is at least that long, bounded by ``cap_seconds``.
+        """
         if not self.consecutive_failures:
             self.outage_started = now
         self.consecutive_failures += 1
@@ -2207,6 +2240,8 @@ class _EmbedOutageBreaker:
             self.base_seconds * (2 ** (self.consecutive_failures - 1)),
             self.cap_seconds,
         )
+        if retry_after is not None:
+            delay = max(delay, min(retry_after, self.cap_seconds))
         self.open_until = now + delay
         return delay
 
@@ -2225,6 +2260,7 @@ class _EmbedOutageBreaker:
 # Deferral delay for an outage when no breaker is supplied (compat
 # shims and tests). Production always passes the main-loop breaker.
 _OUTAGE_DEFER_SECONDS = 30.0
+_OUTAGE_DEFER_CAP_SECONDS = 600.0
 
 _EMBED_PROBE_TEXT = "embedder health probe"
 
@@ -2259,9 +2295,12 @@ def _pause_embedding(
     queue: IndexingQueue,
     breaker: _EmbedOutageBreaker | None,
     exc: BaseException,
+    retry_after: float | None = None,
 ) -> None:
     """The embedder itself is failing: defer ``entries`` without
     spending attempts and open the breaker so draining stops.
+    ``retry_after`` is the provider's ``Retry-After`` (seconds), which
+    lengthens the pause up to the breaker's cap.
 
     A configuration error (or a probe the provider refuses outright)
     records ``operator_action_required``; anything else is an outage
@@ -2274,9 +2313,10 @@ def _pause_embedding(
         else ERROR_CLASS_RETRYABLE
     )
     err_repr = scrub_embed_error(exc)
-    delay = (
-        breaker.record_failure(time.monotonic()) if breaker is not None else _OUTAGE_DEFER_SECONDS
-    )
+    if breaker is not None:
+        delay = breaker.record_failure(time.monotonic(), retry_after)
+    else:
+        delay = max(_OUTAGE_DEFER_SECONDS, min(retry_after or 0.0, _OUTAGE_DEFER_CAP_SECONDS))
     for entry in entries:
         queue.defer(
             entry.row["filepath"],
@@ -2618,6 +2658,23 @@ def _drain_queue_batched(
             # ``EmbedResponseError``), trims SDK status errors to
             # type + status_code, and anything else to its type.
             err_repr = scrub_embed_error(e)
+            if is_rate_limit_error(e):
+                # Throttled: the whole request was refused for rate, so
+                # there is no bad input to isolate, and splitting it
+                # multiplies the request rate against a provider that
+                # is already pushing back (#1384). Back off and retry
+                # the whole batch, spending no attempts. A timeout, 408
+                # or connection error can depend on the request's size,
+                # so those keep the probe and the split below.
+                log.warning(
+                    "batched embed failed (%s): the provider is rate limiting; "
+                    "deferring the whole batch of %d message(s) without "
+                    "splitting it.",
+                    err_repr,
+                    len(survivors),
+                )
+                _pause_embedding(survivors, queue, breaker, e, embed_retry_after_seconds(e))
+                break
             probe_error = _probe_embedder(embedder)
             if probe_error is not None:
                 _pause_embedding(survivors, queue, breaker, probe_error)
@@ -2641,9 +2698,12 @@ def _drain_queue_batched(
         per_msg_embed_ms = embed_ms / max(1, len(survivors))
 
         # ---- Phase 2c: per-message vector commits ----
+        # Cached extraction rows a stale drop purged in this batch, for a
+        # later message that prepared against one to restore (#1375).
+        purged_extractions: dict[tuple[str, str], sqlite3.Row] = {}
         for entry in survivors:
             t0 = time.perf_counter()
-            ok, err = _phase2c_commit_vectors(entry, db, vectors, queue)
+            ok, err = _phase2c_commit_vectors(entry, db, vectors, queue, purged_extractions)
             db_write_ms = (time.perf_counter() - t0) * 1000
             if ok:
                 # A message with deferred attachments was continued in

@@ -56,12 +56,14 @@ payload:
 Each budget that cut the text is reported to the parent, which logs it
 through ``warn_extractor_cap``, so the result is marked incomplete
 (#1242). So is a decode that lost bytes: a body text part's
-(``eml_body_decode``), a nested email's base64, any body text part or
-nested email in quoted-printable, whose loss records nothing to detect
-(#1288), and any body text part in another encoding that is not
-identity (uuencode and its aliases, or an unknown value), each counted
-only when the body keeps that part, and a nested email whose transport
-text lost a line to the parse. So is a
+(``eml_body_decode``), a nested email's base64 or quoted-printable
+(``eml_nested_messages``), a body text part's quoted-printable or
+uuencode (#1288: a quoted-printable ``=`` that is no escape or soft
+break, a uuencode decode that fell back to its transport text), and any
+body text part in another encoding that is not identity (an unknown
+value), each counted only when the body keeps that part, and a nested
+email whose transport text lost a line to the parse. A part that
+decoded cleanly stays complete. So is a
 part declared ``multipart/*`` that the standard library left
 undecomposed (no or a missing boundary), whose text is never read,
 when the body could keep it (``eml_body_structure``), and so is a
@@ -350,15 +352,11 @@ def _inner_message(
         if decoded is None:
             return None, True
         # A lenient decode can drop bytes and still succeed: the email
-        # is rendered, but its text is not whole. Base64 loss is detected
-        # (review round 1); quoted-printable loss records nothing to
-        # detect, so every quoted-printable nested email counts as lossy
-        # until #1288 detects it (review round 2).
-        # A transport line the parse dropped is lost too (review round 8).
-        lossy = (
-            encoding == "quoted-printable"
-            or parser._base64_transport_lost(transport)
-            or parser._transport_lines_dropped(part)
+        # is rendered, but its text is not whole (base64 review round 1,
+        # quoted-printable #1288). A transport line the parse dropped is
+        # lost too (review round 8).
+        lossy = parser._transport_decode_lost(transport, encoding) or (
+            parser._transport_lines_dropped(part)
         )
         container = decoded
     children = container.get_payload()

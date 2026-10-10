@@ -2,6 +2,8 @@
 
 All tools are available inside Claude Desktop once the stack is running.
 
+The server retrieves and reports mail. Linking threads and tracking matters are left to the client; see PLAN.md decision 44.
+
 ## Response format
 
 The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
@@ -611,6 +613,13 @@ individual messages. Each result bundles its messages with subject,
 participants, date range, folder, and a short snippet. To read the
 contents of a returned thread, follow up with `get_thread` or
 `summarize_thread` using the result's `Thread ID`.
+
+For the latest or N most recent messages from a person, use
+`query_messages(sender=..., limit=N)`, newest first. A page holds at most
+100 messages, so follow `next_cursor` until N are collected. This tool
+ranks by relevance, not date. Read a body with `get_message` only when
+the answer needs its content; `get_thread` can return messages outside
+the requested sender and count.
 
 For outstanding-item questions, the description gives the same
 verification guidance as [`query_messages`](#query_messages): look for
@@ -2084,7 +2093,7 @@ unread.
 | `success` | the stored text | null |
 | `empty` | `""` | null |
 | `failed` | null | `extraction failed` (the stored error is never returned) |
-| `unsupported` | null | `no extractor reads this file type`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` |
+| `unsupported` | null | `no extractor could read this file: its type has no extractor, the extractor is missing from this image, or it declined the file (for example an encrypted PDF or a work cap)`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` |
 | `too_large` | null | the file is over the indexer's attachment size limit |
 | `deferred` | null | the indexer deferred this attachment's extraction to a later pass (its per-message extraction budget was reached); its text is not indexed yet |
 | none recorded | null | no extraction is recorded yet (not run yet, or extraction off) |
