@@ -186,12 +186,12 @@ def test_wal_is_reclaimed_after_the_round(report):
         commits = wal["commits_during_transaction"]
         assert commits > 0
         # Every frame committed while the round held its snapshot stays
-        # in the WAL, beyond what the steady state can reuse. Commits
-        # alternate message and ballast, so at least half carry ballast.
-        assert (
-            wal["wal_max_during_transaction_bytes"]
-            >= commits // 2 * wal["commit_bytes"] - wal["wal_at_transaction_start_bytes"]
-        )
+        # in the WAL: the growth over the window (not the size, which
+        # holds the warm-up's commits too) is at least the ballast of the
+        # commits inside it. Commits alternate message and ballast, so at
+        # least half carry ballast.
+        growth = wal["wal_max_during_transaction_bytes"] - wal["wal_at_transaction_start_bytes"]
+        assert growth >= commits // 2 * wal["commit_bytes"] > 0
         assert wal["checkpoint_after"]["busy"] == 0
         assert wal["wal_after_checkpoint_bytes"] == 0
 
