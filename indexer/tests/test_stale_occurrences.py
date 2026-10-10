@@ -156,7 +156,7 @@ def _claimant(p: StalePipeline, path: str) -> str:
 
 class TestStaleSibling:
     def test_a_corrected_filename_drops_the_stale_row_and_keeps_the_chunks(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, caplog
     ):
         """The observed shape: an occurrence indexed under an undecoded
         ``?=`` filename, then the same payload under the corrected name
@@ -185,6 +185,9 @@ class TestStaleSibling:
         # The parser fix: the next parse produces the corrected name, so
         # the occurrence ID differs and the old one is stale.
         names["stale"] = False
+        caplog.set_level(logging.INFO)
+        attachment_indexing.attachment_outcomes.drain()
+        caplog.clear()
         p.reparse(path)
 
         rows = p.rows()
@@ -202,6 +205,11 @@ class TestStaleSibling:
         assert p.stored_sums(p.thread_ids()[0]) == sums_before
         assert p.embedder.embed_batch.call_count == embeds_before
         assert len(p.extractor.calls) == extractions_before
+        # A stale row beside a surviving sibling loses no text: INFO.
+        main._log_attachment_outcomes(force=True)
+        lines = [r for r in caplog.records if r.getMessage().startswith("attachments n=")]
+        assert [r.levelno for r in lines] == [logging.INFO]
+        assert " dropped=1 dropped_text=0 " in lines[0].getMessage()
         # The cache row of the payload is still used, so it stays.
         assert (
             p.db._conn.execute(
@@ -435,8 +443,9 @@ class TestVisibility:
         p.reparse(path)
         main._log_attachment_outcomes(force=True)
         lines = [r for r in caplog.records if r.getMessage().startswith("attachments n=")]
-        assert [r.levelno for r in lines] == [logging.INFO]
-        assert " dropped=2 " in lines[0].getMessage()
+        # Two unique payloads lost their searchable text: a WARNING.
+        assert [r.levelno for r in lines] == [logging.WARNING]
+        assert " dropped=2 dropped_text=2 " in lines[0].getMessage()
         assert MARKER not in caplog.text
         errors = [r[0] for r in p.db._conn.execute("SELECT last_error FROM indexing_jobs")]
         assert not any(MARKER in (e or "") for e in errors)
@@ -584,3 +593,83 @@ class TestSharedSliceAcrossModules:
         assert not any("application/pdf" in t for t in texts)
         thread_id = p.thread_ids()[0]
         assert p.stored_sums(thread_id) == p.recomputed_sums(thread_id)
+
+
+class TestPartialModuleRowsAndPeerFlag:
+    def test_only_the_unused_module_row_of_a_shared_payload_is_purged(self, tmp_path, monkeypatch):
+        """A parsed occurrence keeps its (payload, module) cache row; the
+        stale occurrence's row of another module for the same payload
+        goes (Codex round 2 on #1385)."""
+        p = StalePipeline(tmp_path, monkeypatch)
+        payload = b"two-module-payload"
+        drop = {"on": False}
+
+        def rewrite(_path, msg):
+            if drop["on"]:
+                msg.attachments = msg.attachments[:1]
+
+        p.parse_with(rewrite)
+        path = p.add(
+            "modrows",
+            [
+                (payload, "text/plain", f"{MARKER}-a.txt"),
+                (payload, "application/pdf", f"{MARKER}-b.pdf"),
+            ],
+        )
+        p.drain()
+        shared_hash = hashlib.sha256(payload).hexdigest()
+
+        def modules() -> list[str]:
+            return sorted(
+                r[0]
+                for r in p.db._conn.execute(
+                    "SELECT extractor_module FROM attachment_extractions WHERE attachment_id = ?",
+                    (shared_hash,),
+                )
+            )
+
+        assert len(modules()) == 2
+        drop["on"] = True
+        p.reparse(path)
+        assert modules() == [
+            p.db._conn.execute("SELECT extractor_module FROM attachments").fetchone()[0]
+        ]
+
+    def test_a_peers_unfinished_attachments_keep_the_thread_flag(self, tmp_path, monkeypatch):
+        """Two messages of one thread drop their attachments in one
+        batch; after the first commit the thread flag stays true because
+        the second's occurrence row is still stored (Codex round 2 on #1385)."""
+        p = StalePipeline(tmp_path, monkeypatch)
+        drop = {"on": False}
+
+        def rewrite(_path, msg):
+            if drop["on"]:
+                msg.attachments = []
+                msg.has_attachments = False
+
+        p.parse_with(rewrite)
+        first = p.add("flag-a", _parts("flag-a", 1))
+        second = p.add("flag-b", _parts("flag-b", 1))
+        p.drain()
+        # One thread holds both messages.
+        p.db._conn.execute(
+            "UPDATE message_thread_map SET thread_id = (SELECT MIN(thread_id) FROM threads)"
+        )
+        p.db._conn.commit()
+        thread_id = p.db._conn.execute(
+            "SELECT thread_id FROM message_thread_map LIMIT 1"
+        ).fetchone()[0]
+        drop["on"] = True
+        p.db._conn.execute("UPDATE messages SET has_attachments = 0")
+        p.db._conn.commit()
+        claimant = _claimant(p, first)
+        occurrence = p.db._conn.execute(
+            "SELECT attachment_occurrence_id FROM attachments WHERE claimant_id = ?",
+            (claimant,),
+        ).fetchone()[0]
+        p.db.delete_attachment_occurrences(claimant, [occurrence], set())
+        flag = p.db._conn.execute(
+            "SELECT has_attachments FROM threads WHERE thread_id = ?", (thread_id,)
+        ).fetchone()[0]
+        assert flag == 1, "the peer's stored occurrence keeps the flag"
+        assert p.rows() and _claimant(p, second) in {r[0] for r in p.rows()}

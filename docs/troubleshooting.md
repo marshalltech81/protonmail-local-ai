@@ -830,7 +830,8 @@ kind of reindex that needs depends on whether search data changes too:
   or threading. Its migration queues every indexed message with reason
   `reparse` at startup; the indexer re-reads each file and rewrites its
   per-message rows, with no embedding calls (attachment text comes from
-  the extraction cache). Search keeps working throughout; the data the
+  the extraction cache; a thread left with no chunk by a dropped
+  attachment occurrence embeds its subject once, #1375). Search keeps working throughout; the data the
   release adds is missing for a message until its reparse runs (after
   the release that added `sender_ambiguous`, `query_messages` counts
   such a message as `indeterminate` under a sender filter, or under an
@@ -1781,7 +1782,7 @@ only, never filenames or text (`make logs`):
   here.
 - `attachments n=<total> success= failed= unsupported= too_large=
   ocr_disabled= empty= deferred= cached= deferred_messages=
-  deferred_resumed= dropped= pdf_pages_failed=
+  deferred_resumed= dropped= dropped_text= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
   ocr_capped_images= extractor_caps= parser_caps_messages=
   parser_recipients_merged_messages= parser_sender_ambiguous_messages=
@@ -1802,8 +1803,10 @@ only, never filenames or text (`make logs`):
   occurrences that resolved; a deferred attachment is extracted on a
   later pass of its message, never dropped. `dropped` counts stored
   occurrences removed because the message's current parse no longer
-  produces them (#1375; a stale row, not lost text, so it does not make
-  the line a WARNING). A continuation pass skips
+  produces them (#1375), and `dropped_text` those among them that took
+  the only searchable copy of their payload's text; a stale row beside
+  a surviving sibling is the former only, but `dropped_text` makes the
+  line a WARNING. A continuation pass skips
   the occurrences resolved in earlier passes, so they are not counted
   again.
   - When it is logged: during the initial index, with the timing summary

@@ -1842,10 +1842,14 @@ class Database:
 
     @_synchronized
     def delete_attachment_occurrences(
-        self, claimant_id: str, occurrence_ids: list[str], keep_extractions: set[str]
-    ) -> int:
+        self,
+        claimant_id: str,
+        occurrence_ids: list[str],
+        keep_extractions: set[tuple[str, str]],
+    ) -> tuple[int, int]:
         """Drop occurrences of ``claimant_id`` its current parse no longer
-        produces (#1375) and return how many rows went.
+        produces (#1375) and return how many rows went and how many
+        payload slices went with them.
 
         Each occurrence's ``attachments`` row and ``attachments_fts`` row
         go (a deferral mark goes with the row, #1236). The message's
@@ -1855,11 +1859,14 @@ class Database:
         a corrected filename) uses it; its vectors are subtracted from
         their threads' chunk-vector sums (#1356). A cached extraction of
         the payload that no remaining occurrence uses is purged, as when
-        the whole message is removed, unless ``keep_extractions`` names
-        it: a later message of the same batch prepared against that
-        cached row and writes its occurrence after this one. The
-        thread's ``has_attachments`` is recomputed from its messages,
-        since ``upsert_thread`` only ever sets it. In phase 2c's
+        the whole message is removed, except a (payload, module) row in
+        ``keep_extractions``: a later message of the same batch prepared
+        against that cached row and writes its occurrence after this
+        one. The thread's ``has_attachments`` is recomputed, since
+        ``upsert_thread`` only ever sets it: it stays true while any
+        occurrence of the thread is stored or any message of it has
+        attachments without a stored occurrence yet (a batch peer
+        whose commit has not run). In phase 2c's
         transaction, after the pass's own occurrence writes, so the
         remaining occurrences are the parse's.
         """
@@ -1869,6 +1876,7 @@ class Database:
             started = self._begin_if_needed(cur)
             payloads: set[str] = set()
             deleted = 0
+            slices = 0
             for occurrence_id in occurrence_ids:
                 row = cur.execute(
                     "SELECT fts_rowid, attachment_id FROM attachments "
@@ -1902,14 +1910,27 @@ class Database:
                         "DELETE FROM message_chunks WHERE claimant_id = ? AND attachment_id = ?",
                         (claimant_id, attachment_id),
                     )
-                if attachment_id not in keep_extractions:
-                    cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id,))
+                    slices += bool(rows)
+                for (module,) in cur.execute(
+                    "SELECT extractor_module FROM attachment_extractions WHERE attachment_id = ?",
+                    (attachment_id,),
+                ).fetchall():
+                    if (attachment_id, module) not in keep_extractions:
+                        cur.execute(
+                            _PURGE_ORPHAN_EXTRACTION_SQL + " AND extractor_module = ?",
+                            (attachment_id, module),
+                        )
             if deleted:
                 cur.execute(
                     "UPDATE threads SET has_attachments = EXISTS ("
                     "SELECT 1 FROM message_thread_map t "
+                    "JOIN attachments a ON a.claimant_id = t.claimant_id "
+                    "WHERE t.thread_id = threads.thread_id) OR EXISTS ("
+                    "SELECT 1 FROM message_thread_map t "
                     "JOIN messages m ON m.claimant_id = t.claimant_id "
-                    "WHERE t.thread_id = threads.thread_id AND m.has_attachments = 1) "
+                    "WHERE t.thread_id = threads.thread_id AND m.has_attachments = 1 "
+                    "AND NOT EXISTS (SELECT 1 FROM attachments a "
+                    "WHERE a.claimant_id = t.claimant_id)) "
                     "WHERE thread_id = (SELECT thread_id FROM message_thread_map "
                     "WHERE claimant_id = ?)",
                     (claimant_id,),
@@ -1918,7 +1939,7 @@ class Database:
         except Exception:
             self._rollback_if_started(started)
             raise
-        return deleted
+        return deleted, slices
 
     @_synchronized
     def get_attachment_occurrence_states(

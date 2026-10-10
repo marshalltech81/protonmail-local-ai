@@ -2900,7 +2900,9 @@ per-message rows through `upsert_thread`; Phase 2a finds every chunk ID
 already stored and queues nothing to embed; a chunkless thread keeps
 its stored subject-fallback vector instead of embedding it again (one
 still at the zero placeholder is repaired as usual). So a reparse
-makes no embedding call. Attachment text comes from the extraction
+makes no embedding call, except for a thread whose last chunk goes with
+a dropped attachment occurrence (#1375): its subject is embedded once
+for the thread vector. Attachment text comes from the extraction
 cache, unless the cached row is stale: an older extractor version, or
 (since v6) a `success` or `empty` row with no completeness record, which
 is re-extracted once; a chunk whose text is unchanged keeps its ID and

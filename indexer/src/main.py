@@ -2089,7 +2089,7 @@ def _phase2c_commit_vectors(
     db: Database,
     vectors: list[list[float]],
     queue: IndexingQueue,
-    batch_payloads: set[str],
+    batch_extractions: set[tuple[str, str]],
 ) -> tuple[bool, str | None]:
     """Phase 2c: per-message DB transaction for body + attachments + thread vec.
 
@@ -2142,8 +2142,8 @@ def _phase2c_commit_vectors(
             # occurrence's payload slice goes only when no parsed
             # occurrence carries it, and before the thread vector is
             # derived from the sums the deletion updates (#1375).
-            dropped = db.delete_attachment_occurrences(
-                msg.claimant_id, state.stale_occurrences, batch_payloads
+            dropped, dropped_slices = db.delete_attachment_occurrences(
+                msg.claimant_id, state.stale_occurrences, batch_extractions
             )
             # Replace the Phase 1 seed thread vector. Three cases
             # mirror the old ``_seed_thread_embedding`` logic:
@@ -2184,7 +2184,7 @@ def _phase2c_commit_vectors(
     # Counted once committed, so a message prepared again after an
     # embedder outage is counted once (review round 1 on #884).
     record_committed_outcomes(state.attach_plans)
-    attachment_outcomes.record_dropped(dropped)
+    attachment_outcomes.record_dropped(dropped, dropped_slices)
     if continues:
         attachment_outcomes.record_deferred_message()
         _note_extraction_deferral()
@@ -2661,12 +2661,16 @@ def _drain_queue_batched(
         per_msg_embed_ms = embed_ms / max(1, len(survivors))
 
         # ---- Phase 2c: per-message vector commits ----
-        # Payloads the batch's messages carry: a cached extraction one of
-        # them prepared against is not purged by another's stale drop.
-        batch_payloads = {a.content_hash for entry in survivors for a in entry.msg.attachments}
+        # Cached extractions the batch's messages prepared against: a
+        # stale drop in one message does not purge a row another needs.
+        batch_cache_rows = {
+            (plan.attachment.content_hash, extraction_cache_module(plan.attachment))
+            for entry in survivors
+            for plan in entry.attach_plans
+        }
         for entry in survivors:
             t0 = time.perf_counter()
-            ok, err = _phase2c_commit_vectors(entry, db, vectors, queue, batch_payloads)
+            ok, err = _phase2c_commit_vectors(entry, db, vectors, queue, batch_cache_rows)
             db_write_ms = (time.perf_counter() - t0) * 1000
             if ok:
                 # A message with deferred attachments was continued in

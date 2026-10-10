@@ -174,12 +174,14 @@ class AttachmentOutcomeCounts:
         with self._lock:
             self._counts["deferred_messages"] += 1
 
-    def record_dropped(self, n: int) -> None:
+    def record_dropped(self, n: int, slices: int) -> None:
         """Stored occurrences a pass deleted because the message's
-        current parse no longer produces them (#1375)."""
+        current parse no longer produces them, and how many of them took
+        a payload's searchable text with them (#1375)."""
         if n:
             with self._lock:
                 self._counts["dropped"] += n
+                self._counts["dropped_text"] += slices
 
     def drain(self) -> dict[str, int]:
         """Return every outcome's count plus ``cached`` and the extractor
@@ -194,6 +196,7 @@ class AttachmentOutcomeCounts:
                 "deferred_messages",
                 "deferred_resumed",
                 "dropped",
+                "dropped_text",
             )
         }
         drained.update(drain_extractor_counts())
@@ -212,8 +215,10 @@ _SUMMARY_FIELDS = (
     "deferred_messages",
     "deferred_resumed",
     # Stored occurrences deleted because the message's current parse no
-    # longer produces them (#1375): stale rows removed, not text lost.
+    # longer produces them (#1375), and how many of them took a payload's
+    # searchable text along (the latter is in ``_DEGRADED_FIELDS``).
     "dropped",
+    "dropped_text",
     "pdf_pages_failed",
     "pdf_pages_unrecovered",
     "ocr_capped_pdfs",
@@ -250,6 +255,9 @@ _DEGRADED_FIELDS = (
     "extractor_caps",
     "parser_caps_messages",
     "warnings_suppressed",
+    # A dropped occurrence took the only searchable copy of its payload's
+    # text with it (#1375); a stale row beside a surviving sibling does not.
+    "dropped_text",
 )
 
 
