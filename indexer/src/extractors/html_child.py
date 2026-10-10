@@ -7,8 +7,9 @@ lowered the address-space and CPU limits ``html.py`` passes. The payload
 file holds the documents one after another; each ``<length>`` is one
 document's size in bytes, in order.
 
-Each document is decoded as UTF-8 with replacement and converted with
-``html.html_to_text`` (a fresh converter each). The texts are returned
+Each document is decoded as UTF-8 with replacement, converted with
+``html.html_to_text`` (a fresh converter each) and stripped, as the
+dispatcher and the parser strip every text. The texts are returned
 in one text, each prefixed by its length in characters and a colon,
 which ``html.split_texts`` reads back. They share one budget,
 ``html._MAX_TEXT_CHARS``: the text that crosses it is cut there, the
@@ -44,7 +45,9 @@ def extract_text(payload: bytes, *lengths: str) -> tuple[str, list[str]]:
     for size in sizes:
         source = payload[offset : offset + size].decode("utf-8", errors="replace")
         offset += size
-        text = html.html_to_text(source)
+        # Stripped before the budget charges it, as both callers strip:
+        # whitespace must not cut a text or starve the ones after it.
+        text = html.html_to_text(source).strip()
         if len(text) > left:
             framed.append(f"{left}:{text[:left]}")
             return "".join(framed), [html.CAP_TEXT]

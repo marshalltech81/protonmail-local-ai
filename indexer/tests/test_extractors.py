@@ -483,12 +483,12 @@ class TestHtmlExtractorFallback:
         ("payload", "expected"),
         [
             # Valid multi-byte UTF-8 decodes unchanged.
-            (b"<p>caf\xc3\xa9 na\xc3\xafve</p>", "café naïve\n"),
+            (b"<p>caf\xc3\xa9 na\xc3\xafve</p>", "café naïve"),
             # Each invalid byte, and a truncated sequence, becomes one
             # U+FFFD while the valid text around it is kept.
             (
                 b"<html><body><p>caf\xc3\xa9 \xff\xfe text \xe2\x82</p></body></html>",
-                "café �� text �\n",
+                "café �� text �",
             ),
         ],
         ids=["valid-utf8", "malformed-utf8"],

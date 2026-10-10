@@ -1930,8 +1930,9 @@ walk already runs in its own child and converts there. The documents
 cross as one payload file with their byte lengths as the child's
 arguments (one to 200, ASCII digits, adding up to the file's size;
 anything else is `ValueError` in the child), and come back in the text
-frame, each prefixed by its length in characters and a colon; a broken
-prefix or a count that does not match is `ChildOutputError`. The texts
+frame, each stripped (as the dispatcher and the parser strip them) and
+prefixed by its length in characters and a colon; a broken prefix or a
+count that does not match is `ChildOutputError`. The stripped texts
 share a budget of 10,000,000 characters: the text that crosses it is
 cut there and the documents after it are not converted. A lone
 surrogate, which UTF-8 cannot carry (a UTF-7 part can decode to one),

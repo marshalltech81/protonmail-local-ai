@@ -145,7 +145,8 @@ class TestDifferentialCatalogue:
     @pytest.mark.parametrize("shape", sorted(_SHAPES))
     def test_attachment_text_is_identical(self, shape):
         payload = _SHAPES[shape]
-        assert html.extract(payload) == (_attachment_in_process(payload), "html")
+        # Stripped as the dispatcher strips every result (review round 3).
+        assert html.extract(payload) == (_attachment_in_process(payload).strip(), "html")
 
     @real_child
     @pytest.mark.parametrize("shape", sorted(_SHAPES))
@@ -385,8 +386,8 @@ class TestBodyDegradation:
         sources = [b"<p>abcdefgh</p>", b"<p>ijklmnop</p>", b"<p>" + MARKER.encode() + b"</p>"]
         msg, path = _parse(tmp_path, _message(*(("text/html", s) for s in sources)))
         assert len(converted) == 2
-        # "abcdefgh\n" is nine characters; three are left for the second.
-        assert msg.body_text == "abcdefgh\n\nijk"
+        # "abcdefgh" is eight characters; four are left for the second.
+        assert msg.body_text == "abcdefgh\n\nijkl"
         assert msg.parse_caps == {"html_body": 2}
         assert msg.body_complete is False
         assert (
@@ -395,6 +396,17 @@ class TestBodyDegradation:
         )
         assert f"parser work caps dropped content from {path}: html_body=2" in caplog.text
         assert MARKER not in caplog.text
+
+    def test_whitespace_does_not_use_the_budget(self, tmp_path, monkeypatch):
+        """Review round 3: each text is stripped before the budget charges
+        it, so whitespace both callers discard can neither cut a part nor
+        starve the parts after it."""
+        monkeypatch.setattr(html, "_MAX_TEXT_CHARS", 5)
+        sources = [b"<pre>" + b" " * 50 + b"</pre>", b"<p>abc</p>", b"\n\n<p>de</p>\n\n"]
+        msg, _ = _parse(tmp_path, _message(*(("text/html", s) for s in sources)))
+        assert msg.body_text == "abc\n\nde"
+        assert msg.parse_caps == {}
+        assert msg.body_complete is True
 
     def test_failure_lines_are_rate_limited(self, tmp_path, monkeypatch, caplog):
         caplog.set_level("DEBUG")
@@ -623,4 +635,4 @@ def test_stubbed_output_shape_is_the_childs(monkeypatch):
     runner to the same texts (the frames ``stub_child_output`` feeds)."""
     output = extractor_child.run("html", b"<p>a</p><p>b</p>", ["8", "8"])
     stub_child_output(monkeypatch, output)
-    assert html.convert([b"<p>a</p>", b"<p>b</p>"]) == (["a\n", "b\n"], False)
+    assert html.convert([b"<p>a</p>", b"<p>b</p>"]) == (["a", "b"], False)

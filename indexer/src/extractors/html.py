@@ -34,8 +34,8 @@ parse, a text past the end, or more or fewer texts than documents is
 ``_MAX_TEXT_CHARS``: the text that crosses it is cut there and the
 documents after it are not converted, reported as the ``CAP_TEXT`` cap.
 
-``extract`` returns the converter's text as it did in process (the
-dispatcher strips it); ``convert_bodies`` too (the parser strips each).
+Each text comes back stripped, as the dispatcher and the parser strip
+it, so surrounding whitespace never counts against the budget.
 A lone surrogate, which UTF-8 cannot hold (a UTF-7 body can decode to
 one), is replaced by ``?`` before a body crosses
 (``replace_lone_surrogates``), and the parser logs the count; in process
