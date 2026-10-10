@@ -2923,8 +2923,12 @@ deferral mark) and `attachments_fts` row are deleted; the message's
 chunk slice of its payload is deleted only when no remaining
 occurrence of the message carries the same payload, with the deleted
 vectors subtracted from the thread's chunk-vector sum, and a cached
-extraction no remaining occurrence uses is purged. Other messages'
-occurrences of the payload are untouched. This runs only while
+extraction no remaining occurrence uses is purged (unless another
+message of the same batch was prepared against it). The thread's
+`has_attachments` is recomputed from its messages. A continuation pass
+that drops an occurrence whose extractor module no surviving copy of
+the payload ran rebuilds the payload's slice from the surviving
+copies. Other messages' occurrences of the payload are untouched. This runs only while
 attachment extraction is on (with it off, a pass writes no occurrence
 rows and removes none). The attachments line counts the removed rows as
 `dropped`. `make reparse` clears leftovers from parser fixes released

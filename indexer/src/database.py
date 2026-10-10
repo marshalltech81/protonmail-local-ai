@@ -1823,22 +1823,27 @@ class Database:
             raise
 
     @_synchronized
-    def get_attachment_payloads(self, claimant_id: str, occurrence_ids: list[str]) -> set[str]:
+    def get_attachment_payloads(
+        self, claimant_id: str, occurrence_ids: list[str]
+    ) -> dict[str, set[str]]:
         """The payloads (``attachment_id``) of ``claimant_id``'s stored
-        occurrences among ``occurrence_ids``."""
-        payloads: set[str] = set()
+        occurrences among ``occurrence_ids``, each with the extractor
+        modules those occurrences ran."""
+        payloads: dict[str, set[str]] = {}
         for occurrence_id in occurrence_ids:
             row = self._conn.execute(
-                "SELECT attachment_id FROM attachments "
+                "SELECT attachment_id, extractor_module FROM attachments "
                 "WHERE attachment_occurrence_id = ? AND claimant_id = ?",
                 (occurrence_id, claimant_id),
             ).fetchone()
             if row is not None:
-                payloads.add(row["attachment_id"])
+                payloads.setdefault(row["attachment_id"], set()).add(row["extractor_module"])
         return payloads
 
     @_synchronized
-    def delete_attachment_occurrences(self, claimant_id: str, occurrence_ids: list[str]) -> int:
+    def delete_attachment_occurrences(
+        self, claimant_id: str, occurrence_ids: list[str], keep_extractions: set[str]
+    ) -> int:
         """Drop occurrences of ``claimant_id`` its current parse no longer
         produces (#1375) and return how many rows went.
 
@@ -1850,9 +1855,13 @@ class Database:
         a corrected filename) uses it; its vectors are subtracted from
         their threads' chunk-vector sums (#1356). A cached extraction of
         the payload that no remaining occurrence uses is purged, as when
-        the whole message is removed. In phase 2c's transaction, after
-        the pass's own occurrence writes, so the remaining occurrences
-        are the parse's.
+        the whole message is removed, unless ``keep_extractions`` names
+        it: a later message of the same batch prepared against that
+        cached row and writes its occurrence after this one. The
+        thread's ``has_attachments`` is recomputed from its messages,
+        since ``upsert_thread`` only ever sets it. In phase 2c's
+        transaction, after the pass's own occurrence writes, so the
+        remaining occurrences are the parse's.
         """
         cur = self._conn.cursor()
         started = False
@@ -1893,7 +1902,18 @@ class Database:
                         "DELETE FROM message_chunks WHERE claimant_id = ? AND attachment_id = ?",
                         (claimant_id, attachment_id),
                     )
-                cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id,))
+                if attachment_id not in keep_extractions:
+                    cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id,))
+            if deleted:
+                cur.execute(
+                    "UPDATE threads SET has_attachments = EXISTS ("
+                    "SELECT 1 FROM message_thread_map t "
+                    "JOIN messages m ON m.claimant_id = t.claimant_id "
+                    "WHERE t.thread_id = threads.thread_id AND m.has_attachments = 1) "
+                    "WHERE thread_id = (SELECT thread_id FROM message_thread_map "
+                    "WHERE claimant_id = ?)",
+                    (claimant_id,),
+                )
             self._commit_if_started(started)
         except Exception:
             self._rollback_if_started(started)

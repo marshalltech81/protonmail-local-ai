@@ -22,7 +22,7 @@ from src import attachment_indexing, main, vector_sums
 from src.attachment_indexing import ExtractionBudget
 from src.chunker import l2_normalize
 from src.database import EMBEDDING_DIM, Database
-from src.queue import REASON_REPARSE
+from src.queue import REASON_INITIAL_SCAN, REASON_REPARSE
 from src.threader import Threader
 from src.timings import TimingAggregator
 
@@ -456,3 +456,131 @@ class TestExtractionOff:
         p.reparse(path)
         assert p.rows() == rows
         assert p.slices() == slices
+
+
+class TestThreadAttachmentFlag:
+    def test_dropping_the_last_attachment_clears_the_thread_flag(self, tmp_path, monkeypatch):
+        """``upsert_thread`` only ever sets ``has_attachments``; the drop
+        recomputes it from the thread's messages (Codex round 1 on #1385)."""
+        p = StalePipeline(tmp_path, monkeypatch)
+        drop = {"on": False}
+
+        def rewrite(_path, msg):
+            if drop["on"]:
+                msg.attachments = []
+                msg.has_attachments = False
+
+        p.parse_with(rewrite)
+        path = p.add("flag", _parts("flag", 1))
+        p.drain()
+        thread_id = p.thread_ids()[0]
+
+        def flag() -> int:
+            return p.db._conn.execute(
+                "SELECT has_attachments FROM threads WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+
+        assert flag() == 1
+        drop["on"] = True
+        p.reparse(path)
+        assert p.rows() == []
+        assert flag() == 0
+
+
+class TestBatchPeerKeepsItsCache:
+    def test_a_peer_prepared_against_the_cached_row_keeps_it(self, tmp_path, monkeypatch):
+        """Message A drops the last stored occurrence of a payload while
+        message B, in the same batch, was prepared against its cached
+        extraction and writes its occurrence after A's commit: A's drop
+        must not purge the row (Codex round 1 on #1385)."""
+        p = StalePipeline(tmp_path, monkeypatch)
+        shared = [(b"peer-payload", "text/plain", f"{MARKER}.txt")]
+        drop = {"on": False}
+
+        def rewrite(path, msg):
+            if drop["on"] and path.endswith("first.eml"):
+                msg.attachments = []
+
+        p.parse_with(rewrite)
+        first = p.add("first", shared)
+        p.drain()
+        payload = hashlib.sha256(b"peer-payload").hexdigest()
+        extractions = len(p.extractor.calls)
+
+        drop["on"] = True
+        # Foreground rows are claimed first, so the dropping message is
+        # committed before its peer.
+        second = p.add("second", shared, reason=REASON_REPARSE)
+        p.queue.enqueue(first, REASON_INITIAL_SCAN)
+        p.drain()
+        assert p.job(first) is None and p.job(second) is None
+        # B used the cache: nothing was extracted again, and the row it
+        # relies on is still there beside its occurrence.
+        assert len(p.extractor.calls) == extractions
+        assert [r[1] for r in p.rows()] == [payload]
+        assert (
+            p.db._conn.execute(
+                "SELECT COUNT(*) FROM attachment_extractions WHERE attachment_id = ?",
+                (payload,),
+            ).fetchone()[0]
+            == 1
+        )
+
+
+class TestSharedSliceAcrossModules:
+    def test_a_stale_modules_chunks_leave_a_kept_payload_slice(self, tmp_path, monkeypatch):
+        """Two occurrences of one payload ran different extractors, so the
+        slice holds both modules' chunks. A continuation pass where the
+        parse drops the second keeps the first as complete; the slice is
+        rebuilt from the surviving module only (Codex round 1 on #1385)."""
+        p = StalePipeline(tmp_path, monkeypatch)
+        payload = b"module-payload"
+        parts = [
+            (payload, "text/plain", f"{MARKER}-a.txt"),
+            (b"other-payload", "text/plain", f"{MARKER}-b.txt"),
+            (payload, "application/pdf", f"{MARKER}-c.pdf"),
+        ]
+        drop = {"on": False}
+
+        def rewrite(_path, msg):
+            if drop["on"]:
+                msg.attachments = msg.attachments[:2]
+
+        p.parse_with(rewrite)
+        path = p.add("modules", parts)
+        p.drain()
+        claimant = _claimant(p, path)
+        shared_hash = hashlib.sha256(payload).hexdigest()
+
+        def slice_texts() -> list[str]:
+            return [
+                r[0]
+                for r in p.db._conn.execute(
+                    "SELECT text FROM message_chunks WHERE claimant_id = ? AND attachment_id = ?",
+                    (claimant, shared_hash),
+                )
+            ]
+
+        assert any("application/pdf" in t for t in slice_texts())
+        assert any("under text/plain" in t for t in slice_texts())
+        # Every result is stale and the budget admits one dispatch per
+        # pass: the first copy resolves, the others are deferred.
+        p.db._conn.execute("DELETE FROM attachment_extractions")
+        p.db._conn.execute("UPDATE attachments SET text_complete = NULL")
+        p.db._conn.commit()
+        monkeypatch.setattr(
+            main, "ExtractionBudget", functools.partial(ExtractionBudget, max_launches=1)
+        )
+        p.queue.enqueue(path, REASON_REPARSE)
+        p.drain()
+        assert p.deferred() == 2
+
+        drop["on"] = True
+        while p.job(path) is not None:
+            p.drain()
+        assert len(p.rows()) == 2
+        texts = slice_texts()
+        assert texts
+        assert not any("application/pdf" in t for t in texts)
+        thread_id = p.thread_ids()[0]
+        assert p.stored_sums(thread_id) == p.recomputed_sums(thread_id)

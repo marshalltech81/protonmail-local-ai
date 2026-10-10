@@ -1918,7 +1918,17 @@ def _phase2a_collect_chunks(
             resolved_now = {
                 plan.attachment.content_hash for plan in attach_plans if not plan.deferred
             }
-            for content_hash in sorted((resolved_now - deferred_now) & kept.keys()):
+            # A kept copy whose payload slice also holds chunks of a module
+            # only a now-stale occurrence ran is rebuilt the same way, so
+            # those chunks go with the occurrence (#1375).
+            stale_modules = db.get_attachment_payloads(msg.claimant_id, state.stale_occurrences)
+            shrunk_now = {
+                content_hash
+                for content_hash, modules in stale_modules.items()
+                if content_hash in kept
+                and modules - {extraction_cache_module(a) for _, a in kept[content_hash]}
+            }
+            for content_hash in sorted(((resolved_now | shrunk_now) - deferred_now) & kept.keys()):
                 served_modules: set[str] = set()
                 for occurrence_index, attachment in kept.pop(content_hash):
                     module = extraction_cache_module(attachment)
@@ -1959,7 +1969,7 @@ def _phase2a_collect_chunks(
         if state.stale_occurrences:
             parsed_payloads = {attachment.content_hash for attachment in msg.attachments}
             for content_hash in sorted(
-                db.get_attachment_payloads(msg.claimant_id, state.stale_occurrences)
+                db.get_attachment_payloads(msg.claimant_id, state.stale_occurrences).keys()
                 - parsed_payloads
             ):
                 clears_chunks = clears_chunks or bool(
@@ -2079,6 +2089,7 @@ def _phase2c_commit_vectors(
     db: Database,
     vectors: list[list[float]],
     queue: IndexingQueue,
+    batch_payloads: set[str],
 ) -> tuple[bool, str | None]:
     """Phase 2c: per-message DB transaction for body + attachments + thread vec.
 
@@ -2131,7 +2142,9 @@ def _phase2c_commit_vectors(
             # occurrence's payload slice goes only when no parsed
             # occurrence carries it, and before the thread vector is
             # derived from the sums the deletion updates (#1375).
-            dropped = db.delete_attachment_occurrences(msg.claimant_id, state.stale_occurrences)
+            dropped = db.delete_attachment_occurrences(
+                msg.claimant_id, state.stale_occurrences, batch_payloads
+            )
             # Replace the Phase 1 seed thread vector. Three cases
             # mirror the old ``_seed_thread_embedding`` logic:
             #   1. Thread now has chunks (this message contributed
@@ -2648,9 +2661,12 @@ def _drain_queue_batched(
         per_msg_embed_ms = embed_ms / max(1, len(survivors))
 
         # ---- Phase 2c: per-message vector commits ----
+        # Payloads the batch's messages carry: a cached extraction one of
+        # them prepared against is not purged by another's stale drop.
+        batch_payloads = {a.content_hash for entry in survivors for a in entry.msg.attachments}
         for entry in survivors:
             t0 = time.perf_counter()
-            ok, err = _phase2c_commit_vectors(entry, db, vectors, queue)
+            ok, err = _phase2c_commit_vectors(entry, db, vectors, queue, batch_payloads)
             db_write_ms = (time.perf_counter() - t0) * 1000
             if ok:
                 # A message with deferred attachments was continued in
