@@ -686,9 +686,22 @@ class TestRunner:
             SimpleNamespace(label="E2", thread_id="t", chunk=chunk, char_end=900, text="a")
         )
         thread = runner_passage(
-            SimpleNamespace(label="E3", thread_id="t", chunk=None, char_end=None, text="a")
+            SimpleNamespace(
+                label="E3", thread_id="t", chunk=None, char_end=None, text="a", truncated=False
+            )
         )
         assert (cut.truncated, whole.truncated, thread.truncated) == (True, False, False)
+
+    def test_a_thread_text_passage_cut_to_the_budget_is_truncated(self):
+        """#1128: a thread shown by its indexed text is cut by the budget
+        like a chunk; the captured passage must say so, or the grader
+        counts a partial passage as showing its evidence whole."""
+        cut = runner_passage(
+            SimpleNamespace(
+                label="E1", thread_id="t", chunk=None, char_end=None, text="a", truncated=True
+            )
+        )
+        assert cut.truncated is True
 
     def test_captures_each_passage_header_as_the_model_saw_it(self, chunked_db):
         """#837: each passage keeps the header ask_mailbox rendered above it

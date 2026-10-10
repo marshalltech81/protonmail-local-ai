@@ -599,10 +599,15 @@ class ExtractionResult:
 # ``pptx`` 1. Their occurrences were cached ``unsupported`` ("no
 # extractor") with no stamp, so the "no extractor" sweep re-queues them
 # once.
+# eml 2: a quoted-printable or uuencode part or nested email that decoded
+# cleanly is complete (#1288); version 1 counted every quoted-printable
+# one as lossy. The text is unchanged; the bump re-runs the cached ``eml``
+# rows once (attached emails only) so their ``text_complete`` is
+# re-assessed.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
-    "eml": 1,
+    "eml": 2,
     "image": 4,
     "pdf": 5,
     "ppt": 2,

@@ -99,6 +99,7 @@ class CohereReranker:
 
     def __init__(self, config: RerankConfig):
         import cohere
+        import httpx
 
         # Left out, the SDK would pick the endpoint itself (``CO_API_URL``,
         # then Cohere), and the documents are sent before the provider
@@ -131,6 +132,11 @@ class CohereReranker:
             base_url=config.base_url.rstrip("/"),
             timeout=config.timeout_secs,
             max_retries=0,
+            # A 307/308 keeps the POST body, so following one would send the
+            # query and documents to whatever origin it names (#1357). The SDK
+            # takes a client that does not follow redirects; the redirect then
+            # comes back as an error and the call falls back.
+            httpx_client=httpx.Client(follow_redirects=False, timeout=config.timeout_secs),
         )
         # Note: ``EmbedClient`` / ``_OpenAIBackend`` / ``OpenAIEmbedder``
         # read back ``self.client.base_url`` after construction. The

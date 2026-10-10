@@ -126,7 +126,13 @@ class TestDispatch:
         result = extract(content_type=content_type, filename=filename, payload=_text("x"))
         assert result.status == STATUS_SUCCESS
         assert result.extractor == f"eml@{EXTRACTOR_VERSIONS['eml']}"
-        assert EXTRACTOR_VERSIONS["eml"] == 1
+        assert EXTRACTOR_VERSIONS["eml"] == 2
+
+    def test_a_version_1_row_is_stale(self):
+        """Review round 1 on #1398: the cached ``eml@1`` rows counted every
+        quoted-printable part as lossy, so they are re-extracted."""
+        assert extractors.is_stale_extractor("eml@1") is True
+        assert extractors.is_stale_extractor("eml@2") is False
 
     @pytest.mark.parametrize(
         ("content_type", "filename", "reruns"),
@@ -550,8 +556,8 @@ class TestReviewRound2:
         assert (body, attachments) == ("root\n\ninline body", [])
 
     def test_a_quoted_printable_nested_email_is_a_cut(self, caplog):
-        """Finding 1: quoted-printable loss records nothing to detect, so
-        every such nested email is counted lossy (until #1288)."""
+        """Finding 1: a quoted-printable ``=`` that is no escape or soft
+        break loses text (#1288), so the nested email is counted lossy."""
         part = (
             b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n"
             b"Content-Transfer-Encoding: quoted-printable\r\n\r\n"
@@ -561,6 +567,19 @@ class TestReviewRound2:
         assert result.text_complete is False
         assert result.text is not None and "[Attached message, depth 2]" in result.text
         assert "extractor cap eml_nested_messages:" in caplog.text
+
+    def test_a_clean_quoted_printable_nested_email_is_complete(self, caplog):
+        """#1288: only escapes and soft breaks, so it decoded without
+        loss and the text stays complete."""
+        part = (
+            b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n"
+            b"Content-Transfer-Encoding: quoted-printable\r\n\r\n"
+            b"Subject: n\r\n\r\ncaf=C3=A9 =3D soft=\r\nbreak " + MARKER.encode()
+        )
+        result = self._extract(_multipart(part), caplog)
+        assert result.text_complete is True
+        assert result.text is not None and "café = softbreak" in result.text
+        assert "extractor cap" not in caplog.text
 
     @staticmethod
     def _with_named_part(disposition: bytes) -> bytes:
@@ -623,8 +642,8 @@ class TestReviewRound3:
         return result
 
     def test_a_quoted_printable_body_part_is_a_cut(self, caplog):
-        """Finding 1: a quoted-printable body loss records nothing to
-        detect, so the part counts as lossy (until #1288)."""
+        """Finding 1: a quoted-printable ``=`` that is no escape or soft
+        break loses text (#1288), so the part counts as lossy."""
         payload = (
             HDR + b"Content-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"
             b"visible =\rtail " + MARKER.encode()
@@ -632,6 +651,25 @@ class TestReviewRound3:
         result = self._extract(payload, caplog)
         assert result.text_complete is False
         assert "extractor cap eml_body_decode:" in caplog.text
+
+    def test_a_clean_quoted_printable_body_part_is_complete(self, caplog):
+        payload = (
+            HDR + b"Content-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"
+            b"caf=C3=A9 =3D soft=\r\nbreak " + MARKER.encode()
+        )
+        result = self._extract(payload, caplog)
+        assert result.text_complete is True
+        assert "extractor cap" not in caplog.text
+
+    def test_a_clean_uuencoded_body_part_is_complete(self, caplog):
+        uu = b"begin 644 x\n" + binascii.b2a_uu(b"visible " + MARKER.encode()) + b"`\nend\n"
+        payload = (
+            HDR + b"Content-Type: text/plain\r\nContent-Transfer-Encoding: x-uuencode\r\n\r\n" + uu
+        )
+        result = self._extract(payload, caplog)
+        assert result.text_complete is True
+        assert result.text is not None and "visible" in result.text
+        assert "extractor cap" not in caplog.text
 
     def test_the_default_walk_ignores_a_quoted_printable_body(self):
         msg = email.message_from_bytes(

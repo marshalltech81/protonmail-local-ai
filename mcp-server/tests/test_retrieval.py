@@ -17,6 +17,7 @@ read-only Database, so the tests focus on:
 """
 
 import asyncio
+import logging
 import re
 import sqlite3
 from contextlib import closing, contextmanager
@@ -1680,3 +1681,27 @@ class TestHandlerErrorTextWithheld:
         assert _ERROR_MARKER not in caplog.text
         assert "OperationalError" in text
         assert "OperationalError" in caplog.text
+
+
+class TestFailureLogsAreRateLimited:
+    """#1265: a client chooses the ID, so a repeated missing, reaped or
+    ambiguous ID must not add an un-rate-limited WARNING per call. Each
+    call still errors, and gets its own timing line."""
+
+    def test_repeated_missing_thread_ids_log_one_warning(self, fake_server, empty_db, caplog):
+        handler = _handlers(fake_server, empty_db)["get_thread"]
+        caplog.set_level(logging.DEBUG)
+        for n in range(5):
+            assert "Thread not found" in _error(handler(thread_id=f"synthetic-missing-{n}"))
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings.count("get_thread failed: not_found") == 1
+        assert "synthetic-missing" not in caplog.text
+
+    def test_repeated_missing_message_ids_log_one_warning(self, fake_server, empty_db, caplog):
+        handler = _handlers(fake_server, empty_db)["get_message"]
+        caplog.set_level(logging.DEBUG)
+        for n in range(5):
+            assert "Message not found" in _error(handler(message_id=f"synthetic-missing-{n}"))
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings.count("get_message failed: not_found") == 1
+        assert "synthetic-missing" not in caplog.text

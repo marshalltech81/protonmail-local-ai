@@ -753,10 +753,10 @@ _CALLER_ERRORS = [
         {"attachment_occurrence_id": _MARKER_OCCURRENCE_ID, "offset": 10**6},
         "offset",
     ),
-    ("get_message", {"message_id": f"missing-{MARKER}"}, "get_message failed: not found"),
+    ("get_message", {"message_id": f"missing-{MARKER}"}, "get_message failed: not_found"),
     ("get_message", {"message_id": _MARKER_MESSAGE_ID, "offset": -1}, "offset"),
     ("get_message", {"message_id": _MARKER_MESSAGE_ID, "offset": 10**6}, "offset"),
-    ("get_thread", {"thread_id": f"missing-{MARKER}"}, "get_thread failed: not found"),
+    ("get_thread", {"thread_id": f"missing-{MARKER}"}, "get_thread failed: not_found"),
     ("list_threads", {"folder": _MARKER_FOLDER, "filter_type": MARKER}, "filter_type"),
     ("find_contact", {"query": "   "}, "rejected invalid argument: find_contact.query"),
 ]
@@ -842,7 +842,11 @@ class TestRetrievalAndStatusCompletionLines:
         _register_completion_tools(fake_server, Database(str(db_path)))
         tools = fake_server.tools
         calls = [
-            (tools["get_message"], {"message_id": _MARKER_MESSAGE_ID}, "ambiguous Message-ID"),
+            (
+                tools["get_message"],
+                {"message_id": _MARKER_MESSAGE_ID},
+                "get_message failed: ambiguous",
+            ),
             (tools["get_message"], {"message_id": f"gone-{MARKER}"}, "get_message failed: reaped"),
             (tools["get_thread"], {"thread_id": f"t-gone-{MARKER}"}, "get_thread failed: reaped"),
         ]
