@@ -1896,8 +1896,10 @@ retries on its next pass.
 In the runs before the final cap-sized one the WAL windows were timed
 from the end of the `COUNT` scan; commits during that scan were retained
 but not counted, so those overlapping-commit counts are slightly low
-(the WAL sizes are measured directly). The final cap-sized run takes the
-snapshot first.
+(the WAL sizes are sampled every 5 ms, so a maximum can miss the frames of
+the last commits before the window closed and is a lower bound; the
+benchmark now also reads the size as the window closes). The final
+cap-sized run takes the snapshot first.
 
 The writer of the runs before the final cap-sized one also inserted one
 row into a table per commit, to time the commits; it is removed. The
