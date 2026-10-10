@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx2
 import pytest
 from openai import APIStatusError
+from src.database import EMBEDDING_DIM
 
 from tests.baseline import embed_server
 from tests.baseline import real_embedder as re_mod
@@ -249,6 +250,21 @@ def test_meter_notes_requests_without_usage():
     assert (meter.requests, meter.input_tokens, meter.unreported) == (1, 0, 1)
 
 
+def test_meter_counts_a_failed_attempt_as_unreported_usage():
+    """Review round 2: an attempt that raised may still have been
+    processed (and billed) without returning usage, so the token total
+    is no longer complete."""
+
+    def fail(**kw):
+        raise ConnectionError("synthetic")
+
+    meter = RequestMeter(max_requests=5)
+    with pytest.raises(ConnectionError):
+        meter.wrap(fail)()
+    meter.wrap(lambda **kw: _Response(4))()
+    assert (meter.requests, meter.input_tokens, meter.unreported) == (2, 4, 1)
+
+
 class _Inner:
     def __init__(self):
         self.calls: list[list[str]] = []
@@ -312,6 +328,20 @@ def test_cache_key_covers_text_repeat_and_identity(tmp_path, change):
             cache.close()
 
 
+def test_identity_keeps_the_whole_base_url_as_a_digest(tmp_path):
+    """Review round 2: two base URLs that differ only in their query
+    string are different destinations and must not share cached
+    vectors; the identity holds a digest, not the URL."""
+    raw = _valid_raw(tmp_path)
+    raw["EMBED_BASE_URL"] = f"https://gw.example/v1?deployment={_URL_MARK}"
+    one = re_mod.embedding_identity(validate(raw), "chunk")
+    raw["EMBED_BASE_URL"] = "https://gw.example/v1?deployment=other"
+    other = re_mod.embedding_identity(validate(raw), "chunk")
+    assert one["endpoint"] == other["endpoint"] == "https://gw.example/v1"
+    assert one["base_url_sha256"] != other["base_url_sha256"]
+    assert _URL_MARK not in json.dumps(one)
+
+
 def test_identity_names_every_setting_that_decides_a_vector(tmp_path):
     settings = validate(_valid_raw(tmp_path))
     chunk = re_mod.embedding_identity(settings, "chunk")
@@ -319,6 +349,7 @@ def test_identity_names_every_setting_that_decides_a_vector(tmp_path):
     expected = {
         "role",
         "endpoint",
+        "base_url_sha256",
         "model",
         "dimensions",
         "encoding_format",
@@ -373,11 +404,12 @@ def _status(code: int, retry_after: str | None = None) -> APIStatusError:
 
 
 def test_query_sender_sends_each_query_alone_as_a_string_unnormalised():
-    fake = _FakeEmbedder([[3.0, 4.0]])
+    raw = [3.0, 4.0] + [0.0] * (EMBEDDING_DIM - 2)
+    fake = _FakeEmbedder([raw])
     done = []
     send = re_mod.query_sender(fake, RequestMeter(10))
     vectors = send(["one", "two"], on_batch_complete=lambda: done.append(1))
-    assert vectors == [[3.0, 4.0], [3.0, 4.0]]
+    assert vectors == [raw, raw]
     assert fake.client.embeddings.requests == [
         {"model": "m", "input": "one"},
         {"model": "m", "input": "two"},
@@ -385,17 +417,29 @@ def test_query_sender_sends_each_query_alone_as_a_string_unnormalised():
     assert done == [1]
 
 
-@pytest.mark.parametrize("vectors", [[], [[1.0], [1.0]], [[float("nan")]]])
+@pytest.mark.parametrize(
+    "vectors",
+    [
+        [],
+        [[1.0] * EMBEDDING_DIM, [1.0] * EMBEDDING_DIM],
+        [[float("nan")] * EMBEDDING_DIM],
+        # Review round 2: as mcp-server's ``embed_query`` rejects them.
+        [[0.0] * EMBEDDING_DIM],
+        [[1.0] * (EMBEDDING_DIM - 1)],
+    ],
+    ids=["none", "two", "non-finite", "all-zero", "wrong-width"],
+)
 def test_query_sender_rejects_a_malformed_response(vectors):
     with pytest.raises(re_mod.EmbedResponseError):
         re_mod.query_sender(_FakeEmbedder(vectors), RequestMeter(10))(["q"])
 
 
 def test_query_sender_retries_a_transient_failure_and_counts_it():
-    fake = _FakeEmbedder([[1.0]], failures=[_status(429, "7"), _status(503)])
+    vector = [1.0] * EMBEDDING_DIM
+    fake = _FakeEmbedder([vector], failures=[_status(429, "7"), _status(503)])
     meter = RequestMeter(10)
     waits: list[float] = []
-    assert re_mod.query_sender(fake, meter, sleep=waits.append)(["q"]) == [[1.0]]
+    assert re_mod.query_sender(fake, meter, sleep=waits.append)(["q"]) == [vector]
     # Retry-After when sent, else the backoff; three attempts in all.
     assert waits == [7.0, 4.0] and meter.retries == 2
     assert len(fake.client.embeddings.requests) == 3

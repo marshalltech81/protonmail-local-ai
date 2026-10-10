@@ -20,8 +20,9 @@ flips between repeats.
 
 Vectors are cached in ``<cache_dir>/vectors.sqlite`` (git-ignored,
 mode 600) under a key of the text and the whole request it was sent
-in, the repeat number and the embedding identity (endpoint, model,
-batch size, dimensions, SDK and encoding), so a rerun with an unchanged
+in, the repeat number and the embedding identity (endpoint, a digest
+of the whole base URL, model, batch size, dimensions, SDK and
+encoding), so a rerun with an unchanged
 corpus and configuration sends nothing, and a change re-sends whole
 every request it changed. Delete the cache to measure the variation
 afresh.
@@ -288,7 +289,13 @@ class RequestMeter:
             if self.requests >= self.max_requests:
                 raise EmbedBudgetExhausted
             self.requests += 1
-            response = create(*args, **kwargs)
+            try:
+                response = create(*args, **kwargs)
+            except BaseException:
+                # It may have been processed (and billed) without
+                # returning usage, so the token total is incomplete.
+                self.unreported += 1
+                raise
             tokens = getattr(getattr(response, "usage", None), "prompt_tokens", None)
             if isinstance(tokens, int) and not isinstance(tokens, bool):
                 self.input_tokens += tokens
@@ -318,6 +325,10 @@ def embedding_identity(settings: Settings, role: str) -> dict[str, object]:
     return {
         "role": role,
         "endpoint": sanitize_endpoint(settings.base_url),
+        # The sanitised endpoint drops a query string, which can select
+        # another deployment; the digest keeps the whole URL apart
+        # without holding it.
+        "base_url_sha256": hashlib.sha256(settings.base_url.encode("utf-8")).hexdigest(),
         "model": settings.model,
         "dimensions": EMBEDDING_DIM,
         # The SDK asks for base64 (float32) when no format is given.
@@ -406,8 +417,16 @@ def query_sender(
                     f"embedder returned {len(response.data)} vectors for 1 input"
                 )
             vector = list(response.data[0].embedding)
+            # The checks mcp-server's ``embed_query`` makes before a
+            # query vector reaches search.
+            if len(vector) != EMBEDDING_DIM:
+                raise EmbedResponseError(
+                    f"embedder returned a {len(vector)}-dim vector; the index has {EMBEDDING_DIM}"
+                )
             if not all(math.isfinite(x) for x in vector):
                 raise EmbedResponseError("embedder returned non-finite vector values")
+            if not any(vector):
+                raise EmbedResponseError("embedder returned an all-zero vector")
             vectors.append(vector)
         if on_batch_complete is not None:
             on_batch_complete()

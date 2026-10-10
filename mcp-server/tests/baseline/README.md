@@ -128,7 +128,8 @@ make baseline-real-embedder REAL_EMBED_ARGS="--repeats 5 --max-requests 600"
    `.real-embedder-cache/`, git-ignored, mode 700/600) under the text
    together with every text of the request it was sent in (the
    provider's vector can depend on its batch neighbours), the repeat
-   number, the endpoint, model, batch size, dimensions, SDK version and
+   number, the endpoint (and a digest of the whole base URL, query
+   string included), model, batch size, dimensions, SDK version and
    encoding. A rerun with nothing changed sends no requests; a corpus
    edit re-sends every request whose texts it changed, whole, as a
    fresh build would. Delete the cache to measure the variation afresh.
@@ -140,7 +141,9 @@ make baseline-real-embedder REAL_EMBED_ARGS="--repeats 5 --max-requests 600"
    questions with evidence missing from the top 10, the questions
    whose top 10 differs between repeats, the cosine distance between
    repeats' vectors for the same text, and the spend: requests, the
-   input tokens the provider reported and the wall time. Per-question
+   input tokens the provider reported (shown as unreported when any
+   request, a failed attempt included, returned no usage) and the wall
+   time. Per-question
    `max_rank` and the rank snapshot belong to the hashed baseline and
    are not checked here.
 
@@ -149,7 +152,8 @@ counts against `--max-requests` (1 to 1,000, default 250; one repeat
 is about 100 requests: seven chunk batches at the default
 `--batch-size` of 64, one calibration request and one request per
 query, each sent alone with a string input and left unnormalised, as
-mcp-server embeds a search query). A query request that fails with a
+mcp-server embeds a search query, and refused, as mcp-server refuses
+it, when it is not 4,096 wide, not finite or all zero). A query request that fails with a
 connection error, timeout, 408, 429 or 5xx is retried twice (after the
 provider's Retry-After, else 2 and 4 seconds), and the report counts
 the retries. The request
