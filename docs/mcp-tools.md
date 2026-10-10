@@ -1608,7 +1608,9 @@ here when it ships.
 
 **How it was measured.** `mcp-server/scripts/reconcile_bench.py` builds
 a synthetic index (generated values only, never mail) on the schema the
-server reads (indexer schema v8), and runs each step in a fresh child
+server reads (the tables mirror indexer schema v10, with the v9
+`extraction_deferred_at` column; the figures before "Combined worst case"
+below were taken on the v8 layout, which lacks it), and runs each step in a fresh child
 process, on the server's own read-only connection and with the server's
 own predicate compiler (unfiltered: Trash left out, so 95% of the
 synthetic messages match). Records are read and serialized with the
@@ -1822,6 +1824,18 @@ corpus shape, and 200,000 messages one of about a minute; whether that
 is acceptable, or the caps should be lower, is an owner decision.
 Nothing here measures a larger set.
 
+**Method notes.** Each scan method runs as its own process, but the page
+cache is the host's, so a method that always ran second would inherit
+the pages the first read. From this revision the benchmark alternates
+which method runs first at each repeat (and in the filtered runs), and
+reports in `first_runs` how often each ran first; the stream and
+collect figures above were taken with stream first, so their
+collect-over-stream speedups may be overstated until the cap-sized run
+is repeated this way. `--all-extras` builds the accepted worst upload
+(no member held, `--upload-total` digests, all extras) and returns
+worst-case records first; the `extras` field of each round and of the
+`request` is the count actually generated.
+
 **WAL under a concurrent writer.** A second process committed, in a
 loop, eight message updates plus a ballast blob per transaction while
 one round held its snapshot; commits are counted by their time inside
@@ -1890,10 +1904,15 @@ retries on its next pass.
   and in an `any` group) on the same 50,000 messages cost a certificate
   0.13 to 0.16 times one page at 1,000 and 47,500 matches (0.7 to 1.0 s
   against 5.2 to 6.5 s for the page). With 300 messages that each carry
-  10,000 participant rows, participant and name predicates took a
-  certificate 0.7 to 2.3 s against a page of 1.7 to 10.0 s; no
-  certificate cost more than its page. Those are 3 million
-  participant rows; a cap-sized set of such messages was not built.
+  10,000 participant rows and 11,000 display-name rows (the parser's
+  caps: 3.0 and 3.3 million rows), a participant predicate took a
+  certificate 4.6 s against a page of 9.2 to 9.6 s, and a `where`
+  expression 0.6 to 1.2 s against 17.9 to 18.4 s. With 15,000 messages
+  of 20 chunks of 1,000 words each (300,000 chunks) and a 16-term `text`
+  or `body_words` value matching 14,250 of them, a certificate took
+  2.8 to 2.9 s against a page of 7.3 to 8.3 s, whichever scan method.
+  No certificate cost more than half its page in these runs. A
+  cap-sized set of such messages was not built.
 
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,

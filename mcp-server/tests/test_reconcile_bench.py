@@ -350,7 +350,7 @@ def test_where_expressions_reach_the_certificate(report):
     # The explicit ``where`` expression is compiled as query_messages
     # compiles it, so the page and the certificate count the same set.
     rows = [r for r in report["filtered"]["messages"] if "where" in r["filters"]]
-    assert len(rows) == 2
+    assert len(rows) == 4  # two 16-node expressions, two 16-term body_words
     for row in rows:
         assert row["count"] == row["page_total"]
 
@@ -375,3 +375,124 @@ def test_filtered_runs_cover_high_cardinality_participants(cardinality):
     assert rows
     for row in rows:
         assert row["count"] == row["page_total"]
+
+
+@pytest.fixture(scope="module")
+def terms(bench, tmp_path_factory):
+    work = tmp_path_factory.mktemp("terms")
+    return bench.main(
+        [
+            "--workdir",
+            str(work),
+            "--messages",
+            "60",
+            "--per-message",
+            "1",
+            "--chunks",
+            "6",
+            "--chunk-tokens",
+            "30",
+            "--filtered",
+            "--k",
+            "3",
+            "--missing",
+            "5",
+            "--repeat",
+            "2",
+        ]
+    )
+
+
+@pytest.fixture(scope="module")
+def all_extras(bench, tmp_path_factory):
+    work = tmp_path_factory.mktemp("allextras")
+    return bench.main(
+        [
+            "--workdir",
+            str(work),
+            "--messages",
+            "100",
+            "--per-message",
+            "1",
+            "--records",
+            "mixed",
+            "--all-extras",
+            "--upload-total",
+            "300,400",
+            "--k",
+            "3",
+            "--repeat",
+            "2",
+        ]
+    )
+
+
+def test_cardinality_corpus_stores_names_for_every_participant(bench, cardinality):
+    built = cardinality["build"]
+    assert built["participant_rows"] == 40 * bench.MAX_MESSAGE_ADDRESSES
+    # A first name per participant, plus the extra names of one address.
+    assert built["name_rows"] == 40 * (
+        bench.MAX_MESSAGE_ADDRESSES + bench.MAX_EXTRA_PARTICIPANT_NAMES
+    )
+
+
+def test_chunk_and_term_cardinality_is_built_and_queried(bench, terms):
+    assert terms["build"]["chunks"] == 60 * 6
+    assert terms["build"]["body_tokens_min"] == 30
+    rows = [
+        r
+        for r in terms["filtered"]["messages"]
+        if "text" in r["filters"] and len(r["filters"]["text"].split()) == 16
+    ]
+    assert len(rows) == 1
+    assert rows[0]["count"] == rows[0]["page_total"]
+    # Each of the sixteen terms compiles to its own FTS subquery.
+    count_sql, _, _ = bench.scan_sql("messages", {"text": bench.MESSAGE_FILTERS[0]["text"]})
+    assert count_sql.count("MATCH") == 16
+    negated = [
+        r
+        for r in terms["filtered"]["messages"]
+        if r["filters"].get("where", {}).get("all", [{}])[0].get("negate") is True
+        and r["filters"]["where"]["all"][0]["leaf"] == "body_words"
+        and len(r["filters"]["where"]["all"][0]["value"].split()) == 16
+    ]
+    assert len(negated) == 1
+
+
+def test_scan_methods_alternate_which_runs_first(bench):
+    order = []
+
+    def call(method):
+        order.append(method)
+        return {}
+
+    bench._alternating(4, call)
+    assert order == [
+        "stream",
+        "collect",
+        "collect",
+        "stream",
+        "stream",
+        "collect",
+        "collect",
+        "stream",
+    ]
+
+
+def test_certificates_report_how_often_each_method_ran_first(terms):
+    for kind in ("messages", "occurrences"):
+        assert terms["certificate"][f"{kind}/stream"]["first_runs"] == 1
+        assert terms["certificate"][f"{kind}/collect"]["first_runs"] == 1
+
+
+def test_all_extras_upload_misses_every_member_and_returns_worst_records(all_extras):
+    for kind, uploaded in (("messages", 300), ("occurrences", 400)):
+        req = all_extras["reconcile"][kind]["request"]
+        assert req["extras"] == req["uploaded"] == uploaded
+        for method in ("stream", "collect"):
+            round_ = all_extras["reconcile"][kind][method]["3"]
+            assert round_["extras"] == uploaded
+            assert round_["missing_total"] == req["members"]
+            assert round_["returned"] == 3
+    # Worst-case records first: wide fields, not the typical ones.
+    assert all_extras["reconcile"]["messages"]["stream"]["3"]["record_bytes_max"] > 10_000

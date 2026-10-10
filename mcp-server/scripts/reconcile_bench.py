@@ -228,6 +228,8 @@ def _folder(i: int) -> str:
 # The parser's per-message address cap (indexer/src/parser.py
 # ``MAX_MESSAGE_ADDRESSES``): at most this many participant rows.
 MAX_MESSAGE_ADDRESSES = 10_000
+# indexer/src/parser.py ``MAX_EXTRA_PARTICIPANT_NAMES``.
+MAX_EXTRA_PARTICIPANT_NAMES = 1_000
 # A four-byte character: the most UTF-8 bytes a character-clipped field
 # can carry per character.
 _WIDE = "\U0001f600"
@@ -275,7 +277,14 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
             **base,
             "references": [f"r{n}@x.example" for n in range(references)],
             "people": [
-                (role, f"{role}{p}@x.example", None) for role, n in counts for p in range(n)
+                (role, f"{role}{p}@x.example", f"Person {p}")
+                for role, n in counts
+                for p in range(n)
+            ],
+            # The parser also keeps up to MAX_EXTRA_PARTICIPANT_NAMES
+            # further names of one address: name rows only.
+            "extra_names": [
+                ("to", "to0@x.example", f"Alias {n}") for n in range(MAX_EXTRA_PARTICIPANT_NAMES)
             ],
         }
     return {
@@ -297,12 +306,16 @@ BODY_TOKENS = 40
 _VOCABULARY = 5000
 
 
-def _body(i: int) -> str:
-    """Message ``i``'s body chunk: ``alpha<i % 50>`` (in every fiftieth
-    body), ``gamma<i>`` (in this body only) and filler words drawn from
-    ``_VOCABULARY``, ``BODY_TOKENS`` words in all."""
-    filler = [f"w{(i * 7919 + j * 104729) % _VOCABULARY}" for j in range(BODY_TOKENS - 2)]
-    return " ".join([f"alpha{i % 50}", f"gamma{i}", *filler])
+def _body(i: int, chunk: int = 0, tokens: int = BODY_TOKENS) -> str:
+    """Message ``i``'s body chunk ``chunk``: for chunk 0 ``alpha<i % 50>``
+    (in every fiftieth body) and ``gamma<i>`` (in this body only), then
+    filler words drawn from ``_VOCABULARY``, ``tokens`` words in all."""
+    lead = [f"alpha{i % 50}", f"gamma{i}"] if chunk == 0 else []
+    base = chunk * tokens
+    filler = [
+        f"w{(i * 7919 + (base + j) * 104729) % _VOCABULARY}" for j in range(tokens - len(lead))
+    ]
+    return " ".join([*lead, *filler])
 
 
 def build(
@@ -313,6 +326,8 @@ def build(
     records: str,
     references: int = 0,
     extracted_chars: int = 0,
+    chunks: int = 1,
+    chunk_tokens: int = BODY_TOKENS,
 ) -> dict:
     """Write the synthetic index: ``messages`` rows in shuffled insert
     order, threads of four, ``per_message`` attachment occurrences each.
@@ -326,8 +341,9 @@ def build(
     ``references`` References entries, which the parser does not cap by
     count).
 
-    Every message gets one body chunk of ``BODY_TOKENS`` words
-    (``_body``), its display names in ``message_participant_names``,
+    Every message gets ``chunks`` body chunks of ``chunk_tokens`` words
+    each (``_body``; the parser splits a large message into roughly
+    1,000-token chunks), its display names in ``message_participant_names``,
     completeness flags of 1 so every filter decides, and each From
     address a person entity (every fifth address in order ``vendor``, the rest
     ``unclassified``). ``extracted_chars`` above 0 stores that many
@@ -344,7 +360,8 @@ def build(
         conn.execute("PRAGMA synchronous=NORMAL")
         batch = 2000 if records != "cardinality" and not extracted_chars else 10
         text = _WIDE * extracted_chars if extracted_chars else None
-        min_tokens = BODY_TOKENS
+        min_tokens = chunk_tokens
+        n_chunks = n_parts = n_names = 0
         for start in range(0, messages, batch):
             msg_rows, part_rows, att_rows, ext_rows = [], [], [], []
             name_rows, chunk_rows, fts_rows, worst_rows = [], [], [], []
@@ -384,11 +401,17 @@ def build(
                     (cid, role, address, name)
                     for role, address, name in shape["people"]
                     if name is not None
+                ] + [
+                    (cid, role, address, name)
+                    for role, address, name in shape.get("extra_names", [])
                 ]
-                body = _body(i)
-                min_tokens = min(min_tokens, len(body.split()))
-                fts_rows.append((i + 1, body))
-                chunk_rows.append((f"{cid}:0", cid, tid, 0, body, i + 1, None, "body"))
+                for c in range(chunks):
+                    body = _body(i, c, chunk_tokens)
+                    min_tokens = min(min_tokens, len(body.split()))
+                    rowid = i * chunks + c + 1
+                    fts_rows.append((rowid, body))
+                    chunk_rows.append((f"{cid}:{c}", cid, tid, c, body, rowid, None, "body"))
+                    n_chunks += 1
                 for k in range(per_message):
                     payload = hashlib.sha256(f"{i}:{k}".encode()).hexdigest()
                     occurrence = hashlib.sha256(f"{cid}\0{payload}\0{k}".encode()).hexdigest()
@@ -419,6 +442,8 @@ def build(
                 "1, 1, 1, 1, 1, 1, 1)",
                 msg_rows,
             )
+            n_parts += len(part_rows)
+            n_names += len(name_rows)
             conn.executemany("INSERT INTO message_participants VALUES (?, ?, ?, ?)", part_rows)
             conn.executemany("INSERT INTO message_participant_names VALUES (?, ?, ?, ?)", name_rows)
             conn.executemany("INSERT INTO message_chunks_fts (rowid, text) VALUES (?, ?)", fts_rows)
@@ -455,6 +480,9 @@ def build(
         "build_s": round(time.perf_counter() - t0, 2),
         "db_bytes": db_path.stat().st_size,
         "body_tokens_min": min_tokens,
+        "chunks": n_chunks,
+        "participant_rows": n_parts,
+        "name_rows": n_names,
     }
 
 
@@ -697,6 +725,7 @@ def phase_reconcile(
     request: str,
     hold_s: float = 0.0,
     method: str = "stream",
+    worst_first: bool = False,
 ) -> dict:
     """One reconcile round: parse the packed upload, then in one read
     transaction count, scan (``method``, as ``phase_certificate``),
@@ -705,7 +734,10 @@ def phase_reconcile(
 
     ``hold_s`` keeps the transaction open that much longer after the
     round's work, outside every timing: only the smoke test's WAL check
-    uses it, so a tiny corpus still overlaps the writer."""
+    uses it, so a tiny corpus still overlaps the writer. ``worst_first``
+    materializes missing worst-case identities (``--records mixed``)
+    before the others, so a round that misses every member still returns
+    worst-case records."""
     _import_serializers()
     count_sql, scan, params = scan_sql(kind)
     t0 = time.perf_counter()
@@ -719,6 +751,12 @@ def phase_reconcile(
         digest = hashlib.sha256(CERT_DOMAIN)
         server: set[bytes] = set()
         missing: list[str] = []
+        others: list[str] = []
+        worst = (
+            {row[0] for row in conn.execute("SELECT identity FROM bench_worst")}
+            if worst_first
+            else set()
+        )
         missing_total = 0
         for identity in _sorted_identities(conn, scan, params, method):
             b = identity.encode()
@@ -727,8 +765,12 @@ def phase_reconcile(
             server.add(h)
             if h not in client:
                 missing_total += 1
-                if len(missing) < k:
+                if worst_first and identity not in worst:
+                    if len(others) < k:
+                        others.append(identity)
+                elif len(missing) < k:
                     missing.append(identity)
+        missing = (missing + others)[:k]
         extras = sorted(client - server)
         t_diff = time.perf_counter()
         records, read = _materialize(conn, kind, missing)
@@ -804,7 +846,14 @@ _WHERE_LEAVES: list[dict] = [
     _wl("display_name_contains", "person 1", role="to"),
 ]
 
+# Sixteen terms (the cap, ``_MAX_TEXT_TERMS``), each common in the
+# vocabulary: every term compiles to its own FTS subquery.
+_TERMS = " ".join(f"w{n}" for n in range(16))
+
 MESSAGE_FILTERS: tuple[dict, ...] = (
+    {"text": _TERMS},
+    {"where": {"all": [{"leaf": "body_words", "value": _TERMS}]}},
+    {"where": {"all": [{"leaf": "body_words", "value": _TERMS, "negate": True}]}},
     {"participant": "nobody"},
     {"participant": "from0.7"},
     {"sender": "from0.7@bench.example"},
@@ -836,7 +885,7 @@ OCCURRENCE_FILTERS: tuple[dict, ...] = (
 )
 
 
-def phase_filtered(db_path: str, kind: str, filters: dict) -> dict:
+def phase_filtered(db_path: str, kind: str, filters: dict, collect_first: bool = False) -> dict:
     """One production page of the query under ``filters``
     (``Database.query_messages`` or ``query_attachments`` with
     ``limit=1``: its counts and first row), then the certificate over
@@ -852,8 +901,11 @@ def phase_filtered(db_path: str, kind: str, filters: dict) -> dict:
     else:
         page = db.query_attachments(limit=1, **filters)
     page_s = time.perf_counter() - t0
-    cert = phase_certificate(db_path, kind, "stream", filters)
-    collected = phase_certificate(db_path, kind, "collect", filters)
+    # Whichever certificate runs second reads pages the first cached;
+    # ``collect_first`` swaps them from one repeat to the next.
+    order = ("collect", "stream") if collect_first else ("stream", "collect")
+    done = {m: phase_certificate(db_path, kind, m, filters) for m in order}
+    cert, collected = done["stream"], done["collect"]
     if collected["digest"] != cert["digest"]:
         raise ValueError("stream and collect certificates differ")
     return {
@@ -961,6 +1013,7 @@ def write_request(
     out: Path,
     missing_from: str = "spread",
     upload_total: int = 0,
+    all_extras: bool = False,
 ) -> dict:
     """The client's upload: the SHA-256 of every matching identity but
     ``missing`` of them, plus ``extras`` hashes the server does not
@@ -981,11 +1034,16 @@ def write_request(
         step = max(1, len(ids) // missing) if missing else 0
         skip = set(range(0, len(ids), step)[:missing]) if missing else set()
     held = [identity_hash(b) for n, b in enumerate(ids) if n not in skip]
+    if all_extras:
+        # The accepted worst upload: no member, only hashes the server
+        # does not hold; every member is missing.
+        held = []
     if upload_total:
         # Fill the upload to ``upload_total`` digests (a set cap) with
         # extras, the largest request the cap accepts.
         extras = max(0, upload_total - len(held))
     held += [hashlib.sha256(f"extra:{n}".encode()).digest() for n in range(extras)]
+    n_extras = extras
     hex_body = json.dumps({"hashes": [h.hex() for h in held]}, separators=(",", ":")).encode()
     b64 = json.dumps(
         {"hashes": [base64.b64encode(h).decode() for h in held]}, separators=(",", ":")
@@ -995,6 +1053,7 @@ def write_request(
     return {
         "members": len(ids),
         "uploaded": len(held),
+        "extras": n_extras,
         "request_bytes_hex": len(hex_body),
         "request_bytes_base64": len(b64),
         "request_bytes_packed": len(packed),
@@ -1138,6 +1197,8 @@ def run(args: argparse.Namespace) -> dict:
             args.records,
             args.references,
             args.extracted_chars,
+            args.chunks,
+            args.chunk_tokens,
         ),
     }
     db = str(db_path)
@@ -1154,11 +1215,10 @@ def run(args: argparse.Namespace) -> dict:
         }
     report["certificate"] = {}
     for kind in ("messages", "occurrences"):
-        for method in ("stream", "collect"):
-            runs = [
-                _child("certificate", db_path=db, kind=kind, method=method)
-                for _ in range(args.repeat)
-            ]
+        by_method = _alternating(
+            args.repeat, lambda m, kind=kind: _child("certificate", db_path=db, kind=kind, method=m)
+        )
+        for method, runs in by_method.items():
             if len({r["digest"] for r in runs}) != 1 or any(
                 r["scanned"] != r["count"] for r in runs
             ):
@@ -1172,6 +1232,9 @@ def run(args: argparse.Namespace) -> dict:
                 "scan_s": _median(runs, "scan_s"),
                 "total_s": _median(runs, "total_s"),
                 "rss_kib": max(r["rss_kib"] for r in runs),
+                "first_runs": math.ceil(args.repeat / 2)
+                if method == "stream"
+                else args.repeat // 2,
             }
         if (
             report["certificate"][f"{kind}/stream"]["digest"]
@@ -1203,12 +1266,10 @@ def run(args: argparse.Namespace) -> dict:
             request,
             args.missing_from,
             args.upload_total[0 if kind == "messages" else 1] if args.upload_total else 0,
+            args.all_extras,
         )
         report["reconcile"][kind] = {"request": req}
-        for method in ("stream", "collect"):
-            report["reconcile"][kind][method] = _reconcile_runs(
-                db, kind, request, req, method, args
-            )
+        report["reconcile"][kind].update(_reconcile_runs(db, kind, request, req, args))
     if args.wal:
         report["wal"] = [
             {
@@ -1239,7 +1300,10 @@ def _fill_thread(filters: dict, identity: str) -> dict:
 
 
 def _filtered_runs(db: str, kind: str, filters: dict, repeat: int) -> dict:
-    runs = [_child("filtered", db_path=db, kind=kind, filters=filters) for _ in range(repeat)]
+    runs = [
+        _child("filtered", db_path=db, kind=kind, filters=filters, collect_first=n % 2 == 1)
+        for n in range(repeat)
+    ]
     if any(r["scanned"] != r["count"] for r in runs):
         raise SystemExit(f"{kind} {filters}: scanned and counted sets differ")
     return {
@@ -1264,34 +1328,53 @@ def run_request_shapes(work: Path, n: int) -> dict:
     return out
 
 
-def _reconcile_runs(
-    db: str, kind: str, request: Path, req: dict, method: str, args: argparse.Namespace
-) -> dict:
-    rounds = {}
+def _alternating(repeat: int, call) -> dict[str, list[dict]]:
+    """``call(method)`` ``repeat`` times for each scan method, the method
+    that runs first alternating each repeat. Each run is its own
+    process, but the page cache is the host's: a method that always ran
+    second would inherit the pages the first read."""
+    runs: dict[str, list[dict]] = {"stream": [], "collect": []}
+    for n in range(repeat):
+        for method in ("stream", "collect") if n % 2 == 0 else ("collect", "stream"):
+            runs[method].append(call(method))
+    return runs
+
+
+def _reconcile_runs(db: str, kind: str, request: Path, req: dict, args: argparse.Namespace) -> dict:
+    out: dict = {"stream": {}, "collect": {}}
     for k in args.k:
-        runs = [
-            _child("reconcile", db_path=db, kind=kind, k=k, request=str(request), method=method)
-            for _ in range(args.repeat)
-        ]
-        r0 = runs[0]
-        rounds[str(k)] = {
-            "returned": r0["returned"],
-            "participant_rows": r0["participant_rows"],
-            "references": r0["references"],
-            "extras": r0["extras"],
-            "missing_total": r0["missing_total"],
-            "response_bytes": r0["response_bytes"],
-            "record_bytes_max": r0["record_bytes_max"],
-            "rounds_to_repair": math.ceil(r0["missing_total"] / k),
-            "rounds_from_empty": math.ceil(req["members"] / k),
-            "parse_s": _median(runs, "parse_s"),
-            "diff_s": _median(runs, "diff_s"),
-            "records_s": _median(runs, "records_s"),
-            "transaction_s": _median(runs, "transaction_s"),
-            "total_s": _median(runs, "total_s"),
-            "rss_kib": max(r["rss_kib"] for r in runs),
-        }
-    return rounds
+        by_method = _alternating(
+            args.repeat,
+            lambda m, k=k: _child(
+                "reconcile",
+                db_path=db,
+                kind=kind,
+                k=k,
+                request=str(request),
+                method=m,
+                worst_first=args.all_extras,
+            ),
+        )
+        for method, runs in by_method.items():
+            r0 = runs[0]
+            out[method][str(k)] = {
+                "returned": r0["returned"],
+                "participant_rows": r0["participant_rows"],
+                "references": r0["references"],
+                "extras": r0["extras"],
+                "missing_total": r0["missing_total"],
+                "response_bytes": r0["response_bytes"],
+                "record_bytes_max": r0["record_bytes_max"],
+                "rounds_to_repair": math.ceil(r0["missing_total"] / k),
+                "rounds_from_empty": math.ceil(req["members"] / k),
+                "parse_s": _median(runs, "parse_s"),
+                "diff_s": _median(runs, "diff_s"),
+                "records_s": _median(runs, "records_s"),
+                "transaction_s": _median(runs, "transaction_s"),
+                "total_s": _median(runs, "total_s"),
+                "rss_kib": max(r["rss_kib"] for r in runs),
+            }
+    return out
 
 
 def main(argv: list[str] | None = None) -> dict:
@@ -1347,6 +1430,19 @@ def main(argv: list[str] | None = None) -> dict:
         "--writer-commit-bytes",
         type=lambda s: [int(x) for x in s.split(",")],
         default=[128 * 1024],
+    )
+    p.add_argument(
+        "--chunks",
+        type=int,
+        default=1,
+        help="body chunks per message (the parser splits large mail)",
+    )
+    p.add_argument("--chunk-tokens", type=int, default=BODY_TOKENS, help="words per body chunk")
+    p.add_argument(
+        "--all-extras",
+        action="store_true",
+        help="the upload holds no member: --upload-total digests, all extras "
+        "(the accepted worst case), and a round returns worst-case records first",
     )
     p.add_argument("--filtered", action="store_true", help="also time filtered predicates")
     p.add_argument(
