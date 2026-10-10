@@ -1439,8 +1439,14 @@ tool=get_thread outcome=error total_ms=1.9 stages_ms={} counts={} config={}
   ERROR line from the tool's own logger (`mcp.tools.retrieval`,
   `mcp.tools.system`) naming the cause as fixed text or an exception
   type, for example
-  `get_thread failed: not found`, `rejected invalid argument:
+  `get_thread failed: not_found`, `rejected invalid argument:
   list_threads.filter_type` or `query_messages error: OperationalError`.
+  `get_thread` and `get_message` log a missing, reaped or ambiguous ID
+  once per reason per minute (#1265): repeats in that minute are counted
+  into one `get_thread failed in the last <N>s: not_found=<count>` line
+  (or `get_message failed ...`), logged when the next such failure
+  arrives after the minute ends. Each call still gets its own
+  `outcome=error` line.
   A rejected argument (every tool, keyed by tool and field, #1039) is
   logged once per key per minute; later repeats in that minute are
   counted into one `rejected invalid arguments in the last <N>s:
