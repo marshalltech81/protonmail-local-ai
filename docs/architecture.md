@@ -1481,9 +1481,11 @@ decide.
   file) is `unsupported` ("encrypted Office file (open password
   required)"), none of them is `unsupported` ("OLE2 compound file with
   no Word, Excel or PowerPoint stream": an Outlook message, a Visio
-  drawing, an installer), and more than one is `unsupported` ("container
-  holds more than one Word, Excel or PowerPoint document"), never
-  guessed.
+  drawing, an installer), and more than one of these four kinds (the
+  encrypted pair beside a Word stream, for one) is `unsupported`
+  ("container holds more than one Word, Excel or PowerPoint document"),
+  never guessed, so a decoy stream is never read in place of an
+  encrypted package.
 - ZIP: zipfile reads the central directory only; no member is opened or
   decompressed. A package with `[Content_Types].xml` runs `docx` for
   `word/document.xml`, `xlsx` for `xl/workbook.xml`, `pptx` for

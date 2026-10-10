@@ -13,8 +13,9 @@ extracting anything:
   is ``doc``, ``Workbook`` or ``Book`` (BIFF5) is ``xls``,
   ``PowerPoint Document`` is ``ppt``. ``EncryptionInfo`` with
   ``EncryptedPackage`` is an encrypted OOXML file, which no extractor
-  reads. No stream stays nothing, more than one of the three stays
-  ambiguous: neither is guessed.
+  reads. No stream stays nothing, and more than one of the four kinds
+  (the encrypted pair counting as one) stays ambiguous: neither is
+  guessed.
 * ZIP: zipfile reads the central directory; no member is opened or
   decompressed. An OOXML package has ``[Content_Types].xml``, and its
   main part's name decides: ``word/document.xml`` is ``docx``,
@@ -166,12 +167,15 @@ def _identify_ole2(payload: bytes) -> str:
         # nothing (Codex round 1 on #1444).
         names = {_ole2_name(kid) for kid in ole.root.kids if kid.entry_type == olefile.STGTY_STREAM}
     kinds = {_OLE2_STREAMS[name] for name in names if name in _OLE2_STREAMS}
+    # An encrypted package is a kind of its own: beside a legacy stream it
+    # makes the container ambiguous, so a decoy stream is never read
+    # instead of it (Codex round 3 on #1444).
+    if _OLE2_ENCRYPTION_STREAMS <= names:
+        kinds.add(OLE2_ENCRYPTED)
     if len(kinds) > 1:
         return AMBIGUOUS
     if kinds:
         return kinds.pop()
-    if _OLE2_ENCRYPTION_STREAMS <= names:
-        return OLE2_ENCRYPTED
     return OLE2_OTHER
 
 

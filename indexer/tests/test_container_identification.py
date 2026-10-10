@@ -94,6 +94,10 @@ class TestIdentification:
             ((), "ole2-other"),
             (("WordDocument", "Workbook"), "ambiguous"),
             (("PowerPoint Document", "Book"), "ambiguous"),
+            # Codex round 3: an encrypted package beside a legacy stream is
+            # two kinds, never the decoy legacy one.
+            (("WordDocument", "EncryptionInfo", "EncryptedPackage"), "ambiguous"),
+            (("Workbook", "EncryptionInfo", "EncryptedPackage"), "ambiguous"),
         ],
     )
     def test_ole2_root_streams_decide(self, streams, token):
