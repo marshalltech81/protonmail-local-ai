@@ -1823,18 +1823,158 @@ class Database:
             raise
 
     @_synchronized
-    def clear_attachment_extraction_deferral(self, occurrence_id: str) -> None:
-        """Clear the deferral mark of an occurrence its message no longer
-        has (a parser change dropped it, #1236), so it neither reads as
-        deferred nor re-queues its message. In phase 2c's transaction."""
+    def get_attachment_payloads(
+        self, claimant_id: str, occurrence_ids: list[str]
+    ) -> dict[str, set[str]]:
+        """The payloads (``attachment_id``) of ``claimant_id``'s stored
+        occurrences among ``occurrence_ids``, each with the extractor
+        modules those occurrences ran."""
+        payloads: dict[str, set[str]] = {}
+        for occurrence_id in occurrence_ids:
+            row = self._conn.execute(
+                "SELECT attachment_id, extractor_module FROM attachments "
+                "WHERE attachment_occurrence_id = ? AND claimant_id = ?",
+                (occurrence_id, claimant_id),
+            ).fetchone()
+            if row is not None:
+                payloads.setdefault(row["attachment_id"], set()).add(row["extractor_module"])
+        return payloads
+
+    @_synchronized
+    def delete_attachment_occurrences(
+        self,
+        claimant_id: str,
+        occurrence_ids: list[str],
+        purged_extractions: dict[tuple[str, str], sqlite3.Row],
+    ) -> tuple[int, int]:
+        """Drop occurrences of ``claimant_id`` its current parse no longer
+        produces (#1375) and return how many rows went and how many
+        payload slices went with them.
+
+        Each occurrence's ``attachments`` row and ``attachments_fts`` row
+        go (a deferral mark goes with the row, #1236). The message's
+        chunk slice of a payload goes only when no remaining occurrence
+        of the message carries that payload, since the slice is keyed by
+        message and payload and a surviving sibling (the same bytes under
+        a corrected filename) uses it; its vectors are subtracted from
+        their threads' chunk-vector sums (#1356). A cached extraction of
+        the payload that no remaining occurrence uses is purged, as when
+        the whole message is removed; each row purged is also put in
+        ``purged_extractions`` (by payload and module), so a later
+        message of the same batch that prepared against it can restore it
+        with ``restore_attachment_extraction`` (a peer that fails to
+        commit restores nothing, and a crash before it commits makes the
+        peer extract again). The thread's ``has_attachments`` is recomputed, since
+        ``upsert_thread`` only ever sets it: it stays true while any
+        occurrence of the thread is stored or any message of it has
+        attachments without a stored occurrence yet (a batch peer
+        whose commit has not run). In phase 2c's
+        transaction, after the pass's own occurrence writes, so the
+        remaining occurrences are the parse's.
+        """
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            payloads: set[str] = set()
+            deleted = 0
+            slices = 0
+            for occurrence_id in occurrence_ids:
+                row = cur.execute(
+                    "SELECT fts_rowid, attachment_id FROM attachments "
+                    "WHERE attachment_occurrence_id = ? AND claimant_id = ?",
+                    (occurrence_id, claimant_id),
+                ).fetchone()
+                if row is None:
+                    continue
+                payloads.add(row["attachment_id"])
+                if row["fts_rowid"] is not None:
+                    cur.execute("DELETE FROM attachments_fts WHERE rowid = ?", (row["fts_rowid"],))
+                    self._mark_fts_scrub("attachments_fts")
+                cur.execute(
+                    "DELETE FROM attachments WHERE attachment_occurrence_id = ?",
+                    (occurrence_id,),
+                )
+                deleted += 1
+            for attachment_id in sorted(payloads):
+                still_carried = cur.execute(
+                    "SELECT 1 FROM attachments WHERE claimant_id = ? AND attachment_id = ? LIMIT 1",
+                    (claimant_id, attachment_id),
+                ).fetchone()
+                if still_carried is None:
+                    rows = cur.execute(
+                        "SELECT chunk_id, fts_rowid, thread_id FROM message_chunks "
+                        "WHERE claimant_id = ? AND attachment_id = ?",
+                        (claimant_id, attachment_id),
+                    ).fetchall()
+                    self._delete_chunks_in_batches(cur, rows)
+                    cur.execute(
+                        "DELETE FROM message_chunks WHERE claimant_id = ? AND attachment_id = ?",
+                        (claimant_id, attachment_id),
+                    )
+                    slices += bool(rows)
+                for cached in cur.execute(
+                    "SELECT attachment_id, extractor_module, extraction_status, extractor, "
+                    "extracted_text, extraction_error, extracted_at, ocr_pages_skipped, "
+                    "text_complete FROM attachment_extractions WHERE attachment_id = ?",
+                    (attachment_id,),
+                ).fetchall():
+                    purge = cur.execute(
+                        _PURGE_ORPHAN_EXTRACTION_SQL + " AND extractor_module = ?",
+                        (attachment_id, cached["extractor_module"]),
+                    )
+                    if purge.rowcount:
+                        purged_extractions[(attachment_id, cached["extractor_module"])] = cached
+            if deleted:
+                cur.execute(
+                    "UPDATE threads SET has_attachments = EXISTS ("
+                    "SELECT 1 FROM message_thread_map t "
+                    "JOIN attachments a ON a.claimant_id = t.claimant_id "
+                    "WHERE t.thread_id = threads.thread_id) OR EXISTS ("
+                    "SELECT 1 FROM message_thread_map t "
+                    "JOIN messages m ON m.claimant_id = t.claimant_id "
+                    "WHERE t.thread_id = threads.thread_id AND m.has_attachments = 1 "
+                    "AND NOT EXISTS (SELECT 1 FROM attachments a "
+                    "WHERE a.claimant_id = t.claimant_id)) "
+                    "WHERE thread_id = (SELECT thread_id FROM message_thread_map "
+                    "WHERE claimant_id = ?)",
+                    (claimant_id,),
+                )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+        return deleted, slices
+
+    @_synchronized
+    def restore_attachment_extraction(self, row: sqlite3.Row) -> None:
+        """Put back a cached extraction row ``delete_attachment_occurrences``
+        purged, as it was (``extracted_at`` included), unless the key
+        already has a row (#1375)."""
         cur = self._conn.cursor()
         started = False
         try:
             started = self._begin_if_needed(cur)
             cur.execute(
-                "UPDATE attachments SET extraction_deferred_at = NULL "
-                "WHERE attachment_occurrence_id = ?",
-                (occurrence_id,),
+                """
+                INSERT INTO attachment_extractions
+                    (attachment_id, extractor_module, extraction_status, extractor,
+                     extracted_text, extraction_error, extracted_at, ocr_pages_skipped,
+                     text_complete)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attachment_id, extractor_module) DO NOTHING
+                """,
+                (
+                    row["attachment_id"],
+                    row["extractor_module"],
+                    row["extraction_status"],
+                    row["extractor"],
+                    row["extracted_text"],
+                    row["extraction_error"],
+                    row["extracted_at"],
+                    row["ocr_pages_skipped"],
+                    row["text_complete"],
+                ),
             )
             self._commit_if_started(started)
         except Exception:
@@ -2681,6 +2821,18 @@ class Database:
         if row is None:
             return None
         return row["display_subject"]
+
+    @_synchronized
+    def thread_has_chunks_not_in(self, thread_id: str, chunk_ids: set[str]) -> bool:
+        """Whether ``thread_id`` has a chunk row outside ``chunk_ids``:
+        whether it keeps a chunk once those are deleted. Reads chunk IDs,
+        never vectors."""
+        row = self._conn.execute(
+            "SELECT 1 FROM message_chunks WHERE thread_id = ? "
+            "AND chunk_id NOT IN (SELECT value FROM json_each(?)) LIMIT 1",
+            (thread_id, json.dumps(sorted(chunk_ids))),
+        ).fetchone()
+        return row is not None
 
     @_synchronized
     def thread_has_chunks(self, thread_id: str) -> bool:

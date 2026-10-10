@@ -2146,9 +2146,10 @@ in the seconds.
   same transaction and stays watched by the stall guard until it
   commits, so a crash there leaves the message charged and marked
   `interrupted`. A rolled-back pass leaves no mark and no continuation,
-  and is charged as an ordinary `db_write` failure. A deferral mark on an
-  occurrence the message's current parse no longer has (a parser change
-  dropped it) is cleared in the pass's commit. The continuation
+  and is charged as an ordinary `db_write` failure. An occurrence the
+  message's current parse no longer has (a parser change dropped it) is
+  deleted in the pass's commit, deferral mark included (#1375; see
+  *Reparse in place*). The continuation
   sorts behind the jobs already due, so continued messages and new mail
   take turns. It spends no attempt; a failure in a later pass does.
 - **Progress.** A continuation (a claimed job still carrying the
@@ -2917,7 +2918,9 @@ per-message rows through `upsert_thread`; Phase 2a finds every chunk ID
 already stored and queues nothing to embed; a chunkless thread keeps
 its stored subject-fallback vector instead of embedding it again (one
 still at the zero placeholder is repaired as usual). So a reparse
-makes no embedding call. Attachment text comes from the extraction
+makes no embedding call, except for a thread whose last chunk goes with
+a dropped attachment occurrence (#1375): its subject is embedded once
+for the thread vector. Attachment text comes from the extraction
 cache, unless the cached row is stale: an older extractor version, or
 (since v6) a `success` or `empty` row with no completeness record, which
 is re-extracted once; a chunk whose text is unchanged keeps its ID and
@@ -2930,6 +2933,29 @@ outcomes below). A reparse can drop addresses from a
 message's rows (the #1144 address budget), but the thread's
 `participants` and `senders` keep them until a reap or a rebuild
 (#1173).
+
+A pass (a reparse or any other) also removes the attachment
+occurrences the message's current parse no longer produces, for
+example a row indexed under a filename a later parser fix decodes
+differently (#1375). In phase 2c's transaction, after the parse's own
+occurrence writes, each such occurrence's `attachments` row (with any
+deferral mark) and `attachments_fts` row are deleted; the message's
+chunk slice of its payload is deleted only when no remaining
+occurrence of the message carries the same payload, with the deleted
+vectors subtracted from the thread's chunk-vector sum, and a cached
+extraction no remaining occurrence uses is purged in the same
+transaction. A later message of the same batch that was prepared
+against that cached row restores it unchanged (`extracted_at`
+included) when it writes its occurrence; if it fails to commit, or the
+process stops first, nothing is restored and the retry extracts again.
+The thread's `has_attachments` is recomputed from its messages. A continuation pass
+that drops an occurrence whose extractor module no surviving copy of
+the payload ran rebuilds the payload's slice from the surviving
+copies. Other messages' occurrences of the payload are untouched. This runs only while
+attachment extraction is on (with it off, a pass writes no occurrence
+rows and removes none). The attachments line counts the removed rows as
+`dropped`. `make reparse` clears leftovers from parser fixes released
+before this.
 
 The v4 migration (`0004_participant_names.sql`, #1140) is one: it
 creates `message_participant_names`, seeds it with each participant
