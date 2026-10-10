@@ -1494,6 +1494,8 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
     two-way orders (scan method, K) need an even count and the
     three-way filtered rotation a multiple of three. One repeat is a
     single, unbalanced run and is allowed."""
+    if any(k < 1 for k in args.k):
+        raise SystemExit(f"--k {args.k}: every K must be at least 1")
     if args.repeat is None:
         args.repeat = 6 if args.filtered else 2
     if args.repeat < 1:

@@ -1638,10 +1638,14 @@ fails
 and an RFC 2047 form stays ASCII, so 1,015 bytes (`ascii998`) is the
 longest reachable claimant ID. Every `utf8x4` figure here is a stress shape the indexer cannot build, not
 a limit input; the final cap-sized run below used `ascii998`. `--records worst`
-fills every character-clipped field of a record past its clip with
-four-byte characters (subject, 11 participants per role with name and
-address, 11 References entries, In-Reply-To, filename and MIME type).
-`--records cardinality` gives each message the most rows a record can
+fills every character-clipped field of a record past its clip with what
+the parser can store: four-byte characters in the subject, the 11
+display names per role and the filename, ASCII in the 11 addresses per
+role (with an `@`), In-Reply-To, 11 References entries and the MIME
+type, and a nested folder and source path of about 3.5 KB. The record
+tables below were first taken with four-byte addresses, IDs and MIME
+type, which the parser cannot store; the K bullet gives the reachable
+sizes. `--records cardinality` gives each message the most rows a record can
 carry: 10,000 participants (the parser's `MAX_MESSAGE_ADDRESSES`) and
 `--references` References entries (100,000 here; the parser caps their
 length, not their count). `--extracted-chars` stores that many

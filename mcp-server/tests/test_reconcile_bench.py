@@ -671,7 +671,7 @@ def test_worst_records_carry_the_full_nested_maildir_path(bench, tmp_path):
 def test_repeat_count_must_balance_the_orders(bench, argv, ok):
     import argparse
 
-    ns = argparse.Namespace(repeat=int(argv[1]), filtered="--filtered" in argv)
+    ns = argparse.Namespace(repeat=int(argv[1]), filtered="--filtered" in argv, k=[100])
     if ok:
         bench._require_balanced_repeat(ns)
     else:
@@ -710,7 +710,7 @@ def test_nonpositive_repeat_is_refused(bench, repeat):
     import argparse
 
     with pytest.raises(SystemExit):
-        bench._require_balanced_repeat(argparse.Namespace(repeat=repeat, filtered=False))
+        bench._require_balanced_repeat(argparse.Namespace(repeat=repeat, filtered=False, k=[100]))
 
 
 def test_report_and_wal_results_record_the_artificial_hold(report):
@@ -724,3 +724,11 @@ def test_worst_fields_are_parser_reachable(bench):
     assert shape["in_reply_to"].isascii() and all(r.isascii() for r in shape["references"])
     assert shape["content_type"].isascii()
     assert max(len(a) for _, a, _ in shape["people"]) > 500
+
+
+@pytest.mark.parametrize("k", [[0], [100, 0], [-5]])
+def test_nonpositive_k_is_refused(bench, k):
+    import argparse
+
+    with pytest.raises(SystemExit):
+        bench._require_balanced_repeat(argparse.Namespace(repeat=2, filtered=False, k=k))
