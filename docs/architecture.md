@@ -949,7 +949,13 @@ writes the occurrence's chunks, so they roll back with them.
   serialized (`Attachment.payload_complete`: `_attachment_payload` kept
   the empty payload after a parse cap, a failure, or for a container
   nested inside another attachment), and for a part whose base64
-  decode lost bytes (an invalid-character or invalid-length defect). For
+  decode lost bytes (an invalid-character or invalid-length defect), for
+  a quoted-printable part with an `=` that is neither a two-hex-digit
+  escape nor a soft line break, and for a uuencode part (all four
+  aliases) whose decode fell back to the transport text (#1288; one
+  linear scan of the part's text, behind the same per-message byte
+  budgets; a truncation that leaves valid encoding stays undetectable).
+  For
   a base64 attached email, whose transport form the parser decodes
   leniently, the same text is decoded once more through the stdlib leaf
   decoder only to read those defects (one linear pass behind the
@@ -961,10 +967,10 @@ writes the occurrence's chunks, so they roll back with them.
   An attached email's loss found this way is also counted as the
   `transport_lossy` parse cap, so it is logged (review round 7 on
   #1311); a leaf attachment's is not.
-  Quoted-printable and uuencode failures record no defect and are not
-  detected (#1288), so a quoted-printable attached email (`message/*`)
-  keeps its lenient decode but is always `0` (also counted as
-  `transport_lossy`), and one in any other
+  A quoted-printable attached email (`message/*`) keeps its lenient
+  decode and is `0` (also counted as `transport_lossy`) when its
+  transport text has an `=` that is neither an escape nor a soft line
+  break (#1288), and one in any other
   transfer encoding that is not identity or base64 (uuencode and its
   aliases, or an unknown value) keeps the empty payload, counted as the
   `transport_decode` parse cap when an extractor reads the attachment:
@@ -972,13 +978,15 @@ writes the occurrence's chunks, so they roll back with them.
   one an unserialized container gets, and the message's
   `attachments_manifest_complete` is cleared (review round 4 on #1311).
   An email carried as a leaf part the `eml` extractor reads
-  (`application/eml`, or any type named `.eml`) in any encoding other
-  than identity or base64 keeps its decode but is always `0`, counted
-  as `leaf_transport_lossy` (review round 8 on #1311), which leaves the
+  (`application/eml`, or any type named `.eml`) in an encoding nothing
+  here decodes (not identity, base64, quoted-printable or uuencode)
+  keeps its decode but is always `0`, and a leaf of any type whose
+  base64, quoted-printable or uuencode decode lost bytes is `0` too;
+  each is counted as `leaf_transport_lossy` (review round 8 on #1311,
+  #1288), which leaves the
   attachment list complete, since a leaf is never walked for
   attachments. An attached email's `transport_lossy` clears it: a
-  nested attachment whose boundary was lost is missing (round 13). Any other leaf
-  attachment in those encodings is unchanged.
+  nested attachment whose boundary was lost is missing (round 13).
 - For a `success` or `empty` result, the result's own
   `text_complete`, which the dispatcher sets: `0` when the attempt lost
   text (any `extractor_caps` cap, the `max_extracted_chars` cut, the
@@ -1564,12 +1572,13 @@ characters per header and 10,000,000 characters of text; a budget
 that cut the text is logged through the extractor-cap WARNING
 (`eml_*`) and marks the text incomplete, and so does a decode that
 lost bytes: a body text part's (`eml_body_decode`), a nested email's
-base64 (`eml_nested_messages`), and any body text part or nested email
-in quoted-printable, whose loss the standard library records nothing
-for (counted as lossy until #1288 detects it). A body text part in any
-other encoding that is not identity (uuencode and its aliases, or an
-unknown value) is kept as decoded but counted as `eml_body_decode`
-too, since a malformed one comes back as its transport text. A body
+base64 or quoted-printable (`eml_nested_messages`; a quoted-printable
+`=` that is neither an escape nor a soft line break, #1288), and a body
+text part's quoted-printable or uuencode (the same `=` rule, or a
+uuencode decode that fell back to its transport text). A body text
+part in any other encoding that is not identity (an unknown value) is
+kept as decoded but counted as `eml_body_decode` too, since a
+malformed one comes back as its transport text. A body
 text part counts only when the body keeps it, or would have kept it
 had it decoded whole: a loss in an alternative rendering set aside is
 not counted, and neither is its charset fallback (review round 8). A

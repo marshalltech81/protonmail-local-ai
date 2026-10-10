@@ -8,6 +8,7 @@ encoded headers, address parsing, unknown dates, and folder derivation.
 import base64
 import binascii
 import dataclasses
+import email
 import email.errors
 import email.utils
 import hashlib
@@ -4245,8 +4246,9 @@ _CAP_SHAPES = {
     ),
     # Review round 7 on #1311: an attached email whose transport decoded
     # with bytes lost (base64 with an invalid-character defect), or may
-    # have (quoted-printable, #1288), keeps the lenient decode, marked
-    # incomplete, and is counted so the loss is logged.
+    # have (quoted-printable with an ``=`` that is no escape, #1288), keeps
+    # the lenient decode, marked incomplete, and is counted so the loss is
+    # logged.
     "transport_lossy_base64": (
         _with_attachment(_BASE64_RFC822, _LOSSY_BASE64_INNER),
         False,
@@ -4256,7 +4258,7 @@ _CAP_SHAPES = {
     "transport_lossy_quoted_printable": (
         _with_attachment(
             b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n",
-            quopri.encodestring(_INNER_EMAIL),
+            quopri.encodestring(_INNER_EMAIL) + b"cut =\rtail",
         ),
         False,
         "transport_lossy=1",
@@ -4268,7 +4270,7 @@ _CAP_SHAPES = {
     "leaf_transport_lossy": (
         _with_attachment(
             b"Content-Type: application/eml\r\nContent-Transfer-Encoding: quoted-printable\r\n",
-            quopri.encodestring(_INNER_EMAIL),
+            quopri.encodestring(_INNER_EMAIL) + b"cut =\rtail",
         ),
         False,
         "leaf_transport_lossy=1",
@@ -5806,7 +5808,8 @@ class TestContainerTransportDecodeLoss:
     (``_decode_transport_form`` keeps today's decoder and bytes) is checked
     once more through the stdlib leaf decoder, as a diagnostic only; an
     invalid-character or invalid-length defect marks the container's
-    payload incomplete. Quoted-printable is not checked (#1288)."""
+    payload incomplete. Quoted-printable is checked by a scan for an ``=``
+    that is no escape or soft break (#1288)."""
 
     _INNER = b"From: a@example.test\r\nSubject: s\r\n\r\nSYNTHETIC_TEXT_MARKER body text\r\n"
 
@@ -5873,10 +5876,9 @@ class TestContainerTransportDecodeLoss:
         # The diagnostic runs only on a transport that decoded.
         assert calls == []
 
-    def test_quoted_printable_is_not_checked_and_never_complete(self, tmp_path, monkeypatch):
-        """The base64 diagnostic does not run; a quoted-printable loss
-        records nothing to detect, so the payload is never certified
-        (review round 4 on #1311, until #1288)."""
+    def test_a_clean_quoted_printable_attached_email_is_complete(self, tmp_path, monkeypatch):
+        """#1288: a quoted-printable transport with only escapes and soft
+        breaks decoded without loss; the base64 diagnostic does not run."""
         import quopri
 
         msg, calls = self._parse(
@@ -5886,6 +5888,23 @@ class TestContainerTransportDecodeLoss:
             quopri.encodestring(self._INNER),
         )
         [attachment] = msg.attachments
+        assert attachment.payload and attachment.payload_complete is True
+        assert calls == []
+        assert msg.parse_caps == {}
+
+    def test_a_quoted_printable_equals_sign_that_is_no_escape_makes_it_incomplete(
+        self, tmp_path, monkeypatch
+    ):
+        import quopri
+
+        msg, calls = self._parse(
+            tmp_path,
+            monkeypatch,
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            quopri.encodestring(self._INNER) + b"cut =\rtail",
+        )
+        [attachment] = msg.attachments
+        # The returned bytes are today's lenient decode, kept.
         assert attachment.payload and attachment.payload_complete is False
         assert calls == []
         assert msg.parse_caps == {"transport_lossy": 1}
@@ -5908,8 +5927,9 @@ class TestContainerTransportEncodings:
     """Review round 4 on #1311 (owner decision): an attached email's
     declared Content-Transfer-Encoding decides whether its payload can be
     certified. Identity and base64 (whose loss is detected) are unchanged;
-    quoted-printable keeps its lenient decode but is never complete (its
-    loss records nothing, #1288); any other encoding keeps no payload."""
+    quoted-printable keeps its lenient decode and is complete unless a
+    scan finds an ``=`` that is no escape or soft break (#1288); any other
+    encoding keeps no payload."""
 
     @staticmethod
     def _attachment(tmp_path, headers: bytes, body: bytes):
@@ -5933,20 +5953,27 @@ class TestContainerTransportEncodings:
         assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
 
     @pytest.mark.parametrize(
-        ("body", "kept"),
+        ("body", "kept", "complete"),
         [
-            (_INNER_EMAIL, b"SYNTHETIC_TEXT_MARKER"),
-            (b"From: a@example.test\r\n\r\nvisible =\rtail SYNTHETIC_TEXT_MARKER", b"visible"),
+            (_INNER_EMAIL, b"SYNTHETIC_TEXT_MARKER", True),
+            (quopri.encodestring(_INNER_EMAIL), b"SYNTHETIC_TEXT_MARKER", True),
+            (
+                b"From: a@example.test\r\n\r\nvisible =\rtail SYNTHETIC_TEXT_MARKER",
+                b"visible",
+                False,
+            ),
         ],
-        ids=["clean", "malformed"],
+        ids=["clean_raw", "clean_encoded", "malformed"],
     )
-    def test_quoted_printable_keeps_its_bytes_and_is_never_complete(self, tmp_path, body, kept):
+    def test_quoted_printable_keeps_its_bytes_and_is_complete_unless_lossy(
+        self, tmp_path, body, kept, complete
+    ):
         msg, attachment = self._attachment(
             tmp_path, b"Content-Transfer-Encoding: quoted-printable\r\n", body
         )
         assert kept in attachment.payload
-        assert attachment.payload_complete is False
-        assert msg.parse_caps == {"transport_lossy": 1}
+        assert attachment.payload_complete is complete
+        assert msg.parse_caps == ({} if complete else {"transport_lossy": 1})
 
     @pytest.mark.parametrize(
         ("headers", "body"),
@@ -6041,12 +6068,14 @@ class TestLeafEmlTransportEncodings:
     """Review round 8 on #1311: an email carried as a leaf part the
     ``eml`` extractor reads (``application/eml``, or any type named
     ``.eml``) follows the round-4 rule for ``message/*``: identity and
-    base64 (whose loss is detected) are unchanged; any other encoding
-    keeps its decode but is never complete and is counted as
-    ``transport_lossy``. Leaves for other extractors are #1288."""
+    base64, quoted-printable and uuencode (whose loss is detected, #1288)
+    are complete unless the decode lost bytes; any other encoding keeps
+    its decode but is never complete. A loss is counted as
+    ``leaf_transport_lossy``."""
 
     _QP_MALFORMED = b"From: a@example.test\r\n\r\nvisible =\rtail SYNTHETIC_TEXT_MARKER"
     _UU = b"begin 644 x\n" + _uu_lines(_INNER_EMAIL) + b"`\nend\n"
+    _UU_NO_BEGIN = _uu_lines(_INNER_EMAIL) + b"`\nend\n"
 
     @staticmethod
     def _attachment(tmp_path, caplog, headers: bytes, body: bytes, disposition=_CAP_FILENAME):
@@ -6062,14 +6091,13 @@ class TestLeafEmlTransportEncodings:
     @pytest.mark.parametrize(
         ("content_type", "encoding", "body"),
         [
-            (b"application/eml", b"quoted-printable", quopri.encodestring(_INNER_EMAIL)),
             (b"application/eml", b"quoted-printable", _QP_MALFORMED),
             (b"application/octet-stream", b"quoted-printable", _QP_MALFORMED),
-            (b"application/eml", b"x-uuencode", _UU),
-            (b"application/octet-stream", b"uue", _UU),
+            (b"application/eml", b"x-uuencode", _UU_NO_BEGIN),
+            (b"application/octet-stream", b"uue", _UU_NO_BEGIN),
             (b"application/eml", b"x-other", _INNER_EMAIL),
         ],
-        ids=["qp_clean", "qp_malformed", "qp_named_eml", "uuencode", "uue_named_eml", "unknown"],
+        ids=["qp_malformed", "qp_named_eml", "uuencode", "uue_named_eml", "unknown"],
     )
     def test_an_undetectable_encoding_is_never_complete(
         self, tmp_path, caplog, content_type, encoding, body
@@ -6088,6 +6116,33 @@ class TestLeafEmlTransportEncodings:
         assert attachment.payload_complete is False
         assert msg.parse_caps == {"leaf_transport_lossy": 1}
         assert msg.attachments_manifest_complete is True
+
+    @pytest.mark.parametrize(
+        ("content_type", "encoding", "body"),
+        [
+            (b"application/eml", b"quoted-printable", quopri.encodestring(_INNER_EMAIL)),
+            (b"application/eml", b"x-uuencode", _UU),
+            (b"application/octet-stream", b"uue", _UU),
+        ],
+        ids=["qp", "uuencode", "uue_named_eml"],
+    )
+    def test_a_clean_quoted_printable_or_uuencode_leaf_is_complete(
+        self, tmp_path, caplog, content_type, encoding, body
+    ):
+        """#1288: the decode lost nothing, so the leaf is certified."""
+        msg, attachment = self._attachment(
+            tmp_path,
+            caplog,
+            b"Content-Type: "
+            + content_type
+            + b"\r\nContent-Transfer-Encoding: "
+            + encoding
+            + b"\r\n",
+            body,
+        )
+        assert b"SYNTHETIC_TEXT_MARKER" in attachment.payload
+        assert attachment.payload_complete is True
+        assert msg.parse_caps == {}
 
     @pytest.mark.parametrize(
         ("encoding", "body"),
@@ -6109,8 +6164,10 @@ class TestLeafEmlTransportEncodings:
         assert attachment.payload_complete is True
         assert msg.parse_caps == {}
 
-    def test_a_leaf_for_another_extractor_is_unchanged(self, tmp_path, caplog):
-        """Still #1288: a quoted-printable ``.txt`` is not checked."""
+    def test_a_lossy_quoted_printable_leaf_for_another_extractor_is_incomplete(
+        self, tmp_path, caplog
+    ):
+        """#1288: the leaf check is not limited to emails."""
         msg, attachment = self._attachment(
             tmp_path,
             caplog,
@@ -6118,5 +6175,160 @@ class TestLeafEmlTransportEncodings:
             self._QP_MALFORMED,
             _TXT_FILENAME,
         )
+        assert attachment.payload_complete is False
+        assert msg.parse_caps == {"leaf_transport_lossy": 1}
+
+    def test_a_clean_quoted_printable_leaf_for_another_extractor_is_complete(
+        self, tmp_path, caplog
+    ):
+        msg, attachment = self._attachment(
+            tmp_path,
+            caplog,
+            b"Content-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            b"caf=C3=A9 =3D soft=\r\nbreak SYNTHETIC_TEXT_MARKER",
+            _TXT_FILENAME,
+        )
         assert attachment.payload_complete is True
         assert msg.parse_caps == {}
+
+
+class TestTransferDecodeLossDetection:
+    """#1288: quoted-printable and uuencode decodes record no defect, so
+    ``_decode_lost_bytes`` scans for the shapes the lenient decoders lose."""
+
+    @staticmethod
+    def _leaf(encoding: str, payload: bytes):
+        return email.message_from_bytes(
+            b"Content-Type: text/plain\r\nContent-Transfer-Encoding: "
+            + encoding.encode()
+            + b"\r\n\r\n"
+            + payload
+        )
+
+    @pytest.mark.parametrize(
+        ("payload", "lost"),
+        [
+            (b"plain text", False),
+            (b"caf=C3=A9 and =3d lower and =3D upper", False),
+            (b"soft=\nbreak", False),
+            (b"soft=\r\nbreak", False),
+            (b"lone cr =\rtail", True),
+            (b"trailing equals =", True),
+            (b"not hex =zz", True),
+            (b"short =3", True),
+            (b"short =3x", True),
+        ],
+    )
+    def test_quoted_printable_shapes(self, payload, lost):
+        part = self._leaf("quoted-printable", payload)
+        assert parser_module._decode_lost_bytes(part) is lost
+
+    @pytest.mark.parametrize("encoding", ["x-uuencode", "uuencode", "uue", "x-uue", "X-UUENCODE"])
+    def test_uuencode_aliases(self, encoding):
+        data = b"begin 644 f\n" + _uu_lines(b"SYNTHETIC_TEXT_MARKER " * 8) + b"`\nend\n"
+        assert parser_module._decode_lost_bytes(self._leaf(encoding, data)) is False
+        for broken in (
+            _uu_lines(b"SYNTHETIC_TEXT_MARKER") + b"`\nend\n",  # no begin line
+            b"begin 644 f\n\n" + _uu_lines(b"SYNTHETIC_TEXT_MARKER"),  # blank line
+            b"begin nonoctal f\n" + _uu_lines(b"SYNTHETIC_TEXT_MARKER"),
+            b"",
+        ):
+            assert parser_module._decode_lost_bytes(self._leaf(encoding, broken)) is True
+
+    @pytest.mark.parametrize("charset", ["utf-16le", "utf-16", "utf-8", "latin-1", "bogus"])
+    def test_a_declared_charset_does_not_hide_the_equals_sign(self, charset):
+        """Review round 1 on #1398: ``get_payload()`` decodes 8-bit bytes
+        with the declared charset, and a multibyte one merges the bytes
+        around an ``=``. The scan reads the raw transport text."""
+        part = email.message_from_bytes(
+            b"Content-Type: text/plain; charset="
+            + charset.encode()
+            + b"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n\xff=\rX"
+        )
+        assert parser_module._decode_lost_bytes(part) is True
+        # The part is untouched by the scan.
+        assert part.get_content_charset() == charset.lower()
+
+    @pytest.mark.parametrize("charset", ["utf-16le", "utf-8"])
+    def test_a_declared_charset_leaves_a_clean_part_complete(self, charset):
+        part = email.message_from_bytes(
+            b"Content-Type: text/plain; charset="
+            + charset.encode()
+            + b"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\ncaf=C3=A9 =3D ok"
+        )
+        assert parser_module._decode_lost_bytes(part) is False
+
+    def test_a_non_ascii_uuencode_payload_counts_as_failed(self):
+        part = self._leaf("x-uuencode", b"begin 644 f\n\xc3\xa9\nend\n")
+        assert parser_module._decode_lost_bytes(part) is True
+
+    @pytest.mark.parametrize("encoding", ["7bit", "8bit", "binary", "base64", "x-other"])
+    def test_other_encodings_are_not_scanned(self, encoding):
+        part = self._leaf(encoding, b"=\rtail = begin")
+        assert parser_module._decode_lost_bytes(part) is False
+
+    def test_the_scan_is_one_linear_pass_per_leaf(self, tmp_path, monkeypatch):
+        """The work is one scan of the payload text, once per attachment
+        (not once per consumer), and a crafted run of ``=`` is linear."""
+        scanned: list[int] = []
+        real = parser_module._QP_BAD_ESCAPE_TEXT
+
+        class Counting:
+            def search(self, text):
+                scanned.append(len(text))
+                return real.search(text)
+
+        monkeypatch.setattr(parser_module, "_QP_BAD_ESCAPE_TEXT", Counting())
+        body = b"=3D" * 100_000
+        path = tmp_path / "q.eml"
+        path.write_bytes(
+            _with_attachment(
+                b"Content-Type: application/eml\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+                body,
+            )
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert scanned == [len(body)]
+        assert msg.attachments[0].payload_complete is True
+        # Worst case for the pattern: every position starts a candidate.
+        start = time.perf_counter()
+        assert parser_module._QP_BAD_ESCAPE_BYTES.search(b"=" * 2_000_000 + b"=3D") is not None
+        assert time.perf_counter() - start < 2.0
+
+    @pytest.mark.parametrize("walk", [False, True], ids=["attachment_leaf", "walk_body_part"])
+    def test_a_uuencoded_part_is_decoded_once(self, tmp_path, monkeypatch, walk):
+        """Review round 1 on #1398: the fallback check reuses the decode
+        the parser already made. A uuencoded payload expands 31:1, so a
+        second decode doubled the memory and time of a crafted one."""
+        import email.message as stdlib_message
+
+        decodes: list[int] = []
+        real = stdlib_message._decode_uu
+
+        def counting(data):
+            decodes.append(len(data))
+            return real(data)
+
+        monkeypatch.setattr(stdlib_message, "_decode_uu", counting)
+        data = b"begin 644 f\n" + _uu_lines(b"SYNTHETIC_TEXT_MARKER " * 8) + b"`\nend\n"
+        if walk:
+            part = parser_module.email.message_from_bytes(
+                b"Content-Type: text/plain\r\nContent-Transfer-Encoding: x-uuencode\r\n\r\n" + data
+            )
+            body_walk = parser_module.BodyWalk()
+            parser_module._extract_body_and_attachments(part, walk=body_walk)
+            assert body_walk.decode_lost_parts == 0
+        else:
+            path = tmp_path / "u.eml"
+            path.write_bytes(
+                _with_attachment(
+                    b"Content-Type: application/octet-stream\r\n"
+                    b"Content-Transfer-Encoding: x-uuencode\r\n",
+                    data,
+                )
+            )
+            msg = parse_email(path)
+            assert msg is not None
+            assert msg.attachments[0].payload_complete is True
+        assert len(decodes) == 1
