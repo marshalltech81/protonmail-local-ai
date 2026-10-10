@@ -1846,6 +1846,7 @@ class Database:
         claimant_id: str,
         occurrence_ids: list[str],
         keep_extractions: set[tuple[str, str]],
+        purge_later: set[tuple[str, str]],
     ) -> tuple[int, int]:
         """Drop occurrences of ``claimant_id`` its current parse no longer
         produces (#1375) and return how many rows went and how many
@@ -1862,7 +1863,9 @@ class Database:
         the whole message is removed, except a (payload, module) row in
         ``keep_extractions``: a later message of the same batch prepared
         against that cached row and writes its occurrence after this
-        one. The thread's ``has_attachments`` is recomputed, since
+        one. Such a row is added to ``purge_later``, for
+        ``purge_orphan_extractions`` once the batch's commits are known
+        (a peer whose commit fails leaves the row without a carrier). The thread's ``has_attachments`` is recomputed, since
         ``upsert_thread`` only ever sets it: it stays true while any
         occurrence of the thread is stored or any message of it has
         attachments without a stored occurrence yet (a batch peer
@@ -1915,7 +1918,9 @@ class Database:
                     "SELECT extractor_module FROM attachment_extractions WHERE attachment_id = ?",
                     (attachment_id,),
                 ).fetchall():
-                    if (attachment_id, module) not in keep_extractions:
+                    if (attachment_id, module) in keep_extractions:
+                        purge_later.add((attachment_id, module))
+                    else:
                         cur.execute(
                             _PURGE_ORPHAN_EXTRACTION_SQL + " AND extractor_module = ?",
                             (attachment_id, module),
@@ -1940,6 +1945,26 @@ class Database:
             self._rollback_if_started(started)
             raise
         return deleted, slices
+
+    @_synchronized
+    def purge_orphan_extractions(self, keys: set[tuple[str, str]]) -> None:
+        """Drop each cached extraction among ``keys`` (payload, module)
+        that no ``attachments`` row uses (#1375), in one transaction."""
+        if not keys:
+            return
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            for attachment_id, module in sorted(keys):
+                cur.execute(
+                    _PURGE_ORPHAN_EXTRACTION_SQL + " AND extractor_module = ?",
+                    (attachment_id, module),
+                )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
 
     @_synchronized
     def get_attachment_occurrence_states(

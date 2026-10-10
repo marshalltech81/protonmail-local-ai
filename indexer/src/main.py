@@ -2090,6 +2090,7 @@ def _phase2c_commit_vectors(
     vectors: list[list[float]],
     queue: IndexingQueue,
     batch_extractions: set[tuple[str, str]],
+    purge_later: set[tuple[str, str]],
 ) -> tuple[bool, str | None]:
     """Phase 2c: per-message DB transaction for body + attachments + thread vec.
 
@@ -2143,7 +2144,7 @@ def _phase2c_commit_vectors(
             # occurrence carries it, and before the thread vector is
             # derived from the sums the deletion updates (#1375).
             dropped, dropped_slices = db.delete_attachment_occurrences(
-                msg.claimant_id, state.stale_occurrences, batch_extractions
+                msg.claimant_id, state.stale_occurrences, batch_extractions, purge_later
             )
             # Replace the Phase 1 seed thread vector. Three cases
             # mirror the old ``_seed_thread_embedding`` logic:
@@ -2668,9 +2669,14 @@ def _drain_queue_batched(
             for entry in survivors
             for plan in entry.attach_plans
         }
+        # Rows a drop left for the end of the batch, purged once every
+        # peer's commit is known, failures included.
+        purge_later: set[tuple[str, str]] = set()
         for entry in survivors:
             t0 = time.perf_counter()
-            ok, err = _phase2c_commit_vectors(entry, db, vectors, queue, batch_cache_rows)
+            ok, err = _phase2c_commit_vectors(
+                entry, db, vectors, queue, batch_cache_rows, purge_later
+            )
             db_write_ms = (time.perf_counter() - t0) * 1000
             if ok:
                 # A message with deferred attachments was continued in
@@ -2700,6 +2706,8 @@ def _drain_queue_batched(
             else:
                 queue.mark_failed(entry.row["filepath"], stage="db_write", error=err or "")
             touch_health_file()
+
+        db.purge_orphan_extractions(purge_later)
 
         if paused:
             # Messages embedded before the pause were committed above;

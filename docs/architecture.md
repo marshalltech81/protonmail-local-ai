@@ -2926,7 +2926,8 @@ chunk slice of its payload is deleted only when no remaining
 occurrence of the message carries the same payload, with the deleted
 vectors subtracted from the thread's chunk-vector sum, and a cached
 extraction no remaining occurrence uses is purged (unless another
-message of the same batch was prepared against it). The thread's
+message of the same batch was prepared against it; the row is then
+purged after the batch if that message's commit did not use it). The thread's
 `has_attachments` is recomputed from its messages. A continuation pass
 that drops an occurrence whose extractor module no surviving copy of
 the payload ran rebuilds the payload's slice from the surviving

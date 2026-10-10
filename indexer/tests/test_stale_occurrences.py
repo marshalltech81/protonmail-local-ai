@@ -536,6 +536,48 @@ class TestBatchPeerKeepsItsCache:
         )
 
 
+class TestFailedPeerLeavesNoOrphan:
+    def test_a_peer_whose_commit_fails_does_not_keep_the_cache_row(self, tmp_path, monkeypatch):
+        """The row A's drop left for the end of the batch is purged once
+        the peer's commit failed, so no carrier-less extraction stays
+        (Codex round 3 on #1385)."""
+        p = StalePipeline(tmp_path, monkeypatch)
+        shared = [(b"orphan-payload", "text/plain", f"{MARKER}.txt")]
+        drop = {"on": False}
+
+        def rewrite(path, msg):
+            if drop["on"] and path.endswith("first.eml"):
+                msg.attachments = []
+
+        p.parse_with(rewrite)
+        first = p.add("first", shared)
+        p.drain()
+        payload = hashlib.sha256(b"orphan-payload").hexdigest()
+
+        drop["on"] = True
+        second = p.add("second", shared, reason=REASON_REPARSE)
+        real = Database.set_body_complete
+
+        def failing(self, claimant_id, *args, **kwargs):
+            if claimant_id.startswith("second@"):
+                raise sqlite3.OperationalError(f"disk I/O error {MARKER}")
+            return real(self, claimant_id, *args, **kwargs)
+
+        monkeypatch.setattr(Database, "set_body_complete", failing)
+        p.queue.enqueue(first, REASON_INITIAL_SCAN)
+        p.drain()
+        assert p.job(first) is None
+        assert p.job(second)["last_error"] == "OperationalError"
+        assert p.rows() == []
+        assert (
+            p.db._conn.execute(
+                "SELECT COUNT(*) FROM attachment_extractions WHERE attachment_id = ?",
+                (payload,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
 class TestSharedSliceAcrossModules:
     def test_a_stale_modules_chunks_leave_a_kept_payload_slice(self, tmp_path, monkeypatch):
         """Two occurrences of one payload ran different extractors, so the
@@ -667,7 +709,7 @@ class TestPartialModuleRowsAndPeerFlag:
             "SELECT attachment_occurrence_id FROM attachments WHERE claimant_id = ?",
             (claimant,),
         ).fetchone()[0]
-        p.db.delete_attachment_occurrences(claimant, [occurrence], set())
+        p.db.delete_attachment_occurrences(claimant, [occurrence], set(), set())
         flag = p.db._conn.execute(
             "SELECT has_attachments FROM threads WHERE thread_id = ?", (thread_id,)
         ).fetchone()[0]
