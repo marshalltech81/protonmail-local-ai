@@ -535,6 +535,7 @@ class TestDocxWalkBudgets:
         assert extractors.drain_extractor_counts()["extractor_caps"] == 1
         assert self._MARKER not in caplog.text
 
+    @pytest.mark.serial
     def test_a_header_part_every_section_shows_is_charged_per_read(self, monkeypatch, caplog):
         """A header part many sections define is read again for each:
         600 sections showing one part of 1,000 paragraphs would read

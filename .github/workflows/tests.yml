@@ -172,9 +172,10 @@ jobs:
 
       # -n auto runs one pytest-xdist worker per CPU (four on
       # ubuntu-latest); pytest-cov combines the workers' data (#1472).
-      # Tests marked serial race one child limit against another (CPU
-      # time, wall clock) and lose that race on a busy runner, so they
-      # run afterwards, alone, appending to the same coverage data; the
+      # Tests marked serial depend on the CPU or wall-clock time they get
+      # (one child limit reached before another, a wall-clock bound on
+      # bounded work) and failed on a busy runner, so they run
+      # afterwards, alone, appending to the same coverage data; the
       # floor is checked once, on the combined figure. Local runs stay
       # serial unless -n is passed.
       - name: Run pytest with coverage

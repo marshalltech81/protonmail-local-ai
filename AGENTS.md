@@ -1059,6 +1059,14 @@ Notes:
 - for both `indexer` and `mcp-server`, coverage scope is all of `src/`, `src/main.py` included (#757): the indexer's `main.py` holds the two-phase indexing pipeline (exercised by `tests/test_main.py`), and the MCP server's holds the auth and app wiring; tool handlers run against the `FakeMCPServer` stub in `tests/conftest.py`. A path that genuinely cannot run under test gets a narrow `# pragma: no cover` with its reason, not a file-wide exclusion
 - when coverage drops, add tests rather than lowering the threshold or widening `omit`
 - CI runs `pytest --cov` in `.github/workflows/tests.yml` and uploads `coverage.xml` as an artifact per service
+- CI runs both suites in parallel with `pytest-xdist` (`-n auto`); local
+  runs stay serial unless `-n` is passed. An indexer test whose outcome
+  depends on the CPU or wall-clock time it gets (a real extractor child
+  reaching one limit before another, a wall-clock bound on bounded work)
+  carries `@pytest.mark.serial`: CI runs those after the parallel pass,
+  alone, since a busy runner changes the outcome (#1472). Other tests
+  must not share files, ports or environment, or count processes
+  across all of `/proc` (another worker's children would match)
 
 ### Minimum expectations by area
 

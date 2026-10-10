@@ -92,8 +92,12 @@ def _process_exists(pid: int) -> bool:
     except ProcessLookupError:
         return False
     if sys.platform == "linux":
-        with open(f"/proc/{pid}/stat") as stat:
-            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+        # The process can be reaped between the signal and the read.
+        try:
+            with open(f"/proc/{pid}/stat") as stat:
+                return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
     return True
 
 
