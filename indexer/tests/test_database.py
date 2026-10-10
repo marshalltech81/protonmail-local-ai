@@ -216,7 +216,7 @@ _V0_EXTRACTIONS = [
     (("h-docx", "success", "docx@5", "SYNTHETIC_DOCX_TEXT", None), "docx"),
     (("h-pdf-ocr", "success", "pdf-ocr@4", "SYNTHETIC_OCR_TEXT", None), "pdf"),
     (("h-html", "success", "html", "SYNTHETIC_HTML_TEXT", None), "html"),
-    (("h-image", "empty", "image-ocr@3", None, None), "image"),
+    (("h-image", "empty", "image-ocr@4", None, None), "image"),
     (("h-text", "failed", "text@2", None, "ValueError"), "text"),
     (
         (

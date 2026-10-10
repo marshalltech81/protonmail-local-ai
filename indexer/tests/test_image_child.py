@@ -455,7 +455,7 @@ class TestRealChild:
             "DecompressionBombError",
             None,
         )
-        assert result.extractor == "image@3"
+        assert result.extractor == "image@4"
         assert pages == []
         assert MARKER not in caplog.text
 
@@ -478,7 +478,7 @@ class TestRealChild:
         pages: list[int] = []
         result = _extract(_tiff(4), max_ocr_pages=2, on_progress=lambda: pages.append(1))
         assert result.status in (STATUS_SUCCESS, STATUS_EMPTY)
-        assert result.extractor == "image-ocr@3"
+        assert result.extractor == "image-ocr@4"
         assert result.text_complete is False
         assert len(pages) == 2
         assert extractors.drain_extractor_counts()["ocr_capped_images"] == 1
