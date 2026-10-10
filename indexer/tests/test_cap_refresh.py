@@ -43,7 +43,7 @@ from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_message, make_mock_embedder, make_thread
+from tests.conftest import make_message, make_mock_embedder, make_ole2, make_thread
 
 MARKER = "SYNTHETIC_1418_MARKER"
 _UNIT_VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
@@ -210,7 +210,7 @@ class TestExtractorsRecordTheLimitThatCut:
         result = extract(
             content_type="application/vnd.ms-powerpoint",
             filename=f"{MARKER}.ppt",
-            payload=b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
+            payload=make_ole2("PowerPoint Document"),
             max_extracted_chars=chars,
         )
         assert result.status == STATUS_SUCCESS
@@ -246,7 +246,7 @@ class TestExtractorsRecordTheLimitThatCut:
         result = extract(
             content_type="application/msword",
             filename="a.doc",
-            payload=b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
+            payload=make_ole2("WordDocument"),
             max_extracted_chars=chars,
         )
         assert _caps(result) == expected
@@ -1003,6 +1003,8 @@ class TestOcrOffToOn:
                 ocr_pages_cap=caps[0],
                 digital_pages_cap=caps[1],
                 extracted_chars_cap=caps[2],
+                # A PDF: no container identification applies (#1416).
+                identifier="",
             )
             found[name] = (attachment, msg.claimant_id)
         yield db, queue, found
@@ -1026,6 +1028,7 @@ class TestOcrOffToOn:
             ocr_pages_cap=0,
             digital_pages_cap=0,
             extracted_chars_cap=0,
+            identifier="",
         )
         extractor = MagicMock(return_value=fresh)
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)

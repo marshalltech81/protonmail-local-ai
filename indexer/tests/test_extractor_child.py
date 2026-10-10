@@ -40,10 +40,10 @@ from src.extractors._runner import (
     run_tool,
 )
 
+from tests.conftest import make_ole2
 from tests.test_ooxml_child import _payload as _ooxml_payload
 
 MARKER = "SYNTHETIC_CHILD_MARKER"
-_OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 _MIME = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -75,7 +75,9 @@ def _png() -> bytes:
 def _payload(module: str) -> bytes:
     if module == "image":
         return _png()
-    return _OLE2_MAGIC if module == "xls" else _ooxml_payload(module)
+    # A container the dispatcher's identification (#1416) names as a
+    # workbook, so the ``xls`` child is the one that runs.
+    return make_ole2("Workbook") if module == "xls" else _ooxml_payload(module)
 
 
 def _extract(module: str, **kwargs):
@@ -98,8 +100,14 @@ def stub_child_output(monkeypatch, data: bytes, *, truncated: bool = False) -> l
     """Make the runner hand ``data`` to the protocol parser as the
     child's stdout; returns the arguments of each run."""
     calls: list[dict] = []
+    real = _runner.run_tool
 
-    def fake(argv, _payload, *, on_output, **kwargs):
+    def fake(argv, payload, *, on_output, **kwargs):
+        # Container identification (#1416) runs before the extractor's
+        # child; it is left to run, and only the extractor's run is stubbed.
+        child = str(_runner._CHILD)
+        if child in argv and argv[argv.index(child) + 1] == "container":
+            return real(argv, payload, on_output=on_output, **kwargs)
         calls.append({"argv": argv, **kwargs})
         on_output(data)
         return ToolOutput(b"", truncated=truncated)
@@ -368,9 +376,11 @@ class TestRealProcess:
         result = extract(
             content_type=_MIME["xls"],
             filename="a.xls",
-            payload=_OLE2_MAGIC + MARKER.encode() + bytes(1024),
+            # A container identification names a workbook (#1416), whose
+            # empty Workbook stream xlrd rejects.
+            payload=make_ole2("Workbook", trailer=MARKER.encode() + bytes(1024)),
         )
-        assert (result.status, result.error) == (STATUS_FAILED, "CompDocError")
+        assert (result.status, result.error) == (STATUS_FAILED, "XLRDError")
         assert MARKER not in caplog.text
 
 
@@ -403,7 +413,13 @@ class TestChildSide:
     def test_the_child_runs_every_module_the_dispatcher_sends_it(self):
         """The modules whose extractors call ``run_child`` and the child's
         list agree, and each listed module has the extraction entry."""
-        assert set(extractor_child.MODULES) == OOXML_MODULES | {"xls", "eml", "image", "html"}
+        assert set(extractor_child.MODULES) == OOXML_MODULES | {
+            "xls",
+            "eml",
+            "image",
+            "html",
+            "container",
+        }
         for name in extractor_child.MODULES.values():
             assert callable(_module(name).extract_text)
 

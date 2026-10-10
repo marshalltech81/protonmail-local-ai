@@ -39,12 +39,19 @@ from src.extractors._runner import (
     run_tool,
 )
 
+from tests.conftest import make_ole2
+
 FIXTURES = Path(__file__).parent / "fixtures" / "extractors"
 DOC_FIXTURE = FIXTURES / "legacy.doc"
 XLS_FIXTURE = FIXTURES / "legacy.xls"
 
 MARKER = "SYNTHETIC_PAYLOAD_MARKER"
 _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+# Synthetic OLE2 containers whose directory names each legacy format, so
+# the dispatcher's container identification (#1416) sends them to that
+# extractor; the bytes hold no document.
+_DOC_OLE2 = make_ole2("WordDocument")
+_PPT_OLE2 = make_ole2("PowerPoint Document")
 
 _IN_CI = bool(os.environ.get("CI"))
 requires_catdoc = pytest.mark.skipif(
@@ -423,6 +430,7 @@ class TestEveryToolRunsUnderLimits:
         # limits through ``**kwargs``, which it could not check).
         assert set(calls) == {
             "extractors/_runner.py",
+            "extractors/container.py",
             "extractors/doc.py",
             "extractors/docx.py",
             "extractors/eml.py",
@@ -515,11 +523,20 @@ class TestDocExtractor:
     @requires_catdoc
     def test_catdoc_failure_on_garbage_ole2_is_a_fixed_failed(self, caplog):
         caplog.set_level("DEBUG")
-        payload = _OLE2_MAGIC + MARKER.encode() + bytes(2048)
+        # A valid container whose Word stream is garbage reaches catdoc;
+        # bytes that are not an OLE2 file at all fail identification
+        # first (#1416), by type name.
+        payload = make_ole2("WordDocument", trailer=MARKER.encode() + bytes(2048))
         result = extract(content_type="application/msword", filename="a.doc", payload=payload)
         assert result.status in (STATUS_FAILED, "empty")
         if result.status == STATUS_FAILED:
             assert result.error in {"ToolExitError", "ToolCrashError"}
+        garbage = _OLE2_MAGIC + MARKER.encode() + bytes(2048)
+        result = extract(content_type="application/msword", filename="a.doc", payload=garbage)
+        # olefile's own type, which depends on the header field the
+        # garbage breaks first (and on the platform), never its message.
+        assert (result.status, result.extractor) == (STATUS_FAILED, None)
+        assert result.error in {"NotOleFileError", "ValueError", "OSError"}
         assert MARKER not in caplog.text
 
     def test_missing_binary_is_failed(self, monkeypatch):
@@ -527,7 +544,7 @@ class TestDocExtractor:
 
         monkeypatch.setattr(doc.shutil, "which", lambda _name: None)
         result = extract(
-            content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC + bytes(64)
+            content_type="application/msword", filename="a.doc", payload=_DOC_OLE2 + bytes(64)
         )
         assert (result.status, result.error) == (STATUS_FAILED, "ToolNotFoundError")
 
@@ -558,7 +575,7 @@ class TestDocExtractor:
         result = extract(
             content_type="application/msword",
             filename=f"{MARKER}.doc",
-            payload=_OLE2_MAGIC + MARKER.encode(),
+            payload=_DOC_OLE2 + MARKER.encode(),
         )
         assert (result.status, result.error) == (STATUS_FAILED, error)
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
@@ -574,7 +591,7 @@ class TestDocExtractor:
         tool = _fake_tool(tmp_path, f"sys.exit({ppt.ENCRYPTED_EXIT_STATUS})")
         monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
         result = extract(
-            content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC + bytes(64)
+            content_type="application/msword", filename="a.doc", payload=_DOC_OLE2 + bytes(64)
         )
         assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
 
@@ -612,7 +629,7 @@ class TestDocExtractor:
         tool = _fake_tool(tmp_path, f"sys.stdout.write({MARKER!r})")
         monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
         _stub_exit_status(monkeypatch, returncode)
-        result = extract(content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC)
+        result = extract(content_type="application/msword", filename="a.doc", payload=_DOC_OLE2)
         assert (result.status, result.error, result.text) == (STATUS_FAILED, "ToolCrashError", None)
         assert MARKER not in caplog.text
 
@@ -643,7 +660,7 @@ class TestDocExtractor:
         monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
         monkeypatch.setattr(doc, "CHILD_MAX_CPU_SECONDS", 1)
         started = time.monotonic()
-        result = extract(content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC)
+        result = extract(content_type="application/msword", filename="a.doc", payload=_DOC_OLE2)
         assert (result.status, result.error) == (STATUS_FAILED, "ToolCrashError")
         assert time.monotonic() - started < 15
         assert MARKER not in caplog.text
@@ -666,7 +683,7 @@ class TestDocExtractor:
         monkeypatch.setattr(doc, "run_tool", raise_)
         monkeypatch.setattr(doc.shutil, "which", lambda _name: "/bin/true")
         with pytest.raises(error):
-            extract(content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC)
+            extract(content_type="application/msword", filename="a.doc", payload=_DOC_OLE2)
 
 
 # ---------------------------------------------------------------------------
@@ -776,8 +793,16 @@ class TestXlsExtractor:
 
     def test_garbage_ole2_is_failed_without_quoting_it(self, caplog):
         caplog.set_level("DEBUG")
+        # A valid container with an empty Workbook stream reaches xlrd;
+        # bytes that are not an OLE2 file fail identification first
+        # (#1416), by type name.
+        result = _xls(make_ole2("Workbook", trailer=MARKER.encode() + bytes(1024)))
+        assert result.status == STATUS_FAILED
+        assert result.extractor == "xls@1"
         result = _xls(_OLE2_MAGIC + MARKER.encode() + bytes(1024))
-        assert (result.status, result.error) == (STATUS_FAILED, "CompDocError")
+        # olefile's own exception type, never its message.
+        assert (result.status, result.extractor) == (STATUS_FAILED, None)
+        assert result.error in {"NotOleFileError", "ValueError", "OSError"}
         assert MARKER not in caplog.text
 
 
@@ -991,8 +1016,14 @@ class TestPptRealReader:
 
     def test_garbage_ole2_is_a_fixed_failed_row(self, caplog):
         caplog.set_level("DEBUG")
-        result = _ppt(_OLE2_MAGIC + MARKER.encode() + bytes(2048))
+        result = _ppt(make_ole2("PowerPoint Document", trailer=MARKER.encode() + bytes(2048)))
         assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
+        # Bytes that are not an OLE2 file fail identification (#1416).
+        result = _ppt(_OLE2_MAGIC + MARKER.encode() + bytes(2048))
+        # olefile's own type, which depends on the header field the
+        # garbage breaks first (and on the platform), never its message.
+        assert (result.status, result.extractor) == (STATUS_FAILED, None)
+        assert result.error in {"NotOleFileError", "ValueError", "OSError"}
         assert MARKER not in caplog.text
 
     def test_encrypted_deck_is_a_fixed_unsupported_row(self, caplog):
@@ -1070,7 +1101,7 @@ class TestPptExtractor:
         from src.extractors import ppt
 
         monkeypatch.setattr(ppt, "PPT_HOME", tmp_path / "absent")
-        result = _ppt(_OLE2_MAGIC + bytes(64))
+        result = _ppt(_PPT_OLE2 + bytes(64))
         assert (result.status, result.error) == (STATUS_FAILED, "ToolNotFoundError")
 
     # Only the sleep needs the short timeout. The others start the JVM
@@ -1099,7 +1130,7 @@ class TestPptExtractor:
         result = extract(
             content_type=_PPT_MIME,
             filename=f"{MARKER}.ppt",
-            payload=_OLE2_MAGIC + MARKER.encode(),
+            payload=_PPT_OLE2 + MARKER.encode(),
         )
         assert (result.status, result.error, result.text) == (STATUS_FAILED, error, None)
         # The case's own timeout plus a margin: the exit and crash cases get
@@ -1124,7 +1155,7 @@ class TestPptExtractor:
         result = extract(
             content_type=_PPT_MIME,
             filename=f"{MARKER}.ppt",
-            payload=_OLE2_MAGIC + MARKER.encode(),
+            payload=_PPT_OLE2 + MARKER.encode(),
         )
         assert (result.status, result.extractor, result.text, result.error) == (
             STATUS_UNSUPPORTED,
@@ -1146,7 +1177,7 @@ class TestPptExtractor:
 
         assert returncode != ppt.ENCRYPTED_EXIT_STATUS
         monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, f"sys.exit({returncode})"))
-        result = _ppt(_OLE2_MAGIC)
+        result = _ppt(_PPT_OLE2)
         assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
 
     def test_reader_and_extractor_agree_on_the_encrypted_status(self):
@@ -1171,7 +1202,7 @@ class TestPptExtractor:
 
         monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, "pass"))
         _stub_exit_status(monkeypatch, returncode)
-        result = _ppt(_OLE2_MAGIC)
+        result = _ppt(_PPT_OLE2)
         assert (result.status, result.error) == (STATUS_FAILED, "ToolCrashError")
 
     def test_output_is_cut_at_the_byte_cap_and_java_killed(self, tmp_path, monkeypatch, caplog):
@@ -1203,9 +1234,9 @@ class TestPptExtractor:
         assert extractors.drain_extractor_counts()["extractor_caps"] == 1
         assert MARKER not in caplog.text
 
-    @pytest.mark.parametrize(
-        "payload", [b"PK\x03\x04" + bytes(64), MARKER.encode(), b""], ids=["zip", "text", "empty"]
-    )
+    # A ZIP under a ``.ppt`` label is identified by its directory instead
+    # (#1416, ``tests/test_container_identification.py``).
+    @pytest.mark.parametrize("payload", [MARKER.encode(), b""], ids=["text", "empty"])
     def test_non_ole2_ppt_is_unsupported_without_running_java(self, monkeypatch, payload):
         from src.extractors import NON_OLE2_PPT_ERROR, STATUS_UNSUPPORTED, ppt
 
@@ -1231,7 +1262,7 @@ class TestPptExtractor:
         result = extract(
             content_type=_PPT_MIME,
             filename="deck.ppt",
-            payload=_OLE2_MAGIC + bytes(64),
+            payload=_PPT_OLE2 + bytes(64),
         )
         assert (result.status, result.extractor, result.text) == (
             STATUS_SUCCESS,
@@ -1249,23 +1280,34 @@ class TestPptExtractor:
             ("application/octet-stream", "deck.pptx"),
         ],
     )
-    def test_ole2_labelled_pptx_stays_unsupported(self, monkeypatch, content_type, filename):
-        """``.ppt`` bytes labelled ``.pptx`` select the PPTX extractor,
-        which cannot read OLE2: recorded ``unsupported`` without running
-        either reader (#936, #957)."""
-        from src.extractors import LEGACY_OLE2_ERROR, STATUS_UNSUPPORTED, ppt
+    def test_ppt_bytes_labelled_pptx_run_the_ppt_reader(
+        self, tmp_path, monkeypatch, content_type, filename
+    ):
+        """``.ppt`` bytes labelled ``.pptx`` were recorded ``unsupported``
+        (#936, #957); their directory now names PowerPoint, so the
+        ``.ppt`` reader runs on them (#1416). OLE2 bytes with no Office
+        stream under the same label run neither reader."""
+        from src.extractors import OLE2_NOT_OFFICE_ERROR, STATUS_UNSUPPORTED, ppt
+
+        monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, "print('slide words')"))
+        result = extract(content_type=content_type, filename=filename, payload=_PPT_OLE2)
+        assert (result.status, result.extractor, result.text) == (
+            STATUS_SUCCESS,
+            "ppt@2",
+            "slide words",
+        )
 
         def must_not_run(*_args, **_kwargs):
-            raise AssertionError("the .ppt reader ran on a .pptx occurrence")
+            raise AssertionError("a reader ran on an OLE2 file with no Office stream")
 
         monkeypatch.setattr(ppt, "run_tool", must_not_run)
         result = extract(
-            content_type=content_type, filename=filename, payload=_OLE2_MAGIC + bytes(64)
+            content_type=content_type, filename=filename, payload=make_ole2("Contents")
         )
         assert (result.status, result.extractor, result.error) == (
             STATUS_UNSUPPORTED,
             None,
-            LEGACY_OLE2_ERROR,
+            OLE2_NOT_OFFICE_ERROR,
         )
 
     @pytest.mark.parametrize("error", [MemoryError, RecursionError])
@@ -1278,7 +1320,7 @@ class TestPptExtractor:
         monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, "pass"))
         monkeypatch.setattr(ppt, "run_tool", raise_)
         with pytest.raises(error):
-            _ppt(_OLE2_MAGIC)
+            _ppt(_PPT_OLE2)
 
 
 @pytest.mark.parametrize("module", ["doc", "ppt"])
@@ -1299,7 +1341,8 @@ def test_cut_raw_tool_output_is_incomplete_text(tmp_path, monkeypatch, module, t
         monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, body))
         monkeypatch.setattr(ppt, "_MAX_OUTPUT_BYTES", 100)
         mime = _PPT_MIME
-    result = extract(content_type=mime, filename=f"a.{module}", payload=_OLE2_MAGIC)
+    payload = _DOC_OLE2 if module == "doc" else _PPT_OLE2
+    result = extract(content_type=mime, filename=f"a.{module}", payload=payload)
     assert result.status == STATUS_SUCCESS
     assert len(result.text or "") == (100 if truncated else 25)
     assert result.text_complete is not truncated
@@ -1414,7 +1457,7 @@ class TestRawOutputCapThroughTheDispatcher:
         return extract(
             content_type=mime,
             filename=f"a.{module}",
-            payload=_OLE2_MAGIC,
+            payload=_DOC_OLE2 if module == "doc" else _PPT_OLE2,
             max_extracted_chars=max_chars,
         )
 

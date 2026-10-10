@@ -2252,13 +2252,15 @@ class TestAttachmentBoundaries:
         from src.parser import MAX_ATTACHED_MESSAGE_DEPTH, MAX_DECODED_ATTACHMENT_BYTES
 
         decoded_sizes: list[int] = []
-        real = parser_module._decode_transport_form
+        real = parser_module._decode_transport_bytes
 
-        def counting(data, encoding, content_type):
+        def counting(data, encoding):
             decoded_sizes.append(len(data))
-            return real(data, encoding, content_type)
+            return real(data, encoding)
 
-        monkeypatch.setattr(parser_module, "_decode_transport_form", counting)
+        # The walk decodes a transport form here, then checks it for a
+        # container before parsing it (#1416).
+        monkeypatch.setattr(parser_module, "_decode_transport_bytes", counting)
         inner = b"From: z@example.test\r\nSubject: leaf\r\n\r\n" + (b"y" * 76 + b"\r\n") * 6_000
         for i in range(40):
             inner = (
@@ -6051,6 +6053,32 @@ def test_a_lossy_base64_leaf_an_extractor_reads_is_counted(tmp_path, caplog, hea
     assert attachment.payload_complete is False
     assert msg.parse_caps == ({"leaf_transport_lossy": 1} if counted else {})
     assert msg.attachments_manifest_complete is True
+    assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+
+
+def test_a_lossy_container_leaf_under_any_label_is_counted(tmp_path, caplog):
+    """#1416: an OLE2 or ZIP payload is read whatever its label, so a
+    lossy base64 leaf of one under a label that selects no extractor is
+    counted like one an extractor's label selects."""
+    from tests.conftest import make_zip
+
+    caplog.set_level("DEBUG")
+    encoded = base64.encodebytes(make_zip("[Content_Types].xml", "SYNTHETIC_TEXT_MARKER.xml"))
+    path = tmp_path / "m.eml"
+    path.write_bytes(
+        _with_attachment(
+            b"Content-Type: application/x-unknown-synthetic\r\n"
+            b"Content-Transfer-Encoding: base64\r\n",
+            encoded[:8] + b"!!!!" + encoded[12:],
+            b'Content-Disposition: attachment; filename="f.bin"\r\n',
+        )
+    )
+    msg = parse_email(path)
+    assert msg is not None
+    [attachment] = msg.attachments
+    assert attachment.payload.startswith(b"PK\x03\x04")
+    assert attachment.payload_complete is False
+    assert msg.parse_caps == {"leaf_transport_lossy": 1}
     assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
 
 

@@ -1,0 +1,3850 @@
+{
+"message/rfc822|none|email|top": [
+[
+"message/rfc822",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/rfc822|none|email|nested": [
+[
+"message/rfc822",
+"sha256:fde95b598823f16a54a951f98dae63bf5bad8ef29e852d6e285f8263c470d0ce",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|none|email-with-attachment|top": [
+[
+"message/rfc822",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|none|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:0df24be4426b066d855a7b081b1ed8755719806f677786d581ac77a9934001f2",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|none|dsn-trailing-blank-lines|top": [
+[
+"message/rfc822",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/rfc822|none|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:9c2848a0e6c4db4a3934a4f1165eda253867b744a9aa5adf6ddbea7fce90eda8",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|none|dsn|top": [
+[
+"message/rfc822",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/rfc822|none|dsn|nested": [
+[
+"message/rfc822",
+"sha256:8d9b976914b35617ce153c8dfdf18a032d84192dc825517a3c98b6b5643ac38f",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|none|zip|top": [
+[
+"message/rfc822",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/rfc822|none|zip|nested": [
+[
+"message/rfc822",
+"sha256:175b9965da7da96a34de8abb9a728658704982a914a2a955be3eab32f2b8ba83",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|none|zip-multi-blank|top": [
+[
+"message/rfc822",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/rfc822|none|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:18cdde3d5ad8d834f36b30f82296696d86a189e40427fcb01940ef06fd35a29f",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|none|zip-spanned|top": [
+[
+"message/rfc822",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/rfc822|none|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:4a97ede1ca5b7675200533200bb7ba62982650f6a00413d6aea12bca155a9171",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|none|ole2|top": [
+[
+"message/rfc822",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/rfc822|none|ole2|nested": [
+[
+"message/rfc822",
+"sha256:3f2af95c1c9fde9cfa39da620ea550a504ad56463fb88b1610bc113542c787c7",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|7bit|email|top": [
+[
+"message/rfc822",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/rfc822|7bit|email|nested": [
+[
+"message/rfc822",
+"sha256:c212727a0c443b35263a90ee440d4b95e6958090789ba1b6bbaa1d68c4c65012",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|7bit|email-with-attachment|top": [
+[
+"message/rfc822",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|7bit|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:007d17186840465e335e644173453128211cf1332b2d4826ce2b2eaa1dbd5dd2",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|7bit|dsn-trailing-blank-lines|top": [
+[
+"message/rfc822",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/rfc822|7bit|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:34e5236485b703d18d9d8721aa080feafd89eeafbd7330df7720c9bdf4e4304f",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|7bit|dsn|top": [
+[
+"message/rfc822",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/rfc822|7bit|dsn|nested": [
+[
+"message/rfc822",
+"sha256:7c2621ff380a0297c72b5c01cd5e1a603613dd4418223b208df57a30f04710c2",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|7bit|zip|top": [
+[
+"message/rfc822",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/rfc822|7bit|zip|nested": [
+[
+"message/rfc822",
+"sha256:92c0a5d72575231b99b37f4f10df29428fb556818d8e45e1f9ae8f0c90bfe179",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|7bit|zip-multi-blank|top": [
+[
+"message/rfc822",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/rfc822|7bit|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:2c798dfa38025d8b4ec43096532d9b45a2687dda664ca102f9c42ad323916e90",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|7bit|zip-spanned|top": [
+[
+"message/rfc822",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/rfc822|7bit|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:093dfe7e2f808588d5b4d003d2a6c894128e7ff486b9f8cfd9d46797dfb15e9b",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|7bit|ole2|top": [
+[
+"message/rfc822",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/rfc822|7bit|ole2|nested": [
+[
+"message/rfc822",
+"sha256:43a11f82eb30729dba3fa316cd01439adc42e3ba22217083fc6d294dea950f2b",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|8bit|email|top": [
+[
+"message/rfc822",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/rfc822|8bit|email|nested": [
+[
+"message/rfc822",
+"sha256:cc4c1927a3fcbca6906aabc798fe9e0c08d7856742a05a1b7764f214ae25e1ae",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|8bit|email-with-attachment|top": [
+[
+"message/rfc822",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|8bit|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:571ada31da513d37c6dfaee25985853bd962b4b265b73e622650fe72de479507",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|8bit|dsn-trailing-blank-lines|top": [
+[
+"message/rfc822",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/rfc822|8bit|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:632b6e24dadec170f00271659f1296a6f31a0769f2411bd0dc29e110a73b4e9f",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|8bit|dsn|top": [
+[
+"message/rfc822",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/rfc822|8bit|dsn|nested": [
+[
+"message/rfc822",
+"sha256:8431c6ebfaee78bbbb1e054bcedc2c8b479228d225d50c97e4714cbeabd69871",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|8bit|zip|top": [
+[
+"message/rfc822",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/rfc822|8bit|zip|nested": [
+[
+"message/rfc822",
+"sha256:ca44a5f4317e7c499c10317ce3a7bd11423290e8c1ca1f8c36e749bdda11ccda",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|8bit|zip-multi-blank|top": [
+[
+"message/rfc822",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/rfc822|8bit|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:158bbf384c066a24dc8c700bf57aaaed9fa2f345af78db95588ae96418e3ff28",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|8bit|zip-spanned|top": [
+[
+"message/rfc822",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/rfc822|8bit|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:8d64252a463d5d3763a42f367e7d74f7afb3dfd13aaaf48ecef91988409e1e9f",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|8bit|ole2|top": [
+[
+"message/rfc822",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/rfc822|8bit|ole2|nested": [
+[
+"message/rfc822",
+"sha256:24c25ca52623d85583e2dea66e4b81bb94c27fb63f85cf2bb13f86cd5a790598",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|binary|email|top": [
+[
+"message/rfc822",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/rfc822|binary|email|nested": [
+[
+"message/rfc822",
+"sha256:a1da1b38b96ab86afa41cdf3c23d4a2066cfd31eec7937ab1d668f91ee447705",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|binary|email-with-attachment|top": [
+[
+"message/rfc822",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|binary|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:46347d8c533e03748cf3db87e36c3be6bb1e20455f008d44f5c685c9d6f11a79",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|binary|dsn-trailing-blank-lines|top": [
+[
+"message/rfc822",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/rfc822|binary|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:da3db118b30bbe8c77a3a2b8022ea906b3e171f3a0356d2af61880a24cd28777",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|binary|dsn|top": [
+[
+"message/rfc822",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/rfc822|binary|dsn|nested": [
+[
+"message/rfc822",
+"sha256:4262fbc43cdf42aeddabd8f194f0dc4c27a8f4b4f9c78aafc2b0f05343b330a9",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|binary|zip|top": [
+[
+"message/rfc822",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/rfc822|binary|zip|nested": [
+[
+"message/rfc822",
+"sha256:10b1b9a0b7cb4a2213a462b31a846416f3af9c6de694f2d01570bf415b6b53d2",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|binary|zip-multi-blank|top": [
+[
+"message/rfc822",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/rfc822|binary|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:ba971dc4a2c295153d0469ffa541fb50615599f987fe02f11e3e4bc045108b73",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|binary|zip-spanned|top": [
+[
+"message/rfc822",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/rfc822|binary|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:0cbdd16efd487269bb4a3bda318a67a7c7ff88952ba8cc9d3503e4671fbb16a5",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|binary|ole2|top": [
+[
+"message/rfc822",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/rfc822|binary|ole2|nested": [
+[
+"message/rfc822",
+"sha256:8667c5c19a30d4b946d33f1a3e5f409acbaab03e7001c9e8d8b57ae4a4b76e6e",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|base64|email|top": [
+[
+"message/rfc822",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/rfc822|base64|email|nested": [
+[
+"message/rfc822",
+"sha256:0a525e9a1f0c8062cd44492109f84fbc1d2221090d1daeda5bf12b449fe305bb",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|base64|email-with-attachment|top": [
+[
+"message/rfc822",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|base64|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:2d38fea82d5a5124222c1f0bbe236360da1d8988480436f4709a8b0bd849c6e8",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|base64|dsn-trailing-blank-lines|top": [
+[
+"message/rfc822",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/rfc822|base64|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:1b9076adb1f09a2edcdc0a4d3f2a633188353260a8ba0d6fbf9965623bfd74bf",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|base64|dsn|top": [
+[
+"message/rfc822",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/rfc822|base64|dsn|nested": [
+[
+"message/rfc822",
+"sha256:d49d537d4c47c09d1ec513c9ac59940ec0efda0ac8ccbd86001d526941452218",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|base64|zip|top": [
+[
+"message/rfc822",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/rfc822|base64|zip|nested": [
+[
+"message/rfc822",
+"sha256:60080485681c66b0d36aac319477fb640ab984abb81c01cc4b0c18684d011f65",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|base64|zip-multi-blank|top": [
+[
+"message/rfc822",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/rfc822|base64|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:d8c7a22d3bb6728ff19e979a23d6288107aa0b8310809747b84adca0d6d6b949",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|base64|zip-spanned|top": [
+[
+"message/rfc822",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/rfc822|base64|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:4900fe8d0ee0d9373d9d6f50b3fbf308d486a40212c8e51aaa110980ef961e4a",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|base64|ole2|top": [
+[
+"message/rfc822",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/rfc822|base64|ole2|nested": [
+[
+"message/rfc822",
+"sha256:20f063fdb788542fd5b9ab6ab15948b07b4c98467966f306713d6010dc8568b0",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|quoted-printable|email|top": [
+[
+"message/rfc822",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/rfc822|quoted-printable|email|nested": [
+[
+"message/rfc822",
+"sha256:73695f6c9c5f5e1e18cd32b71890bcca3362352c357c3c551af562cf81a6231d",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|quoted-printable|email-with-attachment|top": [
+[
+"message/rfc822",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|quoted-printable|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:941c8a28a10ffa3cd1ac7b090472896c3072883537da9e21920923e52c60f6b2",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/rfc822|quoted-printable|dsn-trailing-blank-lines|top": [
+[
+"message/rfc822",
+"sha256:b339f6ee61927fe84ca799cd545b14fc2a7612935ca9e526002dfa59a1082689",
+true
+]
+],
+"message/rfc822|quoted-printable|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:55397ad6163b87133cc5a1d30ef9a9a325bd6ae720b02ce178fbeb5ec1c8d5f6",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|quoted-printable|dsn|top": [
+[
+"message/rfc822",
+"sha256:2a0fa9afd2925337f821b136f6dba99f2324d1d88d0d524bffcd8033d0230ca9",
+true
+]
+],
+"message/rfc822|quoted-printable|dsn|nested": [
+[
+"message/rfc822",
+"sha256:91680b2252ee8d4b92f00960be09689522c72604247c277ab9b244dde8fdf482",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|quoted-printable|zip|top": [
+[
+"message/rfc822",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/rfc822|quoted-printable|zip|nested": [
+[
+"message/rfc822",
+"sha256:5afc2b210d5497ddef58e295d93158e58be38331cee88c3441d1081abc30f35f",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|quoted-printable|zip-multi-blank|top": [
+[
+"message/rfc822",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/rfc822|quoted-printable|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:fc616f8e4223ce0af66a90417128a7bb86ede686ea478e0e9b8d4c00a481bbfc",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|quoted-printable|zip-spanned|top": [
+[
+"message/rfc822",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/rfc822|quoted-printable|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:0ff04ad5354bc0ec2407c09360f9d768aa966c5f4d953a71bdccd648944b10a3",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/rfc822|quoted-printable|ole2|top": [
+[
+"message/rfc822",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/rfc822|quoted-printable|ole2|nested": [
+[
+"message/rfc822",
+"sha256:4d0ea53aed66c9f2ed5626ec3cfe087ef5412cd77dd4274b61aa3d6f2d485c2a",
+true
+],
+[
+"message/rfc822",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|none|email|top": [
+[
+"message/global",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/global|none|email|nested": [
+[
+"message/rfc822",
+"sha256:00981757304785ae1463cb3e80f1b8141797bc4daa33ce7d3238779d6af03951",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|none|email-with-attachment|top": [
+[
+"message/global",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|none|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:3e2738ab91eb01637e4dae6dae41593cd2fdec8b10bb4e74de4e9e548d20def4",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|none|dsn-trailing-blank-lines|top": [
+[
+"message/global",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/global|none|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:9c8aa8795222c7fd86da512e84a1713f7a91b281ec974abcae6e53a95bb39d7d",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|none|dsn|top": [
+[
+"message/global",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/global|none|dsn|nested": [
+[
+"message/rfc822",
+"sha256:03a3f418ff323edfc01bcbfe2a60ddb320526fdc4190c4b3c71990caf38edc8a",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|none|zip|top": [
+[
+"message/global",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/global|none|zip|nested": [
+[
+"message/rfc822",
+"sha256:423393f3bba073744d1f5661b4fb32de7e0cab155e6300b5594aba45430bc4a0",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|none|zip-multi-blank|top": [
+[
+"message/global",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/global|none|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:acd6c45b231372654508240117da1a799419c96f6d312dd6cef5d139569a320c",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|none|zip-spanned|top": [
+[
+"message/global",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/global|none|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:69f0c3ccddebeec8f8969eb5faa891ec3706dc467a77039792485e9440fe8985",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|none|ole2|top": [
+[
+"message/global",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/global|none|ole2|nested": [
+[
+"message/rfc822",
+"sha256:5ca82c41d984b08c51d1c067041daaae72660971ecc75fe00c90404ececf1260",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|7bit|email|top": [
+[
+"message/global",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/global|7bit|email|nested": [
+[
+"message/rfc822",
+"sha256:bff80b02ed1bc0a3af69a47203d83f98d7bc89b582de3900a2c4e0b4993a6b9a",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|7bit|email-with-attachment|top": [
+[
+"message/global",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|7bit|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:0efc83e58b8f46257bfed1dc68fe707d2688992ebc767edb5b354f6bc155a479",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|7bit|dsn-trailing-blank-lines|top": [
+[
+"message/global",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/global|7bit|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:7d52937ee8f5c744b6ffe81d4c866ca287d13189e3b9495737928aaa966c4461",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|7bit|dsn|top": [
+[
+"message/global",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/global|7bit|dsn|nested": [
+[
+"message/rfc822",
+"sha256:ef3645fcddca9d8d4f91095b23ca98289cbf02456815ba381cbda81b14f8b165",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|7bit|zip|top": [
+[
+"message/global",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/global|7bit|zip|nested": [
+[
+"message/rfc822",
+"sha256:fe7ccc41e1f31d3506e2e5907b2d2d923c3572190ae6373fd34ab5fa9f33a47f",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|7bit|zip-multi-blank|top": [
+[
+"message/global",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/global|7bit|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:66f7cf0b7fc53a1fffac0de8b954282a067edd5cf07217e18e46c6c945d30276",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|7bit|zip-spanned|top": [
+[
+"message/global",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/global|7bit|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:ab322692e07f7d2fe1b1f641a2ebeff9342d10b9951b66b21ca7b2511ef2a933",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|7bit|ole2|top": [
+[
+"message/global",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/global|7bit|ole2|nested": [
+[
+"message/rfc822",
+"sha256:6dfe2f9d4cdb41b25beda5797bbe71ed581f0bb9f16386b229b67483f297c40d",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|8bit|email|top": [
+[
+"message/global",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/global|8bit|email|nested": [
+[
+"message/rfc822",
+"sha256:8f2156e06cdc9e85e7f19d8ae0359a707dbf9646f22c7a3d190622f9b4fcd0c1",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|8bit|email-with-attachment|top": [
+[
+"message/global",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|8bit|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:a13e68615f08207aa2580898945211f2c0800476b43ae95e3d14547527df892c",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|8bit|dsn-trailing-blank-lines|top": [
+[
+"message/global",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/global|8bit|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:8d263e6d63fe9a9bfb9fe04d5b22be571124b05d71017c85779516b3627addcd",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|8bit|dsn|top": [
+[
+"message/global",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/global|8bit|dsn|nested": [
+[
+"message/rfc822",
+"sha256:1a068f7b1c4ea2fc48769840779b4676cb91124d91859078d4ce6a2eaf038110",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|8bit|zip|top": [
+[
+"message/global",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/global|8bit|zip|nested": [
+[
+"message/rfc822",
+"sha256:f7d43ef4ee08d32c9ac56e5de2471c83fb2426469241792a08ff5ac89df3e27e",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|8bit|zip-multi-blank|top": [
+[
+"message/global",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/global|8bit|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:7116f3b53132184caabd98b4a472b9adfee581d06f9149a68829ab5fb6954db5",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|8bit|zip-spanned|top": [
+[
+"message/global",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/global|8bit|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:a67ce8cacf1e766b15f32afdc69f948949f71685f7d83b4104897fe6d5ace346",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|8bit|ole2|top": [
+[
+"message/global",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/global|8bit|ole2|nested": [
+[
+"message/rfc822",
+"sha256:70df4d32cb63d092b49c1e107b33279bc856be831ec571228a24f4a1f3d7529e",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|binary|email|top": [
+[
+"message/global",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/global|binary|email|nested": [
+[
+"message/rfc822",
+"sha256:a278a2a7a6494fc064cc086e7942eadd544e681a75dd3c2acf5880e1e1f00219",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|binary|email-with-attachment|top": [
+[
+"message/global",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|binary|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:3503aa345315f334b593fbf1bf7263ddaef794e7f870065384489667363ab14f",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|binary|dsn-trailing-blank-lines|top": [
+[
+"message/global",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/global|binary|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:c52034650529b1b59d2e914a42edb55a72e0dc1d655eb2350f169ce29249dcfb",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|binary|dsn|top": [
+[
+"message/global",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/global|binary|dsn|nested": [
+[
+"message/rfc822",
+"sha256:c3e2c2c867d5974ce53289649e4dd557b5b993468f0ff6ccdeb85edf290bde2a",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|binary|zip|top": [
+[
+"message/global",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/global|binary|zip|nested": [
+[
+"message/rfc822",
+"sha256:06bb2b2b007ab504917da033c4c89360c56263268df70c5a3309f04298cd88e1",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|binary|zip-multi-blank|top": [
+[
+"message/global",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/global|binary|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:3649777e38ff83b1a43534c03370564374b51641dd9385bbe322518b941534ca",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|binary|zip-spanned|top": [
+[
+"message/global",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/global|binary|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:bf2a63ffa194963869198a96d4075f81d1e3c3b62ef4ae047b4ecbc770fea868",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|binary|ole2|top": [
+[
+"message/global",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/global|binary|ole2|nested": [
+[
+"message/rfc822",
+"sha256:2e778e41ac7a21259a7d43d255d3eedbd1cfcc19bbbbd5525c05026736f0e0df",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|base64|email|top": [
+[
+"message/global",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/global|base64|email|nested": [
+[
+"message/rfc822",
+"sha256:d78b6496125788f124d7e997fda5c37d3d1849bbf4991952ba8a33be1512145a",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|base64|email-with-attachment|top": [
+[
+"message/global",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|base64|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:c0d48d89b16891e864d039e0358cf3c0223de89729e42d231dec3fa981f37b67",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|base64|dsn-trailing-blank-lines|top": [
+[
+"message/global",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/global|base64|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:9d9f2e930ccae2a4af47dc210dc3c3abbe683ca4d4ebe6c30934d54b8a3ca86c",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|base64|dsn|top": [
+[
+"message/global",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/global|base64|dsn|nested": [
+[
+"message/rfc822",
+"sha256:b1cd316483e8da93e6e715445de2a575a19090fea2e36c1e76c9c7c126a988a1",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|base64|zip|top": [
+[
+"message/global",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/global|base64|zip|nested": [
+[
+"message/rfc822",
+"sha256:10865baf4c7c34a880676e2f23772fde918627a932cbb3307ec7b6175f7c14ab",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|base64|zip-multi-blank|top": [
+[
+"message/global",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/global|base64|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:b816f637993d4ec058059c0b6548ddb36c8ca1f04aa45668206279cb203d7d11",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|base64|zip-spanned|top": [
+[
+"message/global",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/global|base64|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:b240d8e58512c0a864554a00f3a8898a149cabede2ac6766652125e8d9e6fe2b",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|base64|ole2|top": [
+[
+"message/global",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/global|base64|ole2|nested": [
+[
+"message/rfc822",
+"sha256:da2f52eb0bc622ba6bd273ac77ef1d5f3c8006e34e47999fc19b88296ec34209",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|quoted-printable|email|top": [
+[
+"message/global",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/global|quoted-printable|email|nested": [
+[
+"message/rfc822",
+"sha256:3e0963f1e5db52d61826ea13fdd052d8cbfd3c5fdec49e0321076374e2c5fe6a",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|quoted-printable|email-with-attachment|top": [
+[
+"message/global",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|quoted-printable|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:e92f41c7b044ed4df69bad8fa32c1de548f8301a6c11293059744b16177b6d94",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/global|quoted-printable|dsn-trailing-blank-lines|top": [
+[
+"message/global",
+"sha256:b339f6ee61927fe84ca799cd545b14fc2a7612935ca9e526002dfa59a1082689",
+true
+]
+],
+"message/global|quoted-printable|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:9e346c67fb67682117a4d1a6520cdb1aa89c481a9e796afc71ce525bc6251983",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|quoted-printable|dsn|top": [
+[
+"message/global",
+"sha256:2a0fa9afd2925337f821b136f6dba99f2324d1d88d0d524bffcd8033d0230ca9",
+true
+]
+],
+"message/global|quoted-printable|dsn|nested": [
+[
+"message/rfc822",
+"sha256:34310e44e4b83680ae09dd80d7ef44a2d565f220af03e3a68f17bf8f43a5cb81",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|quoted-printable|zip|top": [
+[
+"message/global",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/global|quoted-printable|zip|nested": [
+[
+"message/rfc822",
+"sha256:ec5c8d8da38c12934dbae2d316824da795edbc0926888c75baadfc2a3481a1be",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|quoted-printable|zip-multi-blank|top": [
+[
+"message/global",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/global|quoted-printable|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:f64581fa52f42bbc471b1e445caf372a921e6d2efff3669950068b01b98c651d",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|quoted-printable|zip-spanned|top": [
+[
+"message/global",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/global|quoted-printable|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:c46f0f3b6dd8385cdb9ee4f51d988bbd43881c12f3d460e9b1d52c988fe0743f",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/global|quoted-printable|ole2|top": [
+[
+"message/global",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/global|quoted-printable|ole2|nested": [
+[
+"message/rfc822",
+"sha256:5584c29407b6bc3163312e1ca00e02a729a8ddbd9966574303c5116ff8c5a772",
+true
+],
+[
+"message/global",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|none|email|top": [
+[
+"message/external-body",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/external-body|none|email|nested": [
+[
+"message/rfc822",
+"sha256:1cf2ed9aa6f97b69279b2b24403bcb2ef46d8372b0624ced2c221e7ce1ccdad1",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|none|email-with-attachment|top": [
+[
+"message/external-body",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|none|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:8cab0da5886ad51acb2822bd3a43d2ce2fbc2b0d06f42f4309bec2c707bdc41d",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|none|dsn-trailing-blank-lines|top": [
+[
+"message/external-body",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/external-body|none|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:3751eb9d186bab8a7b3b0180dcb106594a509901ed83847aed2444bbd03a49f4",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|none|dsn|top": [
+[
+"message/external-body",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/external-body|none|dsn|nested": [
+[
+"message/rfc822",
+"sha256:90f058c8d0dd9b5e15afa2c61fafd1bfee7673bc95af913710e04af37840a4c5",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|none|zip|top": [
+[
+"message/external-body",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/external-body|none|zip|nested": [
+[
+"message/rfc822",
+"sha256:b227b31764a0663b1dff08d2b98e28f8443d76509979c9a727dd63733a13d610",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|none|zip-multi-blank|top": [
+[
+"message/external-body",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/external-body|none|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:8cd97a72977066f8d7cce7b66dcd2c5d4a0b104de0c0f61e4805c6962afc110d",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|none|zip-spanned|top": [
+[
+"message/external-body",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/external-body|none|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:86e09b4d194bd4702a5220b7df420b7156ed21b650bf1c82b60830853e5fc895",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|none|ole2|top": [
+[
+"message/external-body",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/external-body|none|ole2|nested": [
+[
+"message/rfc822",
+"sha256:710990f42e2e6e68f84525e990c1d683fbf397f8b9c8def5b6b6a7416eafdbbc",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|7bit|email|top": [
+[
+"message/external-body",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/external-body|7bit|email|nested": [
+[
+"message/rfc822",
+"sha256:a08ee2ef972152fdac4054f95a4afbd9fbdd8ea3c4b7ecea9031fae9984cf0e0",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|7bit|email-with-attachment|top": [
+[
+"message/external-body",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|7bit|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:3322d020c08203c8718dca2b32db2d9e90a24f1ed8728761ee8e819b4ba5ce34",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|7bit|dsn-trailing-blank-lines|top": [
+[
+"message/external-body",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/external-body|7bit|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:66444fc478402e5e91cdb862ae8beba6745675a8bb669130d296e76c8621f22c",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|7bit|dsn|top": [
+[
+"message/external-body",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/external-body|7bit|dsn|nested": [
+[
+"message/rfc822",
+"sha256:9072d45f1bc5e64ac911213f2793142ae420639db3571cd1d1a6aef32a700805",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|7bit|zip|top": [
+[
+"message/external-body",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/external-body|7bit|zip|nested": [
+[
+"message/rfc822",
+"sha256:78288307b9e3b276547838e43fbf73f882e3214f9a50509c2431732cb670536d",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|7bit|zip-multi-blank|top": [
+[
+"message/external-body",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/external-body|7bit|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:87e0ae7d2d3b3ad7132b4beb4347a68500e1fe00b35f9a430f7bf3169447087b",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|7bit|zip-spanned|top": [
+[
+"message/external-body",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/external-body|7bit|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:d2083d18727e71def59312e374b7d23b2a51691b95153bdbe0557820823a9231",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|7bit|ole2|top": [
+[
+"message/external-body",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/external-body|7bit|ole2|nested": [
+[
+"message/rfc822",
+"sha256:58667b8309da68c4fb0386fd21087654f546e87f9d6ae8ad3d73a32a86699528",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|8bit|email|top": [
+[
+"message/external-body",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/external-body|8bit|email|nested": [
+[
+"message/rfc822",
+"sha256:9c544cfcaf1b174bb53d9844fbcd47d8538fb66601dfd1842473d18bc8b8590e",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|8bit|email-with-attachment|top": [
+[
+"message/external-body",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|8bit|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:972148d20c418977c55f9daafca912f1bb0db864356beee3050e198b6b5d5d84",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|8bit|dsn-trailing-blank-lines|top": [
+[
+"message/external-body",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/external-body|8bit|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:623b99191269d8caac78ba03f3f14b4ee027b004cde136a190580721a5967c7d",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|8bit|dsn|top": [
+[
+"message/external-body",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/external-body|8bit|dsn|nested": [
+[
+"message/rfc822",
+"sha256:feba5863c70d2874e09c0682412f41a0631ff64303d10b0494cdee66c18bd078",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|8bit|zip|top": [
+[
+"message/external-body",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/external-body|8bit|zip|nested": [
+[
+"message/rfc822",
+"sha256:f70f8a5d6557df263cfd9434a0575794b16179ea02d13cc4810018dbc3d97f82",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|8bit|zip-multi-blank|top": [
+[
+"message/external-body",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/external-body|8bit|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:912a9ad0eb0da90fa6099fd98de58e9098244db2d57d2f9a0c6814c4295f7aec",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|8bit|zip-spanned|top": [
+[
+"message/external-body",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/external-body|8bit|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:e1a35fd52a0d6eb995c911b8609d3e484db523be156b76a3ba64d07341b18a4b",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|8bit|ole2|top": [
+[
+"message/external-body",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/external-body|8bit|ole2|nested": [
+[
+"message/rfc822",
+"sha256:8da24bd70d81feab2ec0f6fc4b43ca79e6c0935fbd468ee1bad0a0e0af1a6929",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|binary|email|top": [
+[
+"message/external-body",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/external-body|binary|email|nested": [
+[
+"message/rfc822",
+"sha256:9e6b63007ba809c58e7dc94304cb389c249ab9c5ef48c24c02fbbb5d5c121c16",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|binary|email-with-attachment|top": [
+[
+"message/external-body",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|binary|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:6b767d93dd35195707703bc51cf7bc24444b1f3ce11a2b399fe453140cc012f2",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|binary|dsn-trailing-blank-lines|top": [
+[
+"message/external-body",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/external-body|binary|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:4343f428dd822eb793e3fb8c936f8f9d208567066c406a3660497bba41cf40ae",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|binary|dsn|top": [
+[
+"message/external-body",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/external-body|binary|dsn|nested": [
+[
+"message/rfc822",
+"sha256:24a9649c66e3c3a8248aee7e0470d21209a65b7c4474a11a997cd821b9ef3acc",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|binary|zip|top": [
+[
+"message/external-body",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/external-body|binary|zip|nested": [
+[
+"message/rfc822",
+"sha256:475078cfff6164d682b3dc8d17fbd3521de9d4b154569c5bd9242e86eea11351",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|binary|zip-multi-blank|top": [
+[
+"message/external-body",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/external-body|binary|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:b9e775a5342d7a9aeaee95e4cd8d44c9d8df42f0f6e8b660d7da7fe463670625",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|binary|zip-spanned|top": [
+[
+"message/external-body",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/external-body|binary|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:68027dc2de567181d77458630f9456403df43b5d121049f99efc4b131d5beede",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|binary|ole2|top": [
+[
+"message/external-body",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/external-body|binary|ole2|nested": [
+[
+"message/rfc822",
+"sha256:b7cd9ae4bb495ffc66d5da1d52c1f96714872f965bb6938c6e677e8bcae11679",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|base64|email|top": [
+[
+"message/external-body",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/external-body|base64|email|nested": [
+[
+"message/rfc822",
+"sha256:48be877c1d9f3eab9f69cae17151ba53d41b70b24a09a0f7195edfe64d75d88b",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|base64|email-with-attachment|top": [
+[
+"message/external-body",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|base64|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:e79c2c51a785a4833cf97aaef1ca2279689ee19584b3dbb3ba15cd5579cd8d98",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|base64|dsn-trailing-blank-lines|top": [
+[
+"message/external-body",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/external-body|base64|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:948b676f2e4af2c3aecc6e7c43e83955e8268320e57eb9748b101a90ec10bfda",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|base64|dsn|top": [
+[
+"message/external-body",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/external-body|base64|dsn|nested": [
+[
+"message/rfc822",
+"sha256:abe10615d7ed491eaad0a974a3097ed51f85a557e2ef43f2188450cc460bbe9c",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|base64|zip|top": [
+[
+"message/external-body",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/external-body|base64|zip|nested": [
+[
+"message/rfc822",
+"sha256:d43e1c01fc76ea04052f6e9d41ab1031d1ea645b7570f3a5f85da66b8132d735",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|base64|zip-multi-blank|top": [
+[
+"message/external-body",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/external-body|base64|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:c47a64aa0e75ad8b6d42ac4976f7472a8989632fbcd0fc3ca770c568f0718274",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|base64|zip-spanned|top": [
+[
+"message/external-body",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/external-body|base64|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:38d1812a752fccde400654673e12844dcb367263463f0282da8e2144b05fb239",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|base64|ole2|top": [
+[
+"message/external-body",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/external-body|base64|ole2|nested": [
+[
+"message/rfc822",
+"sha256:48e2066e5b13809dcadfeaae533c271b47d687e52962c8ee0ad8957c56414270",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|quoted-printable|email|top": [
+[
+"message/external-body",
+"sha256:122b0eacf5dc0cb7009d253c3dfa473d2348a4e923ec7afea2f704882220bea8",
+true
+]
+],
+"message/external-body|quoted-printable|email|nested": [
+[
+"message/rfc822",
+"sha256:d099f40a321a35457a24e3831840b3e2cd38dcb9b02f52f1d14297d57b26d998",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|quoted-printable|email-with-attachment|top": [
+[
+"message/external-body",
+"sha256:94dcdd155a685f0303f269c92b6df733dfc4fd1f3c084499ab18c3acaad7c198",
+true
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|quoted-printable|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:759b93599009cddd8280fd12a11bfe277bc2a5b140837cdfd592214875d973b1",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/external-body|quoted-printable|dsn-trailing-blank-lines|top": [
+[
+"message/external-body",
+"sha256:b339f6ee61927fe84ca799cd545b14fc2a7612935ca9e526002dfa59a1082689",
+true
+]
+],
+"message/external-body|quoted-printable|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:89c509c2f19d6b0ba177222a65f807d1e36509c95efc14d18004f6b7e09e9656",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|quoted-printable|dsn|top": [
+[
+"message/external-body",
+"sha256:2a0fa9afd2925337f821b136f6dba99f2324d1d88d0d524bffcd8033d0230ca9",
+true
+]
+],
+"message/external-body|quoted-printable|dsn|nested": [
+[
+"message/rfc822",
+"sha256:614115b4c55fd71bf3315211b416fc7fea5b492a1d454ebb9626b3effd5d7e1d",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|quoted-printable|zip|top": [
+[
+"message/external-body",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/external-body|quoted-printable|zip|nested": [
+[
+"message/rfc822",
+"sha256:4e3b3a6ef15e1dcf1497cfbb73d7a03ee4ea6d3297a0e9da0097a0835c408cf7",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|quoted-printable|zip-multi-blank|top": [
+[
+"message/external-body",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/external-body|quoted-printable|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:33c669bd7ef48b460ce3a6dfea9af2a536e728df7ae68e428f94d9235f9ee4a9",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|quoted-printable|zip-spanned|top": [
+[
+"message/external-body",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/external-body|quoted-printable|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:de59e41fb226e76e7482076d5f4162b35902cffcb7eef1f3a328ec9b6ab77740",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/external-body|quoted-printable|ole2|top": [
+[
+"message/external-body",
+"sha256:1dd35bf0d1217fcc3fa2d4a8180c11f109e07536fe2595c21e8d3285e361c35c",
+true
+]
+],
+"message/external-body|quoted-printable|ole2|nested": [
+[
+"message/rfc822",
+"sha256:274b49eb1a21fe4114d874bc74b952037bb9cbcec055b7965a9705415345dfc3",
+true
+],
+[
+"message/external-body",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|none|email|top": [
+[
+"message/delivery-status",
+"sha256:8eb8a7ef27bc2b3a227ceb2b962cabf9b1e9977355aad401a02c73a91b861201",
+true
+]
+],
+"message/delivery-status|none|email|nested": [
+[
+"message/rfc822",
+"sha256:5592c81a5332e8778e046335ad217d35be1c732f03bae40725da0f91b5b50c1c",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|none|email-with-attachment|top": [
+[
+"message/delivery-status",
+"sha256:944df35163dba0ce733a471d664e1ddd4aa4208a025fca875ca7ab235659737d",
+true
+]
+],
+"message/delivery-status|none|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:5f6872f6fe3306e318397ff576f9f436a9369d6e0eaa930f5c98ff922028eaaa",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/delivery-status|none|dsn-trailing-blank-lines|top": [
+[
+"message/delivery-status",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/delivery-status|none|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:d14eb608b6a1bce2fff672992050f9af3fb651414f89fc2f766c8797cd86865a",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|none|dsn|top": [
+[
+"message/delivery-status",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/delivery-status|none|dsn|nested": [
+[
+"message/rfc822",
+"sha256:403d3be37871147069b4334e2a5e7a1d307ce2ecef3243fe569174301ab6bdf3",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|none|zip|top": [
+[
+"message/delivery-status",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/delivery-status|none|zip|nested": [
+[
+"message/rfc822",
+"sha256:4120111aa527d3c6e4c2984d25f8b7ccb4492a2bd691dc6fc2e77e977ff525b0",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|none|zip-multi-blank|top": [
+[
+"message/delivery-status",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/delivery-status|none|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:bcb0f4c1e9600f95c667ca9e8d27ec819eab12b659d1b3f49fc4269714965461",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|none|zip-spanned|top": [
+[
+"message/delivery-status",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/delivery-status|none|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:24dffab3c946e342b9fac614922e345ce158007479a0450377747c6e06397ead",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|none|ole2|top": [
+[
+"message/delivery-status",
+"sha256:0ece329d3029af7abd468fa148ebbf7de6b0bb46c7b9dbd96db80da7d93997be",
+true
+]
+],
+"message/delivery-status|none|ole2|nested": [
+[
+"message/rfc822",
+"sha256:326571014dbf32542dfcb317f9ed495a8d1ac73447204f7cc4cef9e8c8c944a8",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|7bit|email|top": [
+[
+"message/delivery-status",
+"sha256:8eb8a7ef27bc2b3a227ceb2b962cabf9b1e9977355aad401a02c73a91b861201",
+true
+]
+],
+"message/delivery-status|7bit|email|nested": [
+[
+"message/rfc822",
+"sha256:df530950209fc647161ce8cf1524fe706d303ea5713d41f4a4c21aded946b3c5",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|7bit|email-with-attachment|top": [
+[
+"message/delivery-status",
+"sha256:944df35163dba0ce733a471d664e1ddd4aa4208a025fca875ca7ab235659737d",
+true
+]
+],
+"message/delivery-status|7bit|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:fc57c2da3f62a0e854b5aef91ab21008adbc13aca875098e6d6d4440c17fa6b9",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/delivery-status|7bit|dsn-trailing-blank-lines|top": [
+[
+"message/delivery-status",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/delivery-status|7bit|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:27efce12ee1a37377150f6fbfa3084c1e51f3f914ddcff43c01d35cfd22c1d19",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|7bit|dsn|top": [
+[
+"message/delivery-status",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/delivery-status|7bit|dsn|nested": [
+[
+"message/rfc822",
+"sha256:81a4c13ea61b9dbfdc8d9d9deb49216a87b784a10fa135fa1db1b0d929a96156",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|7bit|zip|top": [
+[
+"message/delivery-status",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/delivery-status|7bit|zip|nested": [
+[
+"message/rfc822",
+"sha256:2cdcbaf0441b4e0ff733523d592c858f030a521829527e139aefda5c41ba67ba",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|7bit|zip-multi-blank|top": [
+[
+"message/delivery-status",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/delivery-status|7bit|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:1650de07ccac96b6c301d315fdd6b1dc4d2c84873eab152950085710fed6438e",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|7bit|zip-spanned|top": [
+[
+"message/delivery-status",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/delivery-status|7bit|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:f55f1f393fcd1e4b54cb40e638a6bacec400f4d3d0e012d699416cd77510e23a",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|7bit|ole2|top": [
+[
+"message/delivery-status",
+"sha256:0ece329d3029af7abd468fa148ebbf7de6b0bb46c7b9dbd96db80da7d93997be",
+true
+]
+],
+"message/delivery-status|7bit|ole2|nested": [
+[
+"message/rfc822",
+"sha256:0904f0749fd5f3156b83ca1b0c15ac825c418806304df57e2efcec68023c52a7",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|8bit|email|top": [
+[
+"message/delivery-status",
+"sha256:8eb8a7ef27bc2b3a227ceb2b962cabf9b1e9977355aad401a02c73a91b861201",
+true
+]
+],
+"message/delivery-status|8bit|email|nested": [
+[
+"message/rfc822",
+"sha256:c9c9c471394d78abeb7d451a3590bbae547d2fcec8952b505e5df6a1d05b6e06",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|8bit|email-with-attachment|top": [
+[
+"message/delivery-status",
+"sha256:944df35163dba0ce733a471d664e1ddd4aa4208a025fca875ca7ab235659737d",
+true
+]
+],
+"message/delivery-status|8bit|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:0b4875d977ceec6b3521d452697dd0fea6fe6699fba71aec0fa3e3e5dfb44b19",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/delivery-status|8bit|dsn-trailing-blank-lines|top": [
+[
+"message/delivery-status",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/delivery-status|8bit|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:2134ed7e9caf1467f100b3ea0c0cfc8295a5db9e409e1074267ff08d17107012",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|8bit|dsn|top": [
+[
+"message/delivery-status",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/delivery-status|8bit|dsn|nested": [
+[
+"message/rfc822",
+"sha256:fabd704fc12aa846707802c82b05d8db460bbf9d70a6b91a14270155f5239843",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|8bit|zip|top": [
+[
+"message/delivery-status",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/delivery-status|8bit|zip|nested": [
+[
+"message/rfc822",
+"sha256:0ff925aa19c599de6c6fd45b6f81a0a52ebde95f938c0fa9ff3dd1d416e0047d",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|8bit|zip-multi-blank|top": [
+[
+"message/delivery-status",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/delivery-status|8bit|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:0998836bd26e930bd6a858c4a5272c02ffa765a4ef6eb662c0a67283d52fca6f",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|8bit|zip-spanned|top": [
+[
+"message/delivery-status",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/delivery-status|8bit|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:4eb9923e9c3043f7446cee50df39b8188cdb7f35cb23bafa5d539fef61fb3abb",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|8bit|ole2|top": [
+[
+"message/delivery-status",
+"sha256:0ece329d3029af7abd468fa148ebbf7de6b0bb46c7b9dbd96db80da7d93997be",
+true
+]
+],
+"message/delivery-status|8bit|ole2|nested": [
+[
+"message/rfc822",
+"sha256:db4fe4b95d49b7c19b2a3e9ee66e94418f131ba24afdf2eb125ce0729febed3b",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|binary|email|top": [
+[
+"message/delivery-status",
+"sha256:8eb8a7ef27bc2b3a227ceb2b962cabf9b1e9977355aad401a02c73a91b861201",
+true
+]
+],
+"message/delivery-status|binary|email|nested": [
+[
+"message/rfc822",
+"sha256:5ed197151eaf3c9e66fec23d1e830287ff981612f0dcf60163b8898d95982f8a",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|binary|email-with-attachment|top": [
+[
+"message/delivery-status",
+"sha256:944df35163dba0ce733a471d664e1ddd4aa4208a025fca875ca7ab235659737d",
+true
+]
+],
+"message/delivery-status|binary|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:3b7e65ad44b717e5790cd2eae7a7719941706e1cc5a76fe74ffc552342e44bce",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+],
+[
+"application/pdf",
+"sha256:7f68eb6d42c0f698ebcf01bdd3006574fa6ada718b90db6d494121a68e19a2fd",
+true
+]
+],
+"message/delivery-status|binary|dsn-trailing-blank-lines|top": [
+[
+"message/delivery-status",
+"sha256:247cd957879ed998302f0b53a05bd159513a547622f0cb105b0a36fb9dcdf085",
+true
+]
+],
+"message/delivery-status|binary|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:64a1095a6c76cc1528fe7dad2159df30bde5d3d18420b76387961098befb3b8d",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|binary|dsn|top": [
+[
+"message/delivery-status",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/delivery-status|binary|dsn|nested": [
+[
+"message/rfc822",
+"sha256:c378c462ded3bf22f38f8e346c395d2089ddc418cde17ed5223542343ef9470d",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|binary|zip|top": [
+[
+"message/delivery-status",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/delivery-status|binary|zip|nested": [
+[
+"message/rfc822",
+"sha256:3de38d94d4c5d321e6ae881ebd7e855ebbfaba1cd43da39aae5ffd3bb1a26fc2",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|binary|zip-multi-blank|top": [
+[
+"message/delivery-status",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/delivery-status|binary|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:e77740ab3ee4b1d6b47253e314a29bbe191883c01827bfe5ec4b2246aadc16f4",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|binary|zip-spanned|top": [
+[
+"message/delivery-status",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/delivery-status|binary|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:235c38654a33fd097be7596ba597db652e007490480ed3ffe6d104d59a1ba9a7",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|binary|ole2|top": [
+[
+"message/delivery-status",
+"sha256:0ece329d3029af7abd468fa148ebbf7de6b0bb46c7b9dbd96db80da7d93997be",
+true
+]
+],
+"message/delivery-status|binary|ole2|nested": [
+[
+"message/rfc822",
+"sha256:00d3056ebfb31fb2a931938a380dba78be0ae42c8a5e6db88b7f5d6c8e6810ba",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|base64|email|top": [
+[
+"message/delivery-status",
+"sha256:8eb8a7ef27bc2b3a227ceb2b962cabf9b1e9977355aad401a02c73a91b861201",
+true
+]
+],
+"message/delivery-status|base64|email|nested": [
+[
+"message/rfc822",
+"sha256:f82fb9c0dd66c25749e48e2af5b63170fa960d5cfd75d23b6194b6a31ad8d627",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|base64|email-with-attachment|top": [
+[
+"message/delivery-status",
+"sha256:944df35163dba0ce733a471d664e1ddd4aa4208a025fca875ca7ab235659737d",
+true
+]
+],
+"message/delivery-status|base64|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:447ea2003a4e1de1c78d4b83a7eacc6efc1fd030f0df0eb2fed0e18e35331bd8",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|base64|dsn-trailing-blank-lines|top": [
+[
+"message/delivery-status",
+"sha256:96329684e5b8b5a005822805c72660b3b511c35ce49ba7ba657fb93704986406",
+true
+]
+],
+"message/delivery-status|base64|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:e9af6cad9edef212136aa2681312224df3ce64b00b4daf3181fde7bd6b2015f4",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|base64|dsn|top": [
+[
+"message/delivery-status",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/delivery-status|base64|dsn|nested": [
+[
+"message/rfc822",
+"sha256:cc16021cb5abf4862736d67bc7fb3d6d557e0e6fb67e4361c8fa0d30b2c42cb7",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|base64|zip|top": [
+[
+"message/delivery-status",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/delivery-status|base64|zip|nested": [
+[
+"message/rfc822",
+"sha256:15c805df542039c22156ffc653e6339f551aa9f49a6dac571babae728ae5aa5f",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|base64|zip-multi-blank|top": [
+[
+"message/delivery-status",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/delivery-status|base64|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:d616dfc39a8ff1b622cea56006440cdf963c740c68f8472f4357b675ae8e5cb1",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|base64|zip-spanned|top": [
+[
+"message/delivery-status",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/delivery-status|base64|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:ead77d184a3054f77f0f84132c0c97ed9b86628799d6225e229e7175b8e0c87c",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|base64|ole2|top": [
+[
+"message/delivery-status",
+"sha256:0ece329d3029af7abd468fa148ebbf7de6b0bb46c7b9dbd96db80da7d93997be",
+true
+]
+],
+"message/delivery-status|base64|ole2|nested": [
+[
+"message/rfc822",
+"sha256:6e66a99082341642650f0834af6e47c65fb4caa435acde9cfc00a86392e39371",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|quoted-printable|email|top": [
+[
+"message/delivery-status",
+"sha256:8eb8a7ef27bc2b3a227ceb2b962cabf9b1e9977355aad401a02c73a91b861201",
+true
+]
+],
+"message/delivery-status|quoted-printable|email|nested": [
+[
+"message/rfc822",
+"sha256:c01aeed153971e58bc56b05d28b3a199c804f9eff71d40e438803e6ab27e44b0",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|quoted-printable|email-with-attachment|top": [
+[
+"message/delivery-status",
+"sha256:f70c3e77044ff7083916e2f22777431b28bcf3ea31ccbfc37d8671e6991efe4b",
+true
+]
+],
+"message/delivery-status|quoted-printable|email-with-attachment|nested": [
+[
+"message/rfc822",
+"sha256:be940d2193340855612378c32d586b7064423d01f30ebbed971a1a54ce789ca7",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|quoted-printable|dsn-trailing-blank-lines|top": [
+[
+"message/delivery-status",
+"sha256:96329684e5b8b5a005822805c72660b3b511c35ce49ba7ba657fb93704986406",
+true
+]
+],
+"message/delivery-status|quoted-printable|dsn-trailing-blank-lines|nested": [
+[
+"message/rfc822",
+"sha256:0f6fdffc7976dce1711360ffc035811436d7d08badd1a6fa08b829ebc53c024f",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|quoted-printable|dsn|top": [
+[
+"message/delivery-status",
+"sha256:a8929af7e9b5979248cd981cc9fd2c2a4a91c5d1729f1314455c4728ba3208a5",
+true
+]
+],
+"message/delivery-status|quoted-printable|dsn|nested": [
+[
+"message/rfc822",
+"sha256:338c62dab4521f81b3f7d0b8f259c78cef202d3e2944d398fa1164687aeb97f8",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|quoted-printable|zip|top": [
+[
+"message/delivery-status",
+"sha256:a5f09e2655af57a86f1494226c9f6906448e44a08b24b1414ad8a0581f2c9708",
+true
+]
+],
+"message/delivery-status|quoted-printable|zip|nested": [
+[
+"message/rfc822",
+"sha256:06d82ba434901636065dd918da5d7d496425aa919d043098229238cbc80115d4",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|quoted-printable|zip-multi-blank|top": [
+[
+"message/delivery-status",
+"sha256:bc8bb8f2672dd2c35a9c735d480789c4823f8cf81927bc55ea36877705c6cf79",
+true
+]
+],
+"message/delivery-status|quoted-printable|zip-multi-blank|nested": [
+[
+"message/rfc822",
+"sha256:5aba233ce425f28e1c4597ef3f01cfb8e55c218392a6a9545f661ce681bc1e32",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|quoted-printable|zip-spanned|top": [
+[
+"message/delivery-status",
+"sha256:4395de99437a87af2c0b1e567a581129da5780bd8f3c1329bae875e218fc4675",
+true
+]
+],
+"message/delivery-status|quoted-printable|zip-spanned|nested": [
+[
+"message/rfc822",
+"sha256:8d46e8bbb21de26f5b3c9b0a5fcaa3694130256dea45f243bbb72bbfac9b12b2",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+],
+"message/delivery-status|quoted-printable|ole2|top": [
+[
+"message/delivery-status",
+"sha256:0ece329d3029af7abd468fa148ebbf7de6b0bb46c7b9dbd96db80da7d93997be",
+true
+]
+],
+"message/delivery-status|quoted-printable|ole2|nested": [
+[
+"message/rfc822",
+"sha256:53d216537b270ab44134cc493c792562cb43ffd83cbcff7aa57400901f7ee8f1",
+true
+],
+[
+"message/delivery-status",
+"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+false
+]
+]
+}

@@ -891,6 +891,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "defusedxml" },
     { name = "html2text" },
+    { name = "olefile" },
     { name = "openai" },
     { name = "openpyxl" },
     { name = "pdf2image" },
@@ -911,7 +912,6 @@ dependencies = [
 dev = [
     { name = "httpx2" },
     { name = "mypy" },
-    { name = "olefile" },
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
@@ -921,6 +921,7 @@ requires-dist = [
     { name = "cryptography", specifier = "==50.0.2" },
     { name = "defusedxml", specifier = "==0.7.1" },
     { name = "html2text", specifier = "==2025.4.15" },
+    { name = "olefile", specifier = "==0.47" },
     { name = "openai", specifier = "==3.28.0" },
     { name = "openpyxl", specifier = "==3.1.5" },
     { name = "pdf2image", specifier = "==1.17.0" },
@@ -941,7 +942,6 @@ requires-dist = [
 dev = [
     { name = "httpx2", specifier = "==2.13.1" },
     { name = "mypy", specifier = "==2.4.0" },
-    { name = "olefile", specifier = "==0.47" },
     { name = "pytest", specifier = "==9.1.1" },
     { name = "pytest-cov", specifier = "==7.1.0" },
 ]

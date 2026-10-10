@@ -34,7 +34,7 @@ from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_message, make_mock_embedder, make_thread
+from tests.conftest import make_message, make_mock_embedder, make_ole2, make_thread
 
 # Captured before any test monkeypatches the name, so the sorted
 # wrapper installed by ``_run`` still walks the real Maildir.
@@ -4160,8 +4160,9 @@ class TestRequeueStaleExtractions:
         """A message carrying the same bytes as ``.bin`` that uses the stale
         DOCX row (as a v0 database migrated to v1 leaves it, #928) indexed
         its old text, so it is re-queued too. Its reprocess extracts under
-        its own label, which selects no extractor, so its old text goes and
-        it moves to its own row; neither is re-queued again."""
+        its own label's namespace, which selects no extractor, and moves to
+        its own row; its directory names a Word document, so the DOCX
+        extractor reads it there (#1416). Neither is re-queued again."""
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         docx_path = maildir / "INBOX" / "cur" / "contract.eml"
@@ -4208,7 +4209,7 @@ class TestRequeueStaleExtractions:
             return " ".join(r["text"] for r in rows)
 
         assert "HEADER_MARK" in attachment_text("contract@example.com")
-        assert attachment_text("blob@example.com") == ""
+        assert "HEADER_MARK" in attachment_text("blob@example.com")
         modules = db._conn.execute(
             "SELECT filename, extractor_module FROM attachments ORDER BY filename"
         ).fetchall()
@@ -4487,6 +4488,8 @@ class TestRequeueOcrDisabledExtractions:
                 text="scanned words",
                 error=None,
                 text_complete=True,
+                # Neither payload is OLE2 or ZIP (#1416).
+                identifier="",
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -4661,6 +4664,7 @@ class TestRequeueNewlyDispatchedExtensions:
                 text="photo words",
                 error=None,
                 text_complete=True,
+                identifier="",
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -4705,8 +4709,10 @@ class TestRequeueLegacyOle2Rows:
     """#935: #694 cached a genuine ``.doc`` / ``.xls`` as ``unsupported``
     with the OLE2 error and no extractor, so no version bump marks it
     stale. Once ``.doc`` / ``.xls`` select the legacy extractors, the
-    startup sweep re-queues messages whose occurrence selects one, once;
-    an occurrence labelled ``.docx`` still selects no reader and is left."""
+    startup sweep re-queues messages whose occurrence selects one, once.
+    An occurrence labelled ``.docx`` selects no legacy reader, but its row
+    predates container identification (no ``identifier``, #1416), so the
+    identification arm re-queues it once too."""
 
     _write_eml = staticmethod(TestRequeueOcrDisabledExtractions._write_eml)
     _drain = TestRequeueOcrDisabledExtractions._drain
@@ -4731,7 +4737,20 @@ class TestRequeueLegacyOle2Rows:
             monkeypatch.setitem(extractors._MIME_DISPATCH, mime, legacy[mime] + "x")
         monkeypatch.setitem(extractors._EXT_DISPATCH, ".doc", "docx")
         monkeypatch.setitem(extractors._EXT_DISPATCH, ".xls", "xlsx")
-        self._drain(db, queue)
+        # #694's result for an OLE2 payload under an OOXML module, recorded
+        # with no identifier, as before #1416.
+        from src import attachment_indexing
+        from src.extractors import LEGACY_OLE2_ERROR, STATUS_UNSUPPORTED, ExtractionResult
+
+        with monkeypatch.context() as m:
+            m.setattr(
+                attachment_indexing,
+                "extract_attachment",
+                lambda **_kw: ExtractionResult(
+                    status=STATUS_UNSUPPORTED, extractor=None, text=None, error=LEGACY_OLE2_ERROR
+                ),
+            )
+            self._drain(db, queue)
         # The upgrade.
         for mime, module in legacy.items():
             monkeypatch.setitem(extractors._MIME_DISPATCH, mime, module)
@@ -4741,28 +4760,40 @@ class TestRequeueLegacyOle2Rows:
 
     def test_legacy_labelled_occurrences_are_requeued_once(self, tmp_path, monkeypatch):
         from src import attachment_indexing
-        from src.extractors import LEGACY_OLE2_ERROR, STATUS_SUCCESS, ExtractionResult
+        from src.extractors import (
+            CONTAINER_IDENTIFIER,
+            LEGACY_OLE2_ERROR,
+            STATUS_SUCCESS,
+            ExtractionResult,
+        )
 
-        ole2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        from tests.conftest import make_ole2
+
         db, queue, paths = self._index_as_694_did(
             tmp_path,
             monkeypatch,
             {
-                "memo": (ole2 + b"synthetic doc", "application/msword", "memo.doc"),
-                "book": (ole2 + b"synthetic xls", "application/octet-stream", "book.xls"),
-                "sealed": (ole2 + b"synthetic docx", "application/octet-stream", "sealed.docx"),
+                "memo": (make_ole2("WordDocument", trailer=b"1"), "application/msword", "memo.doc"),
+                "book": (make_ole2("Workbook"), "application/octet-stream", "book.xls"),
+                "sealed": (
+                    make_ole2("WordDocument", trailer=b"2"),
+                    "application/octet-stream",
+                    "sealed.docx",
+                ),
             },
         )
         rows = db._conn.execute(
-            "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
+            "SELECT extraction_status, extractor, extraction_error, identifier "
+            "FROM attachment_extractions"
         ).fetchall()
-        assert [tuple(r) for r in rows] == [("unsupported", None, LEGACY_OLE2_ERROR)] * 3
+        assert [tuple(r) for r in rows] == [("unsupported", None, LEGACY_OLE2_ERROR, None)] * 3
         assert self._queued(db) == {}
 
-        assert main._requeue_stale_extractions(db, queue) == 2
+        assert main._requeue_stale_extractions(db, queue) == 3
         assert self._queued(db) == {
             paths["memo"]: REASON_REEXTRACT,
             paths["book"]: REASON_REEXTRACT,
+            paths["sealed"]: REASON_REEXTRACT,
         }
 
         extractor = MagicMock(
@@ -4772,14 +4803,15 @@ class TestRequeueLegacyOle2Rows:
                 text="legacy words",
                 error=None,
                 text_complete=True,
+                identifier=CONTAINER_IDENTIFIER,
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
         self._drain(db, queue)
-        assert extractor.call_count == 2
+        assert extractor.call_count == 3
 
-        # The rows are rewritten, so the next startup finds nothing; the
-        # ``.docx`` occurrence still selects no reader and is never queued.
+        # The rows are rewritten and certified, so the next startup finds
+        # nothing.
         assert main._requeue_stale_extractions(db, queue) == 0
         assert self._queued(db) == {}
 
@@ -4832,17 +4864,27 @@ class TestPptxStartsDispatching:
             queue.enqueue(str(path), REASON_INITIAL_SCAN)
             paths[name] = str(path)
 
-        # Before: neither label selects an extractor (today's behaviour on
-        # main before #936).
+        # Before: neither label selects an extractor (the behaviour on main
+        # before #936), and no row is certified (before #1416): the result
+        # the dispatcher of the time recorded.
+        from src import attachment_indexing
+        from src.extractors import STATUS_UNSUPPORTED, ExtractionResult
+
         with monkeypatch.context() as before:
             before.delitem(extractors._MIME_DISPATCH, self.PPTX_MIME, raising=False)
             before.delitem(extractors._EXT_DISPATCH, ".pptx", raising=False)
+            before.setattr(
+                attachment_indexing,
+                "extract_attachment",
+                lambda **_kw: ExtractionResult(
+                    status=STATUS_UNSUPPORTED, extractor=None, text=None, error=NO_EXTRACTOR_ERROR
+                ),
+            )
             self._drain(db, queue)
             rows = db._conn.execute(
                 "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
             ).fetchall()
             assert [tuple(r) for r in rows] == [("unsupported", None, NO_EXTRACTOR_ERROR)] * 2
-            assert main._requeue_stale_extractions(db, queue) == 0
 
         # After: both messages are re-queued once and the deck is read.
         assert main._requeue_stale_extractions(db, queue) == 2
@@ -4919,7 +4961,9 @@ class TestLegacyPptThroughThePipeline:
     _write_eml = staticmethod(TestRequeueOcrDisabledExtractions._write_eml)
     _drain = TestRequeueOcrDisabledExtractions._drain
     _queued = staticmethod(TestRequeueOcrDisabledExtractions._queued)
-    _OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    # A synthetic container whose directory names PowerPoint (#1416);
+    # each payload appends its own trailer.
+    _OLE2 = make_ole2("PowerPoint Document")
 
     def _enqueue(self, tmp_path, monkeypatch, messages):
         maildir = tmp_path / "maildir"
@@ -4936,7 +4980,12 @@ class TestLegacyPptThroughThePipeline:
 
     def test_no_extractor_ppt_rows_are_requeued_once_and_extracted(self, tmp_path, monkeypatch):
         from src import attachment_indexing, extractors
-        from src.extractors import NO_EXTRACTOR_ERROR, STATUS_SUCCESS, ExtractionResult
+        from src.extractors import (
+            CONTAINER_IDENTIFIER,
+            NO_EXTRACTOR_ERROR,
+            STATUS_SUCCESS,
+            ExtractionResult,
+        )
 
         db, queue, paths = self._enqueue(
             tmp_path,
@@ -4947,9 +4996,17 @@ class TestLegacyPptThroughThePipeline:
                 "opaque": (self._OLE2 + b"deck three", "application/octet-stream", "c.bin"),
             },
         )
-        # The dispatch before #957: ``.ppt`` selected no extractor.
+        # The dispatch before #957: ``.ppt`` selected no extractor, and no
+        # row was certified (before #1416).
         monkeypatch.delitem(extractors._MIME_DISPATCH, "application/vnd.ms-powerpoint")
         monkeypatch.delitem(extractors._EXT_DISPATCH, ".ppt")
+        monkeypatch.setattr(
+            attachment_indexing,
+            "extract_attachment",
+            lambda **_kw: ExtractionResult(
+                status="unsupported", extractor=None, text=None, error=NO_EXTRACTOR_ERROR
+            ),
+        )
         self._drain(db, queue)
         rows = db._conn.execute(
             "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
@@ -4959,10 +5016,13 @@ class TestLegacyPptThroughThePipeline:
         monkeypatch.undo()
         monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
 
-        assert main._requeue_stale_extractions(db, queue) == 2
+        # The ``.bin`` occurrence selects no extractor, but its row predates
+        # container identification, so it is re-queued once too (#1416).
+        assert main._requeue_stale_extractions(db, queue) == 3
         assert self._queued(db) == {
             paths["by_mime"]: REASON_REEXTRACT,
             paths["by_name"]: REASON_REEXTRACT,
+            paths["opaque"]: REASON_REEXTRACT,
         }
         extractor = MagicMock(
             return_value=ExtractionResult(
@@ -4971,13 +5031,14 @@ class TestLegacyPptThroughThePipeline:
                 text="slide words",
                 error=None,
                 text_complete=True,
+                identifier=CONTAINER_IDENTIFIER,
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
         self._drain(db, queue)
-        assert extractor.call_count == 2
-        # The rows are rewritten, so the next startup finds nothing; the
-        # ``.bin`` occurrence still selects no extractor and is never queued.
+        assert extractor.call_count == 3
+        # The rows are rewritten and certified, so the next startup finds
+        # nothing.
         assert main._requeue_stale_extractions(db, queue) == 0
         assert self._queued(db) == {}
 

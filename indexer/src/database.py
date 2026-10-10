@@ -32,6 +32,7 @@ from .entities import (
     person_entity_id,
 )
 from .extractors import (
+    CONTAINER_IDENTIFICATION_VERSION,
     LEGACY_OLE2_ERROR,
     NO_EXTRACTOR_ERROR,
     OCR_DISABLED_ERROR,
@@ -160,7 +161,13 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # on rows cached before it; no reparse, the startup sweep re-queues the
 # rows a raised limit or the once-only bootstrap arm selects
 # (``migrations/0011_extraction_cap_record.sql``).
-SCHEMA_VERSION = 11
+# v12 (#1416): ``attachment_extractions.identifier`` records how a
+# cached result's payload was certified: ``container@<version>`` when
+# its OLE2 or ZIP directory was identified before dispatch, '' when it
+# starts with neither signature, NULL on rows cached before it; the
+# migration queues a reparse, whose lookup certifies or refreshes each
+# row (``migrations/0012_extraction_identifier.sql``).
+SCHEMA_VERSION = 12
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -198,6 +205,7 @@ _EXTRACTION_COLUMN_NAMES = (
     "ocr_pages_cap",
     "digital_pages_cap",
     "extracted_chars_cap",
+    "identifier",
 )
 _EXTRACTION_COLUMNS = ", ".join(_EXTRACTION_COLUMN_NAMES)
 
@@ -242,6 +250,33 @@ _CAP_BOOTSTRAP_SQL = """
 """
 _CAP_RAISED_QUERY = _CAP_REFRESH_SQL.format(arm=_CAP_RAISED_SQL)
 _CAP_BOOTSTRAP_QUERY = _CAP_REFRESH_SQL.format(arm=_CAP_BOOTSTRAP_SQL)
+
+# The startup sweep's identification arm (#1416), the SQL twin of
+# ``attachment_indexing.identification_due``; a differential test runs a
+# catalogue of rows through both. A row is due when it has no identifier
+# (cached before schema v12) or one an older identification version
+# wrote (``container@<n>``, n below the current version); '' (a payload
+# with no OLE2 or ZIP signature) and a newer version never are. Never a
+# ``too_large`` row, which no dispatch reached (a raised byte cap
+# re-extracts it through its own arm), and, while OCR is off, never a
+# row an OCR extractor wrote (an ``-ocr`` stamp before ``@``), so its
+# text is not traded for "OCR disabled".
+_IDENTIFICATION_REFRESH_QUERY = """
+    SELECT m.filepath, a.attachment_occurrence_id AS occurrence_id,
+           a.text_complete AS occurrence_complete
+    FROM attachment_extractions e
+    JOIN attachments a ON a.attachment_id = e.attachment_id
+        AND a.extractor_module = e.extractor_module
+    JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+    WHERE e.extraction_status <> 'too_large'
+      AND (:ocr_enabled OR substr(CASE WHEN instr(COALESCE(e.extractor, ''), '@') > 0
+               THEN substr(e.extractor, 1, instr(e.extractor, '@') - 1)
+               ELSE COALESCE(e.extractor, '') END, -4) <> '-ocr')
+      AND (e.identifier IS NULL
+           OR (e.identifier <> ''
+               AND CAST(substr(e.identifier, instr(e.identifier, '@') + 1) AS INTEGER)
+                   < :version))
+"""
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -845,6 +880,11 @@ class Database:
             -- it did not, NULL when unknown (not applicable to the
             -- module, a status other than success / empty, or a row
             -- cached before schema v11).
+            -- ``identifier`` is how the payload's container was certified
+            -- (#1416): ``container@<version>`` when its OLE2 or ZIP
+            -- directory was identified before dispatch, '' when it starts
+            -- with neither signature, NULL when unknown (a ``too_large``
+            -- result, or a row cached before schema v12).
             CREATE TABLE attachment_extractions (
                 attachment_id      TEXT NOT NULL,
                 extractor_module   TEXT NOT NULL,
@@ -858,6 +898,7 @@ class Database:
                 ocr_pages_cap      INTEGER CHECK (ocr_pages_cap >= 0),
                 digital_pages_cap  INTEGER CHECK (digital_pages_cap >= 0),
                 extracted_chars_cap INTEGER CHECK (extracted_chars_cap >= 0),
+                identifier         TEXT,
                 PRIMARY KEY (attachment_id, extractor_module)
             );
 
@@ -2330,6 +2371,24 @@ class Database:
         )
 
     @_synchronized
+    def find_identification_refresh_attachment_filepaths(
+        self, *, ocr_enabled: bool, assessed: CompletenessClearing | None = None
+    ) -> set[str]:
+        """The Maildir filepaths of the messages with an attachment
+        occurrence whose cached result's container certification is due
+        (#1416): the SQL twin of ``attachment_indexing.identification_due``.
+        Each qualifying occurrence that still has a ``text_complete``
+        record has it cleared through ``assessed``, so every message using
+        a row is queued, and its assessment cleared, before the drain
+        replaces the row for any of them."""
+        return self._stream_filepaths(
+            _IDENTIFICATION_REFRESH_QUERY,
+            {"ocr_enabled": int(ocr_enabled), "version": CONTAINER_IDENTIFICATION_VERSION},
+            lambda _row: True,
+            assessed,
+        )
+
+    @_synchronized
     def find_deferred_extraction_filepaths(self) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose extraction the per-message budget deferred
@@ -2381,6 +2440,7 @@ class Database:
         ocr_pages_cap: int | None = None,
         digital_pages_cap: int | None = None,
         extracted_chars_cap: int | None = None,
+        identifier: str | None = None,
     ) -> None:
         """Persist (or replace) the extraction record for ``attachment_id``
         under ``extractor_module`` ('' when the occurrence selects no
@@ -2400,7 +2460,8 @@ class Database:
         whether the result lost no text (#1242), ``None`` when unknown.
         ``ocr_pages_cap``, ``digital_pages_cap`` and ``extracted_chars_cap``
         are the configured limits that cut it (#1418): the limit when it
-        cut, 0 when not, ``None`` when unknown.
+        cut, 0 when not, ``None`` when unknown. ``identifier`` is how its
+        container was certified (#1416, ``ExtractionResult.identifier``).
 
         The same (attachment_id, extractor_module) is OR-REPLACE'd so a follow-up pass
         (e.g. after enabling OCR or bumping ``INDEXER_OCR_MAX_PAGES``)
@@ -2416,8 +2477,9 @@ class Database:
                 INSERT OR REPLACE INTO attachment_extractions
                     (attachment_id, extractor_module, extraction_status, extractor,
                      extracted_text, extraction_error, extracted_at, ocr_pages_skipped,
-                     text_complete, ocr_pages_cap, digital_pages_cap, extracted_chars_cap)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     text_complete, ocr_pages_cap, digital_pages_cap, extracted_chars_cap,
+                     identifier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attachment_id,
@@ -2432,7 +2494,29 @@ class Database:
                     ocr_pages_cap,
                     digital_pages_cap,
                     extracted_chars_cap,
+                    identifier,
                 ),
+            )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+    @_synchronized
+    def certify_extraction_identifier(self, attachment_id: str, extractor_module: str) -> None:
+        """Record '' as the ``identifier`` of a cached row that has none,
+        for a payload the lookup found starting with neither the OLE2 nor
+        a ZIP signature (#1416): no identification applies to it, so its
+        result is kept as it is and the sweep's identification arm no
+        longer selects it. A row with an identifier is left as it is."""
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute(
+                "UPDATE attachment_extractions SET identifier = '' "
+                "WHERE attachment_id = ? AND extractor_module = ? AND identifier IS NULL",
+                (attachment_id, extractor_module),
             )
             self._commit_if_started(started)
         except Exception:

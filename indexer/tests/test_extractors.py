@@ -30,6 +30,8 @@ from src.extractors import (
     extract,
 )
 
+from tests.conftest import make_ole2, make_ooxml_names, make_zip
+
 
 class TestDispatchByMime:
     def test_text_plain_routes_to_text_extractor(self):
@@ -136,6 +138,10 @@ class TestSafetyGates:
 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
+            # The names identification reads (#1416), empty, so the cap
+            # trips on the next member.
+            zf.writestr("[Content_Types].xml", b"")
+            zf.writestr("xl/workbook.xml", b"")
             zf.writestr("payload.xml", b"<root>" * 50)
 
         result = extract(
@@ -281,6 +287,7 @@ class TestFailedOutcomesAreLogged:
             text=None,
             error="ValueError",
             text_complete=False,
+            identifier="",
         )
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
         assert record.levelname == "WARNING"
@@ -300,6 +307,8 @@ class TestFailedOutcomesAreLogged:
         monkeypatch.setattr("src.extractors.ZIP_MAX_UNCOMPRESSED_BYTES", 4)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("[Content_Types].xml", b"")
+            zf.writestr("xl/workbook.xml", b"")
             zf.writestr("SYNTHETIC_MEMBER_MARKER", b"<root>" * 50)
 
         result = extract(
@@ -314,6 +323,7 @@ class TestFailedOutcomesAreLogged:
             text=None,
             error="zip member declares 300 uncompressed bytes (cap 4)",
             text_complete=False,
+            identifier="container@1",
         )
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
         assert record.levelname == "WARNING"
@@ -2393,6 +2403,13 @@ class TestXlsxEagerPartBudget:
                 assert not isinstance(exc, xlsx.XlsxEagerPartBudgetError)
                 assert type(exc) is expected
             result = extract(content_type=self._XLSX, filename="book.xlsx", payload=payload)
+        if shape == "no-manifest":
+            # No ``[Content_Types].xml``: not an OOXML package, so
+            # identification decides before the extractor runs (#1416).
+            from src.extractors import ZIP_NOT_OFFICE_ERROR
+
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, ZIP_NOT_OFFICE_ERROR)
+            return
         assert (result.status == STATUS_FAILED) == (expected is not None)
 
     def test_a_part_understating_its_size_is_read_no_further(self, monkeypatch):
@@ -3672,6 +3689,7 @@ class TestPermanentFailuresAreUnsupported:
             text=None,
             error=PDF_LIMIT_ERROR,
             text_complete=False,
+            identifier="",
         )
         assert PDF_LIMIT_ERROR == "PDF structure exceeds pypdf limits"
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
@@ -3720,6 +3738,7 @@ class TestPermanentFailuresAreUnsupported:
             text=None,
             error=error,
             text_complete=False,
+            identifier="container@1",
         )
         assert opened[0] == 0
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
@@ -3819,19 +3838,15 @@ class TestPermanentFailuresAreUnsupported:
 
         monkeypatch.setattr("src.extractors._safe_import", lambda module: boom)
         filename = f"a.{module_name}"
-        # The XLSX path runs the zip pre-check first; give it a zip. A
-        # legacy label keeps its legacy extractor only for an OLE2 payload.
+        # A legacy or OOXML payload is a container whose directory names
+        # the module, so identification (#1416) dispatches to it; the
+        # XLSX path then runs the zip pre-check, which passes.
         payload = b"x"
-        if module_name in {"doc", "xls", "ppt"}:
-            payload = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + bytes(64)
+        streams = {"doc": "WordDocument", "xls": "Workbook", "ppt": "PowerPoint Document"}
+        if module_name in streams:
+            payload = make_ole2(streams[module_name])
         if module_name == "xlsx":
-            import io
-            import zipfile
-
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w") as archive:
-                archive.writestr("a", b"a")
-            payload = buf.getvalue()
+            payload = make_zip(*make_ooxml_names("xlsx"))
 
         result = extract(
             content_type="application/octet-stream", filename=filename, payload=payload
@@ -4595,6 +4610,8 @@ class TestMailContentStaysOutOfLogsAndErrors:
         monkeypatch.setattr("src.extractors.ZIP_MAX_UNCOMPRESSED_BYTES", 4)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("[Content_Types].xml", b"")
+            zf.writestr("xl/workbook.xml", b"")
             zf.writestr("SYNTHETIC_MEMBER_MARKER", b"<root>" * 50)
 
         result = extract(
@@ -5237,8 +5254,10 @@ class TestLegacyOfficeLabels:
             return run
 
         monkeypatch.setattr(extractors, "_safe_import", stub)
-        payload = _OLE2_MAGIC + bytes(512)
-        for content_type, filename, _ in _LEGACY_LABELS:
+        # Each label's own format, as identification (#1416) reads it.
+        payloads = {"docx": make_ole2("WordDocument"), "xlsx": make_ole2("Workbook")}
+        for content_type, filename, module in _LEGACY_LABELS:
+            payload = payloads[module]
             result = extract(content_type=content_type, filename=filename, payload=payload)
             assert result.status == STATUS_SUCCESS, (content_type, filename)
             assert result.extractor == f"{calls[-1]}@{extractors.EXTRACTOR_VERSIONS[calls[-1]]}"
@@ -5254,15 +5273,16 @@ class TestLegacyOfficeLabels:
             assert (result.status, result.error) == (STATUS_UNSUPPORTED, NOT_OLE2_OR_OOXML_ERROR)
         assert calls == []
 
-    def test_ole2_payload_without_a_legacy_label_stays_unsupported(self, monkeypatch):
-        """An OLE2 payload bound for either OOXML extractor with no legacy
-        label is ``unsupported`` (#694): under an OOXML label (for example
-        a password-protected OOXML package, which is also OLE2; the MIME
-        type wins over a ``.doc`` name). #935 keeps this."""
-        from src.extractors import LEGACY_OLE2_ERROR
+    def test_encrypted_ooxml_under_an_ooxml_label_is_unsupported(self, monkeypatch):
+        """A password-protected OOXML package is an OLE2 file with
+        ``EncryptionInfo`` and ``EncryptedPackage`` streams (#694). Its
+        directory says so (#1416): ``unsupported`` with a fixed reason
+        and no extractor run, whatever the OOXML label (the MIME type
+        wins over a ``.doc`` name)."""
+        from src.extractors import ENCRYPTED_OFFICE_ERROR
 
         calls = _count_extractor_calls(monkeypatch)
-        payload = _OLE2_MAGIC + bytes(64)
+        payload = make_ole2("EncryptionInfo", "EncryptedPackage")
         for content_type, filename in (
             (
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -5272,22 +5292,23 @@ class TestLegacyOfficeLabels:
             ("application/octet-stream", "a.xlsx"),
         ):
             result = extract(content_type=content_type, filename=filename, payload=payload)
-            assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR), (
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, ENCRYPTED_OFFICE_ERROR), (
                 content_type,
                 filename,
             )
         assert calls == []
 
-    def test_ole2_payload_labelled_as_text_is_a_binary_payload(self, monkeypatch):
-        """#932: an OLE2 payload labelled ``.txt`` is not decoded either; the
-        text guard records it with its own fixed reason."""
-        from src.extractors import BINARY_AS_TEXT_ERROR
+    def test_ole2_payload_labelled_as_text_is_never_decoded(self, monkeypatch):
+        """#932: an OLE2 payload labelled ``.txt`` is not decoded. Its
+        directory decides instead (#1416): one with no Office stream is
+        ``unsupported`` with a fixed reason, and no extractor runs."""
+        from src.extractors import OLE2_NOT_OFFICE_ERROR
 
         calls = _count_extractor_calls(monkeypatch)
         result = extract(
-            content_type="text/plain", filename="a.txt", payload=_OLE2_MAGIC + b"words"
+            content_type="text/plain", filename="a.txt", payload=make_ole2("Contents") + b"words"
         )
-        assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, OLE2_NOT_OFFICE_ERROR)
         assert calls == []
 
     def test_docx_and_xlsx_rows_from_before_the_ole2_check_are_stale(self):
@@ -5311,6 +5332,15 @@ _BINARY_SIGNATURES = {
     "jpeg": b"\xff\xd8\xff",
     "gif87a": b"GIF87a",
     "gif89a": b"GIF89a",
+}
+# The signatures whose payloads are identified by their container
+# directory under any label instead (#1416,
+# ``tests/test_container_identification.py``).
+_CONTAINER_SIGNATURE_NAMES = frozenset({"zip", "zip-empty", "ole2"})
+_NON_CONTAINER_SIGNATURES = {
+    name: magic
+    for name, magic in _BINARY_SIGNATURES.items()
+    if name not in _CONTAINER_SIGNATURE_NAMES
 }
 
 # Occurrences that select the text extractor: a ``text/plain`` label, and a
@@ -5352,7 +5382,7 @@ class TestBinaryPayloadLabelledAsText:
         assert result.extractor is not None and result.extractor.startswith("text@")
         assert calls == ["text"]
 
-    @pytest.mark.parametrize("signature", sorted(_BINARY_SIGNATURES))
+    @pytest.mark.parametrize("signature", sorted(_NON_CONTAINER_SIGNATURES))
     @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS)
     def test_binary_signature_is_unsupported_without_decoding(
         self, signature, content_type, filename, monkeypatch, caplog
@@ -5361,7 +5391,7 @@ class TestBinaryPayloadLabelledAsText:
 
         caplog.set_level("DEBUG")
         calls = _count_extractor_calls(monkeypatch)
-        payload = _BINARY_SIGNATURES[signature] + b"SYNTHETIC_PAYLOAD_MARKER" + bytes(64)
+        payload = _NON_CONTAINER_SIGNATURES[signature] + b"SYNTHETIC_PAYLOAD_MARKER" + bytes(64)
         result = extract(content_type=content_type, filename=filename, payload=payload)
         assert result == ExtractionResult(
             status=STATUS_UNSUPPORTED,
@@ -5369,6 +5399,7 @@ class TestBinaryPayloadLabelledAsText:
             text=None,
             error=BINARY_AS_TEXT_ERROR,
             text_complete=False,
+            identifier="",
         )
         assert calls == []
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -5406,7 +5437,7 @@ class TestBinaryPayloadLabelledAsText:
         calls = _count_extractor_calls(monkeypatch)
         tail = b"A" * (DEFAULT_MAX_BYTES - 16)
         start = time.perf_counter()
-        for magic in _BINARY_SIGNATURES.values():
+        for magic in _NON_CONTAINER_SIGNATURES.values():
             result = extract(content_type="text/plain", filename="a.txt", payload=magic + tail)
             assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
         assert time.perf_counter() - start < 2.0
@@ -5537,9 +5568,10 @@ class TestWordTemplates:
         assert result.error is not None and "uncompressed" in result.error
         assert calls == []
 
-    def test_ole2_payload_labelled_dotx_keeps_the_ole2_guard(self, monkeypatch):
-        """#694's guard runs before the extractor for a ``.dotx`` label too."""
-        from src.extractors import LEGACY_OLE2_ERROR
+    def test_encrypted_ooxml_labelled_dotx_runs_no_extractor(self, monkeypatch):
+        """#694's guard, now container identification (#1416), runs before
+        the extractor for a ``.dotx`` label too."""
+        from src.extractors import ENCRYPTED_OFFICE_ERROR
 
         calls = _count_extractor_calls(monkeypatch)
         for content_type, filename in (
@@ -5547,14 +5579,17 @@ class TestWordTemplates:
             ("application/octet-stream", "a.dotx"),
         ):
             result = extract(
-                content_type=content_type, filename=filename, payload=_OLE2_MAGIC + bytes(64)
+                content_type=content_type,
+                filename=filename,
+                payload=make_ole2("EncryptionInfo", "EncryptedPackage"),
             )
-            assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, ENCRYPTED_OFFICE_ERROR)
         assert calls == []
 
-    def test_non_word_package_still_fails(self, caplog):
-        """Only the document and template main parts are read: another OOXML
-        package (a workbook) labelled ``.dotx`` fails with a fixed error."""
+    def test_a_workbook_labelled_dotx_is_read_as_a_workbook(self, caplog):
+        """Another OOXML package (a workbook) labelled ``.dotx`` failed in
+        the DOCX extractor with a fixed error; its directory names a
+        workbook, so the XLSX extractor reads it (#1416)."""
         import io
 
         import openpyxl
@@ -5567,7 +5602,8 @@ class TestWordTemplates:
         buf = io.BytesIO()
         workbook.save(buf)
         result = extract(content_type=_DOTX_MIME, filename="a.dotx", payload=buf.getvalue())
-        assert (result.status, result.error) == (STATUS_FAILED, "ValueError")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "xlsx@6")
+        assert "SYNTHETIC_SHEET_MARKER" in (result.text or "")
         assert "SYNTHETIC_SHEET_MARKER" not in caplog.text
 
     def test_docx_rows_from_before_dotx_support_are_stale(self):
@@ -6247,6 +6283,7 @@ class TestPptxExtractor:
             text_complete=True,
             # The dispatcher's character cap did not cut it (#1418).
             extracted_chars_cap=0,
+            identifier="container@1",
         )
         assert calls == ["pptx"]
 
@@ -6737,11 +6774,12 @@ class TestPptxExtractor:
         assert calls == []
         assert _PPTX_MARKER not in caplog.text
 
-    def test_ole2_payload_labelled_pptx_is_unsupported(self, monkeypatch):
+    def test_encrypted_pptx_is_unsupported(self, monkeypatch):
         """An encrypted ``.pptx`` is an OLE2 compound file, which
-        python-pptx cannot open: recorded ``unsupported`` like an
-        encrypted ``.docx`` (#694), without running the extractor."""
-        from src.extractors import LEGACY_OLE2_ERROR
+        python-pptx cannot open: its directory says so (#1416), and it is
+        recorded ``unsupported`` like an encrypted ``.docx`` (#694),
+        without running the extractor."""
+        from src.extractors import ENCRYPTED_OFFICE_ERROR
 
         calls = _count_extractor_calls(monkeypatch)
         for content_type, filename in (
@@ -6749,9 +6787,11 @@ class TestPptxExtractor:
             ("application/octet-stream", "a.pptx"),
         ):
             result = extract(
-                content_type=content_type, filename=filename, payload=_OLE2_MAGIC + bytes(64)
+                content_type=content_type,
+                filename=filename,
+                payload=make_ole2("EncryptionInfo", "EncryptedPackage"),
             )
-            assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, ENCRYPTED_OFFICE_ERROR)
         assert calls == []
 
 
@@ -6957,16 +6997,18 @@ class TestPowerPointVariants:
         assert _VBA_MARKER not in caplog.text
 
     @pytest.mark.parametrize(("content_type", "filename", "main_type"), _PPTX_VARIANT_LABELS)
-    def test_ole2_payload_under_each_label_is_unsupported(
+    def test_encrypted_ooxml_under_each_label_is_unsupported(
         self, content_type, filename, main_type, monkeypatch
     ):
-        from src.extractors import LEGACY_OLE2_ERROR
+        from src.extractors import ENCRYPTED_OFFICE_ERROR
 
         calls = _count_extractor_calls(monkeypatch)
         result = extract(
-            content_type=content_type, filename=filename, payload=_OLE2_MAGIC + bytes(64)
+            content_type=content_type,
+            filename=filename,
+            payload=make_ole2("EncryptionInfo", "EncryptedPackage"),
         )
-        assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, ENCRYPTED_OFFICE_ERROR)
         assert calls == []
 
     @pytest.mark.parametrize(("content_type", "filename", "main_type"), _PPTX_VARIANT_LABELS)
@@ -6996,20 +7038,31 @@ class TestPowerPointVariants:
         assert _PPTX_MARKER not in caplog.text
 
     @pytest.mark.parametrize(("content_type", "filename", "main_type"), _PPTX_VARIANT_LABELS)
-    def test_package_whose_main_part_is_not_a_presentation_fails_by_type(
+    def test_a_word_document_under_each_label_is_read_as_one(
         self, content_type, filename, main_type, caplog
     ):
-        """A Word document under a PowerPoint label: python-pptx loads its
-        main part as a generic part, which the extractor refuses with
-        fixed text; nothing of the document is logged or recorded."""
+        """A Word document under a PowerPoint label failed in python-pptx
+        (its main part loaded as a generic part, refused with fixed
+        text); its directory names a Word document, so the DOCX
+        extractor reads it (#1416). Nothing of it is logged."""
         caplog.set_level("DEBUG")
         result = extract(
             content_type=content_type,
             filename=filename.replace("a.", f"{_PPTX_MARKER}."),
             payload=_docx_bytes(_PPTX_MARKER),
         )
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "docx@7")
+        assert _PPTX_MARKER in (result.text or "")
+        assert _PPTX_MARKER not in caplog.text
+
+    def test_a_presentation_whose_main_part_type_is_not_one_fails_by_type(self, caplog):
+        """The PPTX extractor's own refusal still holds for a package the
+        directory names a presentation (``ppt/presentation.xml``) whose
+        main part is declared as another type."""
+        caplog.set_level("DEBUG")
+        payload = _retyped_deck("application/xml", _deck(_boxes(_PPTX_MARKER)))
+        result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
         assert (result.status, result.error) == (STATUS_FAILED, "ValueError")
-        assert "ValueError" in caplog.text
         assert _PPTX_MARKER not in caplog.text
 
     def test_variant_labelled_pptx_is_extracted(self):
@@ -7761,12 +7814,32 @@ _UNREPORTED_CAPS = {
         "the JVM is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
         "counted as failed="
     ),
+    # Container identification (#1416) returns a token, never text: each
+    # limit decides whether it identifies at all.
+    "src.extractors.container:CHILD_MAX_ADDRESS_SPACE_BYTES": (
+        "identification fails (MemoryError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
+    "src.extractors.container:CHILD_MAX_CPU_SECONDS": (
+        "the identification child is killed (ToolCrashError): a failed row with its "
+        "rate-limited WARNING, counted as failed="
+    ),
+    "src.extractors.container:_MAX_OUTPUT_BYTES": (
+        "a working child writes one short token; output past it fails identification "
+        "(ChildOutputError): a failed row with its rate-limited WARNING"
+    ),
+    "src.extractors.container_child:_MAX_DIRECTORY_ENTRIES": (
+        "a directory over it fails identification (ContainerDirectoryBudgetError): a failed "
+        "row with its rate-limited WARNING, counted as failed="
+    ),
 }
 
 _EXTRACTOR_MODULES = (
     "src.extractors",
     "src.extractors._launcher",
     "src.extractors._runner",
+    "src.extractors.container",
+    "src.extractors.container_child",
     "src.extractors.doc",
     "src.extractors.docx",
     "src.extractors.eml",

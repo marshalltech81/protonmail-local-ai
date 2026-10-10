@@ -16,18 +16,23 @@ from src.attachment_indexing import (
 )
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import (
+    AMBIGUOUS_CONTAINER_ERROR,
+    CONTAINER_IDENTIFIER,
+    ENCRYPTED_OFFICE_ERROR,
     NO_EXTRACTOR_ERROR,
+    OLE2_NOT_OFFICE_ERROR,
     SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
+    ZIP_NOT_OFFICE_ERROR,
     ExtractionResult,
 )
 from src.parser import Attachment
 
-from tests.conftest import make_message, make_mock_embedder, make_thread
+from tests.conftest import make_message, make_mock_embedder, make_ole2, make_thread, make_zip
 
 
 def _module(attachment: Attachment) -> str:
@@ -442,7 +447,15 @@ def _seed_thread_for_cache_test(tmp_path):
 
 
 def _run_process_with_cached_status(
-    db, attachment, status, monkeypatch, *, error=None, ocr_enabled=True, max_bytes=10_000_000
+    db,
+    attachment,
+    status,
+    monkeypatch,
+    *,
+    error=None,
+    ocr_enabled=True,
+    max_bytes=10_000_000,
+    identifier=None,
 ):
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
@@ -452,6 +465,7 @@ def _run_process_with_cached_status(
         extracted_text=None,
         extraction_error=error,
         text_complete=status in {STATUS_SUCCESS, STATUS_EMPTY},
+        identifier=identifier,
     )
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -1626,15 +1640,17 @@ class TestAttachmentOutcomeCounts:
     def test_no_summary_line_without_attachments(self):
         assert attachment_indexing.format_attachment_outcomes(self._zero()) == ""
 
-    def test_legacy_ole2_attachment_counts_as_unsupported(self, tmp_path, caplog):
-        """#694: an OLE2 payload no extractor reads (here labelled
-        ``.docx``) is counted in the aggregate's ``unsupported``, with no
-        per-item WARNING and no payload text."""
+    def test_encrypted_ooxml_attachment_counts_as_unsupported(self, tmp_path, caplog):
+        """#694: an OLE2 payload no extractor reads (here an encrypted
+        OOXML file labelled ``.docx``) is counted in the aggregate's
+        ``unsupported``. Its directory decided it (#1416), logged as a
+        permanent decline in one fixed-text WARNING, with no payload
+        text."""
         caplog.set_level("DEBUG")
         self._drain()
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(
-            _OLE2_MAGIC + b"SYNTHETIC_TEXT_MARKER" + bytes(64),
+            make_ole2("EncryptionInfo", "EncryptedPackage", trailer=b"SYNTHETIC_TEXT_MARKER"),
             filename="SYNTHETIC_FILENAME_MARKER.docx",
             content_type="application/octet-stream",
         )
@@ -1642,7 +1658,10 @@ class TestAttachmentOutcomeCounts:
         assert plan.status == STATUS_UNSUPPORTED
         self._commit(plan)
         assert self._drain() == self._zero() | {"unsupported": 1}
-        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+        assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [
+            "extractor container declined (dispatch_via=extension): encrypted Office file "
+            "(open password required); recorded unsupported, not retried"
+        ]
         for marker in ("SYNTHETIC_TEXT_MARKER", "SYNTHETIC_FILENAME_MARKER"):
             assert marker not in caplog.text
 
@@ -1699,8 +1718,15 @@ class TestLegacyOle2CacheRows:
             attachment = _attachment(
                 _OLE2_MAGIC + bytes(64), filename=filename, content_type=content_type
             )
+            # Certified by the current identification (#1416): a row
+            # without it is identified again (``test_container_identification``).
             extractor = _run_process_with_cached_status(
-                db, attachment, STATUS_UNSUPPORTED, monkeypatch, error=LEGACY_OLE2_ERROR
+                db,
+                attachment,
+                STATUS_UNSUPPORTED,
+                monkeypatch,
+                error=LEGACY_OLE2_ERROR,
+                identifier=CONTAINER_IDENTIFIER,
             )
             extractor.assert_not_called()
 
@@ -1716,20 +1742,26 @@ class TestLegacyOle2CacheRows:
                 _OLE2_MAGIC + bytes(64), filename=filename, content_type="application/octet-stream"
             )
             extractor = _run_process_with_cached_status(
-                db, attachment, STATUS_UNSUPPORTED, monkeypatch, error=LEGACY_OLE2_ERROR
+                db,
+                attachment,
+                STATUS_UNSUPPORTED,
+                monkeypatch,
+                error=LEGACY_OLE2_ERROR,
+                identifier=CONTAINER_IDENTIFIER,
             )
             extractor.assert_not_called()
 
     def test_v0_row_does_not_stand_in_for_a_text_labelled_occurrence(self, tmp_path):
-        """#928: the same bytes labelled ``.txt`` get the text guard's own
-        result (#932) through the real dispatcher, under their own module,
-        and the startup sweep re-queues them for it once."""
-        from src.extractors import BINARY_AS_TEXT_ERROR, LEGACY_OLE2_ERROR
+        """#928: the same bytes labelled ``.txt`` get their own result
+        through the real dispatcher, under their own module (an OLE2 file
+        with no Office stream, by its directory, #1416), and the startup
+        sweep re-queues them for it once."""
+        from src.extractors import LEGACY_OLE2_ERROR, OLE2_NOT_OFFICE_ERROR
 
         for content_type, filename in (("text/plain", "a.bin"), ("", "a.txt")):
             db = _seed_thread_for_cache_test(tmp_path / filename)
             attachment = _attachment(
-                _OLE2_MAGIC + bytes(64), filename=filename, content_type=content_type
+                make_ole2("Contents"), filename=filename, content_type=content_type
             )
             self._store_v0_row(db, attachment)
             assert attachment_indexing.reprocess_reruns_extraction(
@@ -1740,7 +1772,7 @@ class TestLegacyOle2CacheRows:
             )
             assert (plan.status, plan.extraction_error, plan.cached) == (
                 STATUS_UNSUPPORTED,
-                BINARY_AS_TEXT_ERROR,
+                OLE2_NOT_OFFICE_ERROR,
                 False,
             )
 
@@ -1788,38 +1820,43 @@ class TestLegacyOle2CacheRows:
         extractor.assert_called_once()
 
     def test_a_doc_occurrence_after_a_docx_one_extracts_the_bytes(self, tmp_path, monkeypatch):
-        """#694 review round 1: a ``.docx`` occurrence of a genuine
-        ``.doc``'s bytes processed first, through the real dispatcher,
-        caches ``unsupported``, not ``failed``. #935: the later ``.doc``
-        occurrence extracts the bytes. #928: each keeps its own row, and
-        each is then served its own from the cache."""
-        from src.extractors import LEGACY_OLE2_ERROR
-
+        """#694 recorded a ``.docx`` occurrence of a genuine ``.doc``'s
+        bytes ``unsupported``; its directory names a Word document, so it
+        runs the ``doc`` extractor (#1416), keyed under the label's
+        ``docx`` namespace and stamped ``doc``. #928: the later ``.doc``
+        occurrence has its own row, extracted once, and each is then
+        served its own from the cache."""
         calls = _stub_legacy_extractors(monkeypatch)
         db = _setup_db_for_attachment(tmp_path)
-        payload = _OLE2_MAGIC + bytes(64)
+        payload = make_ole2("WordDocument")
         first = _attachment(payload, filename="a.docx", content_type="application/octet-stream")
         plan = prepare_attachment_writes(db=db, **_kwargs(first))
+        _embed_new_chunks(
+            plan, db=db, claimant_id="msg@x", embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
+        )
         with db.transaction():
             apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
-        row = db.get_attachment_extraction(first.content_hash, _module(first))
-        assert (row["extraction_status"], row["extraction_error"]) == (
-            STATUS_UNSUPPORTED,
-            LEGACY_OLE2_ERROR,
+        assert _module(first) == "docx"
+        row = db.get_attachment_extraction(first.content_hash, "docx")
+        assert (row["extraction_status"], row["extractor"], row["identifier"]) == (
+            STATUS_SUCCESS,
+            "doc@2",
+            CONTAINER_IDENTIFIER,
         )
+        assert calls == ["doc"]
         later = _attachment(payload, filename="a.doc", content_type="application/msword")
         again = prepare_attachment_writes(db=db, **_kwargs(later))
         assert (again.status, again.cached) == (STATUS_SUCCESS, False)
-        assert calls == ["doc"]
+        assert calls == ["doc", "doc"]
         _embed_new_chunks(
             again, db=db, claimant_id="msg@x", embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
         )
         with db.transaction():
             apply_attachment_writes(plan=again, claimant_id="msg@x", thread_id="thread-x", db=db)
-        for occurrence, status in ((first, STATUS_UNSUPPORTED), (later, STATUS_SUCCESS)):
+        for occurrence in (first, later):
             served = prepare_attachment_writes(db=db, **_kwargs(occurrence))
-            assert (served.status, served.cached) == (status, True)
-        assert calls == ["doc"]
+            assert (served.status, served.cached) == (STATUS_SUCCESS, True)
+        assert calls == ["doc", "doc"]
 
     def test_stale_failed_row_is_refreshed_through_the_legacy_extractor(
         self, tmp_path, caplog, monkeypatch
@@ -1832,7 +1869,7 @@ class TestLegacyOle2CacheRows:
         calls = _stub_legacy_extractors(monkeypatch)
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(
-            _OLE2_MAGIC + b"SYNTHETIC_TEXT_MARKER" + bytes(64),
+            make_ole2("WordDocument", trailer=b"SYNTHETIC_TEXT_MARKER"),
             filename="a.doc",
             content_type="application/msword",
         )
@@ -1867,11 +1904,12 @@ class TestLegacyOle2CacheRows:
         """#928: a stale ``failed`` DOCX row (migrated under ``docx``) is
         neither used nor refreshed by a ``.bin`` or ``.doc`` occurrence of
         the bytes (before, a ``.bin`` refresh rewrote it ``unsupported``):
-        each extracts under its own label, and the DOCX row is left for a
-        ``.docx`` occurrence."""
+        each extracts under its own label's namespace (with #1416, both run
+        the ``doc`` extractor the directory names), and the DOCX row is
+        left for a ``.docx`` occurrence."""
         calls = _stub_legacy_extractors(monkeypatch)
         db = _setup_db_for_attachment(tmp_path)
-        payload = _OLE2_MAGIC + bytes(64)
+        payload = make_ole2("WordDocument")
         unlabelled = _attachment(payload, filename="a.bin", content_type="application/octet-stream")
         db.store_attachment_extraction(
             attachment_id=unlabelled.content_hash,
@@ -1882,25 +1920,28 @@ class TestLegacyOle2CacheRows:
             extraction_error="BadZipFile",
         )
         plan = prepare_attachment_writes(db=db, **_kwargs(unlabelled))
-        assert (plan.status, plan.extraction_error) == (STATUS_UNSUPPORTED, NO_EXTRACTOR_ERROR)
+        assert (plan.status, plan.cached) == (STATUS_SUCCESS, False)
+        _embed_new_chunks(
+            plan, db=db, claimant_id="msg@x", embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
+        )
         with db.transaction():
             apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
-        assert calls == []
+        assert calls == ["doc"]
+        assert _module(unlabelled) == attachment_indexing.NO_EXTRACTOR_MODULE
         labelled = _attachment(payload, filename="a.doc", content_type="application/msword")
         again = prepare_attachment_writes(db=db, **_kwargs(labelled))
         assert (again.status, again.cached) == (STATUS_SUCCESS, False)
-        assert calls == ["doc"]
+        assert calls == ["doc", "doc"]
         assert db.get_attachment_extraction(unlabelled.content_hash, "docx")["extractor"] == (
             "docx@3"
         )
 
 
-# Fixed binary signatures the text guard rejects (#932).
+# Fixed binary signatures the text guard rejects (#932). OLE2 and ZIP
+# payloads are identified by their directory under any label instead
+# (#1416, ``tests/test_container_identification.py``).
 _BINARY_SIGNATURES = (
     b"%PDF-",
-    b"PK\x03\x04",
-    b"PK\x05\x06",
-    _OLE2_MAGIC,
     b"\x89PNG\r\n\x1a\n",
     b"\xff\xd8\xff",
     b"GIF87a",
@@ -2188,7 +2229,18 @@ def _ppt_encrypted_case(monkeypatch) -> tuple[bytes, str, str]:
         raise ppt.PptEncryptedError
 
     monkeypatch.setitem(extractors._IMPORT_CACHE, "ppt", encrypted)
-    return _OLE2_MAGIC + b"SYNTHETIC_TEXT_MARKER" + bytes(64), ENCRYPTED_PPT_ERROR, "ppt@2"
+    payload = make_ole2("PowerPoint Document", trailer=b"SYNTHETIC_TEXT_MARKER")
+    return payload, ENCRYPTED_PPT_ERROR, "ppt@2"
+
+
+def _container_case(payload: bytes, error: str):
+    """A container whose directory shows no extractor reads it (#1416):
+    decided before any extractor runs, so the row has no stamp."""
+
+    def build(_monkeypatch) -> tuple[bytes, str, str | None]:
+        return payload, error, None
+
+    return build
 
 
 def _image_ceiling_case(monkeypatch) -> tuple[bytes, str, str]:
@@ -2237,6 +2289,38 @@ class TestPermanentFailureCacheRows:
         ),
         "ppt-encrypted": (_ppt_encrypted_case, "application/vnd.ms-powerpoint", "deck.ppt", "ppt"),
         "image-pixel-ceiling": (_image_ceiling_case, "image/png", "photo.png", "image"),
+        "ole2-not-office": (
+            _container_case(
+                make_ole2("Contents", trailer=b"SYNTHETIC_TEXT_MARKER"), OLE2_NOT_OFFICE_ERROR
+            ),
+            "application/msword",
+            "doc.doc",
+            "doc",
+        ),
+        "encrypted-office": (
+            _container_case(
+                make_ole2("EncryptionInfo", "EncryptedPackage", trailer=b"SYNTHETIC_TEXT_MARKER"),
+                ENCRYPTED_OFFICE_ERROR,
+            ),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "doc.docx",
+            "docx",
+        ),
+        "zip-not-office": (
+            _container_case(make_zip("SYNTHETIC_TEXT_MARKER.txt"), ZIP_NOT_OFFICE_ERROR),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "book.xlsx",
+            "xlsx",
+        ),
+        "ambiguous-container": (
+            _container_case(
+                make_ole2("WordDocument", "Workbook", trailer=b"SYNTHETIC_TEXT_MARKER"),
+                AMBIGUOUS_CONTAINER_ERROR,
+            ),
+            "application/vnd.ms-excel",
+            "book.xls",
+            "xls",
+        ),
     }
 
     def test_every_permanent_error_has_a_case(self, monkeypatch):
@@ -2326,9 +2410,14 @@ class TestPermanentFailureCacheRows:
             extractor_name,
             error,
         )
+        # The ``.docx`` occurrence wrote its own row: its directory names
+        # a workbook, so it ran XLSX too (#1416), under the docx key.
         docx_row = db.get_attachment_extraction(as_xlsx.content_hash, "docx")
         assert docx_row is not None
-        assert docx_row["extraction_status"] != STATUS_UNSUPPORTED
+        assert (docx_row["extraction_status"], docx_row["extractor"]) == (
+            STATUS_UNSUPPORTED,
+            extractor_name,
+        )
 
     def test_a_stale_row_is_refreshed_only_by_its_modules_occurrence(self, tmp_path, monkeypatch):
         """Review round 4, finding 2: a stale ``xlsx@5`` row is refreshed by
@@ -2437,8 +2526,17 @@ class TestPermanentFailureCacheRows:
         db._conn.execute(
             "INSERT INTO attachment_extractions "
             "(attachment_id, extractor_module, extraction_status, extractor, extracted_text, "
-            "extraction_error, extracted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (attachment.content_hash, "ppt", STATUS_FAILED, "ppt@2", None, "ToolExitError", stamp),
+            "extraction_error, extracted_at, identifier) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                attachment.content_hash,
+                "ppt",
+                STATUS_FAILED,
+                "ppt@2",
+                None,
+                "ToolExitError",
+                stamp,
+                CONTAINER_IDENTIFIER,
+            ),
         )
         db._conn.commit()
         calls = MagicMock(wraps=attachment_indexing.extract_attachment)
@@ -2525,7 +2623,7 @@ def _catalogue_docx() -> bytes:
 # different extractor module for the same bytes, or none.
 _CATALOGUE: dict[str, tuple[Any, tuple[tuple[str, str], ...]]] = {
     "ole2": (
-        lambda: _OLE2_MAGIC + b"SYNTHETIC_OLE2_BODY" + bytes(64),
+        lambda: make_ole2("WordDocument", trailer=b"SYNTHETIC_OLE2_BODY"),
         (
             ("application/msword", "a.doc"),
             ("application/octet-stream", "a.docx"),
@@ -2567,7 +2665,21 @@ _CATALOGUE: dict[str, tuple[Any, tuple[tuple[str, str], ...]]] = {
             ("application/pdf", "a.pdf"),
         ),
     ),
+    # An OOXML package whose kind its directory does not name (#1416): an
+    # OOXML label keeps its own extractor, any other is unsupported.
+    "ooxml-unnamed-kind": (
+        lambda: make_zip("[Content_Types].xml", "SYNTHETIC/main.xml"),
+        (
+            ("application/octet-stream", "a.docx"),
+            ("application/octet-stream", "a.xlsx"),
+            ("text/plain", "a.txt"),
+            ("application/octet-stream", "a.bin"),
+        ),
+    ),
 }
+# Shapes whose result no label changes: an OLE2 or ZIP payload whose
+# directory names its kind runs that extractor under any label (#1416).
+_LABEL_INDEPENDENT_SHAPES = frozenset({"ole2", "zip"})
 
 _CATALOGUE_PAIRS = [
     (shape, first, second)
@@ -2663,11 +2775,11 @@ class TestPerModuleCacheCatalogue:
     def test_a_ppt_sent_as_doc_does_not_decide_a_ppt_occurrence(
         self, first_label, tmp_path, monkeypatch
     ):
-        """#986: a PowerPoint file (OLE2) sent as ``.doc`` caches an empty
-        row from the Word extractor. A later ``.ppt`` occurrence of the
-        same bytes runs its own extractor instead of being served that
-        row, and the reverse order holds too. Both extractors are stubbed
-        (no catdoc or Java)."""
+        """#986: a PowerPoint file (OLE2) sent as ``.doc`` cached an empty
+        row from the Word extractor. Its directory names PowerPoint, so it
+        now runs the ``.ppt`` extractor under either label (#1416); each
+        label keeps its own row (#928), so each runs it once, in either
+        order. Both extractors are stubbed (no catdoc or Java)."""
         from src import extractors
 
         calls: list[str] = []
@@ -2681,7 +2793,7 @@ class TestPerModuleCacheCatalogue:
 
         monkeypatch.setitem(extractors._IMPORT_CACHE, "doc", stub("doc", ""))
         monkeypatch.setitem(extractors._IMPORT_CACHE, "ppt", stub("ppt", "slide words"))
-        payload = _OLE2_MAGIC + b"SYNTHETIC_PPT_BODY" + bytes(64)
+        payload = make_ole2("PowerPoint Document", trailer=b"SYNTHETIC_PPT_BODY")
         labels = {
             "doc": ("application/msword", "deck.doc"),
             "ppt": ("application/vnd.ms-powerpoint", "deck.ppt"),
@@ -2691,21 +2803,17 @@ class TestPerModuleCacheCatalogue:
         self._commit(db, self._plan(db, payload, labels[first_label]))
         later = self._plan(db, payload, labels[second_label])
 
-        assert calls == [first_label, second_label]
+        assert calls == ["ppt", "ppt"]
         assert later.cached is False
-        expected = (
-            (STATUS_SUCCESS, ("slide words",))
-            if second_label == "ppt"
-            else (
-                STATUS_EMPTY,
-                (),
-            )
+        assert (later.status, tuple(c.text for c in later.chunks)) == (
+            STATUS_SUCCESS,
+            ("slide words",),
         )
-        assert (later.status, tuple(c.text for c in later.chunks)) == expected
 
     def test_the_catalogue_has_labels_with_different_results(self, tmp_path, monkeypatch):
-        """Guards the catalogue: every shape has two labels whose fresh
-        results differ, so the pairs above test something."""
+        """Guards the catalogue: every shape but the label-independent
+        containers has two labels whose fresh results differ, so the pairs
+        above test something; each container's labels all give one."""
         _stub_legacy_extractors(monkeypatch)
         for shape, (make, labels) in _CATALOGUE.items():
             outcomes = {
@@ -2714,7 +2822,10 @@ class TestPerModuleCacheCatalogue:
                 )
                 for label in labels
             }
-            assert len(outcomes) > 1, shape
+            if shape in _LABEL_INDEPENDENT_SHAPES:
+                assert len(outcomes) == 1, shape
+            else:
+                assert len(outcomes) > 1, shape
 
 
 def _stub_ppt_reader(monkeypatch, tmp_path, text: bytes) -> list[bytes]:
@@ -2747,7 +2858,7 @@ def test_cached_no_extractor_row_for_a_ppt_is_re_extracted(tmp_path, monkeypatch
     and the startup sweep's predicate re-queues it."""
     from src.attachment_indexing import reprocess_reruns_extraction
 
-    payload = _OLE2 + b"synthetic deck bytes"
+    payload = make_ole2("PowerPoint Document", trailer=b"synthetic deck bytes")
     for content_type, filename in ((_PPT_MIME, "a.bin"), ("application/octet-stream", "a.ppt")):
         # The row an earlier release wrote is the '' module's (#928).
         assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename, None)
