@@ -1916,7 +1916,8 @@ run has no such insert.
   the byte cap alone does not.
 - **K:** 100 message records and 1,000 occurrence records per round.
   With the largest accepted upload (all extras, 200,000 and 600,000
-  of them) the cap-sized run measured 29.1 MB and 310 MiB for 100
+  of them) the cap-sized run measured 29.1 MB and 503 MiB (collect;
+  310 MiB streamed) for 100
   message records and 55.3 MB and 574 MiB for 1,000 occurrence records
   (a round of 1,000 message records: 170 MB, 849 MiB). Those runs used
   worst-case records with fields the parser cannot store (addresses
@@ -1957,12 +1958,13 @@ run has no such insert.
   Streaming messages was proposed on a 4,009-byte ID shape the parser
   cannot produce.
   Claimant IDs that share their first 998 bytes (many files claiming
-  one maximum-length Message-ID, `--identity ascii998common`) were
-  measured only at 20,000 messages and 3 occurrences each: collect
-  stayed faster (certificate 0.04 s against 0.61 s on messages, 0.89 s
-  against 1.66 s on occurrences; rounds 0.07 s against 0.12 s and 0.84 s
-  against 1.07 s at K = 100), as for distinct prefixes (0.04 s and 0.9 s
-  against 1.02 s and 2.67 s); the cap-sized run used distinct prefixes
+  one maximum-length Message-ID, one thread, `--identity
+  ascii998common`) were measured only at 20,000 messages and 3
+  occurrences each: collect stayed faster (certificate 0.05 s against
+  1.03 s on messages, 0.9 s against 2.23 s on occurrences; rounds 0.07 s
+  against 0.15 s and 1.08 s against 1.58 s at K = 100), as for distinct
+  prefixes (0.05 s and 1.01 s against 1.01 s and 2.64 s); the cap-sized
+  run used distinct prefixes
   and the common-prefix shape was not repeated at the caps. The
   cap-sized run also used `message_chunks` IDs of about 1 KB; the
   benchmark now uses the 64-character digest the indexer writes, and no

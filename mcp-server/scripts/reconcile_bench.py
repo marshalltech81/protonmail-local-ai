@@ -219,12 +219,6 @@ def message_id(i: int, identity: str) -> str:
     raise ValueError(f"unknown identity width {identity!r}")
 
 
-def _thread_identity(identity: str) -> str:
-    """The width whose IDs name threads and In-Reply-To: the common
-    prefix shape would put every message in one thread."""
-    return "typical" if identity == "ascii998common" else identity
-
-
 def claimant_of(mid: str, i: int | None = None) -> str:
     """The claimant ID: the Message-ID plus ``#`` and 16 hex digits of a
     hash (the file's bytes in production); ``i`` distinguishes files that
@@ -290,7 +284,7 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
             # 255-byte name limit) to about 3.5 KB of the 4,096-byte path.
             "folder": "/".join([_WIDE * 63] * 14),
         }
-    previous = message_id(i - 1, _thread_identity(identity))
+    previous = message_id(i - 1, identity) if i % 4 else None
     base = {
         "subject": f"Synthetic subject {i}",
         "in_reply_to": previous,
@@ -322,7 +316,7 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
         }
     return {
         **base,
-        "references": [previous],
+        "references": [previous] if previous else [],
         "people": [
             ("from", f"from0.{i % 500}{_DOMAIN}", "Person 0"),
             ("to", f"to0.{i % 500}{_DOMAIN}", "Person 0"),
@@ -410,7 +404,7 @@ def build(
             for i in order[start : start + batch]:
                 mid = message_id(i, identity)
                 cid = claimant_of(mid, i if identity == "ascii998common" else None)
-                tid = message_id(i - i % 4, _thread_identity(identity))
+                tid = message_id(i - i % 4, identity)
                 at = f"20{10 + i % 15:02d}-{1 + i % 12:02d}-{1 + i % 28:02d}T{i % 24:02d}:{i % 60:02d}:00+00:00"
                 shape = _shape(i, identity, records, references)
                 folder = shape.get("folder") or _folder(i)
@@ -780,6 +774,13 @@ def _sorted_identities(
     return ids
 
 
+def _file_size(path: str) -> int:
+    try:
+        return os.stat(path).st_size
+    except FileNotFoundError:
+        return 0
+
+
 def phase_reconcile(
     db_path: str,
     kind: str,
@@ -846,6 +847,8 @@ def phase_reconcile(
         # Still inside the transaction: its frames are retained until the
         # rollback.
         ended_at = time.monotonic()
+        # The WAL as the window closes, so the last commits are measured.
+        wal_at_end = _file_size(db_path + "-wal")
         conn.rollback()
     response = {
         "complete": missing_total <= k,
@@ -879,6 +882,7 @@ def phase_reconcile(
         "total_s": t_end - t0,
         "started_at": started_at,
         "ended_at": ended_at,
+        "wal_at_end_bytes": wal_at_end,
         "rss_kib": _rss_kib(),
     }
 
@@ -1258,7 +1262,7 @@ def run_wal(
     # landed in that interval.
     start, end = result["started_at"], result["ended_at"]
     at_start = max((s for when, s in samples if when <= start), default=0)
-    in_window = [s for when, s in samples if start <= when <= end]
+    in_window = [s for when, s in samples if start <= when <= end] + [result["wal_at_end_bytes"]]
     overlapping = sum(1 for t in writer_out["commit_times"] if start < t < end)
     with closing(sqlite3.connect(db_path, timeout=30)) as conn:
         busy, log_pages, ckpt_pages = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
@@ -1418,7 +1422,7 @@ def _fill_thread(filters: dict, identity: str) -> dict:
     """``filters`` with a ``thread_id`` placeholder set to the corpus's
     first thread (message 0's root)."""
     if "thread_id" in filters and filters["thread_id"] is None:
-        return {"thread_id": message_id(0, _thread_identity(identity))}
+        return {"thread_id": message_id(0, identity)}
     return filters
 
 
@@ -1540,6 +1544,10 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
         raise SystemExit(
             "--filtered needs --chunk-tokens of at least 20 (sparse chunks hide FTS5 growth)"
         )
+    if args.wal and not all(
+        math.isfinite(x) and x >= 0 for x in [*args.writer_interval, args.wal_hold]
+    ):
+        raise SystemExit("--writer-interval and --wal-hold must be finite and not negative")
     if args.extracted_chars < 0 or args.request_shapes < 0:
         raise SystemExit("--extracted-chars and --request-shapes must not be negative")
     if args.references < 0:

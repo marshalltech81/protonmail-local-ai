@@ -749,6 +749,8 @@ def _ns(**kw):
         "chunk_tokens": 40,
         "chunks": 1,
         "references": 0,
+        "writer_interval": [0.0],
+        "wal_hold": 0.0,
         "extracted_chars": 0,
         "request_shapes": 0,
         "wal": False,
@@ -820,7 +822,7 @@ def test_common_prefix_claimants_share_998_bytes_and_stay_distinct(bench, tmp_pa
     assert len(set(cids)) == 12
     assert len({c[:998] for c in cids}) == 1
     assert all(len(c.encode()) == 998 + 17 for c in cids)
-    assert len(threads) > 1
+    assert len(threads) == 1  # one Message-ID, one thread, as in production
 
 
 def test_alternate_names_trade_participants_within_the_address_budget(bench, tmp_path):
@@ -849,3 +851,38 @@ def test_wal_windows_use_the_monotonic_clock(bench):
         src = inspect.getsource(fn)
         assert "time.time()" not in src
     assert "time.monotonic()" in inspect.getsource(bench.phase_writer)
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"wal": True, "writer_interval": [-1.0]},
+        {"wal": True, "wal_hold": float("nan")},
+        {"wal": True, "writer_interval": [float("inf")]},
+    ],
+)
+def test_invalid_wal_timing_arguments_are_refused_before_building(bench, kw):
+    with pytest.raises(SystemExit):
+        bench._require_balanced_repeat(_ns(**kw))
+
+
+def test_threads_of_four_start_at_a_root_without_a_reply_chain(bench, tmp_path):
+    db = tmp_path / "threads.db"
+    bench.build(db, 12, 1, "typical", "typical")
+    with closing(sqlite3.connect(db)) as conn:
+        rows = conn.execute(
+            "SELECT message_id, thread_id, in_reply_to FROM messages ORDER BY rowid"
+        ).fetchall()
+    roots = {m: (t, r) for m, t, r in rows}
+    for i in range(12):
+        mid = bench.message_id(i, "typical")
+        if i % 4 == 0:
+            assert roots[mid][1] is None
+        else:
+            assert roots[mid][1] == bench.message_id(i - 1, "typical")
+        assert roots[mid][0] == bench.message_id(i - i % 4, "typical")
+
+
+def test_wal_window_includes_the_size_at_its_close(report):
+    for wal in report["wal"]:
+        assert wal["wal_max_during_transaction_bytes"] >= wal["wal_at_transaction_start_bytes"]
