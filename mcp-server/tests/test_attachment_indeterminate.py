@@ -540,6 +540,19 @@ class TestAttachmentIndeterminateCount:
         finally:
             conn.close()
 
+    def test_a_repeatedly_failing_lane_logs_one_warning(self, tmp_path, caplog):
+        """#1216: a lane that keeps failing (a broken index) repeats its
+        fallback WARNING on every call; the first line per window is
+        logged and the rest are counted."""
+        conn, path = _open_built_db_conn(tmp_path, "rate.db")
+        _add(conn, "v1", "t", "2024-01-10T00:00:00+00:00", VENDOR)
+        db = Database(str(path))
+        with caplog.at_level(logging.WARNING):
+            for _ in range(5):
+                assert db._attachment_filename_lane("nosuchcolumn:x", [], [], 10) == []
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings.count("Attachment filename search unavailable: OperationalError") == 1
+
     def test_a_failed_statement_keeps_the_read_transaction(self, tmp_path, caplog):
         """A lane's OperationalError is caught per statement; the shared
         read transaction and its snapshot outlive it."""
