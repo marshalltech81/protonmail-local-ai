@@ -1651,12 +1651,10 @@ only, never filenames or text (`make logs`):
   `XLRDError`, ...), and one that needs more than its 512 MiB is
   `MemoryError` (#1291).
   An image is decoded and OCR'd in a child process (#1292): a
-  decompression bomb is `DecompressionBombError` (or
-  `DecompressionBombWarning` between the pixel cap and twice it), a
-  Tesseract failure `TesseractError` and a Tesseract timeout
+  Tesseract failure is `TesseractError` and a Tesseract timeout
   `RuntimeError` (an image in a mode Pillow cannot write as PNG, such as
   CMYK, is converted to RGB first, #1400); an image whose decode or Tesseract needs more than
-  the child's 1 GiB is `MemoryError` or `TesseractError`, and one that
+  the child's 1,605 MiB is `MemoryError` or `TesseractError`, and one that
   runs past the child's CPU or wall-clock limit `ToolCrashError` or
   `ToolTimeoutError` (limits in `docs/architecture.md`, "Image
   extraction runs in the extractor child").
@@ -1772,6 +1770,17 @@ only, never filenames or text (`make logs`):
   - `image_text_chars`: an image's OCR text, stripped of leading and
     trailing whitespace, passed 10,000,000 characters; the text is cut
     there and no later TIFF frame is read (#1292).
+  - `image_pixel_ceiling`: a JPEG over the image child's
+    48,000,000-pixel ceiling was decoded at half scale (`image decoded
+    at 1/2 scale (lossy) to fit the pixel ceiling`); small or
+    low-contrast text can be lost (#1401). When the scaled-down image
+    yields text, an INFO line `image OCR at 1/2 scale read N chars`
+    follows. Other formats over the ceiling, and JPEGs over
+    192,000,000 pixels, are recorded `unsupported` ("image exceeds the
+    pixel ceiling") without a cap line.
+  - `mpo_frames`: a multi-picture JPEG (MPO, such as a phone photo with
+    a second picture) listed more than one picture; only the primary
+    one is OCR'd (#1401).
   - `doc_output_bytes`: catdoc wrote more for a legacy `.doc` than
     four bytes per character of `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`,
     or than 40 MiB when that is larger or disabled (#1308), counted
@@ -1832,7 +1841,7 @@ only, never filenames or text (`make logs`):
 
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
-  zip, image-pixel and XLSX whole-part caps, the OCR timeout, the
+  zip, image-pixel (the image child's ceiling: `unsupported`) and XLSX whole-part caps, the OCR timeout, the
   legacy-Office tool timeouts and the `.xls` child's and the `.ppt`
   reader's memory and CPU limits); the OCR
   page caps have their own lines above. Like the OCR cap, a cap is reported

@@ -13,7 +13,7 @@ import threading
 import pytest
 from src import database, main
 from src.database import EMBEDDING_DIM, Database
-from src.extractors import NO_EXTRACTOR_ERROR, OCR_DISABLED_ERROR
+from src.extractors import EXTRACTOR_VERSIONS, NO_EXTRACTOR_ERROR, OCR_DISABLED_ERROR
 from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 
 from tests.conftest import make_message, make_thread
@@ -273,7 +273,9 @@ def test_sweep_enqueue_counts_exclusions_and_log_line(mailbox, monkeypatch, capl
     assert MARKER not in caplog.text
 
 
-@pytest.mark.parametrize(("stamp", "queued"), [(None, 3), ("image@5", 2)])
+@pytest.mark.parametrize(
+    ("stamp", "queued"), [(None, 3), (f"image@{EXTRACTOR_VERSIONS['image']}", 2)]
+)
 def test_ocr_off_queues_only_unstamped_ocr_disabled_rows(mailbox, monkeypatch, stamp, queued):
     """#1415: with OCR off the "OCR disabled" query still runs, in the same
     bounded batches, and qualifies only an unstamped image row; a stamped

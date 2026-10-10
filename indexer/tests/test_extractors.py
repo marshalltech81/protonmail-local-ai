@@ -4062,52 +4062,34 @@ class TestImageExtractor:
         # not OCR the unrotated 40×10 source.
         assert captured["size"] == (10, 40)
 
-    def test_decompression_bomb_warning_promoted_to_error(self, monkeypatch):
-        """A canvas in the warning band (1×–2× the cap) must surface
-        as a raised ``DecompressionBombWarning`` (promoted to error
-        inside the ``warnings.catch_warnings()`` scope) so the
-        dispatcher records it as ``failed`` rather than OOM'ing the
-        worker. PIL raises ``DecompressionBombError`` past 2× directly,
-        so we size the test image into the warning band only."""
+    @pytest.mark.parametrize(
+        "ceiling",
+        # 50x50 = 2,500 pixels against a header limit of the ceiling
+        # times 4 (``MAX_DRAFT_FACTOR`` 2, squared): 500 puts it in
+        # Pillow's warning band (2,000 to 4,000), promoted to an error;
+        # 100 past twice the limit, Pillow's hard error.
+        [500, 100],
+        ids=["warning-band", "hard-error"],
+    )
+    def test_pillows_bomb_exceptions_are_the_ceiling_error(self, ceiling, monkeypatch):
+        """#1401: both of Pillow's decompression-bomb exceptions become
+        the child's fixed ``ImagePixelCeilingError`` (recorded
+        ``unsupported``), from the header, before any OCR."""
         import io
 
         import pytest
         from PIL import Image
+        from src.extractors import image
         from src.extractors import image_child as image_module
 
-        # 50×50 = 2500 pixels. Cap at 1500 puts the image at 1.67× the
-        # cap — inside the warning band (Error fires only past 2×). The
-        # cap lives on ``Image.MAX_IMAGE_PIXELS`` since the global
-        # extractors-module assignment in
-        # ``indexer.extractors.__init__``; monkeypatching there scopes
-        # the test override and lets pytest restore the global on
-        # teardown.
-        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1500)
-
+        monkeypatch.setattr(image_module, "CHILD_MAX_IMAGE_PIXELS", ceiling)
+        monkeypatch.setattr(
+            image_module.pytesseract, "image_to_string", lambda *_a, **_k: pytest.fail("OCR'd")
+        )
         buf = io.BytesIO()
         Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
 
-        with pytest.raises(Image.DecompressionBombWarning):
-            image_module.extract_text(buf.getvalue(), "20", "0")
-
-    def test_decompression_bomb_error_propagates(self, monkeypatch):
-        """A canvas past 2× the cap must surface PIL's
-        ``DecompressionBombError`` directly. The dispatcher's exception
-        handler converts both this and the warning-band raise into a
-        ``failed`` ExtractionResult."""
-        import io
-
-        import pytest
-        from PIL import Image
-        from src.extractors import image_child as image_module
-
-        # 50×50 = 2500 pixels. Cap at 100 → 25× the cap → Error.
-        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
-
-        buf = io.BytesIO()
-        Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
-
-        with pytest.raises(Image.DecompressionBombError):
+        with pytest.raises(image.ImagePixelCeilingError):
             image_module.extract_text(buf.getvalue(), "20", "0")
 
     def test_extract_does_not_mutate_global_max_image_pixels(self, monkeypatch):
@@ -4174,7 +4156,7 @@ class TestMultipageTiff:
         assert result.status == STATUS_SUCCESS
         assert result.text is not None
         assert result.text.split() == ["PAGE_0", "PAGE_1", "PAGE_2"]
-        assert result.extractor == "image-ocr@5"
+        assert result.extractor == "image-ocr@6"
 
     def test_pages_are_capped_by_max_ocr_pages(self, monkeypatch):
         seen = self._ocr_by_color(monkeypatch)
@@ -4217,10 +4199,14 @@ class TestMultipageTiff:
         Image.new("RGB", (32, 32), (255, 255, 255)).save(
             buf, format="TIFF", save_all=True, append_images=[Image.new("RGB", (400, 400))]
         )
-        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10_000)
+        from src.extractors import IMAGE_PIXEL_CEILING_ERROR, image_child
+
+        # The image child's own ceiling (#1401), checked as each frame
+        # is loaded: the later page is refused for good, before decoding.
+        monkeypatch.setattr(image_child, "CHILD_MAX_IMAGE_PIXELS", 10_000)
         seen = self._ocr_by_color(monkeypatch)
         result = extract(content_type="image/tiff", filename="scan.tiff", payload=buf.getvalue())
-        assert result.status == STATUS_FAILED
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, IMAGE_PIXEL_CEILING_ERROR)
         assert seen == ["PAGE_0"]
 
     def test_animated_gif_is_still_one_page(self, monkeypatch):
@@ -4353,7 +4339,7 @@ class TestMultipageTiffOcrCap:
         seen = self._ocr(monkeypatch)
         seeks = self._count_seeks(monkeypatch)
         result = self._extract(self._frames(3), max_ocr_pages=2)
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "image-ocr@5")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "image-ocr@6")
         assert result.text is not None
         assert result.text.split() == ["PAGE_0", "PAGE_1"]
         assert seen == ["PAGE_0", "PAGE_1"]
@@ -4874,14 +4860,17 @@ class TestDocumentLibraryOutputIsSilenced:
     def test_decompression_bomb_still_fails_under_the_guard(self, monkeypatch):
         """The image extractor promotes ``DecompressionBombWarning`` to an
         error in its own ``catch_warnings`` scope; the guard's Pillow
-        ``ignore`` filter must not swallow it."""
+        ``ignore`` filter must not swallow it. A 50x50 PNG against a
+        child ceiling of 500 is in the warning band (header limit 2,000),
+        recorded ``unsupported`` by the ceiling (#1401)."""
         import io
         import warnings
 
         from PIL import Image
         from src import main
+        from src.extractors import IMAGE_PIXEL_CEILING_ERROR, STATUS_UNSUPPORTED, image_child
 
-        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1500)
+        monkeypatch.setattr(image_child, "CHILD_MAX_IMAGE_PIXELS", 500)
         buf = io.BytesIO()
         Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
 
@@ -4889,8 +4878,8 @@ class TestDocumentLibraryOutputIsSilenced:
             main.quiet_document_libraries()
             result = extract(content_type="image/png", filename="a.png", payload=buf.getvalue())
 
-        assert result.status == STATUS_FAILED
-        assert result.error == "DecompressionBombWarning"
+        assert result.status == STATUS_UNSUPPORTED
+        assert result.error == IMAGE_PIXEL_CEILING_ERROR
 
 
 def _heic(size: tuple[int, int] = (64, 48), color: str = "red") -> bytes:
@@ -4984,7 +4973,7 @@ class TestHeicImages:
         )
 
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "image-ocr@5"
+        assert result.extractor == "image-ocr@6"
         assert result.text == "SYNTHETIC_HEIC_TEXT"
         # One page OCR'd, decoded at its real size and (lossy) colour.
         assert len(seen) == 1
@@ -5016,15 +5005,17 @@ class TestHeicImages:
         assert result.extractor is None
 
     @pytest.mark.parametrize(
-        ("cap", "error"),
-        [(1500, "DecompressionBombWarning"), (100, "DecompressionBombError")],
+        "cap", [1500, 500, 100], ids=["own-check", "warning-band", "hard-error"]
     )
-    def test_pixel_bomb_heic_fails_like_a_png_without_decoding(self, cap, error, monkeypatch):
-        """50x50 = 2500 pixels: 1.67x a 1500 cap is the warning band the
-        extractor promotes to an error, 25x a 100 cap is Pillow's hard
-        error. Both reject from the header size, before any HEVC decode."""
-        from PIL import Image
+    def test_pixel_bomb_heic_fails_like_a_png_without_decoding(self, cap, monkeypatch):
+        """50x50 = 2500 pixels against the image child's ceiling (#1401):
+        over a 1500 ceiling the child's own check, inside its header limit
+        (four times the ceiling); 1.25x the 2,000 limit of a 500 ceiling
+        is the warning band the extractor promotes to an error, past twice
+        the 400 limit of a 100 ceiling Pillow's hard error. All reject
+        from the header size, before any HEVC decode, as ``unsupported``."""
         from pillow_heif.as_plugin import HeifImageFile
+        from src.extractors import IMAGE_PIXEL_CEILING_ERROR
         from src.extractors import image_child as image_module
 
         payloads = {"png": _png((50, 50)), "heic": _heic((50, 50))}
@@ -5041,7 +5032,7 @@ class TestHeicImages:
             "image_to_string",
             lambda *a, **kw: pytest.fail("a pixel bomb must not be OCR'd"),
         )
-        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", cap)
+        monkeypatch.setattr(image_module, "CHILD_MAX_IMAGE_PIXELS", cap)
 
         results = {
             kind: extract(content_type=f"image/{kind}", filename=f"a.{kind}", payload=payload)
@@ -5049,9 +5040,9 @@ class TestHeicImages:
         }
 
         assert results["heic"] == results["png"]
-        assert results["heic"].status == STATUS_FAILED
-        assert results["heic"].error == error
-        assert results["heic"].extractor == "image@5"
+        assert results["heic"].status == STATUS_UNSUPPORTED
+        assert results["heic"].error == IMAGE_PIXEL_CEILING_ERROR
+        assert results["heic"].extractor == "image@6"
         assert decodes == []
 
     def test_only_the_primary_heif_image_is_ocrd(self, monkeypatch):
@@ -5092,20 +5083,23 @@ class TestHeicImages:
         assert pillow_heif.options.DEPTH_IMAGES is False
         assert pillow_heif.options.AUX_IMAGES is False
 
-    def test_image_version_5_rows_are_current(self):
+    def test_image_version_6_rows_are_current(self):
         """image 4 (#1400): rows from 3 hold the ``failed`` result of a
-        CMYK image. image 5 (#1415) stamps the "OCR disabled" result. Rows
-        from older versions are stale and the startup sweep re-queues
-        them; an ``-ocr`` row only while OCR is on."""
+        CMYK image. image 6 (#1401; 5 is #1415's): rows up to 5 hold the
+        ``failed`` result of an image over 30,000,000 pixels, which a
+        scale-down now reads or the pixel ceiling records
+        ``unsupported``. Both are stale and the startup sweep re-queues
+        them."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["image"] == 5
-        for old in ("image@2", "image-ocr@2", "image@3", "image-ocr@3", "image@4", "image-ocr@4"):
-            assert stale_extractor_module(old) == "image"
-        assert stale_extractor_module("image@5") is None
-        assert stale_extractor_module("image-ocr@5") is None
-        assert stale_extractor_module("image-ocr@4", ocr_enabled=False) is None
-        assert stale_extractor_module("image@4", ocr_enabled=False) == "image"
+        assert EXTRACTOR_VERSIONS["image"] == 6
+        for older in (2, 3, 4, 5):
+            assert stale_extractor_module(f"image@{older}") == "image"
+            assert stale_extractor_module(f"image-ocr@{older}") == "image"
+        assert stale_extractor_module("image@6") is None
+        assert stale_extractor_module("image-ocr@6") is None
+        assert stale_extractor_module("image-ocr@5", ocr_enabled=False) is None
+        assert stale_extractor_module("image@5", ocr_enabled=False) == "image"
 
 
 def _docx_bytes(text: str) -> bytes:
@@ -7411,6 +7405,26 @@ def _cap_xls_text_chars(monkeypatch):
     assert text == "[Sheet: Summary]\nIt"
 
 
+def _cap_image_pixel_ceiling(monkeypatch):
+    """#1401: a JPEG over the child's pixel ceiling is OCR'd at 1/2 scale."""
+    import io
+
+    from PIL import Image
+    from src.extractors import image, image_child
+
+    sizes: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        image_child.pytesseract,
+        "image_to_string",
+        lambda img, **_k: sizes.append(img.size) or _CAP_MARKER,
+    )
+    monkeypatch.setattr(image_child, "CHILD_MAX_IMAGE_PIXELS", 100)
+    buf = io.BytesIO()
+    Image.new("RGB", (20, 10), "white").save(buf, format="JPEG")
+    text, _ = image.extract(buf.getvalue())
+    assert (text, sizes) == (_CAP_MARKER, [(10, 5)])
+
+
 def _cap_image_text_chars(monkeypatch):
     """The child's text budget ends the OCR after the page that crossed
     it: the text is cut to the budget and no further page is read."""
@@ -7555,6 +7569,7 @@ _CAP_TRIGGERS = {
     "eml_text_parts": _cap_eml_text_parts,
     "eml_nested_messages": _cap_eml_nested_messages,
     "image_text_chars": _cap_image_text_chars,
+    "image_pixel_ceiling": _cap_image_pixel_ceiling,
 }
 
 # Every cap constant in the extractor modules (``module:NAME``) and every
@@ -7589,6 +7604,7 @@ _REPORTED_CAPS = {
     "src.extractors.eml:_MAX_DEPTH": "eml_nested_messages",
     "src.extractors.eml:_MAX_DECODED_BYTES": "eml_nested_messages",
     "src.extractors.image:_MAX_TEXT_CHARS": "image_text_chars",
+    "src.extractors.image:CHILD_MAX_IMAGE_PIXELS": "image_pixel_ceiling",
 }
 # ... or the reason it is not reported as an extractor cap.
 _WORKBOOK_FAILS = (
@@ -7611,7 +7627,8 @@ _UNREPORTED_CAPS = {
         "fails the document: a failed row with its rate-limited WARNING, counted as failed="
     ),
     "src.extractors:GLOBAL_MAX_IMAGE_PIXELS": (
-        "an image over it raises: a failed row with its rate-limited WARNING, counted as failed="
+        "a PIL consumer other than the image child (the image child has its own ceiling, "
+        "#1401) raises over it: a failed row with its rate-limited WARNING, counted as failed="
     ),
     "src.extractors:max_ocr_pages": (
         "PDF: reported by #884 as ocr_capped_pdfs= / ocr_pages_skipped=; "

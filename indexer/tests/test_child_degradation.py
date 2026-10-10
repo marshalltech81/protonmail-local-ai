@@ -77,7 +77,7 @@ class TestChildSends:
         not (the child's lines never reach the log)."""
         counters = set(extractors.drain_extractor_counts()) - {"warnings_suppressed"}
         assert (
-            frozenset(counters | {"text_lost", "result_ocr_pages_skipped"})
+            frozenset(counters | {"text_lost", "result_ocr_pages_skipped", "image_scale_factor"})
             == CHILD_DEGRADATION_KEYS
         )
 
