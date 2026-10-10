@@ -6,6 +6,7 @@ Handles MIME, HTML-to-text conversion, and attachment metadata.
 
 import base64
 import binascii
+import copy
 import email
 import email.errors
 import email.header
@@ -325,6 +326,20 @@ _QP_BAD_ESCAPE_BYTES = re.compile(rb"=(?![0-9A-Fa-f]{2}|\r?\n)")
 _UU_ENCODINGS = frozenset({"x-uuencode", "uuencode", "uue", "x-uue"})
 
 
+def _leaf_payload_text(part: email.message.Message) -> str:
+    """The leaf's payload as text with every 8-bit byte kept as one
+    character, so the position of each ASCII character is the raw
+    transport's. ``get_payload()`` decodes 8-bit bytes with the part's
+    declared charset, and a multibyte one (``utf-16le``) merges bytes
+    and can hide an ``=`` (review round 1 on #1398). Works on a shallow
+    copy without the Content-Type, which the decode reads the charset
+    from, so the part itself is untouched."""
+    plain = copy.copy(part)
+    del plain["Content-Type"]
+    payload = plain.get_payload()
+    return payload if isinstance(payload, str) else ""
+
+
 def _uu_decode_fell_back(part: email.message.Message, decoded: bytes | None) -> bool:
     """Whether the stdlib's uuencode decode of this leaf part gave up and
     returned the transport text unchanged (no ``begin`` line, a blank
@@ -335,11 +350,8 @@ def _uu_decode_fell_back(part: email.message.Message, decoded: bytes | None) -> 
     this part; decoding again would double the work of a payload that
     expands 31:1 (review round 1 on #1398). Only a caller with no
     decode yet passes ``None``."""
-    payload = part.get_payload()
-    if not isinstance(payload, str):
-        return False
     try:
-        raw = payload.encode("ascii", "surrogateescape")
+        raw = _leaf_payload_text(part).encode("ascii")
     except UnicodeEncodeError:
         return True
     if decoded is None:
@@ -361,8 +373,7 @@ def _decode_lost_bytes(part: email.message.Message, decoded: bytes | None = None
         return True
     encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
     if encoding == "quoted-printable":
-        payload = part.get_payload()
-        return isinstance(payload, str) and _QP_BAD_ESCAPE_TEXT.search(payload) is not None
+        return _QP_BAD_ESCAPE_TEXT.search(_leaf_payload_text(part)) is not None
     if encoding in _UU_ENCODINGS:
         return _uu_decode_fell_back(part, decoded)
     return False

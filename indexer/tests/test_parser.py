@@ -6235,6 +6235,29 @@ class TestTransferDecodeLossDetection:
         ):
             assert parser_module._decode_lost_bytes(self._leaf(encoding, broken)) is True
 
+    @pytest.mark.parametrize("charset", ["utf-16le", "utf-16", "utf-8", "latin-1", "bogus"])
+    def test_a_declared_charset_does_not_hide_the_equals_sign(self, charset):
+        """Review round 1 on #1398: ``get_payload()`` decodes 8-bit bytes
+        with the declared charset, and a multibyte one merges the bytes
+        around an ``=``. The scan reads the raw transport text."""
+        part = email.message_from_bytes(
+            b"Content-Type: text/plain; charset="
+            + charset.encode()
+            + b"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n\xff=\rX"
+        )
+        assert parser_module._decode_lost_bytes(part) is True
+        # The part is untouched by the scan.
+        assert part.get_content_charset() == charset.lower()
+
+    @pytest.mark.parametrize("charset", ["utf-16le", "utf-8"])
+    def test_a_declared_charset_leaves_a_clean_part_complete(self, charset):
+        part = email.message_from_bytes(
+            b"Content-Type: text/plain; charset="
+            + charset.encode()
+            + b"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\ncaf=C3=A9 =3D ok"
+        )
+        assert parser_module._decode_lost_bytes(part) is False
+
     def test_a_non_ascii_uuencode_payload_counts_as_failed(self):
         part = self._leaf("x-uuencode", b"begin 644 f\n\xc3\xa9\nend\n")
         assert parser_module._decode_lost_bytes(part) is True
