@@ -597,10 +597,13 @@ class ExtractionResult:
 # one as lossy. The text is unchanged; the bump re-runs the cached ``eml``
 # rows once (attached emails only) so their ``text_complete`` is
 # re-assessed.
+# eml 3: a uuencode body part of an attached email with no ``end`` line
+# last (cut in transit) is incomplete (#1402); text unchanged, same
+# re-run of the cached ``eml`` rows.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
-    "eml": 2,
+    "eml": 3,
     "image": 3,
     "pdf": 5,
     "ppt": 2,

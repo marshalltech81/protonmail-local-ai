@@ -350,25 +350,51 @@ def _uu_decode_fell_back(part: email.message.Message, decoded: bytes | None) -> 
     this part; decoding again would double the work of a payload that
     expands 31:1 (review round 1 on #1398). Only a caller with no
     decode yet passes ``None``."""
+    text = _leaf_payload_text(part)
     try:
-        raw = _leaf_payload_text(part).encode("ascii")
+        raw = text.encode("ascii")
     except UnicodeEncodeError:
         return True
     if decoded is None:
         decoded = _decoded_payload(part)
-    return decoded == raw
+    # The decode kept going to the end of the text, or stopped at an
+    # ``end`` line with more text after it: only the tail tells (#1402).
+    return decoded == raw or not _uu_ends_with_end_line(text)
+
+
+# How much of a uuencode payload's tail ``_uu_ends_with_end_line`` reads.
+_UU_TAIL_CHARS = 1024
+
+
+def _uu_ends_with_end_line(text: str) -> bool:
+    """Whether the last non-blank line of a uuencode transport text is
+    the ``end`` line (compared as the stdlib decoder does: stripped of
+    space, tab, CR, LF and form feed). The decoder stops at the first
+    ``end`` and returns what it has with no error when there is none, so
+    a body cut off in transit decodes to its prefix; a body with text
+    after the ``end`` (a second block, a footer) loses that text. Both
+    leave a last line that is not ``end``. A second complete block still
+    ends with ``end`` and is not detected. Reads only the last
+    ``_UU_TAIL_CHARS`` characters, never the whole body: a trailing
+    blank run or a last line longer than that cannot be told from a
+    missing ``end`` and counts as one (#1402)."""
+    window = text[-_UU_TAIL_CHARS:]
+    tail = window.rstrip(" \t\r\n\f")
+    start = max(tail.rfind("\n"), tail.rfind("\r")) + 1
+    if start == 0 and len(window) < len(text):
+        return False  # the line starts before the window
+    return tail[start:].strip(" \t\r\n\f") == "end"
 
 
 def _decode_lost_bytes(part: email.message.Message, decoded: bytes | None = None) -> bool:
     """Whether decoding this leaf part's payload (``_decoded_payload``,
-    which fills ``part.defects``) lost bytes (#1242, review round 2 on
-    #1286). Base64 records a defect; quoted-printable and uuencode record
-    none, so they are checked here (#1288): a quoted-printable ``=`` that
-    is no escape or soft break, and a uuencode decode that fell back to
-    the transport text. A truncation that leaves valid encoding is not
-    detectable. ``decoded`` is the part's decoded payload when the
-    caller has it (uuencode compares against it rather than decoding
-    again)."""
+        which fills ``part.defects``) lost bytes (#1242, review round 2 on
+        #1286). Base64 records a defect; quoted-printable and uuencode record
+        none, so they are checked here (#1288): a quoted-printable ``=`` that
+        is no escape or soft break, and a uuencode decode that fell back to
+    XX ``decoded`` is the part's decoded payload when the
+        caller has it (uuencode compares against it rather than decoding
+        again)."""
     if any(isinstance(d, _DECODE_LOSS_DEFECTS) for d in part.defects):
         return True
     encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
