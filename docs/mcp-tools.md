@@ -1621,10 +1621,10 @@ child process on the server's own read-only connection and with the
 server's own predicate compiler (unfiltered, Trash is left out), and
 records are read and serialized with the server's own `query_messages`
 and `query_attachments` helpers. Timings are plain `perf_counter`
-medians of `--repeat` runs, never a profiler, taken with the page
-cache warm: the index was just built, and an untimed `COUNT(*)` of the
-matching messages runs before the first timed step, so no figure is a
-cold first query. Peak RSS is the child's `VmHWM`. It measures:
+medians of `--repeat` runs, never a profiler. The page cache is not
+controlled: it holds whatever the build and the earlier steps left, so
+a step's figures depend on the order of the steps and on how much of
+the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
 
 - a certificate: `COUNT(*)`, then every matching identity (claimant ID
   or attachment occurrence) scanned, sorted and hashed in one read

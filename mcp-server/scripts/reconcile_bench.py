@@ -914,6 +914,9 @@ def phase_certificate(db_path: str, kind: str, method: str, filters: dict | None
     t0 = time.perf_counter()
     with closing(_ro(db_path)) as conn:
         conn.execute("BEGIN")
+        # COUNT's own time excludes the connection setup; ``total_s``
+        # keeps it, as a production page opens its own connection.
+        t_open = time.perf_counter()
         count = conn.execute(count_sql, params).fetchone()[0]
         t_count = time.perf_counter()
         digest = hashlib.sha256(CERT_DOMAIN)
@@ -957,7 +960,7 @@ def phase_certificate(db_path: str, kind: str, method: str, filters: dict | None
         "identity_bytes": identity_bytes,
         "max_identity_bytes": max_bytes,
         "digest": digest.hexdigest(),
-        "count_s": t_count - t0,
+        "count_s": t_count - t_open,
         "fetch_s": t_fetch - t_count,
         "scan_s": t_scan - t_count,
         "total_s": t_end - t0,
@@ -1084,6 +1087,9 @@ def phase_reconcile(
         with _ordered(order):
             conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone()
             started_at = time.monotonic()
+        # The transaction's own time starts at its snapshot, after the
+        # connection setup.
+        t_snapshot = time.perf_counter()
         count = conn.execute(count_sql, params).fetchone()[0]
         digest = hashlib.sha256(CERT_DOMAIN)
         server: set[bytes] = set()
@@ -1147,7 +1153,7 @@ def phase_reconcile(
         "parse_s": t_parse - t0,
         "diff_s": t_diff - t_parse,
         "records_s": t_records - t_diff,
-        "transaction_s": t_records - t_parse,
+        "transaction_s": t_records - t_snapshot,
         "total_s": t_end - t0,
         "started_at": started_at,
         "ended_at": ended_at,
@@ -1319,13 +1325,16 @@ BALLAST_ROWS = 64
 def phase_writer(
     db_path: str, stop: str, commit_bytes: int, interval: float, order: str = ""
 ) -> dict:
-    """A concurrent writer: until ``stop`` exists, commit transactions
-    that flip eight messages' ``seen`` and append ``commit_bytes`` of
-    ballast, as the indexer's steady-state batch of eight would.
+    """A concurrent writer: until ``stop`` exists, index one message at a
+    time as the indexer does, in two transactions: one flips a random
+    message's ``seen`` (phase 1, the message's rows) and the next
+    appends ``commit_bytes`` of ballast (phase 2c, its chunks and
+    vectors). ``interval`` is the pause between messages; the bytes and
+    the pace are parameters, not the indexer's own figures.
 
     It first replaces the ballast with ``BALLAST_ROWS`` rows of
     ``commit_bytes``, the steady state in which each commit adds one row
-    and deletes one, records that state and creates ``stop + ".ready"``.
+    and deletes one per message, records that state and creates ``stop + ".ready"``.
 
     After each commit it records the time and the WAL file's size, so a
     window's commit count and its WAL sizes come from the same records:
@@ -1350,27 +1359,30 @@ def phase_writer(
         # The state before any measured commit: it can only be the start.
         times.append((time.monotonic(), os.stat(wal).st_size))
         Path(stop + ".ready").touch()
-        while not os.path.exists(stop):
-            conn.execute("BEGIN IMMEDIATE")
-            # Eight distinct messages (``check_args`` requires eight).
-            rowids = rng.sample(range(1, top + 1), 8)
-            flipped = conn.execute(
-                "UPDATE messages SET seen = 1 - seen WHERE rowid IN (?, ?, ?, ?, ?, ?, ?, ?)",
-                rowids,
-            ).rowcount
-            if flipped != 8:
-                raise RuntimeError(f"writer updated {flipped} messages, not 8")
-            cur = conn.execute(
-                "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
-            )
-            conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - BALLAST_ROWS,))
+
+        def commit() -> None:
             # COMMIT and its stamp under the order lock (``_ordered``):
             # a commit is in a round's window only once it is durable,
             # and its frames are in the size.
             with _ordered(order):
                 conn.execute("COMMIT")
                 times.append((time.monotonic(), os.stat(wal).st_size))
-            commits += 1
+
+        while not os.path.exists(stop):
+            conn.execute("BEGIN IMMEDIATE")
+            flipped = conn.execute(
+                "UPDATE messages SET seen = 1 - seen WHERE rowid = ?", (rng.randint(1, top),)
+            ).rowcount
+            if flipped != 1:
+                raise RuntimeError(f"writer updated {flipped} messages, not 1")
+            commit()
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
+            )
+            conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - BALLAST_ROWS,))
+            commit()
+            commits += 2
             resume = time.monotonic() + interval
             while time.monotonic() < resume and not os.path.exists(stop):
                 time.sleep(min(0.05, resume - time.monotonic()))
@@ -1962,7 +1974,7 @@ ARGS: tuple[Arg, ...] = (
         1,
         MAX_BLOB,
         absent="131072 with --wal",
-        help="ballast bytes per writer commit (--wal only)",
+        help="ballast bytes per message (its second writer commit) (--wal only)",
     ),
     Arg(
         "writer_interval",
@@ -1970,7 +1982,7 @@ ARGS: tuple[Arg, ...] = (
         None,
         0,
         absent="0,0.1 with --wal",
-        help="seconds between writer commits (--wal only)",
+        help="seconds between writer messages (--wal only)",
     ),
     Arg(
         "wal_hold",
@@ -2168,10 +2180,6 @@ _RULES: tuple = (
         lambda a: "--filtered excludes --extracted-chars (its attachment chunks are not built)",
     ),
     (lambda a: True, _chunk_problem),
-    (
-        lambda a: a.wal and a.messages < 8,
-        lambda a: "--wal needs at least 8 messages (each writer commit updates eight)",
-    ),
     (
         lambda a: not a.wal and a.explicit_wal,
         lambda a: "--writer-commit-bytes, --writer-interval and --wal-hold need --wal",

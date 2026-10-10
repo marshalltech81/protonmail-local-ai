@@ -177,10 +177,11 @@ def test_wal_is_reclaimed_after_the_round(report):
         commits = wal["commits_during_transaction"]
         assert commits > 0
         # Every frame committed while the round held its snapshot stays
-        # in the WAL, beyond what the steady state can reuse.
+        # in the WAL, beyond what the steady state can reuse. Commits
+        # alternate message and ballast, so at least half carry ballast.
         assert (
             wal["wal_max_during_transaction_bytes"]
-            >= commits * wal["commit_bytes"] - wal["wal_at_transaction_start_bytes"]
+            >= commits // 2 * wal["commit_bytes"] - wal["wal_at_transaction_start_bytes"]
         )
         assert wal["checkpoint_after"]["busy"] == 0
         assert wal["wal_after_checkpoint_bytes"] == 0
@@ -922,7 +923,6 @@ def test_absent_and_zero_are_resolved_as_the_table_says(bench, changes, name, ab
         ({"--extracted-chars": "5", "--per-message": "0", "--missing": "0"}, "--per-message"),
         ({"--records": "mixed", "--missing-from": "worst", "--missing": "0"}, "leaves nothing"),
         ({"--writer-commit-bytes": "5"}, "need --wal"),
-        ({"--wal": None, "--messages": "7", "--missing": "0", "--per-message": "0"}, "8 messages"),
         ({"--writer-interval": "0.5"}, "need --wal"),
         ({"--wal-hold": "1"}, "need --wal"),
         ({"--repeat": "3"}, "cannot balance"),
@@ -1029,15 +1029,21 @@ def test_file_size_check_is_exact_for_many_parts(bench):
     )
 
 
-def test_writer_flips_eight_distinct_messages_a_commit(bench, tmp_path):
-    db = tmp_path / "eight.db"
-    bench.build(db, 8, 0, "typical", "typical")
+def test_writer_commits_each_message_as_the_indexer_does(bench, tmp_path):
+    # The indexer commits per message, twice: phase 1 (the message's
+    # rows) and phase 2c (its chunks and vectors). The writer alternates
+    # a one-message update with a ballast commit, so its commits are
+    # pairs and each pair flips exactly one message.
+    db = tmp_path / "one.db"
+    bench.build(db, 1, 0, "typical", "typical")
 
-    def seen() -> list[int]:
+    def state() -> tuple[int, int]:
         with closing(sqlite3.connect(db)) as conn:
-            return [r[0] for r in conn.execute("SELECT seen FROM messages ORDER BY rowid")]
+            seen = conn.execute("SELECT seen FROM messages").fetchone()[0]
+            top = conn.execute("SELECT COALESCE(MAX(id), 0) FROM bench_ballast").fetchone()[0]
+            return seen, top
 
-    built = seen()
+    built, _ = state()
     stop = tmp_path / "stop"
     import threading
 
@@ -1045,11 +1051,30 @@ def test_writer_flips_eight_distinct_messages_a_commit(bench, tmp_path):
     timer.start()
     out = bench.phase_writer(str(db), str(stop), 16, 0.01)
     timer.join()
-    assert out["commits"] > 0
-    # Every commit flips all eight messages, so an even count leaves
-    # each seen flag as built and an odd one inverts all eight.
-    expected = [1 - x for x in built] if out["commits"] % 2 else built
-    assert seen() == expected
+    assert out["commits"] > 0 and out["commits"] % 2 == 0
+    pairs = out["commits"] // 2
+    seen, top = state()
+    assert seen == (1 - built if pairs % 2 else built)
+    # The steady ballast, then one row per pair.
+    assert top == bench.BALLAST_ROWS + pairs
+
+
+def test_round_transaction_time_starts_at_the_snapshot(bench):
+    import inspect
+
+    src = inspect.getsource(bench.phase_reconcile)
+    snapshot = src.index('"SELECT 1 FROM messages LIMIT 1"')
+    assert snapshot < src.index("t_snapshot = time.perf_counter()") < src.index("count_sql, params")
+    assert '"transaction_s": t_records - t_snapshot' in src
+
+
+def test_certificate_count_time_excludes_the_connection_setup(bench):
+    import inspect
+
+    src = inspect.getsource(bench.phase_certificate)
+    assert src.index("t_open = time.perf_counter()") < src.index("count_sql, params")
+    assert '"count_s": t_count - t_open' in src
+    assert '"total_s": t_end - t0' in src
 
 
 def test_round_parse_time_excludes_the_request_file_read(bench):
@@ -1174,7 +1199,8 @@ def test_writer_delay_ends_when_stop_appears(bench, tmp_path):
     out = bench.phase_writer(str(db), str(stop), 16, 3600.0)
     timer.join()
     assert time.monotonic() - started < 5
-    assert out["commits"] == 1
+    # One message: its two commits.
+    assert out["commits"] == 2
 
 
 def test_writer_starts_from_the_steady_ballast(bench, tmp_path):
