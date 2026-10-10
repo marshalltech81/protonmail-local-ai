@@ -285,7 +285,10 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
         "content_type": "application/pdf",
     }
     if records == "cardinality":
-        counts = (("from", 1), ("to", 4_999), ("cc", MAX_MESSAGE_ADDRESSES - 5_000))
+        # The parser's address budget is shared by every kept occurrence,
+        # the repeats that carry an address's further names included.
+        unique = MAX_MESSAGE_ADDRESSES - MAX_EXTRA_PARTICIPANT_NAMES
+        counts = (("from", 1), ("to", 4_999), ("cc", unique - 5_000))
         return {
             **base,
             "references": [f"r{n}@x.example" for n in range(references)],
@@ -351,7 +354,8 @@ def build(
     (a 2000-character subject, 11 participants per role, 11 references,
     In-Reply-To, filename and MIME type of 501 characters, a 255-byte
     file name); or ``cardinality``, the most rows a record can carry
-    (``MAX_MESSAGE_ADDRESSES`` participants, the parser's cap, and
+    (``MAX_MESSAGE_ADDRESSES`` address occurrences, the parser's cap, of which
+    ``MAX_EXTRA_PARTICIPANT_NAMES`` repeat one address with further names, and
     ``references`` References entries, which the parser does not cap by
     count).
 
@@ -1496,6 +1500,10 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
     single, unbalanced run and is allowed."""
     if args.missing < 0 or args.extras < 0 or any(t < 0 for t in args.upload_total or []):
         raise SystemExit("--missing, --extras and --upload-total must not be negative")
+    if args.all_extras and (not args.upload_total or min(args.upload_total) < 1):
+        raise SystemExit("--all-extras needs a positive --upload-total for both kinds")
+    if args.per_message < 0 or args.messages < 1:
+        raise SystemExit("--per-message must not be negative and --messages must be at least 1")
     if args.all_extras and args.records != "mixed":
         raise SystemExit("--all-extras needs --records mixed (the worst-case records it returns)")
     if any(k < 1 for k in args.k):

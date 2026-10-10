@@ -1646,7 +1646,7 @@ type, and a nested folder and source path of about 3.5 KB. The record
 tables below were first taken with four-byte addresses, IDs and MIME
 type, which the parser cannot store; the K bullet gives the reachable
 sizes. `--records cardinality` gives each message the most rows a record can
-carry: 10,000 participants (the parser's `MAX_MESSAGE_ADDRESSES`) and
+carry 10,000 address occurrences (the parser's `MAX_MESSAGE_ADDRESSES`: 9,000 participants and 1,000 repeats that carry one address's further names) and
 `--references` References entries (100,000 here; the parser caps their
 length, not their count). `--extracted-chars` stores that many
 four-byte characters of extracted text on every extraction row.
@@ -1782,7 +1782,8 @@ cap-sized run above includes them.
 participant row and every References entry of a message before the
 output clips each list to 10
 ([#1377](https://github.com/marshalltech81/protonmail-local-ai/issues/1377)).
-With 10,000 participants and 100,000 References entries per message, a
+With 10,000 participants (the parser's address budget allows 9,000
+plus 1,000 repeats) and 100,000 References entries per message, a
 round read 1 record in 0.013 s, 10 in 0.17 s and 100 in 1.8 s, with
 peak RSS 98 MiB, 216 MiB and 1.4 GiB, while the response stayed under
 200 KB. A References header near the parser's 50 MB file limit holds
@@ -1971,7 +1972,8 @@ run has no such insert.
   `query_attachments` clauses (filename, MIME type, extraction status,
   thread) streamed it reached 2.83 times. On 300 messages that each
   carry 10,000 participant rows and 11,000 display-name rows (3.0 and
-  3.3 million rows), a participant predicate took a certificate
+  3.3 million rows; the parser's shared address budget allows 9,000
+  and 10,000, so these are up to 11 % above what it can store), a participant predicate took a certificate
   4.5 s against a page of 9.0 to 11.9 s (messages) and 6.8 s
   (occurrences), and a `where` expression 0.6 to 1.3 s against 18.4 to
   18.6 s. On 15,000 messages of 20 chunks of 1,000 words (300,000

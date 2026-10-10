@@ -160,7 +160,9 @@ def test_cardinality_records_read_every_stored_row(bench, cardinality):
     # stored cardinality, not K times the listed one.
     for k, round_ in cardinality["reconcile"]["messages"]["stream"].items():
         assert round_["returned"] == int(k)
-        assert round_["participant_rows"] == int(k) * bench.MAX_MESSAGE_ADDRESSES
+        assert round_["participant_rows"] == int(k) * (
+            bench.MAX_MESSAGE_ADDRESSES - bench.MAX_EXTRA_PARTICIPANT_NAMES
+        )
         assert round_["references"] == int(k) * 1000
 
 
@@ -435,11 +437,11 @@ def all_extras(bench, tmp_path_factory):
 
 def test_cardinality_corpus_stores_names_for_every_participant(bench, cardinality):
     built = cardinality["build"]
-    assert built["participant_rows"] == 40 * bench.MAX_MESSAGE_ADDRESSES
-    # A first name per participant, plus the extra names of one address.
-    assert built["name_rows"] == 40 * (
-        bench.MAX_MESSAGE_ADDRESSES + bench.MAX_EXTRA_PARTICIPANT_NAMES
+    assert built["participant_rows"] == 40 * (
+        bench.MAX_MESSAGE_ADDRESSES - bench.MAX_EXTRA_PARTICIPANT_NAMES
     )
+    # A first name per participant, plus the extra names of one address.
+    assert built["name_rows"] == 40 * bench.MAX_MESSAGE_ADDRESSES
 
 
 def test_chunk_and_term_cardinality_is_built_and_queried(bench, terms):
@@ -743,6 +745,8 @@ def _ns(**kw):
         "upload_total": None,
         "all_extras": False,
         "records": "typical",
+        "per_message": 3,
+        "messages": 10,
     }
     return argparse.Namespace(**{**base, **kw})
 
@@ -754,6 +758,9 @@ def _ns(**kw):
         {"extras": -1},
         {"upload_total": [100, -1]},
         {"all_extras": True},
+        {"all_extras": True, "records": "mixed", "upload_total": [0, 0]},
+        {"per_message": -1},
+        {"messages": 0},
         {"all_extras": True, "records": "worst"},
     ],
 )
@@ -763,4 +770,4 @@ def test_invalid_upload_shapes_are_refused_before_building(bench, kw):
 
 
 def test_all_extras_with_mixed_records_is_accepted(bench):
-    bench._require_balanced_repeat(_ns(all_extras=True, records="mixed"))
+    bench._require_balanced_repeat(_ns(all_extras=True, records="mixed", upload_total=[100, 300]))
