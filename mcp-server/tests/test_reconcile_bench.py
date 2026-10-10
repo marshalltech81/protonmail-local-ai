@@ -669,9 +669,8 @@ def test_worst_records_carry_the_full_nested_maildir_path(bench, tmp_path):
     ],
 )
 def test_repeat_count_must_balance_the_orders(bench, argv, ok):
-    import argparse
 
-    ns = argparse.Namespace(repeat=int(argv[1]), filtered="--filtered" in argv, k=[100])
+    ns = _ns(repeat=int(argv[1]), filtered="--filtered" in argv)
     if ok:
         bench._require_balanced_repeat(ns)
     else:
@@ -707,10 +706,9 @@ def test_chunk_rows_carry_every_production_column(bench, tmp_path):
 
 @pytest.mark.parametrize("repeat", [0, -2])
 def test_nonpositive_repeat_is_refused(bench, repeat):
-    import argparse
 
     with pytest.raises(SystemExit):
-        bench._require_balanced_repeat(argparse.Namespace(repeat=repeat, filtered=False, k=[100]))
+        bench._require_balanced_repeat(_ns(repeat=repeat))
 
 
 def test_report_and_wal_results_record_the_artificial_hold(report):
@@ -728,7 +726,41 @@ def test_worst_fields_are_parser_reachable(bench):
 
 @pytest.mark.parametrize("k", [[0], [100, 0], [-5]])
 def test_nonpositive_k_is_refused(bench, k):
-    import argparse
 
     with pytest.raises(SystemExit):
-        bench._require_balanced_repeat(argparse.Namespace(repeat=2, filtered=False, k=k))
+        bench._require_balanced_repeat(_ns(repeat=2, k=k))
+
+
+def _ns(**kw):
+    import argparse
+
+    base = {
+        "repeat": 2,
+        "filtered": False,
+        "k": [100],
+        "missing": 5,
+        "extras": 0,
+        "upload_total": None,
+        "all_extras": False,
+        "records": "typical",
+    }
+    return argparse.Namespace(**{**base, **kw})
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"missing": -1},
+        {"extras": -1},
+        {"upload_total": [100, -1]},
+        {"all_extras": True},
+        {"all_extras": True, "records": "worst"},
+    ],
+)
+def test_invalid_upload_shapes_are_refused_before_building(bench, kw):
+    with pytest.raises(SystemExit):
+        bench._require_balanced_repeat(_ns(**kw))
+
+
+def test_all_extras_with_mixed_records_is_accepted(bench):
+    bench._require_balanced_repeat(_ns(all_extras=True, records="mixed"))

@@ -1977,7 +1977,9 @@ run has no such insert.
   18.6 s. On 15,000 messages of 20 chunks of 1,000 words (300,000
   chunks), each message committed on its own as the indexer does
   (`--commit-each`), a 16-term `text` or `body_words` value took a
-  certificate 2.5 to 2.6 s against a page of 5.2 to 6.4 s (FTS rowids in insertion order). Every other
+  certificate 2.5 to 2.6 s against a page of 5.2 to 6.4 s (FTS rowids in insertion order). The FTS index holds body chunks only; production also indexes
+  attachment chunks, so `text` and `body_words` timings are not claimed
+  for an index with attachment postings. Every other
   corpus here was built in transactions of 2,000 messages (10 for the
   cardinality corpus), which lays out FTS5 segments differently from
   per-message commits, so their `text` and `body_words` timings are not

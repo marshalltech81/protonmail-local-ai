@@ -1494,6 +1494,10 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
     two-way orders (scan method, K) need an even count and the
     three-way filtered rotation a multiple of three. One repeat is a
     single, unbalanced run and is allowed."""
+    if args.missing < 0 or args.extras < 0 or any(t < 0 for t in args.upload_total or []):
+        raise SystemExit("--missing, --extras and --upload-total must not be negative")
+    if args.all_extras and args.records != "mixed":
+        raise SystemExit("--all-extras needs --records mixed (the worst-case records it returns)")
     if any(k < 1 for k in args.k):
         raise SystemExit(f"--k {args.k}: every K must be at least 1")
     if args.repeat is None:
