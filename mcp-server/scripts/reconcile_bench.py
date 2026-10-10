@@ -325,6 +325,7 @@ def build(
     extracted_chars: int = 0,
     chunks: int = 1,
     chunk_tokens: int = BODY_TOKENS,
+    commit_each: bool = False,
 ) -> dict:
     """Write the synthetic index: ``messages`` rows in shuffled insert
     order, threads of four, ``per_message`` attachment occurrences each.
@@ -356,6 +357,10 @@ def build(
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         batch = 2000 if records != "cardinality" and not extracted_chars else 10
+        if commit_each:
+            # The indexer commits one message at a time, so FTS5 creates
+            # and merges segments per message.
+            batch = 1
         text = _WIDE * extracted_chars if extracted_chars else None
         min_tokens = chunk_tokens
         n_chunks = n_parts = n_names = 0
@@ -1061,6 +1066,11 @@ def write_request(
         # The accepted worst upload: no member, only hashes the server
         # does not hold; every member is missing.
         held = []
+    if upload_total and len(held) > upload_total:
+        raise ValueError(
+            f"--upload-total {upload_total}: the upload holds {len(held)} members before any "
+            "extras; raise it or leave more members out with --missing"
+        )
     if upload_total:
         # Fill the upload to ``upload_total`` digests (a set cap) with
         # extras, the largest request the cap accepts.
@@ -1213,6 +1223,17 @@ def run(args: argparse.Namespace) -> dict:
             "identity": args.identity,
             "records": args.records,
             "repeat": args.repeat,
+            "references": args.references,
+            "extracted_chars": args.extracted_chars,
+            "chunks": args.chunks,
+            "chunk_tokens": args.chunk_tokens,
+            "commit_each": args.commit_each,
+            "missing": args.missing,
+            "missing_from": args.missing_from,
+            "extras": args.extras,
+            "upload_total": args.upload_total,
+            "all_extras": args.all_extras,
+            "k": args.k,
             "sqlite": sqlite3.sqlite_version,
             "python": sys.version.split()[0],
         },
@@ -1226,6 +1247,7 @@ def run(args: argparse.Namespace) -> dict:
             args.extracted_chars,
             args.chunks,
             args.chunk_tokens,
+            args.commit_each,
         ),
     }
     db = str(db_path)
@@ -1480,6 +1502,11 @@ def main(argv: list[str] | None = None) -> dict:
         help="body chunks per message (the parser splits large mail)",
     )
     p.add_argument("--chunk-tokens", type=int, default=BODY_TOKENS, help="words per body chunk")
+    p.add_argument(
+        "--commit-each",
+        action="store_true",
+        help="commit each message on its own, as the indexer does (default: batches of 2,000)",
+    )
     p.add_argument(
         "--all-extras",
         action="store_true",

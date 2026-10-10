@@ -1851,10 +1851,11 @@ set.
 cache is the host's, so a method that always ran second would inherit
 the pages the first read. From this revision the benchmark alternates
 which method runs first at each repeat (and in the filtered runs), and
-reports in `first_runs` how often each ran first; the stream and
-collect figures above were taken with stream first, so their
-collect-over-stream speedups may be overstated until the cap-sized run
-is repeated this way. `--all-extras` builds the accepted worst upload
+reports in `first_runs` how often each ran first. The tables before
+"Combined worst case" were taken with stream first, so their
+collect-over-stream speedups may be overstated; the cap-sized run
+below was taken in alternating order and is not affected.
+`--all-extras` builds the accepted worst upload
 (no member held, `--upload-total` digests, all extras) and returns
 worst-case records first; the `extras` field of each round and of the
 `request` is the count actually generated.
@@ -1893,9 +1894,12 @@ were not repeated.
 - **Prerequisites:** bound each record's read (#1377, #1381) before
   the reconcile tool ships; without them no K bounds a round's work.
 - **K:** 100 message records and 1,000 occurrence records per round.
-  On the largest records measured that is 15.9 MB and 17.1 MB per
-  response at a peak RSS of 167 MiB and 156 MiB; a typical response is
-  0.1 MB and 1.0 MB. A larger K would need a byte budget
+  On the largest records measured, with few extras, that is 15.9 MB and
+  17.1 MB per response at a peak RSS of 167 MiB and 156 MiB; with the
+  largest accepted upload (all extras, 200,000 and 600,000 of them) the
+  cap-sized run measured 29.3 MB and 322 MiB for 100 message records
+  and 57.3 MB and 548 MiB for 1,000 occurrence records. A typical
+  response is 0.1 MB and 1.0 MB. A larger K would need a byte budget
   per response alongside it to keep the worst case bounded, which the
   approved design does not include.
 - **Retry bound:** at most ceil(M / K) + 3 rounds per run, where M is
@@ -1939,8 +1943,14 @@ were not repeated.
   4.5 s against a page of 9.0 to 11.9 s (messages) and 6.8 s
   (occurrences), and a `where` expression 0.6 to 1.3 s against 18.4 to
   18.6 s. On 15,000 messages of 20 chunks of 1,000 words (300,000
-  chunks) a 16-term `text` or `body_words` value took a certificate
-  2.9 s against a page of 7.3 to 8.6 s.
+  chunks), each message committed on its own as the indexer does
+  (`--commit-each`), a 16-term `text` or `body_words` value took a
+  certificate 3.0 to 3.1 s against a page of 4.7 to 7.4 s. Every other
+  corpus here was built in transactions of 2,000 messages (10 for the
+  cardinality corpus), which lays out FTS5 segments differently from
+  per-message commits, so their `text` and `body_words` timings are not
+  claimed for a production-built index; the reconcile rounds read no
+  FTS table.
 
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,

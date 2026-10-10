@@ -581,3 +581,45 @@ def test_missing_beyond_the_available_members_is_rejected_in_every_mode(bench, t
     bench.build(db, 60, 1, "typical", "mixed")
     with pytest.raises(ValueError, match=f"--missing-from {mode}: .* can be left out"):
         bench.write_request(str(db), "messages", 500, 0, tmp_path / "r.json", mode)
+
+
+def test_upload_total_below_the_retained_members_is_rejected(bench, tmp_path):
+    db = tmp_path / "total.db"
+    bench.build(db, 60, 1, "typical", "typical")
+    with pytest.raises(ValueError, match="--upload-total 10: the upload holds"):
+        bench.write_request(str(db), "messages", 2, 0, tmp_path / "r.json", "spread", 10)
+
+
+def test_report_config_records_every_workload_dimension(report, cardinality):
+    keys = {
+        "references",
+        "extracted_chars",
+        "chunks",
+        "chunk_tokens",
+        "missing",
+        "missing_from",
+        "extras",
+        "upload_total",
+        "all_extras",
+        "k",
+    }
+    assert keys <= set(report["config"])
+    assert cardinality["config"]["extracted_chars"] == 100
+    assert cardinality["config"]["references"] == 1000
+
+
+def test_commit_each_builds_the_same_corpus_one_message_per_transaction(bench, tmp_path):
+    a, b = tmp_path / "a.db", tmp_path / "b.db"
+    bench.build(a, 30, 1, "typical", "typical", chunks=2)
+    built = bench.build(b, 30, 1, "typical", "typical", chunks=2, commit_each=True)
+    assert built["chunks"] == 60
+    counts = []
+    for db in (a, b):
+        with closing(sqlite3.connect(db)) as conn:
+            counts.append(
+                (
+                    conn.execute("SELECT COUNT(*) FROM message_chunks").fetchone()[0],
+                    conn.execute("SELECT COUNT(*) FROM message_chunks_fts").fetchone()[0],
+                )
+            )
+    assert counts[0] == counts[1] == (60, 60)
