@@ -1,0 +1,12 @@
+From: Recipient <recipient@imap.example>
+To: Sender One <sender-one@mail.example>
+Subject: Re: Synthetic source handoff
+Date: Tue, 02 Jan 2024 10:00:00 +0000
+Message-ID: <synthetic-source-002@imap.example>
+In-Reply-To: <synthetic-source-001@mail.example>
+References: <synthetic-source-001@mail.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+SRCFIXTURE-1483 sent copy, filed by the client with no Received header.
