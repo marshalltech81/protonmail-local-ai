@@ -647,6 +647,9 @@ def phase_certificate(db_path: str, kind: str, method: str, filters: dict | None
                 identity_bytes += len(b)
                 max_bytes = max(max_bytes, len(b))
                 digest.update(len(b).to_bytes(8, "big") + b)
+        # The scan is done once every identity is fetched, ordered and
+        # hashed, for either method.
+        t_scan = time.perf_counter()
         conn.rollback()
     t_end = time.perf_counter()
     return {
@@ -657,7 +660,8 @@ def phase_certificate(db_path: str, kind: str, method: str, filters: dict | None
         "max_identity_bytes": max_bytes,
         "digest": digest.hexdigest(),
         "count_s": t_count - t0,
-        "scan_s": t_fetch - t_count,
+        "fetch_s": t_fetch - t_count,
+        "scan_s": t_scan - t_count,
         "total_s": t_end - t0,
         "rss_kib": _rss_kib(),
     }
@@ -1457,6 +1461,22 @@ def _reconcile_runs(db: str, kind: str, request: Path, req: dict, args: argparse
     return out
 
 
+def _require_balanced_repeat(args: argparse.Namespace) -> None:
+    """Refuse a repeat count that cannot balance the run orders: the
+    two-way orders (scan method, K) need an even count and the
+    three-way filtered rotation a multiple of three. One repeat is a
+    single, unbalanced run and is allowed."""
+    if args.repeat is None:
+        args.repeat = 6 if args.filtered else 2
+    if args.repeat == 1:
+        return
+    step = 6 if args.filtered else 2
+    if args.repeat % step:
+        raise SystemExit(
+            f"--repeat {args.repeat} cannot balance the run orders: use 1 or a multiple of {step}"
+        )
+
+
 def main(argv: list[str] | None = None) -> dict:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["_phase"]:
@@ -1504,7 +1524,12 @@ def main(argv: list[str] | None = None) -> dict:
     p.add_argument(
         "--extras", type=int, default=100, help="hashes the client holds that the server does not"
     )
-    p.add_argument("--repeat", type=int, default=3)
+    p.add_argument(
+        "--repeat",
+        type=int,
+        default=None,
+        help="runs of each step (default 2, or 6 with --filtered; see the balance rule)",
+    )
     p.add_argument("--wal", action="store_true", help="also measure WAL growth under a writer")
     p.add_argument(
         "--writer-commit-bytes",
@@ -1551,7 +1576,9 @@ def main(argv: list[str] | None = None) -> dict:
         default=0.0,
         help="seconds the WAL round keeps its transaction open after its work (smoke test only)",
     )
-    report = run(p.parse_args(argv))
+    args = p.parse_args(argv)
+    _require_balanced_repeat(args)
+    report = run(args)
     print(json.dumps(report, indent=2))
     return report
 

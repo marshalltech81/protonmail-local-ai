@@ -1875,7 +1875,10 @@ reports in `first_runs` how often each ran first. The tables before
 "Combined worst case" were taken with stream first, so their
 collect-over-stream speedups may be overstated; the cap-sized run
 below was taken in alternating order and is not affected.
-`--all-extras` builds the accepted worst upload
+The benchmark refuses a `--repeat` that cannot balance the orders (one,
+or a multiple of two, or of six with `--filtered`); the cap-sized run used
+two. The collect scan time covers fetching, ordering and hashing, as the
+streamed one does (`fetch_s` is the fetch alone). `--all-extras` builds the accepted worst upload
 (no member held, `--upload-total` digests, all extras) and returns
 worst-case records first; the `extras` field of each round and of the
 `request` is the count actually generated.

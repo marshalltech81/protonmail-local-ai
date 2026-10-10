@@ -403,7 +403,7 @@ def terms(bench, tmp_path_factory):
             "--missing",
             "5",
             "--repeat",
-            "2",
+            "1",
         ]
     )
 
@@ -484,10 +484,10 @@ def test_scan_methods_alternate_which_runs_first(bench):
     ]
 
 
-def test_certificates_report_how_often_each_method_ran_first(terms):
+def test_certificates_report_how_often_each_method_ran_first(all_extras):
     for kind in ("messages", "occurrences"):
-        assert terms["certificate"][f"{kind}/stream"]["first_runs"] == 1
-        assert terms["certificate"][f"{kind}/collect"]["first_runs"] == 1
+        assert all_extras["certificate"][f"{kind}/stream"]["first_runs"] == 1
+        assert all_extras["certificate"][f"{kind}/collect"]["first_runs"] == 1
 
 
 def test_all_extras_upload_misses_every_member_and_returns_worst_records(all_extras):
@@ -654,3 +654,32 @@ def test_worst_records_carry_the_full_nested_maildir_path(bench, tmp_path):
     assert len(folder.encode()) > 3_000 and folder.count("/") == 13
     assert filepath.startswith(f"/maildir/{folder}/cur/")
     assert len(filepath.encode()) <= 4_096 + 600  # the folder path plus the 255-byte file name
+
+
+@pytest.mark.parametrize(
+    ("argv", "ok"),
+    [
+        (["--repeat", "1"], True),
+        (["--repeat", "2"], True),
+        (["--repeat", "3"], False),
+        (["--repeat", "2", "--filtered"], False),
+        (["--repeat", "6", "--filtered"], True),
+        (["--repeat", "1", "--filtered"], True),
+    ],
+)
+def test_repeat_count_must_balance_the_orders(bench, argv, ok):
+    import argparse
+
+    ns = argparse.Namespace(repeat=int(argv[1]), filtered="--filtered" in argv)
+    if ok:
+        bench._require_balanced_repeat(ns)
+    else:
+        with pytest.raises(SystemExit, match="cannot balance"):
+            bench._require_balanced_repeat(ns)
+
+
+def test_collect_scan_time_includes_ordering_and_hashing(bench, tmp_path):
+    db = tmp_path / "scan.db"
+    bench.build(db, 200, 1, "typical", "typical")
+    r = bench.phase_certificate(str(db), "messages", "collect")
+    assert r["fetch_s"] <= r["scan_s"] <= r["total_s"]
