@@ -493,12 +493,12 @@ class TestHtmlExtractorFallback:
         ("payload", "expected"),
         [
             # Valid multi-byte UTF-8 decodes unchanged.
-            (b"<p>caf\xc3\xa9 na\xc3\xafve</p>", "café naïve\n"),
+            (b"<p>caf\xc3\xa9 na\xc3\xafve</p>", "café naïve"),
             # Each invalid byte, and a truncated sequence, becomes one
             # U+FFFD while the valid text around it is kept.
             (
                 b"<html><body><p>caf\xc3\xa9 \xff\xfe text \xe2\x82</p></body></html>",
-                "café �� text �\n",
+                "café �� text �",
             ),
         ],
         ids=["valid-utf8", "malformed-utf8"],
@@ -2562,7 +2562,7 @@ class TestPdfDigitalExtractor:
         )
 
         assert result.status == STATUS_FAILED
-        assert result.extractor == "pdf@5"
+        assert result.extractor == "pdf@6"
         assert result.text is None
         assert result.error == "RuntimeError"
 
@@ -3062,7 +3062,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-ocr@5"
+        assert result.extractor == "pdf-ocr@6"
         assert result.text is not None
         assert self.DIGITAL.format(n=1) in result.text
         assert self.SCANNED in result.text
@@ -3104,7 +3104,7 @@ class TestPdfPageLevelOcr:
             max_ocr_pages=5,
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-ocr@5"
+        assert result.extractor == "pdf-ocr@6"
         assert result.text is not None
         assert [f"{self.SCANNED} {n}" in result.text for n in range(1, 7)] == [True] * 5 + [False]
         [record] = [r for r in caplog.records if "OCR capped" in r.getMessage()]
@@ -3185,13 +3185,13 @@ class TestPdfPageLevelOcr:
         [
             # OCR off: a mixed PDF returns its digital text before OCR
             # could read the failed page.
-            ("dd", {1}, False, 20, True, "pdf-digital@5", 1),
+            ("dd", {1}, False, 20, True, "pdf-digital@6", 1),
             # OCR on: the failed page is OCR'd and its text recovered.
-            ("dd", {1}, True, 20, True, "pdf-ocr@5", 0),
+            ("dd", {1}, True, 20, True, "pdf-ocr@6", 0),
             # OCR on but it reads no text on the failed page.
-            ("dd", {1}, True, 20, False, "pdf-digital@5", 1),
+            ("dd", {1}, True, 20, False, "pdf-digital@6", 1),
             # The OCR cap leaves the failed page unread.
-            ("dsss", {3}, True, 1, True, "pdf-ocr@5", 1),
+            ("dsss", {3}, True, 1, True, "pdf-ocr@6", 1),
         ],
     )
     def test_pdf_pages_unrecovered(
@@ -3255,7 +3255,7 @@ class TestPdfPageLevelOcr:
         monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
         extractors.drain_extractor_counts()
         results = [self._extract("d" + "s" * 30, max_ocr_pages=5) for _ in range(5)]
-        assert {(r.status, r.extractor) for r in results} == {(STATUS_SUCCESS, "pdf-ocr@5")}
+        assert {(r.status, r.extractor) for r in results} == {(STATUS_SUCCESS, "pdf-ocr@6")}
         lines = [r for r in caplog.records if "OCR capped" in r.getMessage()]
         assert [r.levelname for r in lines] == ["WARNING", "WARNING"]
         assert extractors.drain_extractor_counts() == {
@@ -3296,13 +3296,13 @@ class TestPdfPageLevelOcr:
     def test_digital_pdf_renders_nothing(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("dd")
-        assert result.extractor == "pdf-digital@5"
+        assert result.extractor == "pdf-digital@6"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_scanned_pdf_still_ocrs_every_page_within_the_cap(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("sss")
-        assert result.extractor == "pdf-ocr@5"
+        assert result.extractor == "pdf-ocr@6"
         assert work["renders"] == [(1, 3)]
         assert work["ocr_calls"] == 3
 
@@ -3310,7 +3310,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds", ocr_enabled=False)
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@5"
+        assert result.extractor == "pdf-digital@6"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_ocr_failure_on_a_mixed_pdf_keeps_the_digital_text(self, monkeypatch, tmp_path, caplog):
@@ -3320,7 +3320,7 @@ class TestPdfPageLevelOcr:
         self._fake_ocr(monkeypatch, tmp_path, fail=True)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@5"
+        assert result.extractor == "pdf-digital@6"
         assert result.text == self.DIGITAL.format(n=1)
         assert "RuntimeError" in caplog.text
         assert "SYNTHETIC_OCR_MARKER" not in caplog.text
@@ -3456,7 +3456,7 @@ class TestPdfPageLevelOcr:
 
     @pytest.mark.parametrize(
         ("layout", "status", "extractor"),
-        [("ds", STATUS_SUCCESS, "pdf-digital@5"), ("ss", STATUS_FAILED, "pdf@5")],
+        [("ds", STATUS_SUCCESS, "pdf-digital@6"), ("ss", STATUS_FAILED, "pdf@6")],
     )
     def test_slow_page_count_degrades_like_a_timeout(
         self, monkeypatch, tmp_path, layout, status, extractor
@@ -3483,7 +3483,7 @@ class TestPdfPageLevelOcr:
 
     @pytest.mark.parametrize(
         ("layout", "status", "extractor"),
-        [("ds", STATUS_SUCCESS, "pdf-digital@5"), ("ss", STATUS_FAILED, "pdf@5")],
+        [("ds", STATUS_SUCCESS, "pdf-digital@6"), ("ss", STATUS_FAILED, "pdf@6")],
     )
     def test_page_count_timeout_degrades_like_a_render_timeout(
         self, monkeypatch, tmp_path, layout, status, extractor
@@ -3558,7 +3558,8 @@ class TestPdfExtractorVersion:
     instead of failing, #707 stops caching a success with pages
     dropped by host pressure, and #931 records a PDF that needs an open
     password or exceeds pypdf's limits ``unsupported``, so rows written
-    before any of them must re-extract."""
+    before any of them must re-extract. Pypdf 6.20 changes stream decoding
+    and malformed page-tree recovery, so version 5 rows also refresh."""
 
     @pytest.mark.parametrize(
         "name",
@@ -3575,15 +3576,18 @@ class TestPdfExtractorVersion:
             "pdf-digital@4",
             "pdf-ocr@4",
             "pdf@4",
+            "pdf-digital@5",
+            "pdf-ocr@5",
+            "pdf@5",
         ],
     )
     def test_pre_bump_pdf_rows_are_stale(self, name):
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["pdf"] == 5
+        assert EXTRACTOR_VERSIONS["pdf"] == 6
         assert stale_extractor_module(name) == "pdf"
 
-    @pytest.mark.parametrize("name", ["pdf-digital@5", "pdf-ocr@5", "pdf@5"])
+    @pytest.mark.parametrize("name", ["pdf-digital@6", "pdf-ocr@6", "pdf@6"])
     def test_current_pdf_rows_are_not_stale(self, name):
         from src.extractors import stale_extractor_module
 
@@ -3681,7 +3685,7 @@ class TestPermanentFailuresAreUnsupported:
 
         assert result == ExtractionResult(
             status=STATUS_UNSUPPORTED,
-            extractor="pdf@5",
+            extractor="pdf@6",
             text=None,
             error=PDF_LIMIT_ERROR,
             text_complete=False,
@@ -3795,7 +3799,7 @@ class TestPermanentFailuresAreUnsupported:
             content_type="application/pdf", filename="a.pdf", payload=b"%PDF-1.7", ocr_enabled=False
         )
 
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@5")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@6")
         assert result.text == good_text.strip()
         assert extractors.drain_extractor_counts()["pdf_pages_failed"] == 1
 
@@ -3872,7 +3876,7 @@ class TestEncryptedPdf:
         result = extract(content_type="application/pdf", filename="statement.pdf", payload=payload)
 
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@5"
+        assert result.extractor == "pdf-digital@6"
         assert result.text == self.MARKER
 
     @pytest.mark.parametrize("algorithm", ["AES-128", "AES-256"])
@@ -3893,7 +3897,7 @@ class TestEncryptedPdf:
         result = extract(content_type="application/pdf", filename="locked.pdf", payload=payload)
 
         assert result.status == STATUS_UNSUPPORTED
-        assert result.extractor == "pdf@5"
+        assert result.extractor == "pdf@6"
         assert result.error == ENCRYPTED_PDF_ERROR == "encrypted PDF (open password required)"
         assert result.text is None
         for marker in ("SYNTHETIC_USER_PW_MARKER", "SYNTHETIC_USER_PASSWORD", "synthetic-owner"):
@@ -3985,7 +3989,7 @@ class TestCffFontPdf:
         )
 
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@5"
+        assert result.extractor == "pdf-digital@6"
         assert result.text is not None and len(result.text) == len(self.SENTENCE)
 
     def test_fixture_resolves_text_through_the_cff_encoding_alone(self):
@@ -7502,6 +7506,25 @@ def _cap_image_text_chars(monkeypatch):
     assert pages == [1, 1]
 
 
+def _cap_html_text_chars(monkeypatch):
+    """The child's text budget cuts the HTML text where it crosses it
+    (#1294)."""
+    from src.extractors import html
+
+    calls: list[str] = []
+    real = html.html_to_text
+
+    def convert(source: str) -> str:
+        calls.append(source)
+        return real(source)
+
+    monkeypatch.setattr(html, "html_to_text", convert)
+    monkeypatch.setattr(html, "_MAX_TEXT_CHARS", 9)
+    text, _ = html.extract(f"<p>{_CAP_MARKER}</p>".encode())
+    assert text == _CAP_MARKER[:9]
+    assert len(calls) == 1
+
+
 def _cap_ppt_output_bytes(monkeypatch):
     """The runner returned a cut output: the bytes before the cut are
     kept. That the runner stops reading at the cap and kills the reader
@@ -7623,6 +7646,7 @@ _CAP_TRIGGERS = {
     "eml_nested_messages": _cap_eml_nested_messages,
     "image_text_chars": _cap_image_text_chars,
     "image_pixel_ceiling": _cap_image_pixel_ceiling,
+    "html_text_chars": _cap_html_text_chars,
 }
 
 # Every cap constant in the extractor modules (``module:NAME``) and every
@@ -7658,6 +7682,7 @@ _REPORTED_CAPS = {
     "src.extractors.eml:_MAX_DECODED_BYTES": "eml_nested_messages",
     "src.extractors.image:_MAX_TEXT_CHARS": "image_text_chars",
     "src.extractors.image:CHILD_MAX_IMAGE_PIXELS": "image_pixel_ceiling",
+    "src.extractors.html:_MAX_TEXT_CHARS": "html_text_chars",
 }
 # ... or the reason it is not reported as an extractor cap.
 _WORKBOOK_FAILS = (
@@ -7721,6 +7746,31 @@ _UNREPORTED_CAPS = {
         "the child or its Tesseract fails (MemoryError, TesseractError, or ToolExitError when "
         "the child cannot report it): a failed row with its rate-limited WARNING, counted as "
         "failed="
+    ),
+    "src.extractors.html:_MAX_OUTPUT_BYTES": (
+        "child output past it cannot come from a working child: ChildOutputError, a failed row "
+        "with its rate-limited WARNING, counted as failed=; for a message body, the html_body "
+        "parse cap (tests/test_html_child.py)"
+    ),
+    "src.extractors.html:_MAX_PREFIX_DIGITS": (
+        "a longer length prefix cannot come from a working child: ChildOutputError, a failed "
+        "row with its rate-limited WARNING, counted as failed=; for a message body, the "
+        "html_body parse cap (tests/test_html_child.py)"
+    ),
+    "src.extractors.html_child:_MAX_DOCUMENTS": (
+        "more documents cannot come from the parent, which sends one per attachment and at "
+        "most parser.MAX_BODY_TEXT_PARTS per message: ValueError in the child, recorded by "
+        "type (tests/test_html_child.py TestChildArguments)"
+    ),
+    "src.extractors.html:CHILD_MAX_ADDRESS_SPACE_BYTES": (
+        "the child fails (MemoryError, or ToolExitError when it cannot report it): a failed "
+        "row with its rate-limited WARNING, counted as failed=; for a message body, the "
+        "html_body parse cap (tests/test_html_child.py)"
+    ),
+    "src.extractors.html:CHILD_MAX_CPU_SECONDS": (
+        "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
+        "counted as failed=; for a message body, the html_body parse cap "
+        "(tests/test_html_child.py)"
     ),
     "src.extractors._runner:_MAX_FRAME_LINE": (
         "a longer protocol line cannot come from a working child: ChildOutputError, a failed "
@@ -7794,6 +7844,7 @@ _EXTRACTOR_MODULES = (
     "src.extractors.docx",
     "src.extractors.eml",
     "src.extractors.html",
+    "src.extractors.html_child",
     "src.extractors.extractor_child",
     "src.extractors.ooxml",
     "src.extractors.image",
@@ -8188,7 +8239,7 @@ class TestTextComplete:
 
         self._pdf(monkeypatch, (self.LONG, ""), ocr=fail)
         result = extract(content_type="application/pdf", filename="a.pdf", payload=b"%PDF-1.7")
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@5")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@6")
         assert result.text_complete is False
         assert self.MARKER not in caplog.text
 

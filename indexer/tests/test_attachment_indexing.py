@@ -149,6 +149,7 @@ def _process_with_cached_extractor(
     *,
     filename="c.docx",
     content_type="application/msword",
+    fresh_extractor="docx@7",
 ):
     attachment = _attachment(b"docx bytes", filename=filename, content_type=content_type)
     db.store_attachment_extraction(
@@ -163,7 +164,7 @@ def _process_with_cached_extractor(
     )
     extractor = MagicMock(
         return_value=ExtractionResult(
-            status=STATUS_SUCCESS, extractor="docx@7", text="fresh text", error=None
+            status=STATUS_SUCCESS, extractor=fresh_extractor, text="fresh text", error=None
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -243,6 +244,35 @@ def test_pre_bump_pdf_row_is_re_extracted_by_the_pdf_extractor(tmp_path, monkeyp
     extractor.assert_called_once()
     assert extractor.call_args.kwargs["filename"] == "statement.pdf"
     assert row["extracted_text"] == "fresh text"
+
+
+@pytest.mark.parametrize("stamp", ["pdf-digital@5", "pdf-ocr@5"])
+def test_pdf_rows_before_pypdf_620_are_re_extracted_once(tmp_path, monkeypatch, stamp):
+    """The upgraded reader's decoding and page-tree changes reach cached PDFs."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, row = _process_with_cached_extractor(
+        db,
+        stamp,
+        STATUS_SUCCESS,
+        "old text",
+        monkeypatch,
+        filename="synthetic.pdf",
+        content_type="application/pdf",
+        fresh_extractor="pdf-digital@6",
+    )
+    extractor.assert_called_once()
+    assert (row["extractor"], row["extracted_text"]) == ("pdf-digital@6", "fresh text")
+    extractor, _ = _process_with_cached_extractor(
+        db,
+        "pdf-digital@6",
+        STATUS_SUCCESS,
+        "fresh text",
+        monkeypatch,
+        filename="synthetic.pdf",
+        content_type="application/pdf",
+        fresh_extractor="pdf-digital@6",
+    )
+    extractor.assert_not_called()
 
 
 def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
@@ -2142,7 +2172,7 @@ def _encrypted_pdf_case(monkeypatch) -> tuple[bytes, str, str]:
         user_password="SYNTHETIC_USER_PASSWORD",  # pragma: allowlist secret
         algorithm="AES-256",
     )
-    return payload, ENCRYPTED_PDF_ERROR, "pdf@5"
+    return payload, ENCRYPTED_PDF_ERROR, "pdf@6"
 
 
 def _pdf_limit_case(monkeypatch) -> tuple[bytes, str, str]:
@@ -2150,7 +2180,7 @@ def _pdf_limit_case(monkeypatch) -> tuple[bytes, str, str]:
 
     from tests.test_extractors import _deep_page_tree_pdf
 
-    return _deep_page_tree_pdf("SYNTHETIC_TEXT_MARKER"), PDF_LIMIT_ERROR, "pdf@5"
+    return _deep_page_tree_pdf("SYNTHETIC_TEXT_MARKER"), PDF_LIMIT_ERROR, "pdf@6"
 
 
 def _xlsx_budget_case(monkeypatch) -> tuple[bytes, str, str]:
@@ -3010,7 +3040,7 @@ class TestOcrCapOnCacheHits:
         attachment = self._pdf_attachment()
         result = ExtractionResult(
             status=STATUS_SUCCESS,
-            extractor="pdf-ocr@5",
+            extractor="pdf-ocr@6",
             text=f"{self.MARKER} fresh text",
             error=None,
             ocr_pages_skipped=7,
@@ -3383,7 +3413,7 @@ class TestUnrecordedCacheRowsAreRefreshedOnce:
     def test_an_unrecorded_ocr_row_is_kept_while_ocr_is_off(self, tmp_path, monkeypatch):
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(b"%PDF-1.7 x", filename="a.pdf", content_type="application/pdf")
-        self._store(db, attachment, extractor="pdf-ocr@5")
+        self._store(db, attachment, extractor="pdf-ocr@6")
         calls = self._counting(monkeypatch)
         plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
         assert (calls, plan.cached, plan.text_complete) == ([], True, None)

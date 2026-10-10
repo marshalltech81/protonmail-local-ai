@@ -3,7 +3,8 @@
 Shared by the ``doc`` extractor (catdoc), the ``ppt`` extractor, which
 runs Apache POI in a Java process (#957), and the extractors that run
 in the Python extractor child (``extractor_child.py``: the OOXML
-formats, ``xls`` and ``image``) through ``run_child`` below. Every tool is
+formats, ``xls``, ``eml``, ``image`` and ``html``, which also converts
+message bodies) through ``run_child`` below. Every tool is
 attacker-reachable parsing code, so the run is bounded and its output
 is treated as data:
 

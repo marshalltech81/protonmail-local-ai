@@ -251,16 +251,15 @@ def register_system_tools(server, db):
         recent mail may be missing. Mail that reached Proton after the last
         sync is never searchable yet.
 
-        Returns:
-            server_version (the deployed source commit, with -dirty for
-            local changes, or unknown when build identity is unavailable),
-            current and the reasons it is false, last sync time, indexer
-            liveness, queue counts (pending, retrying, deferred, parked
-            trashed files that do not count against current, dead, and
-            how many waiting messages are already indexed and being
-            reparsed), total threads
-            and messages, the date range, and how many Message-IDs more
-            than one file claims (counts only).
+        Returns server_version (the deployed source commit, with -dirty for
+        local changes, or unknown when build identity is unavailable),
+        current and the reasons it is false, last sync time, indexer
+        liveness, queue counts (pending, retrying, deferred, parked
+        trashed files that do not count against current, dead, and
+        how many waiting messages are already indexed and being
+        reparsed), total threads
+        and messages, the date range, and how many Message-IDs more
+        than one file claims (counts only).
         """
         log.info("tool=get_mailbox_status")
         try:

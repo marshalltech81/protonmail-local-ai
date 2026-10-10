@@ -334,9 +334,9 @@ class TestBuild:
 
         vectors = json.loads((out / "query_vectors.json").read_text(encoding="utf-8"))
         golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
-        assert set(vectors) == {q["query"] for q in golden["search"]} | set(
-            golden["evidence_queries"]
-        )
+        assert set(vectors) == {q["query"] for q in golden["search"]} | {
+            q["query"] for q in golden["semantic"]
+        } | set(golden["evidence_queries"])
 
     def test_case_queries_are_what_each_tool_embeds(self):
         """#656: an ask_mailbox question is embedded; a summarize_thread
@@ -384,9 +384,9 @@ class TestBuild:
 
         vectors = json.loads((out / "query_vectors.json").read_text(encoding="utf-8"))
         golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
-        assert set(vectors) == {q["query"] for q in golden["search"]} | set(
-            golden["evidence_queries"]
-        ) | {question}
+        assert set(vectors) == {q["query"] for q in golden["search"]} | {
+            q["query"] for q in golden["semantic"]
+        } | set(golden["evidence_queries"]) | {question}
         assert vectors[question] == embed_text(question)
 
     @requires_ocr

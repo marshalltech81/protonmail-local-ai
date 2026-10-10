@@ -44,6 +44,7 @@ import json
 import shutil
 import sqlite3
 import sys
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
@@ -51,7 +52,7 @@ from unittest.mock import patch
 from src import main
 from src.database import EMBEDDING_DIM, Database
 from src.embed_identity import verify_or_record_embedder
-from src.embedder import OpenAIEmbedder
+from src.embedder import EmbeddingBackend, OpenAIEmbedder
 from src.queue import IndexingQueue
 from src.threader import Threader
 
@@ -65,7 +66,7 @@ from tests.baseline.corpus import (
 )
 from tests.baseline.embed_server import MODEL as HASH_MODEL
 from tests.baseline.embed_server import serve
-from tests.baseline.hash_embedder import HashEmbedder, embed_text
+from tests.baseline.hash_embedder import HashEmbedder
 
 # The binaries the OCR shapes run: pytesseract starts ``tesseract``, and
 # pdf2image starts Poppler's ``pdfinfo`` (the page count, before every
@@ -172,12 +173,27 @@ def record_embedder_identity(db: Database) -> None:
             embedder.client.close()
 
 
-def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> dict[str, int]:
+def build(
+    out_dir: Path,
+    golden_path: Path,
+    cases_path: Path | None = None,
+    *,
+    embedder: EmbeddingBackend | None = None,
+    query_embedder: EmbeddingBackend | None = None,
+    record_identity: Callable[[Database], None] = record_embedder_identity,
+) -> dict[str, int]:
     """Build ``out_dir/mail.db`` and ``out_dir/query_vectors.json``.
 
-    The query vectors cover the golden search queries and evidence
-    queries and, with ``cases_path``, the text every answer-evaluation
-    case embeds (``case_queries``).
+    The query vectors cover the golden search queries, the semantic
+    paraphrase questions and the evidence queries and, with
+    ``cases_path``, the text every answer-evaluation case embeds
+    (``case_queries``).
+
+    ``embedder`` (default ``HashEmbedder``) embeds the chunks,
+    ``query_embedder`` (default ``embedder``) the queries, and
+    ``record_identity`` records the index's embedder identity before
+    indexing; ``real_embedder.py`` passes a real provider's embedders
+    and identity (#1439). ``make baseline`` uses the defaults.
 
     Returns the indexing queue's final status counts. Raises
     ``RuntimeError`` if any message failed to index, so a broken corpus
@@ -192,9 +208,13 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
     maildir = out_dir / "maildir"
     write_maildir(maildir)
 
+    if embedder is None:
+        embedder = HashEmbedder()
+    if query_embedder is None:
+        query_embedder = embedder
     db = Database(out_dir / "mail.db")
     try:
-        record_embedder_identity(db)
+        record_identity(db)
         with (
             patch.object(main, "MAILDIR_PATH", maildir),
             patch.object(main, "_iter_maildir_messages", _sorted_walk),
@@ -209,7 +229,7 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
             patch.object(main, "INDEXER_OCR_ENABLED", True),
             patch.object(main, "INDEXER_OCR_MAX_PAGES", CAPPED_OCR_MAX_PAGES),
         ):
-            main.initial_index(db, HashEmbedder(), Threader(db), IndexingQueue(db))
+            main.initial_index(db, embedder, Threader(db), IndexingQueue(db))
         stats = IndexingQueue(db).stats()
     finally:
         db.close()
@@ -221,11 +241,19 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
     # ``evidence_queries`` are get_evidence lookups the outstanding-items
     # reachability checks make (#798); they rank nothing in the snapshot.
-    queries = {q["query"] for q in golden["search"]} | set(golden.get("evidence_queries", []))
+    # ``semantic`` questions are ranked only by the real-embedder run
+    # (#1439).
+    queries = (
+        {q["query"] for q in golden["search"]}
+        | {q["query"] for q in golden.get("semantic", [])}
+        | set(golden.get("evidence_queries", []))
+    )
     if cases_path is not None:
         queries |= case_queries(json.loads(cases_path.read_text(encoding="utf-8")))
+    ordered = sorted(queries)
     (out_dir / "query_vectors.json").write_text(
-        json.dumps({q: embed_text(q) for q in sorted(queries)}), encoding="utf-8"
+        json.dumps(dict(zip(ordered, query_embedder.embed_batch(ordered), strict=True))),
+        encoding="utf-8",
     )
     return stats
 

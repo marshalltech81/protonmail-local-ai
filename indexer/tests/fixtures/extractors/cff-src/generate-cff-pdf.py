@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.14"
-# dependencies = ["fonttools==4.66.1", "pypdf==6.19.0"]
+# dependencies = ["fonttools==4.66.1", "pypdf==6.20.0"]
 # ///
 """Write ``cff-font.pdf``, the CFF-font extraction canary for #691.
 

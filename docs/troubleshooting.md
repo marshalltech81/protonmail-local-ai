@@ -2029,6 +2029,7 @@ with no extractor's file name) is not logged.
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |
+| `html_body` | HTML body parts whose text the HTML conversion child left out (#1294): every HTML part of the message when the conversion failed (its 1 GiB, 60 s CPU or 75 s limit, or an error), logged first as `HTML body conversion failed (<type>); the text of <n> HTML parts is left out`; or the part that crossed the 10,000,000-character budget (cut there) and the parts after it, logged as `HTML body conversion stopped at 10000000 chars; ...`. Counted only for parts the body could keep, like `body_parts`; the rest of the message is indexed |
 | `mime_parts` | Every MIME part past the 10,000th (the message itself and the parts inside attachments count): their text and attachments are not read. Counted once per message |
 | `address_header` | Every recipient of a `From`, `To` or `Cc` header over 256,000 characters (checked before the header is decoded) |
 | `address_element` | One address-list entry over 128,000 characters |
@@ -2051,7 +2052,7 @@ and counts only) and whether the content its filters read is complete
 `From`, or `address_fields` for all three), the attachment list
 (`attached_*`, `transport_decode`, `transport_lossy`, `decoded_bytes`,
 `container_serialize`, `mime_parts`) and the body (`body_parts`,
-`mime_parts`). A filter that finds nothing in content a cap cut reports
+`html_body`, `mime_parts`). A filter that finds nothing in content a cap cut reports
 the message as `indeterminate` in `query_messages`, not as a miss
 (`docs/mcp-tools.md`, "Filter predicates").
 

@@ -219,6 +219,17 @@ def test_evidence_recall_floors(results: dict[str, list[ThreadResult]]) -> None:
         assert recall >= floors[name], f"{name} {recall:.3f} below floor {floors[name]}"
 
 
+def test_semantic_evidence_threads_are_indexed(baseline_db: Database) -> None:
+    """Every thread a ``semantic`` paraphrase question cites exists in
+    the built index. Only the real-embedder run ranks these questions
+    (``test_real_embedder_baseline.py``, #1439); this keeps their
+    evidence valid on every push."""
+    with closing(baseline_db._connect()) as conn:
+        threads = {_thread_ref(t) for (t,) in conn.execute("SELECT thread_id FROM threads")}
+    cited = {ref for q in GOLDEN["semantic"] for g in q["required_evidence"] for ref in g}
+    assert cited and cited <= threads, sorted(cited - threads)
+
+
 @pytest.mark.parametrize("e", GOLDEN["enumerate"], ids=lambda e: e["id"])
 def test_enumerate_golden(baseline_db: Database, e: dict) -> None:
     page = baseline_db.query_messages(limit=100, **e["args"])

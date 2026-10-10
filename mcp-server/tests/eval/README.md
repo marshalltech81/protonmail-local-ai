@@ -956,7 +956,10 @@ case questions precomputed at build time; a summary looks its thread
 up by ID) and no reranker, so a run measures prompt assembly,
 inference and the judge on a frozen corpus and index. The hashed
 embedder has no semantics: one question (`ask-lisbon-dates`) misses
-its thread, which the report attributes to retrieval. A real-model synthetic index is a follow-up.
+its thread, which the report attributes to retrieval. A real-model
+build of the synthetic index exists for retrieval floors only (`make
+baseline-real-embedder`, #1439, `tests/baseline/README.md`); the
+answer evaluation still runs on the hashed index.
 
 ### What is captured and graded
 
@@ -1112,8 +1115,8 @@ never fails a run. CI runs only the scripted path (`make baseline` and
 
 Not yet covered (follow-ups): judge calibration against human labels
 and repeated runs to measure variation, quality thresholds,
-recorded runs of the chronology cases (#1369), a real-model
-synthetic index, and token usage.
+recorded runs of the chronology cases (#1369), answer runs on a
+real-model synthetic index, and token usage.
 
 ## What this harness does NOT do
 

@@ -63,3 +63,6 @@ mcp-server/tests/eval/eval-queries.md
 
 # Answer-evaluation run reports and detail artifacts (make eval-answers).
 .answer-eval/
+
+# Real-embedder baseline vector cache (make baseline-real-embedder).
+.real-embedder-cache/
