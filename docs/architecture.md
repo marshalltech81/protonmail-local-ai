@@ -1466,7 +1466,7 @@ the indexer at startup.
 Container identification (#1416, owner decision on #1416, 2026-10-10):
 a payload that starts with the OLE2 signature (`D0 CF 11 E0 A1 B1 1A
 E1`) or a ZIP lead signature (`PK\x03\x04`, `PK\x05\x06` for an empty
-archive, the split / spanned marker `PK\x07\x08`, or the temporary
+archive, `PK\x06\x06` for an empty ZIP64 archive, the split / spanned marker `PK\x07\x08`, or the temporary
 spanning marker `PK00` before a local header) is identified by its directory, whatever its label (image,
 Office, text, PDF, HTML, email or none) and before the OCR gate, and
 runs the one extractor its directory names. `extractors/container.py`

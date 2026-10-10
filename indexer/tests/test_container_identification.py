@@ -197,6 +197,28 @@ class TestIdentification:
         assert (result.status, result.identifier) == (STATUS_SUCCESS, CONTAINER_IDENTIFIER)
         assert stubbed_extractors == ["docx"]
 
+    def test_an_empty_zip64_archive_is_a_container(self, stubbed_extractors):
+        """Review round 8 on #1444: an empty ZIP64 archive starts with its
+        ZIP64 end-of-central-directory record (``PK\\x06\\x06``), which
+        zipfile reads; it is identified like any ZIP, under any label,
+        never decoded as text."""
+        record = b"PK\x06\x06" + struct.pack("<QHHIIQQQQ", 44, 45, 45, 0, 0, 0, 0, 0, 0)
+        locator = b"PK\x06\x07" + struct.pack("<IQI", 0, 0, 1)
+        end = b"PK\x05\x06" + struct.pack(
+            "<HHHHIIH", 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0
+        )
+        payload = record + locator + end
+        assert zipfile.ZipFile(io.BytesIO(payload)).namelist() == []
+        assert extractors.has_container_prefix(payload)
+        assert container_child.extract_text(payload) == ("zip-other", [])
+        result = extract(content_type="text/plain", filename="a.txt", payload=payload)
+        assert (result.status, result.error, result.identifier) == (
+            STATUS_UNSUPPORTED,
+            ZIP_NOT_OFFICE_ERROR,
+            CONTAINER_IDENTIFIER,
+        )
+        assert stubbed_extractors == []
+
     def test_only_the_two_metadata_members_are_opened(self, monkeypatch):
         """Of the members, only ``[Content_Types].xml`` and ``_rels/.rels``
         are read (owner decision on #1416, 2026-10-10)."""
@@ -759,12 +781,14 @@ def test_the_signature_set_is_pinned_to_its_version():
     (and this pin), so every row certified against the old set is checked
     again; removing a signature also changes what identification does, so
     it bumps ``CONTAINER_IDENTIFICATION_VERSION`` as well."""
+    # 2: the empty ZIP64 archive's lead record (review round 8 on #1444).
     assert (CONTAINER_SIGNATURE_VERSION, extractors._CONTAINER_SIGNATURES) == (
-        1,
+        2,
         (
             b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
             b"PK\x03\x04",
             b"PK\x05\x06",
+            b"PK\x06\x06",
             b"PK\x07\x08",
             b"PK00PK\x03\x04",
         ),
@@ -1081,7 +1105,7 @@ class TestStartupSweep:
         ]
         assert line.levelno == logging.INFO
         assert line.getMessage() == (
-            "container identification sweep (version 2, signature set 1): 4 message(s) with "
+            "container identification sweep (version 2, signature set 2): 4 message(s) with "
             "an attachment result cached before its OLE2 / ZIP container certification, under "
             "an older identification version or checked against an older signature set; "
             "re-queued 3, already queued 0, skipped 1 dead-lettered (run make requeue-dead to "

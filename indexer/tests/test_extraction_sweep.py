@@ -381,7 +381,7 @@ def test_identification_arm_reads_bounded_batches(mailbox, monkeypatch, caplog):
         if r.getMessage().startswith("container identification sweep")
     ]
     assert line == (
-        "container identification sweep (version 2, signature set 1): 5 message(s) with an "
+        "container identification sweep (version 2, signature set 2): 5 message(s) with an "
         "attachment result cached before its OLE2 / ZIP container certification, under an "
         "older identification version or checked against an older signature set; re-queued "
         "3, already queued 1, skipped 1 dead-lettered (run make requeue-dead to refresh them)."

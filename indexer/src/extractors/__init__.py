@@ -920,8 +920,9 @@ CONTAINER_IDENTIFIER = f"container@{CONTAINER_IDENTIFICATION_VERSION}"
 # 2026-10-10). Bump it with any change to the set: a row certified
 # against an older set is checked again, re-extracted if its payload now
 # carries a signature and otherwise restamped with its result kept.
-# ``test_the_signature_set_is_pinned_to_its_version`` pins the pair.
-CONTAINER_SIGNATURE_VERSION = 1
+# ``test_the_signature_set_is_pinned_to_its_version`` pins the pair. 2:
+# the empty ZIP64 archive's lead record (review round 8 on #1444).
+CONTAINER_SIGNATURE_VERSION = 2
 NOT_CONTAINER_IDENTIFIER = f"none@{CONTAINER_SIGNATURE_VERSION}"
 
 # ``unsupported`` errors for an extractor exception the same bytes always
@@ -1460,10 +1461,18 @@ def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
 # same label selects for a payload that is not OLE2.
 _LEGACY_TO_OOXML = {"doc": "docx", "xls": "xlsx"}
 # The lead signatures of a ZIP: a local file header, an empty archive's
-# end-of-central-directory record, and the split / spanned marker and the
+# end-of-central-directory record and an empty ZIP64 archive's ZIP64 one
+# (review round 8 on #1444), and the split / spanned marker and the
 # temporary spanning marker (``PK00``, before a local header) a ZIP can
-# start with (Codex round 1 on #1444).
-_ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08", b"PK00PK\x03\x04")
+# start with (Codex round 1 on #1444). A change here bumps
+# ``CONTAINER_SIGNATURE_VERSION``.
+_ZIP_SIGNATURES = (
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    b"PK\x06\x06",
+    b"PK\x07\x08",
+    b"PK00PK\x03\x04",
+)
 _PDF_SIGNATURE = b"%PDF-"
 # The prefixes whose payloads are identified by their directory (#1416).
 _CONTAINER_SIGNATURES = (_OLE2_SIGNATURE, *_ZIP_SIGNATURES)
