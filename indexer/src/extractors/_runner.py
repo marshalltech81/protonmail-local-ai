@@ -54,17 +54,24 @@ here as it arrives. Every frame but the text is one ASCII line:
   ``N launches <count>``, the processes the child itself started
   (Tesseract for an image), added to this interpreter's
   ``process_launches`` (#1236);
+* ``R <type name>``: the extraction caught an error of that type and
+  degraded instead of failing (the PDF OCR fallback, #1293);
 * ``E <type name>``: the extraction raised; nothing may follow;
 * ``T <length>`` and then exactly ``length`` bytes of UTF-8 text;
-  nothing may follow.
+  nothing may follow. A caller that passes ``names`` gets the extractor
+  name with it instead: ``T <length> <name>``, one of ``names``.
 
+The ``C``, ``N`` and ``R`` frames may precede either ``T`` or ``E``.
 Output that breaks this (a line over ``_MAX_FRAME_LINE`` bytes, an
 unknown frame or name, bytes after the last frame, a text shorter or
 longer than its length, text that is not UTF-8, no ``E`` or ``T``
 frame) or that the output cap cut raises ``ChildOutputError``: a
 ``failed`` row, never text. ``E`` raises the caller's ``permanent``
 class for that name, else ``ChildError``, which the dispatcher records
-``failed`` under the reported name.
+``failed`` under the reported name. A caller's ``on_report`` gets the
+caps, counts and recovered errors before either the text is returned
+or the error raised, so what the child recorded before it failed is not
+lost (#1293).
 """
 
 from __future__ import annotations
@@ -79,7 +86,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Bytes read from a tool's stdout per call.
@@ -205,11 +212,26 @@ class ToolOutput:
 @dataclass(frozen=True)
 class ChildResult:
     """The extractor child's text, the budgets that cut it (each once,
-    in the order reported) and its counts."""
+    in the order reported) and its counts; the extractor name when the
+    caller asked for one (``names``), and the type names of the errors
+    the extraction recovered from (each once)."""
 
     text: str
     caps: list[str]
     counts: dict[str, int]
+    name: str | None = None
+    recovered: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ChildReport:
+    """What the extractor child reported besides its text or error: the
+    budgets that cut, its counts and the type names of the errors it
+    recovered from."""
+
+    caps: list[str]
+    counts: dict[str, int]
+    recovered: list[str]
 
 
 def raw_output_cap(max_extracted_chars: int | None, *, ceiling: int) -> int:
@@ -391,18 +413,25 @@ def run_child(
     max_output_bytes: int,
     caps: frozenset[str],
     counts: frozenset[str] = frozenset(),
+    names: frozenset[str] = frozenset(),
     permanent: Mapping[str, type[Exception]] | None = None,
     on_progress: Callable[[], None] | None = None,
+    on_report: Callable[[ChildReport], None] | None = None,
     options: Sequence[str] = (),
 ) -> ChildResult:
     """Run ``module``'s extraction of ``payload`` in the extractor child
     under the caller's limits, and parse its frames (module docstring).
     ``options`` are the module's own arguments, fixed text the caller
     builds from its settings (``image``: the page cap and OCR timeout).
-    The wall-clock timeout is past the CPU limit, so a CPU-bound child
-    meets that first."""
+    With ``names``, the text frame must carry one of them, returned as
+    the result's ``name``. ``on_report`` (when set) is called once the
+    output has parsed, with the caps, counts and recovered errors,
+    before the text is returned or the child's error raised; not when
+    the run failed or its output broke the protocol. The wall-clock
+    timeout is past the CPU limit, so a CPU-bound child meets that
+    first."""
     global _launches
-    frames = _Frames(caps, counts | {CHILD_LAUNCHES}, on_progress)
+    frames = _Frames(caps, counts | {CHILD_LAUNCHES}, on_progress, names)
     try:
         output = run_tool(
             [sys.executable, "-I", str(_CHILD), module, *options],
@@ -421,11 +450,16 @@ def run_child(
         raise ChildOutputError
     error = frames.error()
     if error is not None:
+        if on_report is not None:
+            on_report(frames.report())
         known = (permanent or {}).get(error)
         if known is not None:
             raise known()
         raise ChildError(error)
-    return frames.result()
+    result = frames.result()
+    if on_report is not None:
+        on_report(frames.report())
+    return result
 
 
 class _Frames:
@@ -436,10 +470,14 @@ class _Frames:
         caps: frozenset[str],
         counts: frozenset[str],
         on_progress: Callable[[], None] | None,
+        names: frozenset[str] = frozenset(),
     ) -> None:
         self._caps_allowed = caps
         self._counts_allowed = counts
+        self._names_allowed = names
         self._on_progress = on_progress
+        self._recovered: list[str] = []
+        self._name: str | None = None
         self._line = bytearray()
         self._caps: list[str] = []
         self._counts: dict[str, int] = {}
@@ -493,10 +531,22 @@ class _Frames:
             if name not in self._counts_allowed or not _COUNT.fullmatch(count):
                 raise ChildOutputError
             self._counts[name] = int(count)
+        elif kind == "R" and _TYPE_NAME.fullmatch(value):
+            if value not in self._recovered:
+                self._recovered.append(value)
         elif kind == "E" and _TYPE_NAME.fullmatch(value):
             self._error = value
-        elif kind == "T" and _COUNT.fullmatch(value):
-            self._text_length = int(value)
+        elif kind == "T":
+            length, _, name = value.partition(" ")
+            if not _COUNT.fullmatch(length):
+                raise ChildOutputError
+            # A caller that asked for the extractor name gets one of its
+            # names; any other caller gets none.
+            valid = name in self._names_allowed if self._names_allowed else not name
+            if not valid:
+                raise ChildOutputError
+            self._name = name or None
+            self._text_length = int(length)
         else:
             raise ChildOutputError
 
@@ -524,4 +574,10 @@ class _Frames:
             text = self._text.decode("utf-8")
         except UnicodeDecodeError:
             raise ChildOutputError from None
-        return ChildResult(text, list(self._caps), dict(self._counts))
+        return ChildResult(
+            text, list(self._caps), dict(self._counts), self._name, list(self._recovered)
+        )
+
+    def report(self) -> ChildReport:
+        """The caps, counts and recovered errors read so far."""
+        return ChildReport(list(self._caps), dict(self._counts), list(self._recovered))

@@ -405,9 +405,14 @@ _TOOLS_OUTSIDE_RUN_TOOL = {
     # ``run_child``: each Tesseract inherits the child's limits and dies
     # with its process group (#1292).
     "extractors/image_child.py": "Tesseract through pytesseract, in the extractor child (#1292)",
-    # pdf2image runs pdfinfo and pdftoppm, and pytesseract Tesseract,
-    # under the OCR timeout.
-    "extractors/pdf.py": "pdfinfo, pdftoppm and Tesseract through pdf2image and pytesseract (#1021)",
+    # Runs only in the extractor child, which ``pdf.py`` starts through
+    # ``run_child``: pdf2image's pdfinfo and pdftoppm and pytesseract's
+    # Tesseract inherit the child's limits and die with its process
+    # group (#1293).
+    "extractors/pdf_child.py": (
+        "pdfinfo, pdftoppm and Tesseract through pdf2image and pytesseract, in the extractor "
+        "child (#1293)"
+    ),
 }
 
 
@@ -429,6 +434,7 @@ class TestEveryToolRunsUnderLimits:
             "extractors/html.py",
             "extractors/image.py",
             "extractors/ooxml.py",
+            "extractors/pdf.py",
             "extractors/ppt.py",
             "extractors/pptx.py",
             "extractors/xls.py",
@@ -447,6 +453,25 @@ class TestEveryToolRunsUnderLimits:
         code = (
             "import sys; import src.extractors, src.extractors.image; "
             "print(sorted(m for m in ('src.extractors.image_child', 'pytesseract') "
+            "if m in sys.modules))"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=Path(extractors.__file__).parents[2],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert out.stdout.strip() == "[]"
+
+    def test_the_indexer_never_loads_the_pdf_child(self):
+        """``pdf_child`` parses the PDF and starts Poppler and Tesseract;
+        only the extractor child may import it (#1293). Importing the PDF
+        extractor and running the dispatcher's imports loads neither it
+        nor pdf2image or pytesseract."""
+        code = (
+            "import sys; import src.extractors, src.extractors.pdf; "
+            "print(sorted(m for m in ('src.extractors.pdf_child', 'pdf2image', 'pytesseract') "
             "if m in sys.modules))"
         )
         out = subprocess.run(
