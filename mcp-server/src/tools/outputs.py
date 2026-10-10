@@ -879,7 +879,9 @@ class ListedAttachment(_Output):
         "null when no extraction is recorded for the payload and extractor_module (not yet "
         "run, or extraction off)."
     )
-    extractor: str | None = Field(description="The extractor that ran; null without one.")
+    extractor: str | None = Field(
+        description="The extractor, with its version, that recorded the result; null when none did."
+    )
     extracted_at: str | None = Field(description="When the extraction ran; null without one.")
     ocr_pages_skipped: int | None = Field(
         description="Scanned PDF pages the OCR page cap left unread; null when unknown."
