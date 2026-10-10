@@ -1296,3 +1296,11 @@ class TestEmbedRetryAfterSeconds:
 
         assert embed_retry_after_seconds(_api_status_error(429)) is None
         assert embed_retry_after_seconds(ValueError("x")) is None
+
+
+def test_is_rate_limit_error_is_429_only():
+    from src.embedder import is_rate_limit_error
+
+    assert is_rate_limit_error(_api_status_error(429)) is True
+    assert is_rate_limit_error(_api_status_error(408)) is False
+    assert is_rate_limit_error(ValueError("x")) is False

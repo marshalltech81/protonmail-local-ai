@@ -272,6 +272,11 @@ def classify_embed_failure(exc: BaseException) -> str:
     return EMBED_FAILURE_UNCERTAIN
 
 
+def is_rate_limit_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is the provider's HTTP 429."""
+    return isinstance(exc, APIStatusError) and exc.status_code == 429
+
+
 def embed_retry_after_seconds(exc: BaseException) -> float | None:
     """The provider's ``Retry-After`` delay in seconds, if it sent one.
 

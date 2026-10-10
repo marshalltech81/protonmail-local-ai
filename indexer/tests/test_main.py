@@ -7340,6 +7340,34 @@ class TestEmbedFailureHandling:
         assert breaker.open_until - before == pytest.approx(expected, abs=5)
         assert self._row(db, paths["a"])["attempts"] == 0
 
+    @pytest.mark.parametrize("batch_error", [_status_error(408), _connection_error()])
+    def test_size_sensitive_batch_failure_still_splits(
+        self, tmp_path, monkeypatch, caplog, batch_error
+    ):
+        """A timeout, 408 or connection error on a full-sized batch may
+        depend on its size: the probe and the split still run, so
+        indexing can continue with smaller requests (Codex, #1386)."""
+        caplog.set_level(logging.INFO)
+        db, threader, queue, paths = self._setup(
+            tmp_path, monkeypatch, {"a": "alpha body", "b": "beta body"}
+        )
+        embedder = make_mock_embedder()
+        calls = {"n": 0}
+
+        def embed_batch(texts, **_kw):
+            calls["n"] += 1
+            if len(texts) > 1:
+                raise batch_error
+            return [_UNIT_VECTOR for _ in texts]
+
+        embedder.embed_batch.side_effect = embed_batch
+        embedder.embed.return_value = _UNIT_VECTOR
+        self._drain(db, embedder, threader, queue)
+
+        assert "individually" in caplog.text
+        assert _chunk_ids(db, "a@example.com")
+        assert _chunk_ids(db, "b@example.com")
+
     def test_rejected_batch_still_splits_after_the_rate_limit_change(
         self, tmp_path, monkeypatch, caplog
     ):

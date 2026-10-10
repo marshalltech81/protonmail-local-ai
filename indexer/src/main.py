@@ -77,7 +77,6 @@ from .embed_identity import (
 )
 from .embedder import (
     EMBED_FAILURE_CONFIGURATION,
-    EMBED_FAILURE_INFRASTRUCTURE,
     EMBED_FAILURE_REJECTED_INPUT,
     EMBED_FAILURE_UNCERTAIN,
     EmbeddingBackend,
@@ -85,6 +84,7 @@ from .embedder import (
     OpenAIEmbedder,
     classify_embed_failure,
     embed_retry_after_seconds,
+    is_rate_limit_error,
     scrub_embed_error,
 )
 from .entities import (
@@ -2631,16 +2631,18 @@ def _drain_queue_batched(
             # ``EmbedResponseError``), trims SDK status errors to
             # type + status_code, and anything else to its type.
             err_repr = scrub_embed_error(e)
-            if classify_embed_failure(e) == EMBED_FAILURE_INFRASTRUCTURE:
-                # Throttled (429), slow (408) or unreachable: the whole
-                # request failed, so there is no bad input to isolate,
-                # and splitting it multiplies the request rate against
-                # a provider that is already pushing back (#1384). Back
-                # off and retry the whole batch, spending no attempts.
+            if is_rate_limit_error(e):
+                # Throttled: the whole request was refused for rate, so
+                # there is no bad input to isolate, and splitting it
+                # multiplies the request rate against a provider that
+                # is already pushing back (#1384). Back off and retry
+                # the whole batch, spending no attempts. A timeout, 408
+                # or connection error can depend on the request's size,
+                # so those keep the probe and the split below.
                 log.warning(
-                    "batched embed failed (%s): the provider is rate limiting "
-                    "or unreachable; deferring the whole batch of %d message(s) "
-                    "without splitting it.",
+                    "batched embed failed (%s): the provider is rate limiting; "
+                    "deferring the whole batch of %d message(s) without "
+                    "splitting it.",
                     err_repr,
                     len(survivors),
                 )
