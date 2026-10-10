@@ -745,9 +745,11 @@ def phase_reconcile(
     t_parse = time.perf_counter()
     with closing(_ro(db_path)) as conn:
         conn.execute("BEGIN")
-        # Wall clock, for the WAL phase to line up with its samples.
-        started_at = time.time()
         count = conn.execute(count_sql, params).fetchone()[0]
+        # BEGIN is deferred: the snapshot is taken by the COUNT, so the
+        # wall clock the WAL phase lines up with its samples is read
+        # after it.
+        started_at = time.time()
         digest = hashlib.sha256(CERT_DOMAIN)
         server: set[bytes] = set()
         missing: list[str] = []
@@ -777,8 +779,10 @@ def phase_reconcile(
         t_records = time.perf_counter()
         if hold_s:
             time.sleep(hold_s)
-        conn.rollback()
+        # Still inside the transaction: its frames are retained until the
+        # rollback.
         ended_at = time.time()
+        conn.rollback()
     response = {
         "complete": missing_total <= k,
         "snapshot_count": count,
@@ -885,34 +889,43 @@ OCCURRENCE_FILTERS: tuple[dict, ...] = (
 )
 
 
-def phase_filtered(db_path: str, kind: str, filters: dict, collect_first: bool = False) -> dict:
+def phase_filtered(db_path: str, kind: str, filters: dict, reverse: bool = False) -> dict:
     """One production page of the query under ``filters``
     (``Database.query_messages`` or ``query_attachments`` with
-    ``limit=1``: its counts and first row), then the certificate over
-    the same predicate by each scan method, each timed on its own."""
+    ``limit=1``: its counts and first row) and the certificate over the
+    same predicate by each scan method, each timed on its own.
+
+    Whatever runs after another reads pages it cached, so ``reverse``
+    flips the whole order (page, stream, collect) from one repeat to the
+    next."""
     from src.lib.sqlite import Database
 
     _import_serializers()
     db = Database(db_path)
-    t0 = time.perf_counter()
-    if kind == "messages":
-        rest = {k: v for k, v in filters.items() if k != "where"}
-        page = db.query_messages(limit=1, where=_where_leaves(filters.get("where")), **rest)
-    else:
-        page = db.query_attachments(limit=1, **filters)
-    page_s = time.perf_counter() - t0
-    # Whichever certificate runs second reads pages the first cached;
-    # ``collect_first`` swaps them from one repeat to the next.
-    order = ("collect", "stream") if collect_first else ("stream", "collect")
-    done = {m: phase_certificate(db_path, kind, m, filters) for m in order}
-    cert, collected = done["stream"], done["collect"]
+
+    def page_run() -> dict:
+        t0 = time.perf_counter()
+        if kind == "messages":
+            rest = {k: v for k, v in filters.items() if k != "where"}
+            page = db.query_messages(limit=1, where=_where_leaves(filters.get("where")), **rest)
+        else:
+            page = db.query_attachments(limit=1, **filters)
+        return {"page_s": time.perf_counter() - t0, "page_total": page.total_matches}
+
+    steps = ["page", "stream", "collect"]
+    done = {}
+    for step in reversed(steps) if reverse else steps:
+        done[step] = (
+            page_run() if step == "page" else phase_certificate(db_path, kind, step, filters)
+        )
+    page, cert, collected = done["page"], done["stream"], done["collect"]
     if collected["digest"] != cert["digest"]:
         raise ValueError("stream and collect certificates differ")
     return {
-        "page_total": page.total_matches,
+        "page_total": page["page_total"],
         "count": cert["count"],
         "scanned": cert["scanned"],
-        "page_s": page_s,
+        "page_s": page["page_s"],
         "certificate_s": cert["total_s"],
         "certificate_collect_s": collected["total_s"],
         "rss_kib": _rss_kib(),
@@ -959,6 +972,7 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
     ballast, as the indexer's steady-state batch of eight would."""
     rng = random.Random(7)
     commits = 0
+    times: list[float] = []
     with closing(sqlite3.connect(db_path, isolation_level=None, timeout=30)) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -976,10 +990,13 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
             conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - 64,))
             conn.execute("INSERT INTO bench_commits (at) VALUES (?)", (time.time(),))
             conn.execute("COMMIT")
+            # Stamped after the commit: a commit is in a round's window
+            # only once it is durable.
+            times.append(time.time())
             commits += 1
             if interval:
                 time.sleep(interval)
-    return {"commits": commits}
+    return {"commits": commits, "commit_times": times}
 
 
 # --- orchestration ------------------------------------------------------
@@ -1029,7 +1046,13 @@ def write_request(
     if missing_from == "worst":
         with closing(_ro(db_path)) as conn:
             worst = {row[0].encode() for row in conn.execute("SELECT identity FROM bench_worst")}
-        skip = set([n for n, b in enumerate(ids) if b in worst][:missing])
+        available = [n for n, b in enumerate(ids) if b in worst]
+        if len(available) < missing and not all_extras:
+            raise ValueError(
+                f"--missing-from worst: {len(available)} worst-case {kind} match, "
+                f"--missing asks for {missing}; build more with --messages or lower --missing"
+            )
+        skip = set(available[:missing])
     else:
         step = max(1, len(ids) // missing) if missing else 0
         skip = set(range(0, len(ids), step)[:missing]) if missing else set()
@@ -1155,10 +1178,7 @@ def run_wal(
     start, end = result["started_at"], result["ended_at"]
     at_start = max((s for when, s in samples if when <= start), default=0)
     in_window = [s for when, s in samples if start <= when <= end]
-    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
-        overlapping = conn.execute(
-            "SELECT COUNT(*) FROM bench_commits WHERE at > ? AND at < ?", (start, end)
-        ).fetchone()[0]
+    overlapping = sum(1 for t in writer_out["commit_times"] if start < t < end)
     with closing(sqlite3.connect(db_path, timeout=30)) as conn:
         busy, log_pages, ckpt_pages = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
     return {
@@ -1309,7 +1329,7 @@ def _fill_thread(filters: dict, identity: str) -> dict:
 
 def _filtered_runs(db: str, kind: str, filters: dict, repeat: int) -> dict:
     runs = [
-        _child("filtered", db_path=db, kind=kind, filters=filters, collect_first=n % 2 == 1)
+        _child("filtered", db_path=db, kind=kind, filters=filters, reverse=n % 2 == 1)
         for n in range(repeat)
     ]
     if any(r["scanned"] != r["count"] for r in runs):

@@ -1904,31 +1904,28 @@ retries on its next pass.
   collect round was 1.6 to 2.4 times faster on occurrences, for at most
   23 MiB more peak RSS at the cap-sized run (1.8 to 1.9 times
   faster there, order balanced), and a collected
-  certificate stayed under one page's cost for every filter, where a
-  streamed one reached 7.6 times.
-- **Filtered queries:** no further cap. With that scan method a
-  certificate cost at most 1.6 times one page of the same message query
-  in these runs; the predicate cost itself is the query's, as it is for
-  paging. On 50,000 messages (142,500 occurrences), without planner
-  statistics, the `query_attachments` clauses (a filename substring that
-  matches nothing and one that matches all, MIME type, extraction status
-  `success` and `none`, one thread) cost a collected certificate 0.5 to
-  1.03 times one page, and a streamed one up to 3.1 times (the filename
-  that matches nothing). An explicit `where`
-  expression (`query_messages` only; the node cap of 16 spent on
-  combined and negated address, display-name and body-word leaves, flat
-  and in an `any` group) on the same 50,000 messages cost a certificate
-  0.13 to 0.16 times one page at 1,000 and 47,500 matches (0.7 to 1.0 s
-  against 5.2 to 6.5 s for the page). With 300 messages that each carry
-  10,000 participant rows and 11,000 display-name rows (the parser's
-  caps: 3.0 and 3.3 million rows), a participant predicate took a
-  certificate 4.6 s against a page of 9.2 to 9.6 s, and a `where`
-  expression 0.6 to 1.2 s against 17.9 to 18.4 s. With 15,000 messages
-  of 20 chunks of 1,000 words each (300,000 chunks) and a 16-term `text`
-  or `body_words` value matching 14,250 of them, a certificate took
-  2.8 to 2.9 s against a page of 7.3 to 8.3 s, whichever scan method.
-  No certificate cost more than half its page in these runs. A
-  cap-sized set of such messages was not built.
+  certificate cost at most 1.06 times one page in the balanced filtered
+  runs, where a streamed one reached 2.8 times (7.6 times in the earlier
+  runs, stream first).
+- **Filtered queries:** no bound is proposed or claimed. The work of
+  a filtered predicate per message is not bounded by the message-count
+  cap (a message can carry the parser's maximum of chunks, participant
+  rows and name rows, and a `where` expression can combine up to 16
+  such leaves), and it was not measured at cap size
+  ([#1396](https://github.com/marshalltech81/protonmail-local-ai/issues/1422)).
+  What was measured, with the page and both certificates alternating
+  which runs first, without planner statistics: on 50,000 messages
+  (142,500 occurrences) a certificate cost 0.14 to 1.56 times one page
+  of the same query streamed and 0.14 to 1.06 times collected; on the
+  `query_attachments` clauses (filename, MIME type, extraction status,
+  thread) streamed it reached 2.83 times. On 300 messages that each
+  carry 10,000 participant rows and 11,000 display-name rows (3.0 and
+  3.3 million rows), a participant predicate took a certificate
+  4.5 s against a page of 9.0 to 11.9 s (messages) and 6.8 s
+  (occurrences), and a `where` expression 0.6 to 1.3 s against 18.4 to
+  18.6 s. On 15,000 messages of 20 chunks of 1,000 words (300,000
+  chunks) a 16-term `text` or `body_words` value took a certificate
+  2.9 s against a page of 7.3 to 8.6 s.
 
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,

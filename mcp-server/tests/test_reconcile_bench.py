@@ -496,3 +496,49 @@ def test_all_extras_upload_misses_every_member_and_returns_worst_records(all_ext
             assert round_["returned"] == 3
     # Worst-case records first: wide fields, not the typical ones.
     assert all_extras["reconcile"]["messages"]["stream"]["3"]["record_bytes_max"] > 10_000
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_filtered_run_alternates_page_and_certificates(bench, tmp_path, monkeypatch, reverse):
+    from src.lib import sqlite as server_sqlite
+
+    db = tmp_path / "order.db"
+    bench.build(db, 20, 1, "typical", "typical")
+    order: list[str] = []
+    real_cert = bench.phase_certificate
+    real_page = server_sqlite.Database.query_messages
+
+    def cert(db_path, kind, method, filters=None):
+        order.append(method)
+        return real_cert(db_path, kind, method, filters)
+
+    def page(self, *args, **kwargs):
+        order.append("page")
+        return real_page(self, *args, **kwargs)
+
+    monkeypatch.setattr(bench, "phase_certificate", cert)
+    monkeypatch.setattr(server_sqlite.Database, "query_messages", page)
+    bench.phase_filtered(str(db), "messages", {"participant": "from0.7"}, reverse)
+    assert order == (["collect", "stream", "page"] if reverse else ["page", "stream", "collect"])
+
+
+def test_round_window_starts_after_the_snapshot_and_ends_before_the_rollback(bench):
+    import inspect
+
+    src = inspect.getsource(bench.phase_reconcile)
+    # The deferred BEGIN takes its snapshot at the COUNT; the writer's
+    # commits are retained until the rollback.
+    assert src.index("count = conn.execute") < src.index("started_at = time.time()")
+    assert src.index("ended_at = time.time()") < src.index("conn.rollback()")
+
+
+def test_wal_commits_are_stamped_by_the_writer_after_they_commit(report):
+    for wal in report["wal"]:
+        assert wal["commits_during_transaction"] <= wal["writer_commits_total"]
+
+
+def test_missing_worst_beyond_the_worst_members_is_rejected(bench, tmp_path):
+    db = tmp_path / "few.db"
+    bench.build(db, 60, 1, "typical", "mixed")  # one worst message in fifty
+    with pytest.raises(ValueError, match="--missing-from worst: .* match, --missing asks for 50"):
+        bench.write_request(str(db), "messages", 50, 0, tmp_path / "r.json", "worst")
