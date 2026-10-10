@@ -532,7 +532,10 @@ class TestDocExtractor:
             assert result.error in {"ToolExitError", "ToolCrashError"}
         garbage = _OLE2_MAGIC + MARKER.encode() + bytes(2048)
         result = extract(content_type="application/msword", filename="a.doc", payload=garbage)
-        assert (result.status, result.error) == (STATUS_FAILED, "NotOleFileError")
+        # olefile's own type, which depends on the header field the
+        # garbage breaks first (and on the platform), never its message.
+        assert (result.status, result.extractor) == (STATUS_FAILED, None)
+        assert result.error in {"NotOleFileError", "ValueError", "OSError"}
         assert MARKER not in caplog.text
 
     def test_missing_binary_is_failed(self, monkeypatch):
@@ -1016,7 +1019,10 @@ class TestPptRealReader:
         assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
         # Bytes that are not an OLE2 file fail identification (#1416).
         result = _ppt(_OLE2_MAGIC + MARKER.encode() + bytes(2048))
-        assert (result.status, result.error) == (STATUS_FAILED, "NotOleFileError")
+        # olefile's own type, which depends on the header field the
+        # garbage breaks first (and on the platform), never its message.
+        assert (result.status, result.extractor) == (STATUS_FAILED, None)
+        assert result.error in {"NotOleFileError", "ValueError", "OSError"}
         assert MARKER not in caplog.text
 
     def test_encrypted_deck_is_a_fixed_unsupported_row(self, caplog):
