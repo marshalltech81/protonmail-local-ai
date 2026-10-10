@@ -2086,6 +2086,321 @@ check "stalled syncs count to the exit without a success stamp" \
 check "invalid deadlines are refused at startup" invalid_deadlines_are_refused_at_startup
 check "the deadline defaults agree" deadline_defaults_agree
 
+# --- the rendered config and the startup order are pinned (#1480) ----------
+#
+# PLAN.md decision 45 moves the Proton Bridge path behind a provider
+# boundary without changing it. These cases fail on any change to the
+# rendered mbsyncrc or to the order of the startup checks.
+#
+# The entrypoint renders one shape only: Host BRIDGE_CERT_HOST and a
+# Tunnel to BRIDGE_HOST:BRIDGE_IMAP_PORT. Those three values and
+# BRIDGE_USER are all that reach the file, comments included.
+# mbsyncrc.golden is the file rendered with Compose's endpoint
+# (host.docker.internal, port 1143, certificate name 127.0.0.1) and a
+# synthetic user, compared byte for byte.
+
+GOLDEN="$(dirname "$ENTRYPOINT")/tests/mbsyncrc.golden"
+readonly GOLDEN
+
+# Renders the template $1 with Compose's endpoint and the synthetic user
+# ($2 names the case); succeeds when the result is the golden file.
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+renders_the_golden() {
+    endpoint_setup "golden-$2"
+    TEMPLATE_FILE="$1"
+    # Not a substituted variable: it must not reach the file.
+    export BRIDGE_PASS="synthetic-golden-marker-pass"
+    render_mbsync_config
+    cmp -s "$CONFIG_FILE" "$GOLDEN"
+}
+
+rendered_config_matches_the_golden_file() {
+    if ! renders_the_golden "$TEMPLATE" match; then
+        diff "$GOLDEN" "$CONFIG_FILE" || true
+        return 1
+    fi
+}
+
+# Each mutation changes one line of the template, a setting or a comment,
+# and the comparison must catch it.
+one_line_template_changes_fail_the_golden() {
+    local mutation copy n=0
+    while IFS= read -r mutation; do
+        n=$((n + 1))
+        copy="$WORK/template-mutation-$n"
+        sed "$mutation" "$TEMPLATE" >"$copy"
+        if [[ "$(diff "$TEMPLATE" "$copy" | grep -c '^>')" != 1 ]]; then
+            printf 'mutation %s does not change exactly one line\n' "$mutation"
+            return 1
+        fi
+        if renders_the_golden "$copy" "mutation-$n"; then
+            printf 'the golden comparison missed: %s\n' "$mutation"
+            return 1
+        fi
+    done <<'EOF'
+s/^Expunge None$/Expunge Both/
+s/ !"Starred"//
+s/^CopyArrivalDate yes$/CopyArrivalDate no/
+s/^Sync Pull$/Sync Pull /
+s/^# Remote store/#  Remote store/
+EOF
+    ((n == 5)) || return 1
+}
+
+# Other endpoint values and another user change exactly the substituted
+# text and nothing else.
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+rendered_config_varies_only_in_the_substituted_values() {
+    local token expected
+    # None of the golden file's values is in the template, so every
+    # occurrence in the golden file came from the substitution.
+    for token in 127.0.0.1 host.docker.internal:1143 synthetic@example.com; do
+        if grep -qF "$token" "$TEMPLATE"; then
+            printf 'the template itself holds %s\n' "$token"
+            return 1
+        fi
+    done
+    endpoint_setup variation
+    BRIDGE_HOST="bridge.example"
+    BRIDGE_IMAP_PORT=2993
+    BRIDGE_CERT_HOST="localhost"
+    export BRIDGE_USER="other-synthetic@example.net"
+    render_mbsync_config
+    expected="$(cat "$GOLDEN")"
+    expected="${expected//host.docker.internal:1143/bridge.example:2993}"
+    expected="${expected//127.0.0.1/localhost}"
+    expected="${expected//synthetic@example.com/other-synthetic@example.net}"
+    if [[ "$(cat "$CONFIG_FILE")" != "$expected" ]]; then
+        diff <(printf '%s\n' "$expected") "$CONFIG_FILE" || true
+        return 1
+    fi
+}
+
+check "the rendered config matches the golden file byte for byte" \
+    rendered_config_matches_the_golden_file
+check "one-line template changes fail the golden comparison" \
+    one_line_template_changes_fail_the_golden
+check "the rendered config varies only in the substituted values" \
+    rendered_config_varies_only_in_the_substituted_values
+
+# The startup order, from the whole entrypoint run on the host: a copy
+# whose fixed paths (/tmp/mbsync, the template, /run/secrets, /state,
+# /maildir) point into $WORK, with nc, openssl s_client, envsubst, mbsync
+# and the sleep between syncs replaced by mocks that append an EVENT line
+# to the log the entrypoint writes to. The log then shows each check and
+# external step in the order it ran. mbsync is where the Bridge password
+# is sent (mbsyncrc's PassCmd), so a refused start must end before its
+# EVENT line. The mock records what mbsync would see (config, pin,
+# certificate), and the sleep between syncs stops the entrypoint with TERM
+# after the first sync.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+order_setup() {
+    ORDER_DIR="$WORK/order-$1"
+    ORDER_LOG="$ORDER_DIR/log"
+    ORDER_ENTRYPOINT="$ORDER_DIR/entrypoint.sh"
+    mkdir -p "$ORDER_DIR/bin" "$ORDER_DIR/runtime" "$ORDER_DIR/state" "$ORDER_DIR/maildir" \
+        "$ORDER_DIR/secrets" "$ORDER_DIR/seen"
+    printf 'synthetic-order-marker-pass\n' >"$ORDER_DIR/secrets/bridge_pass"
+    : >"$ORDER_LOG"
+    sed -e "s|^readonly RUNTIME_DIR=\"/tmp/mbsync\"\$|readonly RUNTIME_DIR=\"$ORDER_DIR/runtime\"|" \
+        -e "s|^readonly TEMPLATE_FILE=\"/etc/mbsyncrc.template\"\$|readonly TEMPLATE_FILE=\"$TEMPLATE\"|" \
+        -e "s|^readonly BRIDGE_PASS_FILE=\"/run/secrets/bridge_pass\"\$|readonly BRIDGE_PASS_FILE=\"$ORDER_DIR/secrets/bridge_pass\"|" \
+        -e "s|^readonly STATE_DIR=\"/state\"\$|readonly STATE_DIR=\"$ORDER_DIR/state\"|" \
+        -e "s|^readonly MAILDIR_PATH=\"/maildir\"\$|readonly MAILDIR_PATH=\"$ORDER_DIR/maildir\"|" \
+        "$ENTRYPOINT" >"$ORDER_ENTRYPOINT"
+    # The five paths moved and nothing else changed; otherwise a run could
+    # touch the real paths.
+    if [[ "$(diff "$ENTRYPOINT" "$ORDER_ENTRYPOINT" | grep -c '^>')" != 5 ]]; then
+        echo "the entrypoint's fixed paths changed; update order_setup"
+        return 1
+    fi
+    # shellcheck disable=SC2016 # the mocks' own expansions
+    {
+        printf '#!/bin/bash\nprintf "EVENT probe\\n" >>"$ORDER_DIR/log"\n' >"$ORDER_DIR/bin/nc"
+        printf '#!/bin/bash\nif [[ "$1" == s_client ]]; then\n  printf "EVENT cert-fetch\\n" >>"$ORDER_DIR/log"\n  cat "$(cat "$ORDER_DIR/served")"\n  exit 0\nfi\nexec "$REAL_OPENSSL" "$@"\n' \
+            >"$ORDER_DIR/bin/openssl"
+        printf '#!/bin/bash\nprintf "EVENT render\\n" >>"$ORDER_DIR/log"\nexec "$REAL_ENVSUBST" "$@"\n' \
+            >"$ORDER_DIR/bin/envsubst"
+        # Called as mbsync -c CONFIG -a.
+        printf '#!/bin/bash\nprintf "EVENT mbsync\\n" >>"$ORDER_DIR/log"\ncp "$2" "$ORDER_DIR/seen/mbsyncrc"\ncp "$ORDER_DIR/state/bridge-cert.fingerprint" "$ORDER_DIR/seen/pin"\ncp "$ORDER_DIR/runtime/bridge-cert.pem" "$ORDER_DIR/seen/cert"\n' \
+            >"$ORDER_DIR/bin/mbsync"
+        printf '#!/bin/bash\nif [[ "$1" == "$SYNC_INTERVAL" ]]; then\n  printf "EVENT sleep-between-syncs\\n" >>"$ORDER_DIR/log"\n  kill -TERM "$PPID"\nfi\nexec "$REAL_SLEEP" "$@"\n' \
+            >"$ORDER_DIR/bin/sleep"
+    }
+    chmod 755 "$ORDER_DIR/bin/nc" "$ORDER_DIR/bin/openssl" "$ORDER_DIR/bin/envsubst" \
+        "$ORDER_DIR/bin/mbsync" "$ORDER_DIR/bin/sleep"
+    load cert_fingerprint
+}
+
+# Runs the copy with Compose's settings plus the NAME=VALUE arguments, in
+# an environment holding only those; sets ORDER_RC to its exit status.
+order_run() {
+    ORDER_RC=0
+    env -i PATH="$ORDER_DIR/bin:$PATH" ORDER_DIR="$ORDER_DIR" \
+        REAL_OPENSSL="$(command -v openssl)" REAL_ENVSUBST="$(command -v envsubst)" \
+        REAL_SLEEP="$(command -v sleep)" \
+        BRIDGE_HOST=host.docker.internal BRIDGE_IMAP_PORT=1143 BRIDGE_CERT_HOST=127.0.0.1 \
+        BRIDGE_USER=synthetic@example.com SYNC_INTERVAL=3600 SYNC_DEADLINE_SECONDS=86400 \
+        BRIDGE_CERT_PIN_ROTATE=false "$@" \
+        timeout 60 "$BASH" "$ORDER_ENTRYPOINT" >>"$ORDER_LOG" 2>&1 || ORDER_RC=$?
+}
+
+# The log reduced to one word per milestone, in order. Any other ERROR or
+# WARNING line is "error" or "warning", so an unexpected one shows.
+order_of() {
+    local line words=""
+    while IFS= read -r line; do
+        case "$line" in
+            ">>> Startup identity:"*) words+=" identity" ;;
+            *"BRIDGE_CERT_FINGERPRINT is not set"*) words+=" no-expected-fingerprint" ;;
+            ">>> WARNING: BRIDGE_CERT_PIN_ROTATE=true"*"will be accepted"*) words+=" rotation-on" ;;
+            "EVENT render") words+=" render" ;;
+            ">>> Waiting for ProtonBridge IMAP"*) words+=" wait" ;;
+            "EVENT probe") words+=" probe" ;;
+            "EVENT cert-fetch") words+=" cert-fetch" ;;
+            *"does not match BRIDGE_CERT_FINGERPRINT"*) words+=" expected-mismatch" ;;
+            ">>> First boot"*"pinned Bridge cert fingerprint"*) words+=" pin-first-boot" ;;
+            *"fingerprint matches the pinned value"*) words+=" pin-match" ;;
+            *"fingerprint does not match pinned value"*) words+=" pin-mismatch" ;;
+            *"BRIDGE_CERT_PIN_ROTATE=true"*"rotating pin"*) words+=" pin-rotated" ;;
+            ">>> Bridge cert extracted successfully."*) words+=" cert-accepted" ;;
+            ">>> Running initial sync"*) words+=" initial-sync" ;;
+            "EVENT mbsync") words+=" mbsync" ;;
+            ">>> Sync ok"*) words+=" sync-ok" ;;
+            ">>> Starting sync loop"*) words+=" sync-loop" ;;
+            "EVENT sleep-between-syncs") words+=" sleep" ;;
+            ">>> Received SIGTERM"*) words+=" stopped" ;;
+            ">>> ERROR:"*) words+=" error" ;;
+            ">>> WARNING:"*) words+=" warning" ;;
+        esac
+    done <"$ORDER_LOG"
+    printf '%s\n' "${words# }"
+}
+
+# The milestones match $1 and the run exited with $2; the password never
+# reaches the log.
+order_is() {
+    local got
+    got="$(order_of)"
+    if [[ "$got" != "$1" || "$ORDER_RC" != "$2" ]]; then
+        printf 'got:      %s (exit %s)\nexpected: %s (exit %s)\n' "$got" "$ORDER_RC" "$1" "$2"
+        sed 's/^/  log: /' "$ORDER_LOG"
+        return 1
+    fi
+    if grep -q 'synthetic-order-marker' "$ORDER_LOG"; then
+        echo "the password reached the log"
+        return 1
+    fi
+}
+
+# A refused start: nothing reached mbsync, no certificate is kept, and
+# the pin is $1 (empty for none).
+refused_before_mbsync() {
+    [[ -z "$(find "$ORDER_DIR/seen" -type f)" ]] || return 1
+    [[ ! -e "$ORDER_DIR/runtime/bridge-cert.pem" ]] || return 1
+    if [[ -z "$1" ]]; then
+        [[ ! -e "$ORDER_DIR/state/bridge-cert.fingerprint" ]] || return 1
+    else
+        [[ "$(cat "$ORDER_DIR/state/bridge-cert.fingerprint")" == "$1" ]] || return 1
+    fi
+}
+
+# The full order of a first start: validation, render, the wait, the
+# certificate, the pin, then mbsync with the golden config, the pin stored
+# and the certificate in place.
+first_start_runs_in_order() {
+    order_setup first-start
+    printf '%s\n' "$WORK/cert-a.pem" >"$ORDER_DIR/served"
+    order_run BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-a.pem")"
+    order_is "identity render wait probe cert-fetch pin-first-boot cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143
+    cmp -s "$ORDER_DIR/seen/mbsyncrc" "$GOLDEN" || {
+        diff "$GOLDEN" "$ORDER_DIR/seen/mbsyncrc" || true
+        return 1
+    }
+    [[ "$(cat "$ORDER_DIR/seen/pin")" == "$(cert_fingerprint "$WORK/cert-a.pem")" ]] || return 1
+    cmp -s "$ORDER_DIR/seen/cert" "$WORK/cert-a.pem" || return 1
+}
+
+# A missing BRIDGE_CERT_FINGERPRINT stops the start at validation: no
+# render, no wait, no connection.
+missing_expected_fingerprint_stops_before_render() {
+    order_setup missing
+    printf '%s\n' "$WORK/cert-a.pem" >"$ORDER_DIR/served"
+    order_run
+    order_is "identity no-expected-fingerprint" 1
+    [[ ! -e "$ORDER_DIR/runtime/mbsyncrc" ]] || return 1
+    refused_before_mbsync ""
+}
+
+# The expected fingerprint is checked before the pin: with a pin that
+# would accept the presented certificate, a certificate other than the
+# expected one is still refused, and the pin is never consulted.
+expected_fingerprint_mismatch_stops_before_the_pin() {
+    local pinned
+    order_setup expected-mismatch
+    pinned="$(cert_fingerprint "$WORK/cert-a.pem")"
+    printf '%s\n' "$pinned" >"$ORDER_DIR/state/bridge-cert.fingerprint"
+    printf '%s\n' "$WORK/cert-a.pem" >"$ORDER_DIR/served"
+    order_run BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-b.pem")"
+    order_is "identity render wait probe cert-fetch expected-mismatch" 1
+    refused_before_mbsync "$pinned"
+}
+
+# Rotation does not lift the expected fingerprint, and it is still checked
+# first.
+rotation_stops_at_an_expected_fingerprint_mismatch() {
+    local pinned
+    order_setup rotation-mismatch
+    pinned="$(cert_fingerprint "$WORK/cert-a.pem")"
+    printf '%s\n' "$pinned" >"$ORDER_DIR/state/bridge-cert.fingerprint"
+    printf '%s\n' "$WORK/cert-b.pem" >"$ORDER_DIR/served"
+    order_run BRIDGE_CERT_FINGERPRINT="$pinned" BRIDGE_CERT_PIN_ROTATE=true
+    order_is "identity rotation-on render wait probe cert-fetch expected-mismatch" 1
+    refused_before_mbsync "$pinned"
+}
+
+# The expected certificate against another pin, without rotation: refused
+# by the pin, before mbsync.
+pin_mismatch_stops_before_mbsync() {
+    local pinned
+    order_setup pin-mismatch
+    pinned="$(cert_fingerprint "$WORK/cert-a.pem")"
+    printf '%s\n' "$pinned" >"$ORDER_DIR/state/bridge-cert.fingerprint"
+    printf '%s\n' "$WORK/cert-b.pem" >"$ORDER_DIR/served"
+    order_run BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-b.pem")"
+    order_is "identity render wait probe cert-fetch pin-mismatch" 1
+    refused_before_mbsync "$pinned"
+}
+
+# An approved rotation: the boot warning comes first, and the new pin is
+# stored before mbsync runs.
+approved_rotation_stores_the_pin_before_mbsync() {
+    local rotated
+    order_setup rotation
+    rotated="$(cert_fingerprint "$WORK/cert-b.pem")"
+    cert_fingerprint "$WORK/cert-a.pem" >"$ORDER_DIR/state/bridge-cert.fingerprint"
+    printf '%s\n' "$WORK/cert-b.pem" >"$ORDER_DIR/served"
+    order_run BRIDGE_CERT_FINGERPRINT="$rotated" BRIDGE_CERT_PIN_ROTATE=true
+    order_is "identity rotation-on render wait probe cert-fetch pin-rotated cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143
+    [[ "$(cat "$ORDER_DIR/seen/pin")" == "$rotated" ]] || return 1
+    cmp -s "$ORDER_DIR/seen/cert" "$WORK/cert-b.pem" || return 1
+    cmp -s "$ORDER_DIR/seen/mbsyncrc" "$GOLDEN" || return 1
+}
+
+check "startup order: a first start renders, waits, pins, then runs mbsync" \
+    first_start_runs_in_order
+check "startup order: a missing expected fingerprint stops before the render" \
+    missing_expected_fingerprint_stops_before_render
+check "startup order: the expected fingerprint is checked before the pin" \
+    expected_fingerprint_mismatch_stops_before_the_pin
+check "startup order: rotation still stops at the expected fingerprint" \
+    rotation_stops_at_an_expected_fingerprint_mismatch
+check "startup order: a pin mismatch stops before mbsync" \
+    pin_mismatch_stops_before_mbsync
+check "startup order: an approved rotation stores the pin before mbsync" \
+    approved_rotation_stores_the_pin_before_mbsync
+
 # --- startup identity line (#887) -------------------------------------------
 #
 # One line names the image's source commit, a random boot ID and a hash of
