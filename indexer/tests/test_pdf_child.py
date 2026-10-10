@@ -995,20 +995,42 @@ class TestLimitsInTheImage:
         assert list(scratch_root.iterdir()) == []
 
     @requires_ocr_tools
-    def test_a_heavy_digital_page_then_scans_run_under_the_ocr_phase_limit(self):
+    def test_a_heavy_digital_page_then_scans_run_under_the_ocr_phase_limit(
+        self, tmp_path, monkeypatch
+    ):
         """#1450: a 16 MiB page of path operators (pypdf's walk peaks
         around 430 MiB) then scanned pages, end to end. The child's limit
         is 2 GiB for the parse and the OCR phase's once OCR starts; each
-        Poppler and Tesseract process runs under the OCR phase's."""
+        Poppler and Tesseract process runs under the OCR phase's.
+
+        Every tool pdf2image and pytesseract start is recorded by a shim
+        that writes its own ``/proc`` limits before ``exec``ing the real
+        tool (#1473): ``pdfinfo`` exits within milliseconds, so sampling
+        ``/proc`` missed it in some runs. ``PATH`` holds only the shims,
+        so a tool the libraries start that is not shimmed fails the
+        extraction rather than escaping the check."""
+        shims = tmp_path / "shims"
+        records = tmp_path / "records"
+        shims.mkdir()
+        records.mkdir()
+        tools = ("pdfinfo", "pdftoppm", "tesseract")
+        for tool in tools:
+            real = shutil.which(tool)
+            assert real is not None
+            shim = shims / tool
+            shim.write_text(
+                "#!/bin/bash\nset -Eeuo pipefail\n"
+                f'printf "%s\\n" "$(</proc/$$/limits)" > "{records}/{tool}.$$"\n'
+                f'exec "{real}" "$@"\n'
+            )
+            shim.chmod(0o755)
+        monkeypatch.setenv("PATH", str(shims))
         payload = _mixed_pdf(16.0, 2)
-        seen: dict[int, tuple[str, str]] = {}
         child_limits: set[tuple[int, int]] = set()
         done = threading.Event()
 
         def watch():
             while not done.is_set():
-                for pid, found in _tools_under(Path(_runner._TMP_DIR)).items():
-                    seen.setdefault(pid, found)
                 for limits in _pdf_children():
                     child_limits.add(_limit(limits, "Max address space"))
                 time.sleep(0.005)
@@ -1023,10 +1045,10 @@ class TestLimitsInTheImage:
         assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-ocr@6")
         assert "synthetic" in (result.text or "").lower()
         assert progress == 3 + 2
-        tools = {name for name, _limits in seen.values()}
-        assert {"tesseract", "pdftoppm", "pdfinfo"} <= tools
+        seen = [(r.name.split(".")[0], r.read_text()) for r in records.iterdir()]
+        assert {name for name, _limits in seen} == set(tools)
         ocr_phase = pdf._OCR_TOOL_ADDRESS_SPACE_BYTES
-        for _name, limits in seen.values():
+        for _name, limits in seen:
             assert _limit(limits, "Max address space") == (ocr_phase, ocr_phase)
         parse = pdf.CHILD_MAX_ADDRESS_SPACE_BYTES
         assert child_limits <= {(parse, parse), (ocr_phase, ocr_phase)}
@@ -1186,7 +1208,10 @@ def _scanned_text_pages(count: int) -> bytes:
 
 
 def _pdf_children() -> list[str]:
-    """The ``/proc`` limits of every PDF extractor child running."""
+    """The ``/proc`` limits of every PDF extractor child running. The
+    launcher that starts one is left out: its arguments name the child
+    too, and it runs unlimited until it sets the limits and ``exec``s
+    the child (#1473)."""
     found = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -1195,6 +1220,8 @@ def _pdf_children() -> list[str]:
             argv = (entry / "cmdline").read_bytes().split(b"\0")
             limits = (entry / "limits").read_text()
         except OSError:
+            continue
+        if any(a.endswith(b"_launcher.py") for a in argv):
             continue
         if any(a.endswith(b"extractor_child.py") for a in argv) and b"pdf" in argv:
             found.append(limits)
