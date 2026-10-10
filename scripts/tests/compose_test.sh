@@ -43,6 +43,7 @@ render() {
         ${GIT_COMMIT:+GIT_COMMIT="$GIT_COMMIT"} \
         ${EMBED_BASE_URL:+EMBED_BASE_URL="$EMBED_BASE_URL"} \
         ${EMBED_MODEL:+EMBED_MODEL="$EMBED_MODEL"} \
+        ${MCP_PORT:+MCP_PORT="$MCP_PORT"} \
         docker compose --project-directory "$ROOT_DIR" --env-file /dev/null "${args[@]}" \
         config --format json >"$WORK/config.json" 2>"$WORK/compose.err" || {
         cat "$WORK/compose.err"
@@ -608,6 +609,14 @@ the_base_runs_mbsync_indexer_and_mcp_server() {
     expect '.services["mcp-server"].depends_on.indexer.condition == "service_healthy"' || return 1
 }
 
+# #1192: the published port and its container target must both follow
+# MCP_PORT, so a literal in ports: cannot leave the server unreachable.
+mcp_port_follows_the_published_port() {
+    MCP_PORT=4000 render "$BASE"
+    expect '.services["mcp-server"].environment.MCP_PORT == "4000"' || return 1
+    expect '.services["mcp-server"].ports | map("\(.host_ip):\(.published):\(.target)/\(.protocol)") == ["127.0.0.1:4000:4000/tcp"]' || return 1
+}
+
 mbsync_points_at_the_host_app() {
     render "$BASE"
     expect '.services.mbsync.environment.BRIDGE_HOST == "host.docker.internal"' || return 1
@@ -749,6 +758,7 @@ check "the base runs mbsync, indexer and mcp-server, with no Bridge dependency" 
     the_base_runs_mbsync_indexer_and_mcp_server
 check "mbsync points at the host app" mbsync_points_at_the_host_app
 check "mbsync takes the IMAP port from the environment" mbsync_takes_the_port_from_the_environment
+check "mcp-server publishes the port MCP_PORT names on both sides" mcp_port_follows_the_published_port
 check "mbsync takes the expected fingerprint from the environment" \
     mbsync_takes_the_expected_fingerprint_from_the_environment
 check "mbsync keeps its hardening and no new port is exposed" \
