@@ -1361,6 +1361,7 @@ class TestAttachmentOutcomeCounts:
             "cached": 0,
             "deferred_messages": 0,
             "deferred_resumed": 0,
+            "dropped": 0,
             "pdf_pages_failed": 0,
             "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 0,
@@ -1470,6 +1471,7 @@ class TestAttachmentOutcomeCounts:
             "cached": 4,
             "deferred_messages": 1,
             "deferred_resumed": 2,
+            "dropped": 3,
             "pdf_pages_failed": 5,
             "pdf_pages_unrecovered": 9,
             "ocr_capped_pdfs": 7,
@@ -1487,7 +1489,7 @@ class TestAttachmentOutcomeCounts:
         assert attachment_indexing.format_attachment_outcomes(counts) == (
             "attachments n=11 success=3 failed=1 unsupported=0 too_large=0 "
             "ocr_disabled=2 empty=0 deferred=5 cached=4 deferred_messages=1 deferred_resumed=2 "
-            "pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
+            "dropped=3 pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
             "ocr_pages_skipped=8 ocr_capped_images=2 extractor_caps=4 parser_caps_messages=3 "
             "parser_recipients_merged_messages=1 parser_sender_ambiguous_messages=2 "
             "eml_headers_degraded=3 eml_filenames_degraded=1 eml_charsets_degraded=5 "
@@ -1508,6 +1510,8 @@ class TestAttachmentOutcomeCounts:
         ("deferred", True),
         ("deferred_messages", True),
         ("deferred_resumed", False),
+        # Stale occurrences removed (#1375): no text is lost.
+        ("dropped", False),
         # A page pypdf cannot read may still be OCR-recovered: a
         # diagnostic count, not lost text (review round 3).
         ("pdf_pages_failed", False),

@@ -864,8 +864,15 @@ kind of reindex that needs depends on whether search data changes too:
   in [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
 
 The release notes and the migration's header say which applies.
+A reparse also removes the attachment occurrences the current parser
+no longer produces (for example a row kept under a filename an earlier
+parser fix now decodes differently), with their filename search rows
+and, when no other occurrence of the message carries the same bytes,
+their chunks (#1375); the attachments line counts them as `dropped`.
 `make reparse` queues the same reparse by hand, for recovery (for
-example when a reparse's jobs were cleared another way). Messages that
+example when a reparse's jobs were cleared another way), and run once
+after upgrading to the release with #1375 it clears such leftovers
+from earlier parser fixes. Messages that
 already have a job keep it, and dead-lettered ones stay dead until
 `make requeue-dead`. It runs inside the indexer container, so the
 stack must be up:
@@ -1774,7 +1781,7 @@ only, never filenames or text (`make logs`):
   here.
 - `attachments n=<total> success= failed= unsupported= too_large=
   ocr_disabled= empty= deferred= cached= deferred_messages=
-  deferred_resumed= pdf_pages_failed=
+  deferred_resumed= dropped= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
   ocr_capped_images= extractor_caps= parser_caps_messages=
   parser_recipients_merged_messages= parser_sender_ambiguous_messages=
@@ -1793,7 +1800,10 @@ only, never filenames or text (`make logs`):
   extraction budget (#1236), `deferred_messages` the messages committed
   with some deferred, and `deferred_resumed` previously deferred
   occurrences that resolved; a deferred attachment is extracted on a
-  later pass of its message, never dropped. A continuation pass skips
+  later pass of its message, never dropped. `dropped` counts stored
+  occurrences removed because the message's current parse no longer
+  produces them (#1375; a stale row, not lost text, so it does not make
+  the line a WARNING). A continuation pass skips
   the occurrences resolved in earlier passes, so they are not counted
   again.
   - When it is logged: during the initial index, with the timing summary

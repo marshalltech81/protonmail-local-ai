@@ -1490,9 +1490,10 @@ class _BatchedMsg:
     # pass (#1236): Phase 2c then continues the message instead of
     # marking it succeeded.
     deferred_attachments: int = 0
-    # Occurrences with a deferral mark this parse no longer has (a parser
-    # change dropped them): Phase 2c clears the marks (#1236).
-    obsolete_deferrals: list[str] = field(default_factory=list)
+    # Stored occurrences of the message this parse no longer produces (a
+    # parser change dropped or renamed them): Phase 2c deletes them, with
+    # any deferral mark (#1236, #1375).
+    stale_occurrences: list[str] = field(default_factory=list)
     parse_ms: float = 0.0
     thread_ms: float = 0.0
     phase1_ms: float = 0.0
@@ -1912,11 +1913,7 @@ def _phase2a_collect_chunks(
             # #1355). Each copy resolved earlier is read once per module,
             # from its cached row as it stands, and only adds its chunks;
             # a payload settles once, so this work stays linear.
-            state.obsolete_deferrals = sorted(
-                occurrence_id
-                for occurrence_id, (_, deferred) in occurrence_states.items()
-                if deferred and occurrence_id not in parsed_occurrences
-            )
+            state.stale_occurrences = sorted(set(occurrence_states) - parsed_occurrences)
             deferred_now = {plan.attachment.content_hash for plan in attach_plans if plan.deferred}
             resolved_now = {
                 plan.attachment.content_hash for plan in attach_plans if not plan.deferred
@@ -1953,15 +1950,21 @@ def _phase2a_collect_chunks(
                     add_plan(plan, attachment)
         elif INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
             # The parse has no attachments (a parser change may have
-            # dropped them all): any stored deferral mark is obsolete
-            # (Codex round 7 on #1355).
-            state.obsolete_deferrals = sorted(
-                occurrence_id
-                for occurrence_id, (_, deferred) in db.get_attachment_occurrence_states(
-                    msg.claimant_id
-                ).items()
-                if deferred
-            )
+            # dropped them all): every stored occurrence is stale
+            # (Codex round 7 on #1355, #1375).
+            state.stale_occurrences = sorted(db.get_attachment_occurrence_states(msg.claimant_id))
+        # Phase 2c deletes the message's chunk slice of each stale
+        # payload no parsed attachment carries (#1375), which may leave
+        # the thread chunkless, so the fallback below is reserved for it.
+        if state.stale_occurrences:
+            parsed_payloads = {attachment.content_hash for attachment in msg.attachments}
+            for content_hash in sorted(
+                db.get_attachment_payloads(msg.claimant_id, state.stale_occurrences)
+                - parsed_payloads
+            ):
+                clears_chunks = clears_chunks or bool(
+                    db.get_chunk_ids_for_message(msg.claimant_id, attachment_id=content_hash)
+                )
         # A plan without text clears its attachment's chunk slice in
         # Phase 2c, unless another copy of the same bytes in this message
         # fills it: that copy counted the stored chunks as kept and
@@ -2124,6 +2127,11 @@ def _phase2c_commit_vectors(
                     thread_id=thread.thread_id,
                     db=db,
                 )
+            # After the parse's own occurrence writes, so a stale
+            # occurrence's payload slice goes only when no parsed
+            # occurrence carries it, and before the thread vector is
+            # derived from the sums the deletion updates (#1375).
+            dropped = db.delete_attachment_occurrences(msg.claimant_id, state.stale_occurrences)
             # Replace the Phase 1 seed thread vector. Three cases
             # mirror the old ``_seed_thread_embedding`` logic:
             #   1. Thread now has chunks (this message contributed
@@ -2144,8 +2152,6 @@ def _phase2c_commit_vectors(
                 db.replace_thread_vector(thread.thread_id, chunk_mean)
             elif state.subject_fallback_offset is not None:
                 db.replace_thread_vector(thread.thread_id, vectors[state.subject_fallback_offset])
-            for occurrence_id in state.obsolete_deferrals:
-                db.clear_attachment_extraction_deferral(occurrence_id)
             if continues:
                 # The refund of a lone survivor's charge is part of this
                 # transaction, and the charge stays watched until it
@@ -2165,6 +2171,7 @@ def _phase2c_commit_vectors(
     # Counted once committed, so a message prepared again after an
     # embedder outage is counted once (review round 1 on #884).
     record_committed_outcomes(state.attach_plans)
+    attachment_outcomes.record_dropped(dropped)
     if continues:
         attachment_outcomes.record_deferred_message()
         _note_extraction_deferral()

@@ -174,6 +174,13 @@ class AttachmentOutcomeCounts:
         with self._lock:
             self._counts["deferred_messages"] += 1
 
+    def record_dropped(self, n: int) -> None:
+        """Stored occurrences a pass deleted because the message's
+        current parse no longer produces them (#1375)."""
+        if n:
+            with self._lock:
+                self._counts["dropped"] += n
+
     def drain(self) -> dict[str, int]:
         """Return every outcome's count plus ``cached`` and the extractor
         counts, and reset them."""
@@ -181,7 +188,13 @@ class AttachmentOutcomeCounts:
             counts, self._counts = self._counts, Counter()
         drained = {
             name: counts[name]
-            for name in (*ATTACHMENT_OUTCOMES, "cached", "deferred_messages", "deferred_resumed")
+            for name in (
+                *ATTACHMENT_OUTCOMES,
+                "cached",
+                "deferred_messages",
+                "deferred_resumed",
+                "dropped",
+            )
         }
         drained.update(drain_extractor_counts())
         return drained
@@ -198,6 +211,9 @@ _SUMMARY_FIELDS = (
     # resolved (#1236).
     "deferred_messages",
     "deferred_resumed",
+    # Stored occurrences deleted because the message's current parse no
+    # longer produces them (#1375): stale rows removed, not text lost.
+    "dropped",
     "pdf_pages_failed",
     "pdf_pages_unrecovered",
     "ocr_capped_pdfs",

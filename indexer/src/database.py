@@ -1823,23 +1823,82 @@ class Database:
             raise
 
     @_synchronized
-    def clear_attachment_extraction_deferral(self, occurrence_id: str) -> None:
-        """Clear the deferral mark of an occurrence its message no longer
-        has (a parser change dropped it, #1236), so it neither reads as
-        deferred nor re-queues its message. In phase 2c's transaction."""
+    def get_attachment_payloads(self, claimant_id: str, occurrence_ids: list[str]) -> set[str]:
+        """The payloads (``attachment_id``) of ``claimant_id``'s stored
+        occurrences among ``occurrence_ids``."""
+        payloads: set[str] = set()
+        for occurrence_id in occurrence_ids:
+            row = self._conn.execute(
+                "SELECT attachment_id FROM attachments "
+                "WHERE attachment_occurrence_id = ? AND claimant_id = ?",
+                (occurrence_id, claimant_id),
+            ).fetchone()
+            if row is not None:
+                payloads.add(row["attachment_id"])
+        return payloads
+
+    @_synchronized
+    def delete_attachment_occurrences(self, claimant_id: str, occurrence_ids: list[str]) -> int:
+        """Drop occurrences of ``claimant_id`` its current parse no longer
+        produces (#1375) and return how many rows went.
+
+        Each occurrence's ``attachments`` row and ``attachments_fts`` row
+        go (a deferral mark goes with the row, #1236). The message's
+        chunk slice of a payload goes only when no remaining occurrence
+        of the message carries that payload, since the slice is keyed by
+        message and payload and a surviving sibling (the same bytes under
+        a corrected filename) uses it; its vectors are subtracted from
+        their threads' chunk-vector sums (#1356). A cached extraction of
+        the payload that no remaining occurrence uses is purged, as when
+        the whole message is removed. In phase 2c's transaction, after
+        the pass's own occurrence writes, so the remaining occurrences
+        are the parse's.
+        """
         cur = self._conn.cursor()
         started = False
         try:
             started = self._begin_if_needed(cur)
-            cur.execute(
-                "UPDATE attachments SET extraction_deferred_at = NULL "
-                "WHERE attachment_occurrence_id = ?",
-                (occurrence_id,),
-            )
+            payloads: set[str] = set()
+            deleted = 0
+            for occurrence_id in occurrence_ids:
+                row = cur.execute(
+                    "SELECT fts_rowid, attachment_id FROM attachments "
+                    "WHERE attachment_occurrence_id = ? AND claimant_id = ?",
+                    (occurrence_id, claimant_id),
+                ).fetchone()
+                if row is None:
+                    continue
+                payloads.add(row["attachment_id"])
+                if row["fts_rowid"] is not None:
+                    cur.execute("DELETE FROM attachments_fts WHERE rowid = ?", (row["fts_rowid"],))
+                    self._mark_fts_scrub("attachments_fts")
+                cur.execute(
+                    "DELETE FROM attachments WHERE attachment_occurrence_id = ?",
+                    (occurrence_id,),
+                )
+                deleted += 1
+            for attachment_id in sorted(payloads):
+                still_carried = cur.execute(
+                    "SELECT 1 FROM attachments WHERE claimant_id = ? AND attachment_id = ? LIMIT 1",
+                    (claimant_id, attachment_id),
+                ).fetchone()
+                if still_carried is None:
+                    rows = cur.execute(
+                        "SELECT chunk_id, fts_rowid, thread_id FROM message_chunks "
+                        "WHERE claimant_id = ? AND attachment_id = ?",
+                        (claimant_id, attachment_id),
+                    ).fetchall()
+                    self._delete_chunks_in_batches(cur, rows)
+                    cur.execute(
+                        "DELETE FROM message_chunks WHERE claimant_id = ? AND attachment_id = ?",
+                        (claimant_id, attachment_id),
+                    )
+                cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id,))
             self._commit_if_started(started)
         except Exception:
             self._rollback_if_started(started)
             raise
+        return deleted
 
     @_synchronized
     def get_attachment_occurrence_states(
