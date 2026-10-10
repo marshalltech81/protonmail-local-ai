@@ -129,11 +129,11 @@ def _reset_extractor_warning_budget(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _ooxml_child_in_process(request, monkeypatch):
-    """Run the extractor child (#1040, #1291, #1292, #1294) in this
-    process for the OOXML, image and HTML conversions (the ``html``
-    extractor and message bodies), through the same frames and parsing
-    (progress frames as each page is read), so a test can patch a walk's
-    budgets, stub Tesseract or count calls. The ``xls`` extractor starts
+    """Run the extractor child (#1040, #1291, #1292, #1293, #1294) in
+    this process for the OOXML, image, PDF and HTML conversions (the
+    ``html`` extractor and message bodies), through the same frames and
+    parsing (progress frames as each page is read), so a test can patch a
+    walk's budgets, stub Poppler or Tesseract or count calls. The ``xls`` extractor starts
     the real child, as before. A test marked ``real_extractor_child``
     starts the real child process for every module
     (``tests/test_ooxml_child.py``, ``tests/test_image_child.py``)."""
@@ -149,7 +149,7 @@ def _ooxml_child_in_process(request, monkeypatch):
         pytesseract.pytesseract, "tesseract_cmd", pytesseract.pytesseract.tesseract_cmd
     )
     real = _runner.run_tool
-    in_process = OOXML_MODULES | {"image", "html"}
+    in_process = OOXML_MODULES | {"image", "html", "pdf"}
 
     def run_tool(argv, payload, *, on_output=None, **kwargs):
         child = str(_runner._CHILD)
@@ -158,8 +158,11 @@ def _ooxml_child_in_process(request, monkeypatch):
         assert on_output is not None
         module, *options = argv[argv.index(child) + 1 :]
         # A real child starts with zero counters (#1314): set the test's
-        # aside so the child sends only what this extraction counted.
+        # aside so the child sends only what this extraction counted. It
+        # also has its own attempt state, which the dispatcher's must
+        # not see changed: the parent applies only what crosses.
         before = extractors.drain_counters()
+        attempt = dict(vars(extractors._attempt))
         try:
             output = extractor_child.run(
                 module,
@@ -169,6 +172,8 @@ def _ooxml_child_in_process(request, monkeypatch):
             )
         finally:
             extractors.add_counters(before)
+            vars(extractors._attempt).clear()
+            vars(extractors._attempt).update(attempt)
         on_output(output)
         return _runner.ToolOutput(b"", truncated=False)
 

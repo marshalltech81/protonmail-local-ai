@@ -396,7 +396,7 @@ class TestRealChild:
         child = str(Path(ooxml.__file__).with_name("extractor_child.py"))
         with pytest.raises(ToolExitError) as raised:
             run_tool(
-                [sys.executable, "-I", child, "pdf"],
+                [sys.executable, "-I", child, "rtf"],
                 b"%PDF-1.7",
                 timeout_seconds=30,
                 max_output_bytes=1024,
