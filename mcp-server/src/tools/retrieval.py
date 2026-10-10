@@ -2224,10 +2224,9 @@ def register_retrieval_tools(server, db):
         before search_emails as a discovery step; search_emails
         already understands folder filters when the user names them.
 
-        Returns:
-            All folders with thread counts from the local index. A
-            folder's count is the threads with a message in it, so a
-            thread spanning folders counts in each.
+        Returns all folders with thread counts from the local index. A
+        folder's count is the threads with a message in it, so a
+        thread spanning folders counts in each.
         """
         log.info("tool=list_folders")
         try:

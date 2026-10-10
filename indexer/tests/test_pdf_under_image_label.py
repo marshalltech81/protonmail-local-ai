@@ -416,10 +416,10 @@ class TestSweep:
         # Each unstamped row was re-extracted once, and the pending message too.
         assert len(p.extractor.calls) == 4
         after = _rows(p)
-        assert (f"{MARKER}-1.png", "pdf", "pdf-digital@5", "success", None) in after
-        assert (f"{MARKER}-2.jpg", "pdf", "pdf-digital@5", "success", None) in after
+        assert (f"{MARKER}-1.png", "pdf", "pdf-digital@6", "success", None) in after
+        assert (f"{MARKER}-2.jpg", "pdf", "pdf-digital@6", "success", None) in after
         assert (f"{MARKER}-3.png", "image", _STAMP, "unsupported", OCR_DISABLED_ERROR) in after
-        assert (f"{MARKER}-7.png", "pdf", "pdf-digital@5", "success", None) in after
+        assert (f"{MARKER}-7.png", "pdf", "pdf-digital@6", "success", None) in after
         # Untouched: the scanned PDF, the stamped image and the dead letter.
         for kept in (f"{MARKER}-4.pdf", f"{MARKER}-5.png", f"{MARKER}-6.png"):
             assert [r for r in after if r[0] == kept] == [r for r in before if r[0] == kept]

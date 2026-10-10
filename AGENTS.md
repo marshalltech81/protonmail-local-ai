@@ -559,8 +559,7 @@ is exactly what this forbids.
   stderr. A limit hit in a child is a per-payload `failed` row; a
   parent `MemoryError` or `RecursionError` stays host pressure. Body
   HTML conversion uses the `html` child. Process separation is not
-  filesystem or network confinement. Until #1294 lands, `html` still
-  runs in-process. Measure a
+  filesystem or network confinement. Measure a
   candidate library on crafted input with plain timing and RSS before
   choosing it: two `.xls` readers failed that test (#935).
 - A review finding that calls for new parsing of untrusted input, or
@@ -1000,9 +999,9 @@ Notes:
 - for Docker Compose or env wiring changes, run `docker compose config --quiet`
 - for Docker Compose or shell script changes, run the Semgrep job from
   `.github/workflows/security.yml` locally:
-  `uvx --from semgrep==1.179.0 semgrep test .semgrep`,
-  `uvx --from semgrep==1.179.0 bash scripts/tests/semgrep_paths_test.sh` and
-  `uvx --from semgrep==1.179.0 semgrep scan --metrics=off --strict --error --config .semgrep/compose.yaml --config .semgrep/shell.yaml .`.
+  `uvx --from semgrep==1.180.0 semgrep test .semgrep`,
+  `uvx --from semgrep==1.180.0 bash scripts/tests/semgrep_paths_test.sh` and
+  `uvx --from semgrep==1.180.0 semgrep scan --metrics=off --strict --error --config .semgrep/compose.yaml --config .semgrep/shell.yaml .`.
   The rules in `.semgrep/` encode the hardening and exposure rules
   above and cover every `docker-compose*.yml` and `compose*.yml`
   overlay (`.yaml` too) and `*.sh` file.

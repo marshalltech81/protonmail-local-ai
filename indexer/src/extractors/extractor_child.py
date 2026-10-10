@@ -14,11 +14,13 @@ The module's ``extract_text`` does the whole extraction (for the OOXML
 formats: the pre-open budgets, the library's open and the budgeted
 walk; for ``xls``: xlrd's open and the walk in ``xls_child``; for
 ``image``: the decode and Tesseract in ``image_child``, which takes the
-page cap and OCR timeout as its options, #1292; for ``pdf``: pypdf,
-Poppler and Tesseract in ``pdf_child``, #1293). It returns the text
-and the names of the budgets that cut it, and may return a third item,
-the extractor name it chose (``pdf``: ``pdf-digital``, ``pdf-ocr`` or
-the OCR-disabled sentinel), which crosses with the text.
+page cap and OCR timeout as its options, #1292; for ``html``: the
+conversion of one or more documents in ``html_child``, which takes
+their byte lengths as its options, #1294; for ``pdf``: pypdf, Poppler
+and Tesseract in ``pdf_child``, #1293). It returns the text and the
+names of the budgets that cut it, and may return a third item, the
+extractor name it chose (``pdf``: ``pdf-digital``, ``pdf-ocr`` or the
+OCR-disabled sentinel), which crosses with the text.
 
 Output on stdout is the runner's framed protocol (``_runner``): for a
 module in ``REPORTS_PROGRESS``, a ``P`` line written and flushed as each
@@ -71,6 +73,7 @@ MODULES = {
     "xls": "xls_child",
     "eml": "eml",
     "image": "image_child",
+    "html": "html_child",
     "pdf": "pdf_child",
 }
 

@@ -129,10 +129,11 @@ def _reset_extractor_warning_budget(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _ooxml_child_in_process(request, monkeypatch):
-    """Run the extractor child (#1040, #1291, #1292, #1293) in this
-    process for the OOXML, image and PDF extractors, through the same
-    frames and parsing (progress frames as each page is read), so a test
-    can patch a walk's budgets, stub Poppler or Tesseract or count calls. The ``xls`` extractor starts
+    """Run the extractor child (#1040, #1291, #1292, #1293, #1294) in
+    this process for the OOXML, image, PDF and HTML conversions (the
+    ``html`` extractor and message bodies), through the same frames and
+    parsing (progress frames as each page is read), so a test can patch a
+    walk's budgets, stub Poppler or Tesseract or count calls. The ``xls`` extractor starts
     the real child, as before. A test marked ``real_extractor_child``
     starts the real child process for every module
     (``tests/test_ooxml_child.py``, ``tests/test_image_child.py``)."""
@@ -148,7 +149,7 @@ def _ooxml_child_in_process(request, monkeypatch):
         pytesseract.pytesseract, "tesseract_cmd", pytesseract.pytesseract.tesseract_cmd
     )
     real = _runner.run_tool
-    in_process = OOXML_MODULES | {"image", "pdf"}
+    in_process = OOXML_MODULES | {"image", "html", "pdf"}
 
     def run_tool(argv, payload, *, on_output=None, **kwargs):
         child = str(_runner._CHILD)

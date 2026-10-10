@@ -290,8 +290,8 @@ class TestFrames:
     @pytest.mark.parametrize(
         ("name", "status", "extractor"),
         [
-            ("pdf-digital", STATUS_SUCCESS, "pdf-digital@5"),
-            ("pdf-ocr", STATUS_SUCCESS, "pdf-ocr@5"),
+            ("pdf-digital", STATUS_SUCCESS, "pdf-digital@6"),
+            ("pdf-ocr", STATUS_SUCCESS, "pdf-ocr@6"),
             ("pdf-ocr-disabled", STATUS_UNSUPPORTED, None),
         ],
     )
@@ -405,7 +405,7 @@ class TestFrames:
         result = _extract(b"%PDF-1.7")
         assert (result.status, result.extractor, result.text_complete) == (
             STATUS_SUCCESS,
-            "pdf-digital@5",
+            "pdf-digital@6",
             False,
         )
         [line] = [r for r in caplog.records if "OCR fallback failed" in r.getMessage()]
