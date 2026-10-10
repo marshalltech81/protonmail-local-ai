@@ -1289,15 +1289,25 @@ def phase_request_shape(path: str, shape: str) -> dict:
     return {"elements": elements, "parse_s": parse_s, "rss_kib": _rss_kib()}
 
 
+# Ballast rows the writer keeps: each commit adds one and deletes the
+# oldest, standing for the rows an indexer commit replaces.
+BALLAST_ROWS = 64
+
+
 def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) -> dict:
     """A concurrent writer: until ``stop`` exists, commit transactions
     that flip eight messages' ``seen`` and append ``commit_bytes`` of
     ballast, as the indexer's steady-state batch of eight would.
 
+    It first replaces the ballast with ``BALLAST_ROWS`` rows of
+    ``commit_bytes``, the steady state in which each commit adds one row
+    and deletes one, records that state and creates ``stop + ".ready"``.
+
     After each commit it records the time and the WAL file's size, so a
     window's commit count and its WAL sizes come from the same records:
     only this process writes the WAL, and the file never shrinks until
-    a truncating checkpoint, which ``run_wal`` runs after the round."""
+    a truncating checkpoint, which ``run_wal`` runs after the round. The
+    delay between commits ends early when ``stop`` appears."""
     rng = random.Random(7)
     wal = db_path + "-wal"
     commits = 0
@@ -1306,6 +1316,16 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         top = conn.execute("SELECT MAX(rowid) FROM messages").fetchone()[0]
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM bench_ballast")
+        conn.executemany(
+            "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))",
+            [(commit_bytes,)] * BALLAST_ROWS,
+        )
+        conn.execute("COMMIT")
+        # The state before any measured commit: it can only be the start.
+        times.append((time.monotonic(), os.stat(wal).st_size))
+        Path(stop + ".ready").touch()
         while not os.path.exists(stop):
             conn.execute("BEGIN IMMEDIATE")
             # Eight distinct messages (``check_args`` requires eight).
@@ -1319,14 +1339,15 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
             cur = conn.execute(
                 "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
             )
-            conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - 64,))
+            conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - BALLAST_ROWS,))
             conn.execute("COMMIT")
             # Stamped after the commit: a commit is in a round's window
             # only once it is durable, and its frames are in the size.
             times.append((time.monotonic(), os.stat(wal).st_size))
             commits += 1
-            if interval:
-                time.sleep(interval)
+            resume = time.monotonic() + interval
+            while time.monotonic() < resume and not os.path.exists(stop):
+                time.sleep(min(0.05, interval))
     return {"commits": commits, "commit_times": times}
 
 
@@ -1449,7 +1470,9 @@ def run_wal(
     reverse."""
     wal = Path(db_path + "-wal")
     stop = Path(db_path + ".stop")
+    ready = Path(str(stop) + ".ready")
     stop.unlink(missing_ok=True)
+    ready.unlink(missing_ok=True)
 
     def size() -> int:
         try:
@@ -1481,7 +1504,13 @@ def run_wal(
     # this returns or raises: left running, it commits until the disk
     # fills.
     try:
-        # Three seconds of steady state before the round.
+        # The writer's ballast in its steady state, then three seconds of
+        # commits before the round.
+        deadline = time.monotonic() + 600
+        while not ready.exists():
+            if writer.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError("the WAL writer did not reach its steady state")
+            time.sleep(0.05)
         time.sleep(3)
         try:
             result = _child(
@@ -1503,6 +1532,7 @@ def run_wal(
             writer.kill()
             out, _ = writer.communicate()
         stop.unlink()
+        ready.unlink(missing_ok=True)
     writer_out = json.loads(out)
     at_start, at_end, overlapping = wal_window(
         writer_out["commit_times"], result["started_at"], result["ended_at"]
@@ -1759,6 +1789,9 @@ MAX_EXTRACTED_CHARS = 10_000_000
 MAX_MESSAGES = 2**30
 # SQLite's default largest blob (``SQLITE_MAX_LENGTH``).
 MAX_BLOB = 1_000_000_000
+# The most digits an upload holds: built in memory (430 MB packed),
+# over 16 times the proposed caps.
+MAX_UPLOAD = 10_000_000
 
 
 @dataclass(frozen=True)
@@ -1802,6 +1835,8 @@ ARGS: tuple[Arg, ...] = (
         "int",
         None,
         0,
+        # Each entry takes at least 16 bytes of the file.
+        PARSE_MAX_BYTES // 16,
         absent="100,000 with cardinality records, else none",
         help="References entries per message (cardinality records only)",
     ),
@@ -1813,7 +1848,9 @@ ARGS: tuple[Arg, ...] = (
         MAX_EXTRACTED_CHARS,
         help="stress: four-byte characters on every extraction row instead of its text (0: none)",
     ),
-    Arg("chunks", "int", 1, 1, help="body chunks per message"),
+    # Each chunk takes at least 13 bytes of the file (two words and a
+    # blank line).
+    Arg("chunks", "int", 1, 1, PARSE_MAX_BYTES // 13, help="body chunks per message"),
     Arg(
         "chunk_tokens",
         "int",
@@ -1845,6 +1882,7 @@ ARGS: tuple[Arg, ...] = (
         "int",
         None,
         0,
+        MAX_UPLOAD,
         absent="100 (with --upload-total: what fills the total)",
         help="hashes the client holds that the server does not",
     ),
@@ -1853,6 +1891,7 @@ ARGS: tuple[Arg, ...] = (
         "ints",
         None,
         1,
+        MAX_UPLOAD,
         length=2,
         absent="no total",
         help="messages,occurrences: fill each upload to this many digests with extras",
@@ -1878,6 +1917,7 @@ ARGS: tuple[Arg, ...] = (
         "int",
         0,
         0,
+        MAX_UPLOAD,
         help="also time parsing each upload shape at this many digests (0: skip)",
     ),
     Arg("wal", "flag", False, help="also measure WAL growth under a writer"),
@@ -1948,6 +1988,13 @@ def _paragraph_tokens(args: argparse.Namespace) -> list[int]:
         for i in range(min(args.messages, SHAPE_PERIOD))
         for c in range(min(args.chunks, 2))
     ]
+
+
+def _file_floor(args: argparse.Namespace) -> int:
+    """A lower bound on one message's file size, computed without
+    rendering it: each References entry takes at least 16 bytes, each
+    body word six and each attachment part 1,000."""
+    return 16 * args.references + 6 * args.chunks * args.chunk_tokens + 1000 * args.per_message
 
 
 def _largest_file(args: argparse.Namespace) -> int:
@@ -2084,9 +2131,13 @@ _RULES: tuple = (
     (
         lambda a: True,
         lambda a: (
-            f"a message of {_largest_file(a)} bytes is over the indexer's {PARSE_MAX_BYTES}-byte "
+            f"a message of at least {_file_floor(a)} bytes is over the indexer's "
+            f"{PARSE_MAX_BYTES}-byte file limit; lower --references, --chunks, "
+            "--chunk-tokens or --per-message"
+            if _file_floor(a) > PARSE_MAX_BYTES
+            else f"a message of {size} bytes is over the indexer's {PARSE_MAX_BYTES}-byte "
             "file limit; lower --references, --chunks, --chunk-tokens or --per-message"
-            if _largest_file(a) > PARSE_MAX_BYTES
+            if (size := _largest_file(a)) > PARSE_MAX_BYTES
             else None
         ),
     ),

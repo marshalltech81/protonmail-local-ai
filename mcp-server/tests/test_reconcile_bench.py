@@ -808,7 +808,13 @@ def _boundary_cases():
 def test_every_numeric_argument_is_checked_at_its_bounds(bench, flag, value, extra, ok):
     argv = _argv({**extra, flag: value})
     if ok:
-        bench.parse_args(argv)
+        # The table accepts the bound; a combination rule may still
+        # refuse it (a References count at its cap overflows the file
+        # limit), but never as out of range.
+        try:
+            bench.parse_args(argv)
+        except SystemExit as refused:
+            assert "must be at" not in str(refused)
     else:
         with pytest.raises(SystemExit):
             bench.parse_args(argv)
@@ -1048,3 +1054,45 @@ def test_round_parse_time_excludes_the_request_file_read(bench):
 
     src = inspect.getsource(bench.phase_reconcile)
     assert src.index("read_bytes()") < src.index("t0 = time.perf_counter()")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {"--records": "cardinality", "--references": "1000", "--messages": "3", "--missing": "0"},
+        {"--records": "worst", "--per-message": "5", "--chunks": "3", "--chunk-tokens": "250"},
+        {"--identity": "ascii998", "--records": "mixed", "--missing": "3"},
+    ],
+)
+def test_file_floor_is_below_every_file(bench, changes):
+    args = bench.parse_args(_argv(changes))
+    assert 0 < bench._file_floor(args) <= bench._largest_file(args)
+
+
+def test_writer_delay_ends_when_stop_appears(bench, tmp_path):
+    db = tmp_path / "delay.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    import threading
+
+    timer = threading.Timer(0.5, stop.touch)
+    timer.start()
+    started = time.monotonic()
+    out = bench.phase_writer(str(db), str(stop), 16, 3600.0)
+    timer.join()
+    assert time.monotonic() - started < 5
+    assert out["commits"] == 1
+
+
+def test_writer_starts_from_the_steady_ballast(bench, tmp_path):
+    db = tmp_path / "ballast.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    stop.touch()  # no commit: only the reset runs
+    out = bench.phase_writer(str(db), str(stop), 32, 0.0)
+    assert out["commits"] == 0 and len(out["commit_times"]) == 1
+    assert (tmp_path / "stop.ready").exists()
+    with closing(sqlite3.connect(db)) as conn:
+        rows = conn.execute("SELECT COUNT(*), MIN(length(payload)) FROM bench_ballast").fetchone()
+    assert rows == (bench.BALLAST_ROWS, 32)
