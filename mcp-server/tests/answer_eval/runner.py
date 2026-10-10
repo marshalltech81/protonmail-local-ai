@@ -314,7 +314,15 @@ def _passage(ref: Any) -> Passage:
     header = intelligence._piece_header(chunk, ref.char_end or 0, ref.label, scope)
     if chunk is None:
         return Passage(
-            ref.label, ref.thread_id, None, None, None, "thread", ref.text, header=header
+            ref.label,
+            ref.thread_id,
+            None,
+            None,
+            None,
+            "thread",
+            ref.text,
+            truncated=ref.truncated,
+            header=header,
         )
     source = "attachment" if chunk.attachment_id is not None else "body"
     # ``char_end`` is short of the chunk's end when the passage was cut.
