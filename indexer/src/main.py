@@ -1964,17 +1964,23 @@ def _phase2a_collect_chunks(
             # (Codex round 7 on #1355, #1375).
             state.stale_occurrences = sorted(db.get_attachment_occurrence_states(msg.claimant_id))
         # Phase 2c deletes the message's chunk slice of each stale
-        # payload no parsed attachment carries (#1375), which may leave
-        # the thread chunkless, so the fallback below is reserved for it.
+        # payload no parsed attachment carries (#1375). Only when no
+        # other chunk of the thread is left does that leave it chunkless,
+        # so the fallback below is reserved for that case.
         if state.stale_occurrences:
             parsed_payloads = {attachment.content_hash for attachment in msg.attachments}
+            dropped_chunk_ids: set[str] = set()
             for content_hash in sorted(
                 db.get_attachment_payloads(msg.claimant_id, state.stale_occurrences).keys()
                 - parsed_payloads
             ):
-                clears_chunks = clears_chunks or bool(
-                    db.get_chunk_ids_for_message(msg.claimant_id, attachment_id=content_hash)
+                dropped_chunk_ids |= db.get_chunk_ids_for_message(
+                    msg.claimant_id, attachment_id=content_hash
                 )
+            if dropped_chunk_ids and not db.thread_has_chunks_not_in(
+                state.thread.thread_id, dropped_chunk_ids
+            ):
+                clears_chunks = True
         # A plan without text clears its attachment's chunk slice in
         # Phase 2c, unless another copy of the same bytes in this message
         # fills it: that copy counted the stored chunks as kept and

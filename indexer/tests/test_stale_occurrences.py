@@ -241,10 +241,15 @@ class TestUniquePayload:
         assert dropped_slice
         vector_before = p.thread_vector(thread_id)
         recomputes = _count_calls(monkeypatch, Database, "_compute_thread_sums")
+        embedded_before = [call.args for call in p.embedder.embed_batch.call_args_list]
 
         drop["on"] = True
         p.reparse(path)
 
+        # The body and the other attachments keep the thread's chunks:
+        # no subject fallback, so the reparse sent nothing to the
+        # embedder (Codex round 4 on #1385).
+        assert [call.args for call in p.embedder.embed_batch.call_args_list] == embedded_before
         assert len(p.rows()) == 2
         assert dropped_hash not in {r[1] for r in p.rows()}
         assert (claimant, dropped_hash) not in p.slices()

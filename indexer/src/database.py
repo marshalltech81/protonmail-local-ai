@@ -2808,6 +2808,18 @@ class Database:
         return row["display_subject"]
 
     @_synchronized
+    def thread_has_chunks_not_in(self, thread_id: str, chunk_ids: set[str]) -> bool:
+        """Whether ``thread_id`` has a chunk row outside ``chunk_ids``:
+        whether it keeps a chunk once those are deleted. Reads chunk IDs,
+        never vectors."""
+        row = self._conn.execute(
+            "SELECT 1 FROM message_chunks WHERE thread_id = ? "
+            "AND chunk_id NOT IN (SELECT value FROM json_each(?)) LIMIT 1",
+            (thread_id, json.dumps(sorted(chunk_ids))),
+        ).fetchone()
+        return row is not None
+
+    @_synchronized
     def thread_has_chunks(self, thread_id: str) -> bool:
         """Return True iff at least one chunk row exists for ``thread_id``.
 
