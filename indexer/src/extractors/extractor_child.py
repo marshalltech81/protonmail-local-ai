@@ -17,10 +17,12 @@ walk; for ``xls``: xlrd's open and the walk in ``xls_child``; for
 page cap and OCR timeout as its options, #1292; for ``html``: the
 conversion of one or more documents in ``html_child``, which takes
 their byte lengths as its options, #1294; for ``pdf``: pypdf, Poppler
-and Tesseract in ``pdf_child``, #1293). It returns the text and the
-names of the budgets that cut it, and may return a third item, the
-extractor name it chose (``pdf``: ``pdf-digital``, ``pdf-ocr`` or the
-OCR-disabled sentinel), which crosses with the text.
+and Tesseract in ``pdf_child``, #1293; for ``container``: the
+directory read in ``container_child``, which returns a fixed token
+instead of text, #1416). It returns the text and the names of the
+budgets that cut it, and may return a third item, the extractor name it
+chose (``pdf``: ``pdf-digital``, ``pdf-ocr`` or the OCR-disabled
+sentinel), which crosses with the text.
 
 Output on stdout is the runner's framed protocol (``_runner``): for a
 module in ``REPORTS_PROGRESS``, a ``P`` line written and flushed as each
@@ -75,6 +77,7 @@ MODULES = {
     "image": "image_child",
     "html": "html_child",
     "pdf": "pdf_child",
+    "container": "container_child",
 }
 
 # The modules whose ``extract_text`` takes an ``on_progress`` callback.

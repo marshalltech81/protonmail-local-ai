@@ -40,6 +40,8 @@ from src.parser import (
     parse_email_bytes,
 )
 
+from tests.conftest import make_ole2, make_zip
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -2252,13 +2254,15 @@ class TestAttachmentBoundaries:
         from src.parser import MAX_ATTACHED_MESSAGE_DEPTH, MAX_DECODED_ATTACHMENT_BYTES
 
         decoded_sizes: list[int] = []
-        real = parser_module._decode_transport_form
+        real = parser_module._decode_transport_bytes
 
-        def counting(data, encoding, content_type):
+        def counting(data, encoding):
             decoded_sizes.append(len(data))
-            return real(data, encoding, content_type)
+            return real(data, encoding)
 
-        monkeypatch.setattr(parser_module, "_decode_transport_form", counting)
+        # The walk decodes a transport form here, then checks it for a
+        # container before parsing it (#1416).
+        monkeypatch.setattr(parser_module, "_decode_transport_bytes", counting)
         inner = b"From: z@example.test\r\nSubject: leaf\r\n\r\n" + (b"y" * 76 + b"\r\n") * 6_000
         for i in range(40):
             inner = (
@@ -4093,6 +4097,15 @@ _CAP_FILENAME = b'Content-Disposition: attachment; filename="SYNTHETIC_FILENAME_
 _TXT_FILENAME = b'Content-Disposition: attachment; filename="SYNTHETIC_FILENAME_MARKER.txt"\r\n'
 
 
+# A ZIP and an OLE2 container with no blank line in them, so a delivery
+# report holding the ZIP is one block (``delivery_status_parts``).
+_DSN = "message/delivery-status"
+_DSN_CAP_ZIP = make_zip("[Content_Types].xml", "word/document.xml")
+_DSN_CAP_OLE2 = make_ole2("WordDocument")
+assert b"\n\n" not in _DSN_CAP_ZIP.replace(b"\r", b"")
+assert b"\n\n" not in _DSN_CAP_OLE2.replace(b"\r", b"")
+
+
 def _with_attachment(headers: bytes, body: bytes, disposition: bytes = _CAP_FILENAME) -> bytes:
     """A message whose body is PARENT_BODY plus one attachment part with
     ``headers`` (beside the marker filename) and ``body``."""
@@ -4394,6 +4407,35 @@ _CAP_SHAPES = {
         "mime_parts=1",
         lambda msg: msg.body_text == "S0" and msg.attachments == [],
     ),
+    # Review round 6 on #1444: the delivery-status re-read enumerates at
+    # most MAX_WALKED_PARTS parts of a tree. Each OLE2 leaf under
+    # message/rfc822 is one part of the walk but two of the tree (its
+    # parsed child), so the tree is over the cap while the walk is not:
+    # the report's ZIP is not recovered and stays a walked container.
+    "delivery_status_parts": (
+        _CAP_HEAD
+        + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + (
+            b"--b\r\nContent-Type: message/rfc822\r\n"
+            + _TXT_FILENAME
+            + b"\r\n"
+            + _DSN_CAP_OLE2
+            + b"\r\n"
+        )
+        * 4
+        + b"--b\r\nContent-Type: message/delivery-status\r\n"
+        + _TXT_FILENAME
+        + b"\r\n"
+        + _DSN_CAP_ZIP
+        + b"\r\n--b--\r\n",
+        {"MAX_WALKED_PARTS": 8},
+        "delivery_status_parts=1",
+        lambda msg: (
+            [a.content_type for a in msg.attachments] == ["message/rfc822"] * 4 + [_DSN]
+            and all(a.payload == _DSN_CAP_OLE2 for a in msg.attachments[:4])
+            and msg.attachments[4].payload not in (b"", _DSN_CAP_ZIP)
+        ),
+    ),
     "address_header": (
         _addresses(b"bob@example.test, " + b"SYNTHETIC_HEADER_MARKER@example.test, " * 7_000),
         False,
@@ -4567,6 +4609,7 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     "body_parts": {"body_complete"},
     "html_body": {"body_complete"},
     "mime_parts": {"body_complete", *_MANIFEST},
+    "delivery_status_parts": _MANIFEST,
     "address_header": {"to_addresses_complete"},
     "address_element": {"to_addresses_complete"},
     "address_length": {"to_addresses_complete"},
@@ -6051,6 +6094,32 @@ def test_a_lossy_base64_leaf_an_extractor_reads_is_counted(tmp_path, caplog, hea
     assert attachment.payload_complete is False
     assert msg.parse_caps == ({"leaf_transport_lossy": 1} if counted else {})
     assert msg.attachments_manifest_complete is True
+    assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+
+
+def test_a_lossy_container_leaf_under_any_label_is_counted(tmp_path, caplog):
+    """#1416: an OLE2 or ZIP payload is read whatever its label, so a
+    lossy base64 leaf of one under a label that selects no extractor is
+    counted like one an extractor's label selects."""
+    from tests.conftest import make_zip
+
+    caplog.set_level("DEBUG")
+    encoded = base64.encodebytes(make_zip("[Content_Types].xml", "SYNTHETIC_TEXT_MARKER.xml"))
+    path = tmp_path / "m.eml"
+    path.write_bytes(
+        _with_attachment(
+            b"Content-Type: application/x-unknown-synthetic\r\n"
+            b"Content-Transfer-Encoding: base64\r\n",
+            encoded[:8] + b"!!!!" + encoded[12:],
+            b'Content-Disposition: attachment; filename="f.bin"\r\n',
+        )
+    )
+    msg = parse_email(path)
+    assert msg is not None
+    [attachment] = msg.attachments
+    assert attachment.payload.startswith(b"PK\x03\x04")
+    assert attachment.payload_complete is False
+    assert msg.parse_caps == {"leaf_transport_lossy": 1}
     assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
 
 

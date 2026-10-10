@@ -433,8 +433,9 @@ _V5_COLUMNS = (
 
 def _drop_v5_columns(db: Database) -> None:
     """The v4 shape's missing columns: v5's and v6's (#1242), v7's
-    tables (#824), v9's column (#1236), v10's table (#1356) and v11's
-    columns (#1418)."""
+    tables (#824), v9's column (#1236), v10's table (#1356), v11's
+    columns (#1418) and v12's (#1416)."""
+    db._conn.execute("ALTER TABLE attachment_extractions DROP COLUMN identifier")
     for column in ("ocr_pages_cap", "digital_pages_cap", "extracted_chars_cap"):
         db._conn.execute(f"ALTER TABLE attachment_extractions DROP COLUMN {column}")
     db._conn.execute("DROP TABLE thread_vector_sums")

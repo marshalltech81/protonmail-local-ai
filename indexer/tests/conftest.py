@@ -2,7 +2,10 @@
 Shared fixtures for indexer tests.
 """
 
+import io
+import struct
 import sys
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -85,6 +88,148 @@ def make_thread(
     )
 
 
+_OLE2_END = 0xFFFFFFFE
+_OLE2_FREE = 0xFFFFFFFF
+_OLE2_NOSTREAM = 0xFFFFFFFF
+
+
+def _ole2_entry(name: str, kind: int, *, left: int, right: int, child: int) -> bytes:
+    encoded = (name + "\0").encode("utf-16-le")
+    return (
+        encoded.ljust(64, b"\0")
+        + struct.pack("<HBB3I", len(encoded), kind, 1, left, right, child)
+        + b"\0" * 36
+        + struct.pack("<IQ", _OLE2_END, 0)
+    )
+
+
+def make_ole2(*stream_names: str, trailer: bytes = b"", storages: tuple[str, ...] = ()) -> bytes:
+    """A synthetic, valid OLE2 compound file (version 3, 512-byte
+    sectors) whose root storage holds empty streams named
+    ``stream_names`` and empty storages named ``storages``, followed by
+    ``trailer``. Identification (#1416) reads only these names; the bytes
+    carry no document."""
+    entries_per_sector = 4
+    children = [(name, 2) for name in stream_names] + [(name, 1) for name in storages]
+    count = len(children) + 1
+    dir_sectors = -(-count // entries_per_sector)
+    fat = [0xFFFFFFFD] + [i + 2 if i < dir_sectors - 1 else _OLE2_END for i in range(dir_sectors)]
+    fat += [_OLE2_FREE] * (128 - len(fat))
+
+    # A balanced red-black tree over the root's children (all black).
+    links: dict[int, tuple[int, int]] = {}
+
+    def subtree(lo: int, hi: int) -> int:
+        if lo > hi:
+            return _OLE2_NOSTREAM
+        mid = (lo + hi) // 2
+        links[mid] = (subtree(lo, mid - 1), subtree(mid + 1, hi))
+        return mid
+
+    root_child = subtree(1, count - 1)
+    entries = [
+        _ole2_entry("Root Entry", 5, left=_OLE2_NOSTREAM, right=_OLE2_NOSTREAM, child=root_child)
+    ]
+    for sid, (name, kind) in enumerate(children, start=1):
+        left, right = links[sid]
+        entries.append(_ole2_entry(name, kind, left=left, right=right, child=_OLE2_NOSTREAM))
+    directory = b"".join(entries).ljust(dir_sectors * 512, b"\0")
+    header = (
+        b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        + b"\0" * 16
+        + struct.pack("<HHHHH", 0x3E, 3, 0xFFFE, 9, 6)
+        + b"\0" * 6
+        + struct.pack("<9I", 0, 1, 1, 0, 4096, _OLE2_END, 0, _OLE2_END, 0)
+        + struct.pack("<109I", 0, *([_OLE2_FREE] * 108))
+    )
+    return header + struct.pack("<128I", *fat) + directory + trailer
+
+
+def make_zip(*member_names: str, contents: bytes = b"") -> bytes:
+    """A synthetic ZIP whose members are ``member_names``, each holding
+    ``contents`` (stored), with a fixed timestamp, so the same arguments
+    give the same bytes in every run."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        for name in member_names:
+            archive.writestr(zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0)), contents)
+    return buffer.getvalue()
+
+
+# OPC metadata of a synthetic OOXML package (#1416): its content types
+# and package relationships, which identification reads (owner decision
+# on #1416, 2026-10-10).
+OPC_CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+OPC_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+OFFICE_DOCUMENT_REL = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+)
+WORD_MAIN_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+WORKBOOK_MAIN_CT = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+PRESENTATION_MAIN_CT = (
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+)
+OOXML_MAIN_PARTS = {
+    "docx": ("word/document.xml", WORD_MAIN_CT),
+    "xlsx": ("xl/workbook.xml", WORKBOOK_MAIN_CT),
+    "pptx": ("ppt/presentation.xml", PRESENTATION_MAIN_CT),
+}
+
+
+def make_package(members: dict[str, bytes]) -> bytes:
+    """A synthetic ZIP of ``members`` (name to contents, stored), with a
+    fixed timestamp."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        for name, contents in members.items():
+            archive.writestr(zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0)), contents)
+    return buffer.getvalue()
+
+
+def ooxml_content_types(
+    overrides: dict[str, str] | None = None, defaults: dict[str, str] | None = None
+) -> bytes:
+    """``[Content_Types].xml`` with ``defaults`` (extension to content
+    type; ``rels`` and ``xml`` by default) and ``overrides`` (part name to
+    content type)."""
+    if defaults is None:
+        defaults = {
+            "rels": "application/vnd.openxmlformats-package.relationships+xml",
+            "xml": "application/xml",
+        }
+    lines = [f'<Types xmlns="{OPC_CONTENT_TYPES_NS}">']
+    lines += [f'<Default Extension="{e}" ContentType="{t}"/>' for e, t in defaults.items()]
+    lines += [f'<Override PartName="{n}" ContentType="{t}"/>' for n, t in (overrides or {}).items()]
+    lines.append("</Types>")
+    return "".join(lines).encode()
+
+
+def ooxml_rels(
+    *targets: str, rel_type: str = OFFICE_DOCUMENT_REL, mode: str | None = None
+) -> bytes:
+    """``_rels/.rels`` with one relationship of ``rel_type`` per target."""
+    attr = "" if mode is None else f' TargetMode="{mode}"'
+    rels = "".join(
+        f'<Relationship Id="rId{i}" Type="{rel_type}" Target="{t}"{attr}/>'
+        for i, t in enumerate(targets, 1)
+    )
+    return f'<Relationships xmlns="{OPC_RELATIONSHIPS_NS}">{rels}</Relationships>'.encode()
+
+
+def make_ooxml(kind: str, *extra: str, contents: bytes = b"") -> bytes:
+    """A minimal OOXML package of ``kind`` (``docx``, ``xlsx`` or
+    ``pptx``) at its conventional main part, with its content types and
+    root relationship, plus ``extra`` members holding ``contents``."""
+    part, content_type = OOXML_MAIN_PARTS[kind]
+    members = {
+        "[Content_Types].xml": ooxml_content_types({f"/{part}": content_type}),
+        "_rels/.rels": ooxml_rels(f"/{part}"),
+        part: b"<root/>",
+    }
+    members.update(dict.fromkeys(extra, contents))
+    return make_package(members)
+
+
 def count_pending_deletions(db: Database) -> int:
     """Number of tombstones in ``pending_deletions``."""
     return int(db._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])
@@ -131,9 +276,10 @@ def _reset_extractor_warning_budget(monkeypatch):
 def _ooxml_child_in_process(request, monkeypatch):
     """Run the extractor child (#1040, #1291, #1292, #1293, #1294) in
     this process for the OOXML, image, PDF and HTML conversions (the
-    ``html`` extractor and message bodies), through the same frames and
-    parsing (progress frames as each page is read), so a test can patch a
-    walk's budgets, stub Poppler or Tesseract or count calls. The ``xls`` extractor starts
+    ``html`` extractor and message bodies) and container identification
+    (#1416), through the same frames and parsing (progress frames as each
+    page is read), so a test can patch a walk's budgets, stub Poppler or
+    Tesseract or count calls. The ``xls`` extractor starts
     the real child, as before. A test marked ``real_extractor_child``
     starts the real child process for every module
     (``tests/test_ooxml_child.py``, ``tests/test_image_child.py``)."""
@@ -149,7 +295,7 @@ def _ooxml_child_in_process(request, monkeypatch):
         pytesseract.pytesseract, "tesseract_cmd", pytesseract.pytesseract.tesseract_cmd
     )
     real = _runner.run_tool
-    in_process = OOXML_MODULES | {"image", "html", "pdf"}
+    in_process = OOXML_MODULES | {"image", "html", "pdf", "container"}
 
     def run_tool(argv, payload, *, on_output=None, **kwargs):
         child = str(_runner._CHILD)

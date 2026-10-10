@@ -1749,8 +1749,10 @@ and `status_counts`: `total_matches` split by extraction status, with
 (#1236) and `none` for occurrences that have no extraction recorded. Anything but
 `success` means no extracted text is available, not that the file says
 nothing relevant. Each row carries the occurrence ID, the payload's
-`attachment_id`, its `extractor_module` (`''` when its label selects no
-extractor), the claimant, Message-ID and thread IDs, the filename and
+`attachment_id`, its `extractor_module` (the extraction cache
+namespace its label selects, `''` when it selects no extractor; an OLE2
+or ZIP file runs the extractor its contents name whatever its label, so
+the extractor that ran is in `extractor`, #1416), the claimant, Message-ID and thread IDs, the filename and
 MIME type (each cut at 500 characters, with `filename_clipped` /
 `content_type_clipped` set when the stored value is longer), the size,
 the carrying message's folder, `sent_at`, `sent_at_status`,
@@ -1833,7 +1835,7 @@ unread.
 | `success` | the stored text | null |
 | `empty` | `""` | null |
 | `failed` | null | `extraction failed` (the stored error is never returned) |
-| `unsupported` | null | `no extractor could read this file: its type has no extractor, the extractor is missing from this image, or it declined the file (for example an encrypted PDF or a work cap)`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` (since #1415 a PDF sent under an image label is extracted as a PDF instead) |
+| `unsupported` | null | `no extractor could read this file: its type has no extractor, the extractor is missing from this image, or it declined the file (for example an encrypted PDF or a work cap)`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` (since #1415 a PDF sent under an image label is extracted as a PDF instead; since #1416 an OLE2 or ZIP file under any type is identified by its contents, and one no extractor reads, such as an encrypted Office file or an Outlook message, is reported with the first reason) |
 | `too_large` | null | the file is over the indexer's attachment size limit |
 | `deferred` | null | the indexer deferred this attachment's extraction to a later pass (its per-message extraction budget was reached); its text is not indexed yet |
 | none recorded | null | no extraction is recorded yet (not run yet, or extraction off) |
