@@ -1251,3 +1251,61 @@ def _mixed_pdf(mb: float, scans: int) -> bytes:
         kids.append(b"%d 0 R" % page)
     objects[1] = b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(kids), len(kids))
     return _build(objects)
+
+
+# ---------------------------------------------------------------------------
+# The indexer process never imports pypdf (#1464)
+# ---------------------------------------------------------------------------
+
+_PARENT_DISPATCH = """
+import sys
+from pathlib import Path
+
+from src.extractors import extract
+
+payload = Path(sys.argv[1]).read_bytes()
+result = extract(
+    content_type="application/pdf", filename="a.pdf", payload=payload, ocr_enabled=False
+)
+loaded = sorted(m for m in ("pypdf", "fontTools") if m in sys.modules)
+print(result.status, result.error, loaded, sep="|")
+"""
+
+
+class TestTheParentNeverImportsPypdf:
+    @pytest.mark.parametrize(
+        ("case", "status", "error"),
+        [
+            ("digital", STATUS_SUCCESS, None),
+            ("encrypted", STATUS_UNSUPPORTED, ENCRYPTED_PDF_ERROR),
+            ("limit", STATUS_UNSUPPORTED, PDF_LIMIT_ERROR),
+        ],
+    )
+    def test_a_dispatch_in_a_fresh_process_loads_neither_pypdf_nor_fonttools(
+        self, tmp_path, case, status, error
+    ):
+        """#1464: pypdf (and fontTools, which it loads once installed,
+        #1351) runs only in the extractor child. A fresh indexer process
+        that dispatches a PDF to the real child, for a success and both
+        permanent errors, never imports either."""
+        import subprocess
+
+        from tests.test_extractors import _deep_page_tree_pdf
+
+        payload = {
+            "digital": lambda: _pdf("d"),
+            "encrypted": lambda: _pdf("d", encrypt=("SYNTHETIC_USER_PASSWORD", "AES-256")),
+            "limit": _deep_page_tree_pdf,
+        }[case]()
+        path = tmp_path / "payload.pdf"
+        path.write_bytes(payload)
+
+        out = subprocess.run(
+            [sys.executable, "-c", _PARENT_DISPATCH, str(path)],
+            cwd=Path(extractors.__file__).parents[2],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        assert out.stdout.strip() == f"{status}|{error}|[]"
