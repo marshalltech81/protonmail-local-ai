@@ -689,6 +689,11 @@ LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office 
 # re-running on each (``attachment_indexing``).
 NON_OLE2_PPT_ERROR = "not an OLE2 compound file (labelled legacy .ppt)"
 
+# ``unsupported`` error for a payload under a legacy ``.doc`` / ``.xls`` label
+# that is neither OLE2 nor a ZIP (for example an RTF file labelled ``.doc``):
+# no reader takes it, and the OOXML route would only fail and be retried (#1227).
+NOT_OLE2_OR_OOXML_ERROR = "not an OLE2 or OOXML container (labelled as a legacy Office type)"
+
 # The fixed 8-byte signature every OLE2 compound file starts with.
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
@@ -920,6 +925,18 @@ def extract(
             error=NON_OLE2_PPT_ERROR,
         )
 
+    # A legacy label whose bytes are neither OLE2 nor ZIP (#1227): the same
+    # constant-size prefix check; no reader takes it, so it is not retried.
+    if module_name in _LEGACY_TO_OOXML and not payload.startswith(
+        (*_ZIP_SIGNATURES, _OLE2_SIGNATURE)
+    ):
+        return ExtractionResult(
+            status=STATUS_UNSUPPORTED,
+            extractor=None,
+            text=None,
+            error=NOT_OLE2_OR_OOXML_ERROR,
+        )
+
     # The container decides between a legacy and an OOXML extractor
     # (#694, #935): a constant-size prefix check; the aggregate counts an
     # unsupported result, so no per-item line.
@@ -1115,6 +1132,7 @@ def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
 # The legacy (OLE2) extractor for a legacy label, and the OOXML one the
 # same label selects for a payload that is not OLE2.
 _LEGACY_TO_OOXML = {"doc": "docx", "xls": "xlsx"}
+_ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06")
 
 
 def _route_container(module_name: str, payload: bytes) -> str | None:

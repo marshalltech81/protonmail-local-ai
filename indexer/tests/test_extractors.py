@@ -18,6 +18,7 @@ from collections.abc import Callable
 import pytest
 from src.extractors import (
     DOCX_PACKAGE_BUDGET_ERROR,
+    NOT_OLE2_OR_OOXML_ERROR,
     PPTX_PACKAGE_BUDGET_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
@@ -5162,23 +5163,24 @@ class TestLegacyOfficeLabels:
             assert "SYNTHETIC_DOC_TEXT" in (result.text or "")
         assert calls == [module for _, _, module in _LEGACY_LABELS]
 
-    def test_other_payloads_with_a_legacy_label_still_fail_in_the_extractor(
+    def test_other_payloads_with_a_legacy_label_are_unsupported_not_retried(
         self, monkeypatch, caplog
     ):
-        """Neither ZIP nor OLE2: today's behaviour, the extractor runs and
-        its exception is recorded as ``failed`` by type, with a WARNING."""
+        """#1227: neither ZIP nor OLE2 (an RTF file labelled ``.doc``, for
+        one) under a legacy label has no reader. It is recorded
+        ``unsupported`` with a fixed reason, not ``failed`` (which the
+        startup sweep retries every week); no extractor runs."""
         caplog.set_level("INFO")
         calls = _count_extractor_calls(monkeypatch)
         payload = b"SYNTHETIC_PAYLOAD_MARKER not a zip and not OLE2"
-        for content_type, filename, module in _LEGACY_LABELS:
+        for content_type, filename, _module in _LEGACY_LABELS:
             result = extract(content_type=content_type, filename=filename, payload=payload)
-            assert result.status == STATUS_FAILED, (content_type, filename)
-            assert result.extractor is not None
-            assert result.extractor.startswith(f"{module}@")
-            assert result.error == "BadZipFile"
-        assert calls == [module for _, _, module in _LEGACY_LABELS]
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert len(warnings) == len(_LEGACY_LABELS)
+            assert (result.status, result.error, result.extractor) == (
+                STATUS_UNSUPPORTED,
+                NOT_OLE2_OR_OOXML_ERROR,
+                None,
+            ), (content_type, filename)
+        assert calls == []
         assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text
 
     def test_ole2_payload_with_a_legacy_label_reaches_the_legacy_extractor(self, monkeypatch):
@@ -5205,12 +5207,13 @@ class TestLegacyOfficeLabels:
 
     def test_ole2_check_reads_only_the_signature(self, monkeypatch):
         """A payload shorter than the signature, or one that only starts
-        like it, keeps today's path."""
+        like it, is neither OLE2 nor ZIP, so no legacy reader takes it:
+        ``unsupported`` with no extractor run (#1227)."""
         calls = _count_extractor_calls(monkeypatch)
         for payload in (_OLE2_MAGIC[:4], b"\xd0\xcf\x11\xe0\x00\x00\x00\x00junk"):
             result = extract(content_type="application/msword", filename="a.doc", payload=payload)
-            assert result.status == STATUS_FAILED
-        assert calls == ["docx", "docx"]
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, NOT_OLE2_OR_OOXML_ERROR)
+        assert calls == []
 
     def test_ole2_payload_without_a_legacy_label_stays_unsupported(self, monkeypatch):
         """An OLE2 payload bound for either OOXML extractor with no legacy
