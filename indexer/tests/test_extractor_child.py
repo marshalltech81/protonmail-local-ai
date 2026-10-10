@@ -403,7 +403,7 @@ class TestChildSide:
     def test_the_child_runs_every_module_the_dispatcher_sends_it(self):
         """The modules whose extractors call ``run_child`` and the child's
         list agree, and each listed module has the extraction entry."""
-        assert set(extractor_child.MODULES) == OOXML_MODULES | {"xls", "eml", "image"}
+        assert set(extractor_child.MODULES) == OOXML_MODULES | {"xls", "eml", "image", "pdf"}
         for name in extractor_child.MODULES.values():
             assert callable(_module(name).extract_text)
 

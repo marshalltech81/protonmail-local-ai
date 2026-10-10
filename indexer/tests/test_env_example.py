@@ -76,6 +76,7 @@ _NOT_DOCUMENTED = {
     "SQLITE_PATH": "container plumbing: the Compose volume mount path",
     "INDEXER_HEALTH_FILE": "container plumbing: the healthcheck file, a tmpfs default",
     "GIT_COMMIT": "a build arg the Makefile passes, not configuration",
+    "PATH": "process plumbing: the PDF extractor child sets the indexer's search path so Poppler and Tesseract are found as in the indexer (#1293)",
 }
 
 

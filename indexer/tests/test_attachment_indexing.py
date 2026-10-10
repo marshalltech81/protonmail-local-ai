@@ -1562,7 +1562,7 @@ class TestAttachmentOutcomeCounts:
         extraction result is unchanged: these pages give no digital text,
         so with OCR off the PDF is recorded as needing OCR. Pages count
         per extraction attempt, not per commit."""
-        from src.extractors import pdf
+        from src.extractors import pdf_child
 
         caplog.set_level("DEBUG")
 
@@ -1574,7 +1574,7 @@ class TestAttachmentOutcomeCounts:
             def __init__(self, stream):
                 self.pages = [BadPage(), BadPage()]
 
-        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+        monkeypatch.setattr(pdf_child.pypdf, "PdfReader", FakeReader)
         self._drain()
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(
@@ -2226,10 +2226,12 @@ class TestPermanentFailureCacheRows:
     def test_row_is_unsupported_and_served_to_its_modules_occurrences(
         self, tmp_path, monkeypatch, caplog, case
     ):
-        from src.extractors import pdf
+        from src.extractors import pdf_child
 
         caplog.set_level("DEBUG")
-        monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
+        monkeypatch.setattr(
+            pdf_child, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run")
+        )
         build, content_type, filename, module = self._CASES[case]
         payload, error, extractor_name = build(monkeypatch)
         calls = MagicMock(wraps=attachment_indexing.extract_attachment)

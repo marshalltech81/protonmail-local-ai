@@ -2094,7 +2094,11 @@ class TestHostPressureEscapesPhase2a:
     Exception`` turned them into a ``chunk`` failure, spending the
     message's attempt as an ordinary error. They must escape the step
     with the ``begin_attempt`` charge still held, as ``IndexingQueue``
-    documents for a process that dies mid-step."""
+    documents for a process that dies mid-step. Since #1293 the PDF's
+    parse runs in the extractor child, where either is the child's own
+    limit and a ``failed`` row (``tests/test_pdf_child.py``); one raised
+    in the indexer itself, here by the PDF extractor's parent side,
+    still escapes."""
 
     @staticmethod
     def _write_eml_with_pdf(path: Path, message_id: str) -> None:
@@ -2127,28 +2131,18 @@ class TestHostPressureEscapesPhase2a:
         )
 
     @pytest.mark.parametrize("error", [MemoryError, RecursionError])
-    def test_host_pressure_on_a_pdf_page_escapes_the_drain_with_the_charge_held(
+    def test_host_pressure_in_the_pdf_extractor_escapes_the_drain_with_the_charge_held(
         self, tmp_path, monkeypatch, error
     ):
-        from src.extractors import pdf
+        from src import extractors
 
         calls: list[int] = []
 
-        class Page:
-            def __init__(self, index):
-                self.index = index
+        def extract(payload, **_kwargs):
+            calls.append(1)
+            raise error("SYNTHETIC_PAGE_MARKER")
 
-            def extract_text(self):
-                calls.append(self.index)
-                if self.index == 1:
-                    raise error("SYNTHETIC_PAGE_MARKER")
-                return f"Synthetic page {self.index} text long enough to count as digital."
-
-        class FakeReader:
-            def __init__(self, stream):
-                self.pages = [Page(0), Page(1), Page(2)]
-
-        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+        monkeypatch.setitem(extractors._IMPORT_CACHE, "pdf", extract)
 
         dest = tmp_path / "INBOX" / "new" / "pdf.eml"
         self._write_eml_with_pdf(dest, "pdf@example.com")
@@ -2160,9 +2154,9 @@ class TestHostPressureEscapesPhase2a:
         with pytest.raises(error):
             _drain(queue, db, embedder, Threader(db), batch_size=1, max_passes=1)
 
-        # Extraction stopped at the failing page, and nothing after it ran:
-        # no extraction cached, no embed call.
-        assert calls == [0, 1]
+        # Nothing after the extraction ran: no extraction cached, no
+        # embed call.
+        assert calls == [1]
         assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 0
         embedder.embed_batch.assert_not_called()
         # The row is still queued with the Phase 2a charge held and marked

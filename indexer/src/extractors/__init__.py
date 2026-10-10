@@ -367,6 +367,10 @@ CHILD_OCR_PAGES_SKIPPED = "result_ocr_pages_skipped"
 CHILD_IMAGE_SCALE_FACTOR = "image_scale_factor"
 # The cap name the parent reports a scale-down under.
 IMAGE_PIXEL_CEILING_CAP = "image_pixel_ceiling"
+# The DPI the PDF child rendered pages for OCR at when the page-pixel
+# budget lowered it (``record_pdf_ocr_dpi``, #1293); the parent reports
+# it as an extractor cap.
+CHILD_PDF_OCR_DPI = "pdf_ocr_dpi"
 CHILD_DEGRADATION_KEYS = frozenset(
     {
         "pdf_pages_failed",
@@ -384,19 +388,66 @@ CHILD_DEGRADATION_KEYS = frozenset(
         CHILD_TEXT_LOST,
         CHILD_OCR_PAGES_SKIPPED,
         CHILD_IMAGE_SCALE_FACTOR,
+        CHILD_PDF_OCR_DPI,
     }
 )
 
 
 def reset_attempt() -> None:
     """Clear the running extraction's text loss and OCR pages skipped,
-    as the dispatcher does before an extractor runs; the child calls it
-    before its extraction. The cap record (``CAP_COLUMNS``) is the
-    parent's alone: the child reports a cap that cut by name and the
-    parent records it."""
+    as the dispatcher does before an extractor runs, and what a child
+    reports besides its counts; the child calls it before its
+    extraction. The cap record (``CAP_COLUMNS``) is the parent's alone:
+    the child reports a cap that cut by name and the parent records it."""
     _attempt.text_lost = False
     _attempt.ocr_pages_skipped = None
     _attempt.image_scale_factor = None
+    _attempt.pdf_ocr_dpi = None
+    _attempt.child_caps = []
+    _attempt.recovered_errors = []
+
+
+def report_cap(name: str) -> None:
+    """In the extractor child: report that the cap ``name`` (one of the
+    parent extractor's fixed cap names) cut the extraction. Sent as a
+    ``C`` frame whether the extraction then returns or raises (#1293),
+    so the parent logs and records it as the in-process extractor did
+    where it happened."""
+    caps: list[str] | None = getattr(_attempt, "child_caps", None)
+    if caps is None:
+        caps = _attempt.child_caps = []
+    if name not in caps:
+        caps.append(name)
+
+
+def record_recovered_error(type_name: str) -> None:
+    """In the extractor child: record that the extraction caught an
+    exception of ``type_name`` and degraded instead of failing (the PDF
+    OCR fallback, #1293). Sent as an ``R`` frame; the parent logs it.
+    The type name only: the exception's message can quote the
+    document."""
+    errors: list[str] | None = getattr(_attempt, "recovered_errors", None)
+    if errors is None:
+        errors = _attempt.recovered_errors = []
+    if type_name not in errors:
+        errors.append(type_name)
+
+
+def child_reports() -> tuple[list[str], list[str]]:
+    """In the child, after the extraction (returned or raised): the caps
+    it reported (``report_cap``) and the errors it recovered from
+    (``record_recovered_error``)."""
+    return (
+        list(getattr(_attempt, "child_caps", [])),
+        list(getattr(_attempt, "recovered_errors", [])),
+    )
+
+
+def record_pdf_ocr_dpi(dpi: int) -> None:
+    """In the PDF child: record that pages were rendered for OCR at
+    ``dpi``, lowered from the default to fit the page-pixel budget. The
+    parent reports it as an extractor cap (``pdf._report``)."""
+    _attempt.pdf_ocr_dpi = dpi
 
 
 def record_image_scale_factor(factor: int) -> None:
@@ -418,6 +469,9 @@ def child_degradation() -> dict[str, int]:
     factor = getattr(_attempt, "image_scale_factor", None)
     if factor is not None:
         state[CHILD_IMAGE_SCALE_FACTOR] = factor
+    dpi = getattr(_attempt, "pdf_ocr_dpi", None)
+    if dpi is not None:
+        state[CHILD_PDF_OCR_DPI] = dpi
     return state
 
 

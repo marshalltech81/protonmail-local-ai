@@ -14,19 +14,28 @@ The module's ``extract_text`` does the whole extraction (for the OOXML
 formats: the pre-open budgets, the library's open and the budgeted
 walk; for ``xls``: xlrd's open and the walk in ``xls_child``; for
 ``image``: the decode and Tesseract in ``image_child``, which takes the
-page cap and OCR timeout as its options, #1292). It returns the text
-and the names of the budgets that cut it.
+page cap and OCR timeout as its options, #1292; for ``pdf``: pypdf,
+Poppler and Tesseract in ``pdf_child``, #1293). It returns the text
+and the names of the budgets that cut it, and may return a third item,
+the extractor name it chose (``pdf``: ``pdf-digital``, ``pdf-ocr`` or
+the OCR-disabled sentinel), which crosses with the text.
 
 Output on stdout is the runner's framed protocol (``_runner``): for a
 module in ``REPORTS_PROGRESS``, a ``P`` line written and flushed as each
 page is read; then ``N launches <count>``, the processes this child
-started (Tesseract per image frame, counted from the same audit event
-as in the indexer, #1236); then a ``C <name>`` line per budget, an
-``N <key> <count>`` line per degradation the extraction recorded
-(#1314), then ``T <length>`` and the text as UTF-8; or ``E <type name>``
-after the launch count when the extraction raised. Only the type name: an exception's message can quote the
-document. A ``MemoryError`` or ``RecursionError`` is reported the same
-way: here it is the child's own limit.
+started (Tesseract per image frame, Poppler and Tesseract for a scanned
+PDF, counted from the same audit event as in the indexer, #1236); then
+a ``C <name>`` line per budget, an ``N <key> <count>`` line per
+degradation the extraction recorded (#1314), an ``R <type name>`` line
+per error it recovered from (#1293), then ``T <length>`` (or
+``T <length> <name>`` with the extractor name) and the text as UTF-8.
+When the extraction raised, the caps it reported as they cut
+(``report_cap``), its degradation and its recovered errors are sent
+the same way, then ``E <type name>``, so the parent can apply what
+happened before the failure, as the in-process extractor did (#1293).
+Only the type name: an exception's message can quote the document. A
+``MemoryError`` or ``RecursionError`` is reported the same way: here it
+is the child's own limit.
 
 The degradation an extraction records (``note_text_lost``,
 ``record_ocr_pages_skipped`` and the counters
@@ -62,10 +71,11 @@ MODULES = {
     "xls": "xls_child",
     "eml": "eml",
     "image": "image_child",
+    "pdf": "pdf_child",
 }
 
 # The modules whose ``extract_text`` takes an ``on_progress`` callback.
-REPORTS_PROGRESS = frozenset({"image"})
+REPORTS_PROGRESS = frozenset({"image", "pdf"})
 
 # The progress frame.
 PROGRESS_FRAME = b"P\n"
@@ -94,10 +104,20 @@ def run(
     package.reset_attempt()
     try:
         extractor = importlib.import_module(f"{_PACKAGE}.{MODULES[module]}")
-        text, caps = extractor.extract_text(payload, *options, **kwargs)
+        text, caps, *name = extractor.extract_text(payload, *options, **kwargs)
     except Exception as exc:  # noqa: BLE001 — reported by type name only
-        return error_frame(type(exc).__name__)
-    return result_frames(text, caps, package.child_degradation())
+        reported, recovered = package.child_reports()
+        return report_frames(reported, package.child_degradation(), recovered) + error_frame(
+            type(exc).__name__
+        )
+    reported, recovered = package.child_reports()
+    return result_frames(
+        text,
+        [*reported, *(cap for cap in caps if cap not in reported)],
+        package.child_degradation(),
+        recovered,
+        name=name[0] if name else None,
+    )
 
 
 def launches_frame(launches: int) -> bytes:
@@ -110,16 +130,32 @@ def error_frame(type_name: str) -> bytes:
     return f"E {type_name}\n".encode("ascii", errors="replace")
 
 
-def result_frames(text: str, caps: list[str], counts: dict[str, int] | None = None) -> bytes:
-    """A frame per cap name and per count, then the text frame. A lone
-    surrogate, which UTF-8 cannot hold, is written as ``?``."""
-    body = text.encode("utf-8", errors="replace")
-    head = (
+def report_frames(
+    caps: list[str], counts: dict[str, int] | None = None, recovered: list[str] | None = None
+) -> bytes:
+    """A frame per cap name, per count and per recovered error's type
+    name."""
+    return (
         "".join(f"C {cap}\n" for cap in caps)
         + "".join(f"N {key} {n}\n" for key, n in (counts or {}).items())
-        + f"T {len(body)}\n"
-    )
-    return head.encode("ascii") + body
+        + "".join(f"R {type_name}\n" for type_name in (recovered or []))
+    ).encode("ascii", errors="replace")
+
+
+def result_frames(
+    text: str,
+    caps: list[str],
+    counts: dict[str, int] | None = None,
+    recovered: list[str] | None = None,
+    *,
+    name: str | None = None,
+) -> bytes:
+    """The report frames, then the text frame, with the extractor name
+    when there is one. A lone surrogate, which UTF-8 cannot hold, is
+    written as ``?``."""
+    body = text.encode("utf-8", errors="replace")
+    head = f"T {len(body)}\n" if name is None else f"T {len(body)} {name}\n"
+    return report_frames(caps, counts, recovered) + head.encode("ascii") + body
 
 
 def _write_progress() -> None:  # pragma: no cover — runs only in the child

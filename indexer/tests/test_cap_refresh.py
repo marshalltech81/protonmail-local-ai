@@ -98,11 +98,11 @@ class TestExtractorsRecordTheLimitThatCut:
     def _pdf(monkeypatch, pages: list[str]):
         """Stub the PDF's page reads: ``pages`` is each page's digital
         text; OCR reads text from every page it is given."""
-        from src.extractors import pdf
+        from src.extractors import pdf_child
 
-        monkeypatch.setattr(pdf, "_extract_digital_pages", lambda payload, **_: list(pages))
+        monkeypatch.setattr(pdf_child, "_extract_digital_pages", lambda payload, **_: list(pages))
         monkeypatch.setattr(
-            pdf, "_extract_ocr", lambda payload, pages, **_: dict.fromkeys(pages, "ocr text")
+            pdf_child, "_extract_ocr", lambda payload, pages, **_: dict.fromkeys(pages, "ocr text")
         )
 
     def test_the_pdf_ocr_page_cap_is_recorded(self, monkeypatch):

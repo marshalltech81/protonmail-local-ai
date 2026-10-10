@@ -211,6 +211,7 @@ _IDENTITY_SETTINGS = (
 _IDENTITY_EXCLUDED = {
     "EMBED_API_KEY": "a secret: the embedder credential",  # pragma: allowlist secret
     "GIT_COMMIT": "not configuration: logged as the line's own commit field",
+    "PATH": "not configuration: the search path the PDF extractor child sets for its tools",
 }
 
 
@@ -658,8 +659,9 @@ INDEXER_OCR_MAX_PAGES = _int_env("INDEXER_OCR_MAX_PAGES", 20, minimum=1)
 # crafted high-noise image (still inside ``INDEXER_ATTACHMENT_MAX_BYTES``)
 # can keep it busy for minutes; combined with ``INDEXER_OCR_MAX_PAGES``
 # that pins the worker for tens of minutes per PDF. Set to 0 to
-# disable the timeout. Image OCR keeps a CPU limit derived from it
-# (``extractors.image.child_cpu_seconds``) that 0 does not lift (#1292).
+# disable the timeout. Image and PDF OCR keep a CPU limit derived from it
+# (``extractors.image.child_cpu_seconds``, ``extractors.pdf
+# .child_cpu_seconds``) that 0 does not lift (#1292, #1293).
 INDEXER_OCR_TIMEOUT_SECONDS = _int_env("INDEXER_OCR_TIMEOUT_SECONDS", 60, minimum=0)
 # Longest one unit of work — a message's parse, or one attachment's
 # extraction — may run before the stall guard exits the process for

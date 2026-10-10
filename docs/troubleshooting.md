@@ -1658,11 +1658,20 @@ only, never filenames or text (`make logs`):
   runs past the child's CPU or wall-clock limit `ToolCrashError` or
   `ToolTimeoutError` (limits in `docs/architecture.md`, "Image
   extraction runs in the extractor child").
+  A PDF is parsed, rendered and OCR'd in a child process (#1293): a PDF
+  pypdf rejects is failed under pypdf's type name (`PdfReadError`,
+  `PdfStreamError`, ...); one whose parse needs more than the child's
+  2 GiB is `MemoryError`, and one that runs past the child's CPU or
+  wall-clock limit `ToolCrashError` or `ToolTimeoutError` (limits in
+  `docs/architecture.md`, "PDF extraction runs in the extractor
+  child"). Before #1293 a `MemoryError` or `RecursionError` while a PDF
+  was parsed was host pressure that stopped the indexing pass; now it
+  is that PDF's `failed` row.
   A DOCX, XLSX or PPTX is extracted in a child process with 1 GiB of
   address space, 30 s of CPU and a 45 s timeout (#1040): a file that
   needs more is `MemoryError` (or `XMLSyntaxError`, lxml's name for a
   failed allocation), `ToolCrashError` or `ToolTimeoutError`. For a
-  `.xls`, `.docx`, `.xlsx`, `.pptx` or an image, `ChildOutputError` means the
+  `.xls`, `.docx`, `.xlsx`, `.pptx`, a PDF or an image, `ChildOutputError` means the
   extractor child's output broke its protocol or passed its byte cap
   (#1291). The limits and what they were measured on are in
   `docs/architecture.md` ("OOXML extraction runs in a child process").
@@ -1693,6 +1702,15 @@ only, never filenames or text (`make logs`):
   pages without a text layer raised (a Tesseract error or timeout). A
   PDF with enough digital text keeps it and loses the scanned pages;
   otherwise the extraction fails as above.
+- `extractor pdf degraded in the child: <key>=<n> ...` (WARNING, rate
+  limited): what the PDF's extraction recorded in its child process
+  (#1293): `pdf_pages_failed` (pages pypdf could not read, each skipped),
+  `pdf_pages_unrecovered` (those whose text OCR did not recover),
+  `ocr_capped_pdfs` / `ocr_pages_skipped` and `result_ocr_pages_skipped`
+  (the OCR page cap, also logged on its own line below), and
+  `text_lost` when the text is incomplete. The same counts reach the
+  attachments line below. A page pypdf could not read was a DEBUG line
+  before #1293; its exception type is no longer logged.
 - `pdf OCR capped at <N> of <M> scanned pages` (WARNING): a scanned
   PDF had more pages without a text layer than `INDEXER_OCR_MAX_PAGES`;
   the pages past the cap are not read. Every capped PDF is also counted
@@ -1753,6 +1771,9 @@ only, never filenames or text (`make logs`):
   - `pdf_ocr_dpi`: a scanned page is too large to render at 200 dpi
     within the 10-megapixel page budget, so the PDF's OCR ran at the
     lower DPI the line names, which reads small print less reliably.
+  - `pdf_text_chars`: a PDF's text, stripped of leading and trailing
+    whitespace, passed 10,000,000 characters in its child process; the
+    text is cut there, as for images (#1293).
   - `xlsx_sheet_nodes`, `xlsx_row_nodes`, `xlsx_tag_bytes`: a
     worksheet's XML crossed a node budget (5,000,000 across the
     workbook, 131,072 in one row) or a 1 MB start tag; that worksheet is
