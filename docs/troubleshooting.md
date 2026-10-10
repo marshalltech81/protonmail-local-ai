@@ -1360,14 +1360,18 @@ Queue and maintenance (all INFO unless noted):
   (counted apart from the attachment WARNINGs, so they never make the
   attachments line a WARNING). `queue heartbeat failed: <type>`
   (WARNING) if the counts could not be read.
-- `re-queued <n> message(s) (<n> for a missing text-completeness
+- `re-queued <n> of <n> message(s) (<n> for a missing text-completeness
   record) whose attachments were extracted by an older extractor
-  version (...); skipped <n> dead-lettered (run make requeue-dead to
-  refresh them).`, at startup after an extractor change, after OCR is
-  turned on with OCR rows cached before schema v6, or for a message
+  version (...); <n> already pending, skipped <n> dead-lettered (run
+  make requeue-dead to refresh them).`, at startup when the sweep found
+  messages to refresh: after an extractor change, after OCR is
+  turned on with OCR rows cached before schema v6, for an image "OCR
+  disabled" row recorded with no stamp, whatever the OCR setting
+  (#1415), or for a message
   whose deferred attachment extraction has no job left (attachment
   extraction was switched off while it was being continued; #1236).
-  WARNING when any
+  The second number counts the messages found, once each; the already
+  pending ones keep their queued job. WARNING when any
   dead-lettered message was skipped: those keep their old attachment
   text until you run `make requeue-dead`.
 - `cap refresh sweep (INDEXER_OCR_MAX_PAGES=<n>
@@ -1398,7 +1402,8 @@ Queue and maintenance (all INFO unless noted):
   refresh; each is unknown until its message is processed again.`, at
   startup when the sweep found occurrences to refresh (a result with no
   extractor whose label now has one, a `too_large` result that now fits,
-  an "OCR disabled" result once OCR is on, a cached result with no
+  an "OCR disabled" result once OCR is on, an unstamped image one
+  whatever the OCR setting, a cached result with no
   completeness record), so a message mid-continuation picks them up
   (#1236).
 - `cleared attachment text completeness on <n> occurrence(s) extracted

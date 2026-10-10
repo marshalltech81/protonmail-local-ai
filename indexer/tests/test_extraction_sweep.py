@@ -262,27 +262,42 @@ def test_sweep_enqueue_counts_exclusions_and_log_line(mailbox, monkeypatch, capl
     assert len(lines) == 1
     assert lines[0].levelno == logging.WARNING
     assert lines[0].getMessage() == (
-        "re-queued 3 message(s) (0 for a missing text-completeness record) whose "
-        "attachments were extracted by an older extractor version (none), skipped "
+        "re-queued 3 of 5 message(s) (0 for a missing text-completeness record) "
+        "whose attachments were extracted by an older extractor version (none), skipped "
         "while OCR was off, had no extractor, now fit under "
         "INDEXER_ATTACHMENT_MAX_BYTES, were cut by a since-raised limit or predate the "
         "cap record, or were deferred by the per-message extraction "
-        "budget; skipped 1 dead-lettered "
+        "budget; 1 already pending, skipped 1 dead-lettered "
         "(run make requeue-dead to refresh them)."
     )
     assert MARKER not in caplog.text
 
 
-def test_ocr_off_skips_the_ocr_disabled_query(mailbox, monkeypatch):
+@pytest.mark.parametrize(("stamp", "queued"), [(None, 3), ("image@5", 2)])
+def test_ocr_off_queues_only_unstamped_ocr_disabled_rows(mailbox, monkeypatch, stamp, queued):
+    """#1415: with OCR off the "OCR disabled" query still runs, in the same
+    bounded batches, and qualifies only an unstamped image row; a stamped
+    one waits for OCR."""
     db, queue, paths = mailbox
+    db._conn.execute(
+        "UPDATE attachment_extractions SET extractor = ? WHERE extraction_error = ?",
+        (stamp, OCR_DISABLED_ERROR),
+    )
+    db._conn.commit()
     _configure(monkeypatch, ocr=False)
     spy = _spy(db, monkeypatch)
-    assert main._requeue_stale_extractions(db, queue) == 2
-    assert len(spy.sweep_cursors()) == 2
-    assert paths["ocr"] not in {
+    assert main._requeue_stale_extractions(db, queue) == queued
+    cursors = spy.sweep_cursors()
+    assert len(cursors) == 3
+    ocr = cursors[2]
+    assert sum(ocr.batches) == OCCURRENCES
+    assert max(ocr.batches) <= database.SWEEP_FETCH_ROWS
+    assert ocr.closed and not ocr.fetchall_called
+    found = {
         r["filepath"]
         for r in db._conn.execute("SELECT filepath FROM indexing_jobs WHERE status = 'queued'")
     }
+    assert (paths["ocr"] in found) is (stamp is None)
 
 
 def test_cursor_closed_and_lock_released_when_the_predicate_raises(mailbox, monkeypatch):

@@ -623,6 +623,13 @@ class ExtractionResult:
 # cached image payload once (about 3,460 on the live index) and clears
 # ``text_complete`` on them until re-indexed (owner approved). A later
 # image change (#1413 routing) takes 5 or higher.
+# image 5: the "OCR disabled" result of an image is stamped ``image@5``
+# (#1415), so a row recorded with no stamp, which may be a PDF sent
+# under an image label from before the routing to ``pdf``, is re-run
+# once whatever the OCR setting (``attachment_indexing``
+# ``_unsupported_still_holds``), and the ``failed`` image rows are re-run
+# too (owner approved, 2026-10-10). Like 4, it re-OCRs every cached image
+# payload once while OCR is on.
 # doc 2, ppt 2: the raw tool's output byte cap follows the configured
 # ``max_extracted_chars`` (four bytes a character, up to a 40 MiB
 # ceiling) instead of a fixed 8 MiB (#1308), so the same bytes can
@@ -648,7 +655,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
     "eml": 3,
-    "image": 4,
+    "image": 5,
     "pdf": 5,
     "ppt": 2,
     "pptx": 3,
@@ -948,13 +955,21 @@ def extract(
 
     module_name, dispatch_via = _resolve_extractor(content_type, filename)
 
+    # A PDF under an image label runs the PDF extractor (#1415), decided
+    # before the OCR gate below, since that extractor reads a digital text
+    # layer without OCR: the same constant-size prefix check.
+    if module_name == "image":
+        module_name = _route_container(module_name, payload)
+
     # Image types are gated by ``ocr_enabled`` because the only sensible
     # extractor is Tesseract. Disabling OCR globally should cleanly
-    # downgrade them to ``unsupported`` rather than failing per-call.
+    # downgrade them to ``unsupported`` rather than failing per-call. The
+    # result is stamped (#1415), so a row recorded before the routing above
+    # (no stamp) is told apart and re-run once.
     if module_name == "image" and not ocr_enabled:
         return ExtractionResult(
             status=STATUS_UNSUPPORTED,
-            extractor=None,
+            extractor=_stamp_extractor(module_name, module_name),
             text=None,
             error=OCR_DISABLED_ERROR,
         )
@@ -1209,6 +1224,7 @@ def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
 # same label selects for a payload that is not OLE2.
 _LEGACY_TO_OOXML = {"doc": "docx", "xls": "xlsx"}
 _ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06")
+_PDF_SIGNATURE = b"%PDF-"
 
 
 def _route_container(module_name: str, payload: bytes) -> str | None:
@@ -1223,8 +1239,13 @@ def _route_container(module_name: str, payload: bytes) -> str | None:
       OOXML extractor (DOCX, XLSX, PPTX) can read OLE2, and an attempt
       would only record ``failed`` and re-run every
       ``_FAILED_CACHE_MAX_AGE`` (#694).
+    * A PDF (``%PDF-``) under an image label goes to ``pdf`` (#1415): the
+      image extractor cannot read it, and the PDF extractor reads its
+      digital text layer whatever the OCR setting.
     * Anything else is unchanged.
     """
+    if module_name == "image" and payload.startswith(_PDF_SIGNATURE):
+        return "pdf"
     ole2 = payload.startswith(_OLE2_SIGNATURE)
     if module_name in _LEGACY_TO_OOXML:
         return module_name if ole2 else _LEGACY_TO_OOXML[module_name]
@@ -1237,8 +1258,9 @@ def extraction_module(content_type: str, filename: str, payload: bytes) -> str |
     """The extractor module whose result an extraction of ``payload``
     under this label is, or ``None`` when the label selects none: the
     module the label selects after the container check (``.doc`` with
-    OOXML bytes runs ``docx``). An OLE2 payload under an OOXML label,
-    which no extractor reads, stays under that label's module. A prefix
+    OOXML bytes runs ``docx``, an image label with PDF bytes ``pdf``). An
+    OLE2 payload under an OOXML label, which no extractor reads, stays
+    under that label's module. A prefix
     check only. With the content hash, the extraction cache key (#928):
     labels that run the same extractor on the same bytes share its row."""
     selected = _resolve_extractor(content_type, filename)[0]
@@ -1261,12 +1283,15 @@ def ole2_extraction_module(content_type: str, filename: str) -> str | None:
 def label_extraction_modules(content_type: str, filename: str) -> frozenset[str]:
     """Every module ``extraction_module`` can return for this label,
     whatever the bytes: a legacy label also runs its OOXML extractor on
-    bytes that are not OLE2. Empty when the label selects none."""
+    bytes that are not OLE2, and an image label the PDF extractor on PDF
+    bytes (#1415). Empty when the label selects none."""
     selected = _resolve_extractor(content_type, filename)[0]
     if selected is None:
         return frozenset()
     if selected in _LEGACY_TO_OOXML:
         return frozenset({selected, _LEGACY_TO_OOXML[selected]})
+    if selected == "image":
+        return frozenset({selected, "pdf"})
     return frozenset({selected})
 
 

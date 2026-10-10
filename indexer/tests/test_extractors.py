@@ -4174,7 +4174,7 @@ class TestMultipageTiff:
         assert result.status == STATUS_SUCCESS
         assert result.text is not None
         assert result.text.split() == ["PAGE_0", "PAGE_1", "PAGE_2"]
-        assert result.extractor == "image-ocr@4"
+        assert result.extractor == "image-ocr@5"
 
     def test_pages_are_capped_by_max_ocr_pages(self, monkeypatch):
         seen = self._ocr_by_color(monkeypatch)
@@ -4353,7 +4353,7 @@ class TestMultipageTiffOcrCap:
         seen = self._ocr(monkeypatch)
         seeks = self._count_seeks(monkeypatch)
         result = self._extract(self._frames(3), max_ocr_pages=2)
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "image-ocr@4")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "image-ocr@5")
         assert result.text is not None
         assert result.text.split() == ["PAGE_0", "PAGE_1"]
         assert seen == ["PAGE_0", "PAGE_1"]
@@ -4984,7 +4984,7 @@ class TestHeicImages:
         )
 
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "image-ocr@4"
+        assert result.extractor == "image-ocr@5"
         assert result.text == "SYNTHETIC_HEIC_TEXT"
         # One page OCR'd, decoded at its real size and (lossy) colour.
         assert len(seen) == 1
@@ -5051,7 +5051,7 @@ class TestHeicImages:
         assert results["heic"] == results["png"]
         assert results["heic"].status == STATUS_FAILED
         assert results["heic"].error == error
-        assert results["heic"].extractor == "image@4"
+        assert results["heic"].extractor == "image@5"
         assert decodes == []
 
     def test_only_the_primary_heif_image_is_ocrd(self, monkeypatch):
@@ -5092,19 +5092,20 @@ class TestHeicImages:
         assert pillow_heif.options.DEPTH_IMAGES is False
         assert pillow_heif.options.AUX_IMAGES is False
 
-    def test_image_version_4_rows_are_current(self):
+    def test_image_version_5_rows_are_current(self):
         """image 4 (#1400): rows from 3 hold the ``failed`` result of a
-        CMYK image, so they are stale and the startup sweep re-queues
-        them."""
+        CMYK image. image 5 (#1415) stamps the "OCR disabled" result. Rows
+        from older versions are stale and the startup sweep re-queues
+        them; an ``-ocr`` row only while OCR is on."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["image"] == 4
-        assert stale_extractor_module("image@2") == "image"
-        assert stale_extractor_module("image-ocr@2") == "image"
-        assert stale_extractor_module("image@3") == "image"
-        assert stale_extractor_module("image-ocr@3") == "image"
-        assert stale_extractor_module("image@4") is None
-        assert stale_extractor_module("image-ocr@4") is None
+        assert EXTRACTOR_VERSIONS["image"] == 5
+        for old in ("image@2", "image-ocr@2", "image@3", "image-ocr@3", "image@4", "image-ocr@4"):
+            assert stale_extractor_module(old) == "image"
+        assert stale_extractor_module("image@5") is None
+        assert stale_extractor_module("image-ocr@5") is None
+        assert stale_extractor_module("image-ocr@4", ocr_enabled=False) is None
+        assert stale_extractor_module("image@4", ocr_enabled=False) == "image"
 
 
 def _docx_bytes(text: str) -> bytes:

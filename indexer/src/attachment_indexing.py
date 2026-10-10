@@ -394,11 +394,27 @@ def extraction_cache_module(attachment: Attachment) -> str:
     )
 
 
-def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) -> bool:
-    """Whether an ``unsupported`` result cached under ``module`` still
-    holds for the occurrences that select that module (#928).
+def unstamped_ocr_disabled(error: str | None, extractor: str | None) -> bool:
+    """Whether a cached ``unsupported`` row is an image's "OCR disabled"
+    result recorded with no stamp, before an image label with PDF bytes
+    ran the PDF extractor (#1415). Such a row may hold a PDF the PDF
+    extractor reads without OCR, so it never holds: it is re-run once,
+    whatever the OCR setting, and the fresh result is stamped (or keyed
+    ``pdf``), so it is not matched again. A scanned PDF's own row is not
+    one."""
+    return error == OCR_DISABLED_ERROR and extractor is None
 
-    An "OCR disabled" result holds until OCR is turned on. An OLE2 result
+
+def _unsupported_still_holds(
+    error: str | None, module: str, ocr_enabled: bool, extractor: str | None
+) -> bool:
+    """Whether an ``unsupported`` result cached under ``module`` and
+    recorded by ``extractor`` still holds for the occurrences that select
+    that module (#928).
+
+    An unstamped image "OCR disabled" result never holds
+    (``unstamped_ocr_disabled``, #1415); any other "OCR disabled" result
+    holds until OCR is turned on. An OLE2 result
     under an OOXML label, a "binary payload labelled as text" result, a
     "not an OLE2 compound file" result under the ``ppt`` label, a "not an
     OLE2 or OOXML container" result under a legacy label and the "no
@@ -412,6 +428,8 @@ def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) 
     extractor not importable in this image) holds only while the
     occurrence selects no extractor.
     """
+    if unstamped_ocr_disabled(error, extractor):
+        return False
     error = error or ""
     if "OCR disabled" in error:
         return not ocr_enabled
@@ -428,14 +446,18 @@ def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) 
 
 
 def reprocess_reruns_extraction(
-    error: str | None, extractor_module: str, content_type: str, filename: str
+    error: str | None,
+    extractor_module: str,
+    content_type: str,
+    filename: str,
+    extractor: str | None,
 ) -> bool:
     """Whether reprocessing an occurrence (by its MIME type and filename)
     that uses an ``unsupported`` row with ``error`` cached under
-    ``extractor_module`` would extract again once OCR is on: its label
-    now runs another module on the bytes (a release started routing it,
-    or a migrated v0 row was keyed by its stamp), or the row no longer
-    holds. The startup sweep re-queues by this, so it shares
+    ``extractor_module`` by ``extractor`` would extract again once OCR is
+    on: its label now runs another module on the bytes (a release started
+    routing it, or a migrated v0 row was keyed by its stamp), or the row
+    no longer holds. The startup sweep re-queues by this, so it shares
     ``_unsupported_still_holds`` with the cache check."""
     if error == LEGACY_OLE2_ERROR:
         # The row says the bytes are OLE2, so the label's module is exact.
@@ -444,7 +466,7 @@ def reprocess_reruns_extraction(
         modules = set(label_extraction_modules(content_type, filename)) or {NO_EXTRACTOR_MODULE}
     if extractor_module not in modules:
         return True
-    return not _unsupported_still_holds(error, extractor_module, ocr_enabled=True)
+    return not _unsupported_still_holds(error, extractor_module, True, extractor)
 
 
 # A result's cap record: ``(ocr_pages_cap, digital_pages_cap,
@@ -568,7 +590,8 @@ def _cache_hit_short_circuits(
       the startup sweep runs ``too_large_fits``' comparison in SQL
       (``Database.find_fitting_too_large_attachment_filepaths``).
     * ``STATUS_UNSUPPORTED`` — while ``_unsupported_still_holds`` for
-      the row's module: re-run once OCR is re-enabled.
+      the row's module and stamp: re-run once OCR is re-enabled, and an
+      unstamped image "OCR disabled" row at once (#1415).
     * ``STATUS_FAILED`` — re-run if the cached row is older than
       ``_FAILED_CACHE_MAX_AGE`` (defense against a chronic failure
       burning OCR cycles on every reappearance), otherwise honor the
@@ -593,7 +616,9 @@ def _cache_hit_short_circuits(
     if status == STATUS_TOO_LARGE:
         return not too_large_fits(len(attachment.payload), max_bytes)
     if status == STATUS_UNSUPPORTED:
-        return _unsupported_still_holds(cached["extraction_error"], module, ocr_enabled)
+        return _unsupported_still_holds(
+            cached["extraction_error"], module, ocr_enabled, cached["extractor"]
+        )
     if status == STATUS_FAILED:
         cached_at = cached["extracted_at"]
         if not cached_at:
