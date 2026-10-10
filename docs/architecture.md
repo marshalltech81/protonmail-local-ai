@@ -2104,7 +2104,7 @@ anything else stays `failed`. The row is keyed by the module that
 raised the error (#928), so it is served only to occurrences that run
 that module on the bytes; an occurrence whose label runs another
 extractor has its own row and extracts. It is stamped with the
-extractor version (`pdf@5`), so a later version bump, for example one
+extractor version (`pdf@6`), so a later version bump, for example one
 that raises a budget, refreshes it; the bumps that came with the
 `pdf`, `xlsx` and `pptx` mappings (`pdf@5`, `xlsx@6`, `pptx@3`)
 refreshed the `failed` rows the previous versions wrote, since the
@@ -2124,6 +2124,11 @@ A pypdf limit hit inside one page's text extraction (a `/ToUnicode`
 map over its size limit, for example) is not one of these: like any
 per-page error, that page is counted in `pdf_pages_failed` (and OCR'd
 when OCR is on) and the other pages' text is kept.
+
+The PDF extractor is version 6 with pypdf 6.20.0: stream decoding limits
+and malformed page-tree recovery changed, so cached PDF results from
+earlier extractor versions are re-extracted once. The usual OCR-disabled
+and dead-letter rules still apply.
 
 The parsing libraries log and warn with values read from the
 attachment (pypdf's font dictionaries and encoding names, openpyxl's

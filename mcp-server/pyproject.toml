@@ -5,10 +5,10 @@ requires-python = ">=3.14"
 dependencies = [
     # Standalone FastMCP (jlowin/Prefect): the server framework and its
     # Streamable HTTP app.
-    "fastmcp==4.0.11",
+    "fastmcp==4.1.0",
     # ``fastmcp`` accepts any ``mcp`` 2.x. The tool code imports
     # ``mcp.types`` and ``main.py`` the SDK's Host/Origin validator
-    # directly, so pin the version fastmcp 4.0.11 resolves.
+    # directly, so pin the version fastmcp 4.1.0 resolves.
     "mcp==2.3.0",
     "uvicorn==0.54.0",
     "starlette==1.7.0",
@@ -20,13 +20,13 @@ dependencies = [
     # OpenRouter — already speaks). The embed client is a thin wrapper
     # around ``AsyncOpenAI`` so the project does not maintain its own
     # HTTP/retry plumbing for a wire format the SDK already handles.
-    "openai==3.26.0",
-    "anthropic==1.11.0",
+    "openai==3.28.0",
+    "anthropic==1.13.0",
     "cohere==7.2.0",
     # Output models for structured tool results (``src/tools/outputs.py``).
     # Pinned to a version ``fastmcp`` and ``mcp`` accept; declared
     # because the tool code imports it directly.
-    "pydantic==2.13.5",
+    "pydantic==2.14.0",
     # The HTTP client fastmcp's Streamable HTTP transport uses; already
     # locked through ``fastmcp``. Declared at that version because
     # ``src/stdio_adapter.py`` builds its client directly.

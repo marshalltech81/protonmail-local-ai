@@ -693,12 +693,15 @@ class ExtractionResult:
 # eml 3: a uuencode body part of an attached email with no ``end`` line
 # last (cut in transit) is incomplete (#1402); text unchanged, same
 # re-run of the cached ``eml`` rows.
+# pdf 6: pypdf 6.20 changes stream decoding limits and malformed page-tree
+# recovery. Re-run cached PDF results once so those changes reach existing
+# attachments, preserving the usual OCR-disabled and dead-letter rules.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
     "eml": 3,
     "image": 6,
-    "pdf": 5,
+    "pdf": 6,
     "ppt": 2,
     "pptx": 3,
     "text": 3,

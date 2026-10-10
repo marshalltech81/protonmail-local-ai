@@ -9,7 +9,7 @@ set -Eeuo pipefail
 # Compose rule in every copy.
 #
 # Run (needs semgrep on PATH):
-#   uvx --from semgrep==1.179.0 bash scripts/tests/semgrep_paths_test.sh
+#   uvx --from semgrep==1.180.0 bash scripts/tests/semgrep_paths_test.sh
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="$(mktemp -d)"
