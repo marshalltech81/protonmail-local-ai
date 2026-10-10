@@ -645,6 +645,9 @@ class ExtractionResult:
 # that only with a raised OCR page limit or crafted input — owner
 # exception, 2026-10-08, no bump (bumping would reset completeness and
 # re-OCR with new failure modes).
+# html (no version): moved to the limited child with body HTML
+# conversion (#1294); the text of a document inside the limits and the
+# 10,000,000-char budget is unchanged, so nothing is re-run.
 # image 4: converts frames in modes Pillow cannot write as PNG (CMYK,
 # ...) to RGB (#1400). Those images were recorded ``failed``, and a
 # failed row is re-run only when its bytes are extracted again, so the

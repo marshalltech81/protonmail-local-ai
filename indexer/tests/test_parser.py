@@ -3501,20 +3501,30 @@ def test_related_root_shape_catalogue(tmp_path, caplog, shape, expected):
 
 def test_body_text_parts_decoded_are_capped(tmp_path, monkeypatch):
     """#295: every inline text part is now decoded, each with a fresh
-    html2text converter, so the number decoded per message is capped."""
+    html2text converter, so the number decoded per message is capped;
+    #1294: all of them in one HTML child."""
     import time
 
     from src import parser
+    from src.extractors import _runner, html
 
     calls = 0
-    real = parser._html_to_text
+    real = html.html_to_text
 
-    def counting(html: str) -> str:
+    def counting(source: str) -> str:
         nonlocal calls
         calls += 1
-        return real(html)
+        return real(source)
 
-    monkeypatch.setattr(parser, "_html_to_text", counting)
+    monkeypatch.setattr(html, "html_to_text", counting)
+    children: list[str] = []
+    real_run_child = _runner.run_child
+
+    def run_child(module, *args, **kwargs):
+        children.append(module)
+        return real_run_child(module, *args, **kwargs)
+
+    monkeypatch.setattr(html, "run_child", run_child)
     parts = 20_000
     raw = (
         b"Message-ID: <many@example.test>\r\nFrom: sender@example.test\r\n"
@@ -3533,6 +3543,7 @@ def test_body_text_parts_decoded_are_capped(tmp_path, monkeypatch):
     assert time.perf_counter() - started < 10
     assert msg is not None
     assert calls == parser.MAX_BODY_TEXT_PARTS
+    assert children == ["html"]
     segments = msg.body_text.split("\n\n")
     assert segments == [f"S{i}" for i in range(parser.MAX_BODY_TEXT_PARTS)]
 
@@ -4357,6 +4368,17 @@ _CAP_SHAPES = {
         "body_parts=5",
         lambda msg: msg.body_text.split("\n\n") == [f"S{i}" for i in range(200)],
     ),
+    # #1294: the HTML conversion child's text budget cut the HTML part.
+    "html_body": (
+        _CAP_HEAD
+        + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + b"--b\r\nContent-Type: text/plain\r\n\r\nS0\r\n"
+        + b"--b\r\nContent-Type: text/html\r\n\r\n<p>Hello world</p>\r\n"
+        + b"--b--\r\n",
+        {"html_conversion._MAX_TEXT_CHARS": 5},
+        "html_body=1",
+        lambda msg: msg.body_text == "S0\n\nHello",
+    ),
     # #996: the walk stops at MAX_WALKED_PARTS (the root counts as one),
     # so the attachment after the cap is never recorded.
     "mime_parts": (
@@ -4476,7 +4498,9 @@ def _parse_cap_shape(tmp_path, monkeypatch, shape: str):
     raw, small_decode_budget, _, _ = _CAP_SHAPES[shape]
     if isinstance(small_decode_budget, dict):
         for name, limit in small_decode_budget.items():
-            monkeypatch.setattr(parser, name, limit)
+            # ``module.NAME`` patches a module the parser imports.
+            owner, _, attr = name.rpartition(".")
+            monkeypatch.setattr(getattr(parser, owner) if owner else parser, attr, limit)
     elif small_decode_budget:
         budget = parser._SerializationBudget
         monkeypatch.setattr(parser, "_SerializationBudget", lambda: budget(decodable=10))
@@ -4541,6 +4565,7 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     "container_serialize_eml": _MANIFEST,
     "container_serialize_decoded_eml": _MANIFEST,
     "body_parts": {"body_complete"},
+    "html_body": {"body_complete"},
     "mime_parts": {"body_complete", *_MANIFEST},
     "address_header": {"to_addresses_complete"},
     "address_element": {"to_addresses_complete"},
