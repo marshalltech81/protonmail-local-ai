@@ -351,16 +351,20 @@ class TestModesPillowCannotSaveAsPng:
 
     @staticmethod
     def _saves_as_png(mode: str) -> bool:
-        """What pytesseract's own save does with a frame of this mode."""
-        from src.extractors import image_child
-
+        """Whether pytesseract can hand a frame of this mode to Tesseract:
+        Pillow writes it as PNG, or pytesseract pastes its alpha channel
+        onto white first (``RGBA``, ``LA``, ``PA``). Not pytesseract's own
+        save, which takes ``LAB``'s "A" band for alpha and pastes through
+        it, garbling the colours instead of failing."""
+        if mode in {"RGBA", "LA", "PA"}:
+            return True
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             try:
-                with image_child.pytesseract.pytesseract.save(Image.new(mode, (4, 4))):
-                    return True
+                Image.new(mode, (4, 4)).save(io.BytesIO(), format="PNG")
             except OSError:
                 return False
+        return True
 
     @staticmethod
     def _ocr_through_pytesseract_save(monkeypatch) -> list[str]:
@@ -385,7 +389,7 @@ class TestModesPillowCannotSaveAsPng:
         """Some of these modes must fail the PNG save, or the test below
         proves nothing; a new Pillow that saves more shows up here."""
         failing = {m for m in self.MODES if not self._saves_as_png(m)}
-        assert {"CMYK", "YCbCr", "HSV", "F", "RGBa", "RGBX"} <= failing
+        assert {"CMYK", "YCbCr", "HSV", "F", "RGBa", "RGBX", "LAB"} <= failing
 
     @pytest.mark.parametrize("mode", MODES)
     def test_the_prepared_frame_always_saves_and_is_unchanged_when_it_already_did(self, mode):

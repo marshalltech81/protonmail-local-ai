@@ -66,13 +66,15 @@ pillow_heif.register_heif_opener(thumbnails=False, depth_images=False, aux_image
 
 _SEPARATOR = "\n\n"
 
-# The modes Pillow writes as PNG, which ``pytesseract`` does before it
-# runs Tesseract (alpha is pasted onto white first, so ``RGBA``, ``LA``
-# and ``PA`` are in). Any other mode (CMYK, YCbCr, HSV, F, the
-# premultiplied and padded RGB/L modes) raises ``OSError`` on that save
-# (#1400). ``tests/test_image_child.py`` checks this set against
+# The modes ``pytesseract`` can pass on: it saves each frame as PNG
+# before running Tesseract, after pasting any alpha channel onto white
+# (``RGBA``, ``LA``, ``PA``). Any other mode Pillow cannot write as PNG
+# (CMYK, YCbCr, HSV, F, the premultiplied and padded RGB/L modes) raises
+# ``OSError`` on that save (#1400). ``LAB`` is left out: Pillow cannot
+# write it either, and pytesseract would take its "A" band for alpha and
+# paste through it. ``tests/test_image_child.py`` checks this set against
 # Pillow's own save for each mode.
-_PNG_MODES = frozenset({"1", "L", "P", "PA", "LA", "RGB", "RGBA", "LAB", "I", "I;16", "I;16B"})
+_PNG_MODES = frozenset({"1", "L", "P", "PA", "LA", "RGB", "RGBA", "I", "I;16", "I;16B"})
 
 
 def extract_text(
