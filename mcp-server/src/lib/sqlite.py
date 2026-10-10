@@ -86,6 +86,25 @@ class VectorLanesUnavailableError(RuntimeError):
 _UNFILTERED_OVERSAMPLE = 2
 _FILTERED_OVERSAMPLE = 4
 
+# Fallback WARNINGs of the retrieval lanes (#1216): one rate-limited line per
+# lane and exception type per window, the rest counted. A broken index repeats
+# every lane's failure on every call, so the lines are limited, not dropped.
+_LANE_FAILURE_KEYS = ("OperationalError", "DatabaseError", "ValueError", "other")
+_LANE_FAILURE_MESSAGES = {
+    "rerank_subjects": "Rerank subject lookup failed; skipping",
+    "attachment_filename": "Attachment filename search unavailable",
+    "attachment_text": "Attachment text search unavailable",
+    "attachment_scan": "Attachment scan unavailable",
+    "thread_keyword": "FTS keyword search error, falling back to LIKE",
+    "chunk_keyword": "Chunk keyword search unavailable",
+    "attachment_keyword": "Attachment keyword search unavailable",
+    "matched_attachments": "Attachment match lookup failed; skipping bias",
+    "like_fallback": "LIKE fallback search error",
+    "chunk_vector": "Chunk vector search error",
+    "evidence_chunks": "Per-thread evidence chunk fetch failed",
+    "recent_chunks": "Recent-chunks lookup failed",
+    "vector": "Vector search error",
+}
 # Rate-limit keys (fixed exception type names) and window for the
 # ``search_attachments`` indeterminate-count failure WARNING (#1204).
 _COUNT_FAILURE_KEYS = (
@@ -2042,6 +2061,12 @@ class Database:
     persistent reader.
     """
 
+    def _lane_failed(self, lane: str, error: Exception) -> None:
+        """Log a retrieval lane's fallback WARNING, rate-limited per lane
+        and exception type (#1216). The error text is never logged."""
+        name = type(error).__name__
+        self._lane_failures[lane].record(name if name in _LANE_FAILURE_KEYS else "other")
+
     def __init__(self, path: str):
         self.path = path
         # A failing ``search_attachments`` indeterminate count (#1204)
@@ -2075,6 +2100,16 @@ class Database:
             ),
             summary_msg="Keyword passage ranking capped in the last %ds: %s",
         )
+        self._lane_failures = {
+            lane: RateLimitedLog(
+                log,
+                _LANE_FAILURE_KEYS,
+                _COUNT_FAILURE_LOG_SECS,
+                first_msg=f"{text}: %s",
+                summary_msg=f"{text} in the last %ds: %s",
+            )
+            for lane, text in _LANE_FAILURE_MESSAGES.items()
+        }
         # Fail fast at startup with the same checks ``_connect`` runs
         # on every access. Catches a missing volume / typo'd
         # SQLITE_PATH / unhealthy indexer at process start instead of
@@ -2391,7 +2426,7 @@ class Database:
                     ).fetchall()
                     out[thread_id] = [r["subject"] for r in rows]
         except sqlite3.Error as e:
-            log.warning("Rerank subject lookup failed; skipping: %s", type(e).__name__)
+            self._lane_failed("rerank_subjects", e)
             timings.count("degraded_rerank_subjects", 1)
             return {}
         return out
@@ -2914,7 +2949,7 @@ class Database:
         try:
             rows = self._lane_rows(sql, params, conn)
         except sqlite3.OperationalError as e:
-            log.warning("Attachment filename search unavailable: %s", type(e).__name__)
+            self._lane_failed("attachment_filename", e)
             timings.count("degraded_attachment_filename", 1)
             return []
         return [_row_to_attachment_result(r) for r in rows]
@@ -2990,7 +3025,7 @@ class Database:
         try:
             rows = self._lane_rows(sql, params, conn)
         except sqlite3.OperationalError as e:
-            log.warning("Attachment text search unavailable: %s", type(e).__name__)
+            self._lane_failed("attachment_text", e)
             timings.count("degraded_attachment_text", 1)
             return []
         results: list[AttachmentResult] = []
@@ -3037,7 +3072,7 @@ class Database:
         try:
             rows = self._lane_rows(sql, params, conn)
         except sqlite3.OperationalError as e:
-            log.warning("Attachment scan unavailable: %s", type(e).__name__)
+            self._lane_failed("attachment_scan", e)
             timings.count("degraded_attachment_scan", 1)
             return []
         return [_row_to_attachment_result(r) for r in rows]
@@ -3200,7 +3235,7 @@ class Database:
             # Defense-in-depth: if the sanitized query still trips FTS5, fall
             # back to a LIKE scan against subject/body/participants so valid
             # searches still return recall rather than empty.
-            log.warning("FTS keyword search error, falling back to LIKE: %s", type(e).__name__)
+            self._lane_failed("thread_keyword", e)
             timings.count("degraded_thread_fts", 1)
             return self._like_fallback(query, limit, folders, date_from, date_to, has_attachments)
 
@@ -3254,7 +3289,7 @@ class Database:
             # DB is impossible at runtime. Reaching this branch implies
             # corruption or a missing FTS shadow — log at warning so the
             # operator notices precision retrieval has degraded to none.
-            log.warning("Chunk keyword search unavailable: %s", type(e).__name__)
+            self._lane_failed("chunk_keyword", e)
             timings.count("degraded_chunk_fts", 1)
             return []
         results = [self._row_to_result(r) for r in rows]
@@ -3305,7 +3340,7 @@ class Database:
             # DB is impossible at runtime. Reaching this branch implies
             # corruption or a missing FTS shadow — log at warning so the
             # operator notices attachment retrieval has degraded to none.
-            log.warning("Attachment keyword search unavailable: %s", type(e).__name__)
+            self._lane_failed("attachment_keyword", e)
             timings.count("degraded_attachment_fts", 1)
             return []
         results = [self._row_to_result(r) for r in rows]
@@ -3344,7 +3379,7 @@ class Database:
         try:
             rows = self._fetchall(sql, [fts_query, *thread_ids])
         except sqlite3.Error as e:
-            log.warning("Attachment match lookup failed; skipping bias: %s", type(e).__name__)
+            self._lane_failed("matched_attachments", e)
             timings.count("degraded_attachment_match", 1)
             return {}
         matched: dict[str, list[str]] = {}
@@ -3460,7 +3495,7 @@ class Database:
             rows = self._fetchall(sql, params)
             return [self._row_to_result(r) for r in rows]
         except sqlite3.OperationalError as e:
-            log.warning("LIKE fallback search error: %s", type(e).__name__)
+            self._lane_failed("like_fallback", e)
             timings.count("degraded_like_fallback", 1)
             return []
 
@@ -3526,7 +3561,7 @@ class Database:
             # table) and DatabaseError (corruption); ``ValueError`` is
             # raised by sqlite-vec on malformed embedding payloads. Any
             # other exception type is unexpected and should propagate.
-            log.warning("Chunk vector search error: %s", type(e).__name__)
+            self._lane_failed("chunk_vector", e)
             timings.count("degraded_chunk_vec", 1)
             return None
 
@@ -3696,7 +3731,7 @@ class Database:
             # embedding. Degrade to empty evidence rather than failing
             # the whole hybrid_search call; coarse retrieval still
             # works and the LLM falls back to ``body_text``.
-            log.warning("Per-thread evidence chunk fetch failed: %s", type(e).__name__)
+            self._lane_failed("evidence_chunks", e)
             timings.count("degraded_evidence_chunks", 1)
             return {tid: [] for tid in thread_ids}
 
@@ -3816,7 +3851,7 @@ class Database:
                 (thread_id, limit),
             )
         except sqlite3.Error as e:
-            log.warning("Recent-chunks lookup failed: %s", type(e).__name__)
+            self._lane_failed("recent_chunks", e)
             timings.count("degraded_recent_chunks", 1)
             return []
         chunks = [_row_to_chunk_result(r) for r in rows]
@@ -3924,7 +3959,7 @@ class Database:
             # ``sqlite3.Error`` for table/connection issues, ``ValueError``
             # for malformed serialised vectors. Other exception types
             # should propagate so corrupt-state bugs aren't masked.
-            log.warning("Vector search error: %s", type(e).__name__)
+            self._lane_failed("vector", e)
             timings.count("degraded_thread_vec", 1)
             return None
 
