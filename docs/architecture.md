@@ -2022,8 +2022,10 @@ dispatcher does, and cuts it at 10,000,000 characters
 (`pdf_text_chars`, an extractor cap), as for images (owner decision
 2026-10-08 on #1325), so its output, read whole by the parent, has a
 fixed bound. A `FileNotDecryptedError` or `LimitReachedError` reported
-by the child is raised again in the parent and recorded `unsupported`
-(#931); any other error, the child's own `MemoryError` and
+by the child (matched by exact type name) is raised in the parent as
+the repo-owned `PdfEncryptedError` or `PdfLimitError` and recorded
+`unsupported` (#931), so the indexer process never imports pypdf
+(#1464); any other error, the child's own `MemoryError` and
 `RecursionError` included, is `failed` under its type name, where in
 process those two were host pressure that stopped the indexing pass.
 The move takes no version bump (`pdf@6` stays; owner exception
