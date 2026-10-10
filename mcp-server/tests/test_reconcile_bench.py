@@ -1096,3 +1096,23 @@ def test_writer_starts_from_the_steady_ballast(bench, tmp_path):
     with closing(sqlite3.connect(db)) as conn:
         rows = conn.execute("SELECT COUNT(*), MIN(length(payload)) FROM bench_ballast").fetchone()
     assert rows == (bench.BALLAST_ROWS, 32)
+
+
+def test_writer_waits_only_the_remaining_interval(bench, tmp_path, monkeypatch):
+    db = tmp_path / "interval.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    slept: list[float] = []
+    real_sleep = time.sleep
+
+    def sleep(seconds):
+        slept.append(seconds)
+        real_sleep(max(seconds, 0))
+        if len(slept) >= 6:
+            stop.touch()
+
+    monkeypatch.setattr(bench.time, "sleep", sleep)
+    bench.phase_writer(str(db), str(stop), 16, 0.06)
+    # Within one 0.06 s delay: 0.05, then at most the 0.01 s left.
+    assert all(s <= 0.05 for s in slept)
+    assert any(s < 0.0101 for s in slept[1::2])

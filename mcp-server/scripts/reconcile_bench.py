@@ -1347,7 +1347,7 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
             commits += 1
             resume = time.monotonic() + interval
             while time.monotonic() < resume and not os.path.exists(stop):
-                time.sleep(min(0.05, interval))
+                time.sleep(min(0.05, resume - time.monotonic()))
     return {"commits": commits, "commit_times": times}
 
 
