@@ -104,8 +104,8 @@ def cardinality(bench, tmp_path_factory):
 
 
 def test_certificate_scans_exactly_the_counted_set(report):
-    # 240 messages, 5 % in Trash (left out by the default predicate).
-    for kind, members in (("messages", 228), ("occurrences", 456)):
+    # 240 messages; worst-case records sit in a nested folder, never in Trash.
+    for kind, members in (("messages", 240), ("occurrences", 480)):
         stream = report["certificate"][f"{kind}/stream"]
         collect = report["certificate"][f"{kind}/collect"]
         assert stream["count"] == collect["count"] == members
@@ -117,7 +117,7 @@ def test_certificate_scans_exactly_the_counted_set(report):
 
 
 def test_reconcile_round_returns_at_most_k_missing_records(report):
-    for kind, members in (("messages", 228), ("occurrences", 456)):
+    for kind, members in (("messages", 240), ("occurrences", 480)):
         result = report["reconcile"][kind]
         assert result["request"]["members"] == members
         assert result["request"]["uploaded"] == members - 30 + 4
@@ -627,3 +627,21 @@ def test_commit_each_builds_the_same_corpus_one_message_per_transaction(bench, t
                 )
             )
     assert counts[0] == counts[1] == (60, 60)
+
+
+def test_fts_rowids_follow_insertion_order(bench, tmp_path):
+    db = tmp_path / "rowids.db"
+    bench.build(db, 30, 1, "typical", "typical", chunks=2, commit_each=True)
+    with closing(sqlite3.connect(db)) as conn:
+        ids = [r[0] for r in conn.execute("SELECT fts_rowid FROM message_chunks ORDER BY rowid")]
+    assert ids == list(range(1, 61))
+
+
+def test_worst_records_carry_the_full_nested_maildir_path(bench, tmp_path):
+    db = tmp_path / "paths.db"
+    bench.build(db, 20, 1, "typical", "worst")
+    with closing(sqlite3.connect(db)) as conn:
+        folder, filepath = conn.execute("SELECT folder, filepath FROM messages LIMIT 1").fetchone()
+    assert len(folder.encode()) > 3_000 and folder.count("/") == 13
+    assert filepath.startswith(f"/maildir/{folder}/cur/")
+    assert len(filepath.encode()) <= 4_096 + 600  # the folder path plus the 255-byte file name

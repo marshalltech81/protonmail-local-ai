@@ -259,6 +259,11 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
             "file_name": f"{i:012d}" + "f" * (255 - 12),
             "filename": wide,
             "content_type": wide,
+            # The full Maildir path and the folder derived from it are
+            # stored and returned unclipped: nested folders of 63
+            # four-byte characters (252 bytes, under a file system's
+            # 255-byte name limit) to about 3.5 KB of the 4,096-byte path.
+            "folder": "/".join([_WIDE * 63] * 14),
         }
     previous = message_id(i - 1, identity)
     base = {
@@ -371,9 +376,9 @@ def build(
                 mid = message_id(i, identity)
                 cid = claimant_of(mid)
                 tid = message_id(i - i % 4, identity)
-                folder = _folder(i)
                 at = f"20{10 + i % 15:02d}-{1 + i % 12:02d}-{1 + i % 28:02d}T{i % 24:02d}:{i % 60:02d}:00+00:00"
                 shape = _shape(i, identity, records, references)
+                folder = shape.get("folder") or _folder(i)
                 worst = records == "mixed" and _mixed_worst(i)
                 if worst:
                     worst_rows.append((cid,))
@@ -410,7 +415,8 @@ def build(
                 for c in range(chunks):
                     body = _body(i, c, chunk_tokens)
                     min_tokens = min(min_tokens, len(body.split()))
-                    rowid = i * chunks + c + 1
+                    # Production inserts without a rowid, in insertion order.
+                    rowid = n_chunks + 1
                     fts_rows.append((rowid, body))
                     chunk_rows.append((f"{cid}:{c}", cid, tid, c, body, rowid, None, "body"))
                     n_chunks += 1

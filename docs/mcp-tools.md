@@ -1760,6 +1760,13 @@ On the largest occurrence records, 1,000 are 17.1 MB (153 MiB
 streamed, 156 MiB collected), 2,000 are 34.1 MB (207 / 210 MiB) and
 5,000 are 85.3 MB (371 / 373 MiB).
 
+**Full Maildir paths.** The benchmark's worst-case records carry the
+unclipped folder and source path (nested folders of 252 bytes to about
+3.5 KB), which the cap-sized run above predates: with them a worst-case
+message record is 166.0 KB (158.9 KB before) and an occurrence record
+24.1 KB (17.1 KB before), 7.1 KB more each, so 1,000 records are 7.1 MB
+more than the cap-sized responses above. That run was not repeated.
+
 **Rows behind a record.** The server's record readers load every
 participant row and every References entry of a message before the
 output clips each list to 10
@@ -1842,12 +1849,16 @@ its snapshot; nothing here claims how K changes it. The benchmark now
 alternates K ascending and descending across repeats, which balances
 only with `--repeat` of at least 2, and this run predates it.
 
-What the figures show: memory is not the ceiling (at most 903 MiB with
-the scan method proposed below, stream for messages and collect for
-occurrences; the collected message scan, not proposed, reached
-1.58 GiB). Time is. A round at the caps holds one read snapshot for 7.6
-s (K = 1,000) to 36 s (K = 100) on messages and 160 to 164 s on occurrences with the proposed
-scan method (11 to 21 s and 297 to 299 s with the other). The indexer's
+What the figures show, for one round at a time: time, not memory, is
+the ceiling. Memory peaked at 903 MiB with the scan method proposed
+below (stream for messages, collect for occurrences; the collected
+message scan, not proposed, reached 1.58 GiB). Concurrent rounds were
+not measured
+([#1423](https://github.com/marshalltech81/protonmail-local-ai/issues/1423)).
+A round at the caps holds one read snapshot for 7.6 s (K = 1,000) to
+36 s (K = 100) on messages and 160 to 164 s on occurrences with the
+proposed scan method (11 to 21 s and 297 to 299 s with the other).
+The indexer's
 truncating checkpoint cannot finish for that long, and the WAL holds
 every frame written meanwhile (0.86 GB over a 287 s streamed
 occurrence round at ten commits a second). A cap of 600,000 occurrences
@@ -1956,7 +1967,7 @@ were not repeated.
   18.6 s. On 15,000 messages of 20 chunks of 1,000 words (300,000
   chunks), each message committed on its own as the indexer does
   (`--commit-each`), a 16-term `text` or `body_words` value took a
-  certificate 3.0 to 3.1 s against a page of 4.7 to 7.4 s. Every other
+  certificate 2.5 to 2.6 s against a page of 5.2 to 6.4 s (FTS rowids in insertion order). Every other
   corpus here was built in transactions of 2,000 messages (10 for the
   cardinality corpus), which lays out FTS5 segments differently from
   per-message commits, so their `text` and `body_words` timings are not
