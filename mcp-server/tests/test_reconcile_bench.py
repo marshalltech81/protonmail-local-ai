@@ -6,6 +6,7 @@ import json
 import math
 import sqlite3
 import sys
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -66,6 +67,13 @@ def report(bench, tmp_path_factory):
             "4",
             "--repeat",
             "1",
+            "--wal",
+            "--writer-interval",
+            "0.005",
+            # Keeps the tiny round's transaction open long enough for
+            # the writer to commit inside it.
+            "--wal-hold",
+            "1.0",
             "--filtered",
             "--request-shapes",
             "1000",
@@ -161,6 +169,51 @@ def test_cardinality_records_read_every_stored_row(bench, cardinality):
         assert round_["participant_rows"] == int(k) * bench.MAX_MESSAGE_ADDRESSES
         # 1,000 entries each, plus the parent on a reply.
         assert int(k) * 1000 <= round_["references"] <= int(k) * 1001
+
+
+def test_wal_is_reclaimed_after_the_round(report):
+    # Both scan methods, so the WAL figures size whichever one ships.
+    assert [(w["kind"], w["method"]) for w in report["wal"]] == [
+        ("messages", "stream"),
+        ("messages", "collect"),
+        ("occurrences", "stream"),
+        ("occurrences", "collect"),
+    ]
+    for wal in report["wal"]:
+        # The explicit checkpoint found the retained frames still in the
+        # WAL: no last-connection close reclaimed them first.
+        assert wal["wal_before_checkpoint_bytes"] >= wal["wal_max_during_transaction_bytes"] > 0
+        commits = wal["commits_during_transaction"]
+        assert commits > 0
+        # Every frame committed while the round held its snapshot stays
+        # in the WAL, beyond what the steady state can reuse. Commits
+        # alternate message and ballast, so at least half carry ballast.
+        assert (
+            wal["wal_max_during_transaction_bytes"]
+            >= commits // 2 * wal["commit_bytes"] - wal["wal_at_transaction_start_bytes"]
+        )
+        assert wal["checkpoint_after"]["busy"] == 0
+        assert wal["wal_after_checkpoint_bytes"] == 0
+
+
+def test_failed_round_stops_the_writer(bench, tmp_path):
+    # A reader that fails (here: its request file is missing) must not
+    # leave the unthrottled writer committing after run_wal returns.
+    db = tmp_path / "failed.db"
+    bench.build(db, 20, 1, "typical", "typical")
+
+    def commits() -> int:
+        # The ballast rowid grows by one with every writer commit.
+        with closing(sqlite3.connect(db)) as conn:
+            return conn.execute("SELECT COALESCE(MAX(id), 0) FROM bench_ballast").fetchone()[0]
+
+    with pytest.raises(RuntimeError, match="reconcile round failed"):
+        bench.run_wal(str(db), "messages", 5, str(tmp_path / "missing.json"), 4096, 0.0)
+    after = commits()
+    assert after > 0
+    time.sleep(0.5)
+    assert commits() == after
+    assert not (tmp_path / "failed.db.stop").exists()
 
 
 def test_filtered_certificate_counts_what_a_page_counts(report):
@@ -525,6 +578,32 @@ def test_filtered_run_rotates_page_and_certificates(bench, tmp_path, monkeypatch
     assert order == expected
 
 
+def test_round_window_starts_after_the_snapshot_and_ends_before_the_rollback(bench):
+    import inspect
+
+    src = inspect.getsource(bench.phase_reconcile)
+    # The deferred BEGIN takes its snapshot at the COUNT; the writer's
+    # commits are retained until the rollback.
+    assert src.index('"SELECT 1 FROM messages LIMIT 1"') < src.index(
+        "started_at = time.monotonic()"
+    )
+    assert src.index("started_at = time.monotonic()") < src.index("count = conn.execute")
+    assert src.index("ended_at = time.monotonic()") < src.index("conn.rollback()")
+
+
+def test_wal_commits_are_stamped_by_the_writer_after_they_commit(report):
+    for wal in report["wal"]:
+        assert wal["commits_during_transaction"] <= wal["writer_commits_total"]
+
+
+def test_writer_commits_carry_no_instrumentation_row(bench, tmp_path):
+    db = tmp_path / "plain2.db"
+    bench.build(db, 20, 1, "typical", "typical")
+    with closing(sqlite3.connect(db)) as conn:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+    assert "bench_commits" not in names
+
+
 def test_k_and_method_order_alternate_across_repeats(bench):
     order = []
 
@@ -550,6 +629,7 @@ def test_report_config_records_every_workload_dimension(bench, report, cardinali
     keys = {a.name for a in bench.ARGS} - {"workdir"}
     assert keys == set(report["config"]) - {"sqlite", "python"}
     assert cardinality["config"]["references"] == 1000
+    assert report["config"]["writer_interval"] == [0.005]
 
 
 def test_fts_rowids_follow_insertion_order(bench, tmp_path):
@@ -590,6 +670,14 @@ def test_chunk_rows_carry_every_production_column(bench, tmp_path):
     for name in ("char_start", "char_end", "token_est", "chunked_at"):
         assert name in cols
     assert row[1] > row[0] > 0 and row[2] == bench.token_estimate(row[4]) and row[3]
+
+
+def test_report_and_wal_results_record_the_artificial_hold(report):
+    assert "wal_hold" in report["config"]
+    assert all("hold_s" in w for w in report["wal"])
+    # The reported transaction is the WAL window, hold included, so
+    # its duration matches the commits and growth counted in it.
+    assert all(w["reader_transaction_s"] >= w["hold_s"] == 1.0 for w in report["wal"])
 
 
 def test_worst_fields_are_parser_reachable(bench):
@@ -639,6 +727,15 @@ def test_alternate_names_trade_participants_within_the_address_budget(bench, tmp
     assert built["name_rows"] == 3 * bench.MAX_MESSAGE_ADDRESSES
 
 
+def test_wal_windows_use_the_monotonic_clock(bench):
+    import inspect
+
+    for fn in (bench.phase_reconcile, bench.phase_writer, bench.run_wal):
+        src = inspect.getsource(fn)
+        assert "time.time()" not in src
+    assert "time.monotonic()" in inspect.getsource(bench.phase_writer)
+
+
 def test_threads_of_four_start_at_a_root_without_a_reply_chain(bench, tmp_path):
     db = tmp_path / "threads.db"
     bench.build(db, 12, 1, "typical", "typical")
@@ -675,6 +772,9 @@ _WITH = {
             "--k": "1",
         }
     },
+    "writer_commit_bytes": {"*": {"--wal": None}},
+    "writer_interval": {"*": {"--wal": None}},
+    "wal_hold": {"*": {"--wal": None}},
 }
 
 
@@ -751,6 +851,12 @@ def test_the_parser_offers_exactly_the_table(bench):
     assert seen == [a.flag for a in bench.ARGS]
 
 
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_floats_must_be_finite(bench, value):
+    with pytest.raises(SystemExit, match="finite"):
+        bench.parse_args([*_argv({"--wal": None}), f"--wal-hold={value}"])
+
+
 @pytest.mark.parametrize("value", ["5", "5,6,7"])
 def test_upload_total_takes_two_values(bench, value):
     with pytest.raises(SystemExit, match="takes 2 values"):
@@ -771,6 +877,7 @@ def test_upload_total_takes_two_values(bench, value):
             100_000,
             0,
         ),
+        ({"--wal": None}, "wal_hold", 0.0, 0.0),
         ({}, "extracted_chars", 0, 0),
         ({}, "request_shapes", 0, 0),
     ],
@@ -825,6 +932,11 @@ def test_absent_and_zero_are_resolved_as_the_table_says(bench, changes, name, ab
         ({"--chunks": "2", "--chunk-tokens": "199"}, "one chunk per paragraph"),
         ({"--extracted-chars": "5", "--per-message": "0", "--missing": "0"}, "--per-message"),
         ({"--records": "mixed", "--missing-from": "worst", "--missing": "0"}, "leaves nothing"),
+        ({"--writer-commit-bytes": "5"}, "need --wal"),
+        ({"--writer-interval": "0.5"}, "need --wal"),
+        ({"--wal-hold": "1"}, "need --wal"),
+        ({"--wal": None, "--writer-commit-bytes": "16,16"}, "distinct"),
+        ({"--wal": None, "--writer-interval": "0,0.0"}, "distinct"),
         ({"--repeat": "3"}, "cannot balance"),
         ({"--repeat": "2", "--filtered": None}, "cannot balance"),
         (
@@ -858,6 +970,15 @@ def test_the_largest_accepted_combinations_pass(bench):
         )
     )
     bench.parse_args(_argv({"--records": "mixed", "--missing-from": "worst", "--missing": "6"}))
+
+
+def test_wal_window_takes_sizes_and_count_from_the_same_commits(bench):
+    commits = [(1.0, 100), (2.0, 200), (3.0, 350), (4.0, 500), (5.0, 650)]
+    # A commit stamped exactly at the start belongs before the window;
+    # one stamped at the end, inside it.
+    assert bench.wal_window(commits, 2.0, 4.0) == (200, 500, 2)
+    assert bench.wal_window(commits, 2.5, 2.6) == (200, 200, 0)
+    assert bench.wal_window(commits, 0.5, 1.0) == (0, 100, 1)
 
 
 def test_build_commits_each_message_on_its_own(bench, tmp_path, monkeypatch):
@@ -918,6 +1039,36 @@ def test_file_size_check_is_exact_for_many_parts(bench):
         len(bench.render_eml(i, "typical", "typical", 0, 1, bench.BODY_TOKENS, 7))
         for i in range(120)
     )
+
+
+def test_writer_commits_each_message_as_the_indexer_does(bench, tmp_path):
+    # The indexer commits per message, twice: phase 1 (the message's
+    # rows) and phase 2c (its chunks and vectors). The writer alternates
+    # a one-message update with a ballast commit, so its commits are
+    # pairs and each pair flips exactly one message.
+    db = tmp_path / "one.db"
+    bench.build(db, 1, 0, "typical", "typical")
+
+    def state() -> tuple[int, int]:
+        with closing(sqlite3.connect(db)) as conn:
+            seen = conn.execute("SELECT seen FROM messages").fetchone()[0]
+            top = conn.execute("SELECT COALESCE(MAX(id), 0) FROM bench_ballast").fetchone()[0]
+            return seen, top
+
+    built, _ = state()
+    stop = tmp_path / "stop"
+    import threading
+
+    timer = threading.Timer(0.3, stop.touch)
+    timer.start()
+    out = bench.phase_writer(str(db), str(stop), 16, 0.01)
+    timer.join()
+    assert out["commits"] > 0 and out["commits"] % 2 == 0
+    pairs = out["commits"] // 2
+    seen, top = state()
+    assert seen == (1 - built if pairs % 2 else built)
+    # The steady ballast, then one row per pair.
+    assert top == bench.BALLAST_ROWS + pairs
 
 
 def test_round_transaction_time_starts_at_the_snapshot(bench):
@@ -1018,3 +1169,190 @@ def test_an_oversized_body_is_refused_after_one_probe(bench, tmp_path, monkeypat
 def test_file_floor_counts_the_references_header_exactly(bench, references):
     header = "References: " + "\n ".join(f"<r{n}@x.example>" for n in range(references))
     assert bench._references_bytes(references) == len(header) - len("References: ")
+
+
+def test_writer_commits_and_stamps_only_under_the_order_lock(bench, tmp_path):
+    # The round takes its snapshot and reads its clock under the same
+    # lock the writer holds across COMMIT and its stamp, so no commit
+    # can fall between a snapshot and the time that marks it.
+    import fcntl
+    import threading
+
+    db = tmp_path / "order.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    order = tmp_path / "order.lock"
+    out: dict = {}
+    with open(order, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        writer = threading.Thread(
+            target=lambda: out.update(
+                bench.phase_writer(str(db), str(stop), 16, 0.0, order=str(order))
+            )
+        )
+        writer.start()
+        ready = Path(str(stop) + ".ready")
+        deadline = time.monotonic() + 30
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.3)
+        released = time.monotonic()
+        fcntl.flock(held, fcntl.LOCK_UN)
+    time.sleep(0.2)
+    stop.touch()
+    writer.join()
+    measured = out["commit_times"][1:]
+    assert out["commits"] > 0
+    assert all(when > released for when, _ in measured)
+
+
+def test_the_round_takes_its_snapshot_under_the_order_lock(bench):
+    import inspect
+
+    src = inspect.getsource(bench.phase_reconcile)
+    lock = src.index("with _ordered(order):")
+    assert lock < src.index('"SELECT 1 FROM messages LIMIT 1"') < src.index("started_at = ")
+    end = src.index("with _ordered(order):", lock + 1)
+    assert end < src.index("ended_at = ")
+
+
+def test_writer_wal_size_is_its_logical_end(bench, tmp_path):
+    # An automatic checkpoint would restart the WAL and refill its
+    # allocated file without growing it, hiding retained frames. With
+    # it off, every commit grows the file, so its size is the WAL's end.
+    import threading
+
+    db = tmp_path / "grow.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    timer = threading.Timer(0.5, stop.touch)
+    timer.start()
+    out = bench.phase_writer(str(db), str(stop), 262_144, 0.0)
+    timer.join()
+    sizes = [size for _, size in out["commit_times"]]
+    assert len(sizes) > 4
+    assert all(b > a for a, b in zip(sizes, sizes[1:]))
+
+
+def test_writer_survives_a_tiny_interval(bench, tmp_path, monkeypatch):
+    # The pause is computed from one clock read: a clock that passes
+    # ``resume`` between reads never yields a negative sleep.
+    import threading
+
+    db = tmp_path / "tiny.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    real = time.sleep
+
+    def checked(seconds: float) -> None:
+        assert seconds >= 0
+        real(seconds)
+
+    monkeypatch.setattr(bench.time, "sleep", checked)
+    timer = threading.Timer(0.3, stop.touch)
+    timer.start()
+    out = bench.phase_writer(str(db), str(stop), 16, 0.000001)
+    timer.join()
+    assert out["commits"] > 0
+
+
+def test_the_round_closes_its_transaction_inside_the_end_boundary(bench):
+    import inspect
+
+    src = inspect.getsource(bench.phase_reconcile)
+    end = src.index("with _ordered(order):", src.index("with _ordered(order):") + 1)
+    block = src[end:].split("\n")
+    body = []
+    for line in block[1:]:
+        if line.strip() and not line.startswith(" " * 12):
+            break
+        body.append(line.strip())
+    assert "ended_at = time.monotonic()" in body
+    assert "conn.rollback()" in body
+
+
+def test_an_unbounded_wal_hold_is_refused_before_building(bench, tmp_path):
+    with pytest.raises(SystemExit, match="wal-hold"):
+        bench.parse_args([*_argv({"--wal": None, "--workdir": str(tmp_path)}), "--wal-hold=1e308"])
+    assert not list(tmp_path.iterdir())
+
+
+def test_writer_delay_ends_when_stop_appears(bench, tmp_path):
+    db = tmp_path / "delay.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    import threading
+
+    timer = threading.Timer(0.5, stop.touch)
+    timer.start()
+    started = time.monotonic()
+    out = bench.phase_writer(str(db), str(stop), 16, 3600.0)
+    timer.join()
+    assert time.monotonic() - started < 5
+    # One message: its two commits.
+    assert out["commits"] == 2
+
+
+def test_writer_starts_from_the_steady_ballast(bench, tmp_path):
+    db = tmp_path / "ballast.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    stop.touch()  # no commit: only the reset runs
+    out = bench.phase_writer(str(db), str(stop), 32, 0.0)
+    assert out["commits"] == 0 and len(out["commit_times"]) == 1
+    assert (tmp_path / "stop.ready").exists()
+    with closing(sqlite3.connect(db)) as conn:
+        rows = conn.execute("SELECT COUNT(*), MIN(length(payload)) FROM bench_ballast").fetchone()
+    assert rows == (bench.BALLAST_ROWS, 32)
+
+
+def test_writer_waits_only_the_remaining_interval(bench, tmp_path, monkeypatch):
+    db = tmp_path / "interval.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    slept: list[float] = []
+    real_sleep = time.sleep
+
+    def sleep(seconds):
+        slept.append(seconds)
+        real_sleep(max(seconds, 0))
+        if len(slept) >= 6:
+            stop.touch()
+
+    monkeypatch.setattr(bench.time, "sleep", sleep)
+    bench.phase_writer(str(db), str(stop), 16, 0.06)
+    # Within one 0.06 s delay: 0.05, then at most the 0.01 s left.
+    assert all(s <= 0.05 for s in slept)
+    assert any(s < 0.0101 for s in slept[1::2])
+
+
+def test_the_largest_writer_commit_is_a_row_sqlite_stores(bench):
+    # Every accepted --writer-commit-bytes runs: SQLite refuses a row at
+    # its length limit (record header included), and the steady ballast
+    # stays bounded.
+    with closing(sqlite3.connect(":memory:")) as conn:
+        assert bench.MAX_COMMIT_BYTES < conn.getlimit(sqlite3.SQLITE_LIMIT_LENGTH)
+        conn.execute("CREATE TABLE b (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)")
+        conn.execute("INSERT INTO b (payload) VALUES (randomblob(?))", (bench.MAX_COMMIT_BYTES,))
+    assert bench.MAX_COMMIT_BYTES * bench.BALLAST_ROWS <= 3_200_000_000
+
+
+def test_a_writer_that_dies_mid_round_fails_the_measurement(bench, tmp_path):
+    # Only the highest message row is left, so the writer's first
+    # one-message update (a seeded random row) finds no row and the
+    # writer exits after its steady state; the round itself succeeds.
+    db = tmp_path / "dies.db"
+    bench.build(db, 20, 0, "typical", "typical")
+    with closing(sqlite3.connect(db)) as conn:
+        conn.execute("DELETE FROM messages WHERE rowid < 20")
+        conn.commit()
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"hashes": ""}))
+    with pytest.raises(RuntimeError, match="WAL writer exited with status 1"):
+        bench.run_wal(str(db), "messages", 5, str(request), 16, 0.0)
+    assert not (tmp_path / "dies.db.stop").exists()
+
+
+def test_wal_results_name_the_round_they_measured(bench, report):
+    # Kind, scan method and K: the workload each WAL figure belongs to.
+    assert all(w["k"] == max(report["config"]["k"]) for w in report["wal"])
