@@ -530,24 +530,30 @@ class TestDocExtractor:
         )
         assert (result.status, result.error) == (STATUS_FAILED, "ToolNotFoundError")
 
+    # Only the sleep needs the short timeout to reach the timeout path.
+    # The others start two Python processes, which a loaded run can take
+    # longer than 0.5 s to start (#1336).
     @pytest.mark.parametrize(
-        ("body", "error"),
+        ("body", "error", "timeout"),
         [
-            ("time.sleep(60)", "ToolTimeoutError"),
+            ("time.sleep(60)", "ToolTimeoutError", 0.5),
             (
                 f"sys.stderr.write({MARKER!r})\nsys.stdout.write({MARKER!r})\nsys.exit(1)",
                 "ToolExitError",
+                30.0,
             ),
-            ("os.kill(os.getpid(), signal.SIGKILL)", "ToolCrashError"),
+            ("os.kill(os.getpid(), signal.SIGKILL)", "ToolCrashError", 30.0),
         ],
     )
-    def test_tool_failures_are_fixed_failed_rows(self, tmp_path, monkeypatch, caplog, body, error):
+    def test_tool_failures_are_fixed_failed_rows(
+        self, tmp_path, monkeypatch, caplog, body, error, timeout
+    ):
         from src.extractors import doc
 
         caplog.set_level("DEBUG")
         tool = _fake_tool(tmp_path, body)
         monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
-        monkeypatch.setattr(doc, "TOOL_TIMEOUT_SECONDS", 0.5)
+        monkeypatch.setattr(doc, "TOOL_TIMEOUT_SECONDS", timeout)
         result = extract(
             content_type="application/msword",
             filename=f"{MARKER}.doc",
