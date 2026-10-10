@@ -2,6 +2,7 @@
 runnable and its measurements honest, at a size that runs in seconds."""
 
 import importlib.util
+import json
 import math
 import sqlite3
 import time
@@ -217,7 +218,9 @@ def test_filtered_certificate_counts_what_a_page_counts(report):
     vendor = next(
         r for r in report["filtered"]["messages"] if r["filters"] == {"authority_class": "vendor"}
     )
-    assert vendor["count"] > 0
+    # Every worst-case message has eleven From participants, so its
+    # sender is ambiguous and no authority class decides it.
+    assert vendor["count"] == vendor["page_total"] == 0
     # Body chunks carry at least the 20 tokens real mail does, so the
     # text filters run over a realistic FTS index.
     assert report["build"]["body_tokens_min"] >= 20
@@ -765,6 +768,7 @@ def _ns(**kw):
         {"missing": -1},
         {"extras": -1},
         {"upload_total": [100, -1]},
+        {"upload_total": [0, 300]},
         {"all_extras": True},
         {"all_extras": True, "records": "mixed", "upload_total": [0, 0]},
         {"per_message": -1},
@@ -796,6 +800,7 @@ def test_all_extras_needs_enough_worst_records_for_k(bench):
         {"missing_from": "worst", "records": "typical"},
         {"filtered": True, "repeat": 6, "chunk_tokens": 3},
         {"chunks": 0},
+        {"chunk_tokens": 1},
         {"wal": True, "writer_commit_bytes": [1024, -1]},
     ],
 )
@@ -896,3 +901,20 @@ def test_threads_of_four_start_at_a_root_without_a_reply_chain(bench, tmp_path):
 def test_wal_window_includes_the_size_at_its_close(report):
     for wal in report["wal"]:
         assert wal["wal_max_during_transaction_bytes"] >= wal["wal_at_transaction_start_bytes"]
+
+
+def test_worst_records_keep_their_assigned_thread_and_flag_ambiguous_senders(bench, tmp_path):
+    db = tmp_path / "worst-threads.db"
+    bench.build(db, 12, 1, "ascii998", "worst")
+    with closing(sqlite3.connect(db)) as conn:
+        rows = conn.execute(
+            "SELECT message_id, thread_id, in_reply_to, references_json, sender_ambiguous "
+            "FROM messages"
+        ).fetchall()
+    for mid, tid, reply, refs, ambiguous in rows:
+        assert ambiguous == 1  # eleven From participants
+        i = next(n for n in range(12) if bench.message_id(n, "ascii998") == mid)
+        if i % 4:
+            assert reply == bench.message_id(i - 1, "ascii998")
+            assert json.loads(refs)[0] == reply
+        assert tid == bench.message_id(i - i % 4, "ascii998")

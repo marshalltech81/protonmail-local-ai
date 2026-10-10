@@ -275,10 +275,14 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
             for role in ("from", "to", "cc")
             for p in range(11)
         ]
+        # A reply (every message but the thread root) names its thread's
+        # previous message first, so the production threader would place
+        # it where ``build`` does; the rest of the References are junk.
+        previous = message_id(i - 1, identity) if i % 4 else ascii_id
         return {
             "subject": _WIDE * 2000,
-            "in_reply_to": ascii_id,
-            "references": [ascii_id] * 11,
+            "in_reply_to": previous,
+            "references": [previous] + [ascii_id] * 10,
             "people": people,
             "file_name": f"{i:012d}" + "f" * (255 - 12),
             "filename": wide,
@@ -435,7 +439,8 @@ def build(
                         at,
                         at,
                         i % 2,
-                        0,
+                        # More than one From makes the sender ambiguous.
+                        1 if sum(r == "from" for r, _, _ in shape["people"]) > 1 else 0,
                     )
                 )
                 part_rows += [(cid, role, address, name) for role, address, name in shape["people"]]
@@ -1528,8 +1533,10 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
     two-way orders (scan method, K) need an even count and the
     three-way filtered rotation a multiple of three. One repeat is a
     single, unbalanced run and is allowed."""
-    if args.missing < 0 or args.extras < 0 or any(t < 0 for t in args.upload_total or []):
-        raise SystemExit("--missing, --extras and --upload-total must not be negative")
+    if args.missing < 0 or args.extras < 0 or any(t < 1 for t in args.upload_total or []):
+        raise SystemExit(
+            "--missing and --extras must not be negative and --upload-total at least 1"
+        )
     if args.all_extras and (not args.upload_total or min(args.upload_total) < 1):
         raise SystemExit("--all-extras needs a positive --upload-total for both kinds")
     if args.per_message < 0 or args.messages < 1:
@@ -1558,8 +1565,10 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
         raise SystemExit("--extracted-chars and --request-shapes must not be negative")
     if args.references < 0:
         raise SystemExit("--references must not be negative")
-    if args.chunks < 1 or args.chunk_tokens < 1:
-        raise SystemExit("--chunks and --chunk-tokens must be at least 1")
+    if args.chunks < 1 or args.chunk_tokens < 2:
+        raise SystemExit(
+            "--chunks must be at least 1 and --chunk-tokens at least 2 (the lead terms)"
+        )
     if args.wal and any(b < 0 for b in args.writer_commit_bytes):
         raise SystemExit("--writer-commit-bytes must not be negative")
     if any(k < 1 for k in args.k):
