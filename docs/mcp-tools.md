@@ -1900,6 +1900,11 @@ bytes. The indexer's own truncating checkpoint (every 10 minutes)
 cannot finish while a round holds its snapshot; it logs busy and
 retries on its next pass.
 
+The WAL windows were timed from the end of the `COUNT` scan until the
+benchmark took its snapshot at the first statement; commits during that
+scan were retained but not counted, so the recorded overlapping-commit
+counts are slightly low (the WAL sizes are measured directly).
+
 The writer of the cap-sized runs (above and below) also inserted one
 row into a table per commit, to time the commits; it is removed. The
 same small configuration (20,000 messages, an unthrottled writer, about
@@ -1954,8 +1959,10 @@ were not repeated.
   rows and name rows, and a `where` expression can combine up to 16
   such leaves), and it was not measured at cap size
   ([#1396](https://github.com/marshalltech81/protonmail-local-ai/issues/1422)).
-  What was measured, with the page and both certificates alternating
-  which runs first, without planner statistics: on 50,000 messages
+  What was measured, with two repeats that put the page first once and
+  last once (the benchmark now rotates page, stream and collect over
+  repeats, balanced when the count is a multiple of three), without
+  planner statistics: on 50,000 messages
   (142,500 occurrences) a certificate cost 0.14 to 1.56 times one page
   of the same query streamed and 0.14 to 1.06 times collected; on the
   `query_attachments` clauses (filename, MIME type, extraction status,

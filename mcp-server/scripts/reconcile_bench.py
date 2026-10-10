@@ -753,11 +753,13 @@ def phase_reconcile(
     t_parse = time.perf_counter()
     with closing(_ro(db_path)) as conn:
         conn.execute("BEGIN")
-        count = conn.execute(count_sql, params).fetchone()[0]
-        # BEGIN is deferred: the snapshot is taken by the COUNT, so the
-        # wall clock the WAL phase lines up with its samples is read
-        # after it.
+        # BEGIN is deferred: the first statement takes the snapshot when
+        # it starts, so a trivial read takes it, and the wall clock the
+        # WAL phase lines up with its samples is read right after,
+        # before the COUNT scan.
+        conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone()
         started_at = time.time()
+        count = conn.execute(count_sql, params).fetchone()[0]
         digest = hashlib.sha256(CERT_DOMAIN)
         server: set[bytes] = set()
         missing: list[str] = []
@@ -897,15 +899,16 @@ OCCURRENCE_FILTERS: tuple[dict, ...] = (
 )
 
 
-def phase_filtered(db_path: str, kind: str, filters: dict, reverse: bool = False) -> dict:
+def phase_filtered(db_path: str, kind: str, filters: dict, rotate: int = 0) -> dict:
     """One production page of the query under ``filters``
     (``Database.query_messages`` or ``query_attachments`` with
     ``limit=1``: its counts and first row) and the certificate over the
     same predicate by each scan method, each timed on its own.
 
-    Whatever runs after another reads pages it cached, so ``reverse``
-    flips the whole order (page, stream, collect) from one repeat to the
-    next."""
+    Whatever runs after another reads pages it cached, so ``rotate``
+    rotates the order (page, stream, collect) by that many places: with
+    a repeat count that is a multiple of three each step runs first
+    equally often."""
     from src.lib.sqlite import Database
 
     _import_serializers()
@@ -922,7 +925,7 @@ def phase_filtered(db_path: str, kind: str, filters: dict, reverse: bool = False
 
     steps = ["page", "stream", "collect"]
     done = {}
-    for step in reversed(steps) if reverse else steps:
+    for step in steps[rotate % 3 :] + steps[: rotate % 3]:
         done[step] = (
             page_run() if step == "page" else phase_certificate(db_path, kind, step, filters)
         )
@@ -1365,8 +1368,7 @@ def _fill_thread(filters: dict, identity: str) -> dict:
 
 def _filtered_runs(db: str, kind: str, filters: dict, repeat: int) -> dict:
     runs = [
-        _child("filtered", db_path=db, kind=kind, filters=filters, reverse=n % 2 == 1)
-        for n in range(repeat)
+        _child("filtered", db_path=db, kind=kind, filters=filters, rotate=n) for n in range(repeat)
     ]
     if any(r["scanned"] != r["count"] for r in runs):
         raise SystemExit(f"{kind} {filters}: scanned and counted sets differ")

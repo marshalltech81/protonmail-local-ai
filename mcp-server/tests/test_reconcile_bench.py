@@ -503,8 +503,16 @@ def test_all_extras_upload_misses_every_member_and_returns_worst_records(all_ext
     assert all_extras["reconcile"]["messages"]["stream"]["3"]["record_bytes_max"] > 10_000
 
 
-@pytest.mark.parametrize("reverse", [False, True])
-def test_filtered_run_alternates_page_and_certificates(bench, tmp_path, monkeypatch, reverse):
+@pytest.mark.parametrize(
+    ("rotate", "expected"),
+    [
+        (0, ["page", "stream", "collect"]),
+        (1, ["stream", "collect", "page"]),
+        (2, ["collect", "page", "stream"]),
+        (3, ["page", "stream", "collect"]),
+    ],
+)
+def test_filtered_run_rotates_page_and_certificates(bench, tmp_path, monkeypatch, rotate, expected):
     from src.lib import sqlite as server_sqlite
 
     db = tmp_path / "order.db"
@@ -523,8 +531,8 @@ def test_filtered_run_alternates_page_and_certificates(bench, tmp_path, monkeypa
 
     monkeypatch.setattr(bench, "phase_certificate", cert)
     monkeypatch.setattr(server_sqlite.Database, "query_messages", page)
-    bench.phase_filtered(str(db), "messages", {"participant": "from0.7"}, reverse)
-    assert order == (["collect", "stream", "page"] if reverse else ["page", "stream", "collect"])
+    bench.phase_filtered(str(db), "messages", {"participant": "from0.7"}, rotate)
+    assert order == expected
 
 
 def test_round_window_starts_after_the_snapshot_and_ends_before_the_rollback(bench):
@@ -533,7 +541,8 @@ def test_round_window_starts_after_the_snapshot_and_ends_before_the_rollback(ben
     src = inspect.getsource(bench.phase_reconcile)
     # The deferred BEGIN takes its snapshot at the COUNT; the writer's
     # commits are retained until the rollback.
-    assert src.index("count = conn.execute") < src.index("started_at = time.time()")
+    assert src.index('"SELECT 1 FROM messages LIMIT 1"') < src.index("started_at = time.time()")
+    assert src.index("started_at = time.time()") < src.index("count = conn.execute")
     assert src.index("ended_at = time.time()") < src.index("conn.rollback()")
 
 
