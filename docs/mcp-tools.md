@@ -1710,9 +1710,18 @@ over the concatenated 32-byte digests, 25.6 MB) took 0.05 s and peaked
 at 136 MiB; an array of 600,000 hex strings (40.2 MB) took 0.04 s and
 169 MiB. An array is unsafe under a byte cap: the same 40.2 MB holds
 8,039,999 two-character strings, which `json.loads` builds before any
-length check, taking 0.16 s and 530 MiB. A packed upload is one
-element whatever its size, and its digest count is its decoded length
-over 32, known before any per-digest object exists.
+length check, taking 0.16 s and 530 MiB. A packed upload that holds
+only the `hashes` string is one element whatever its size, and its
+digest count is its decoded length over 32, known before any
+per-digest object exists. That holds only while nothing else is in
+the JSON body: an envelope of the same 25.6 MB with an empty `hashes`
+and an ignored member of 5,119,998 two-character strings took 0.13 s
+and 347 MiB, because `json.loads` builds the whole body before any
+member is selected. A byte cap alone therefore does not bound a packed
+request; its structure must be bounded before it is parsed (for
+example by requiring the body to be exactly the fixed prefix, the
+base64 and the fixed suffix, or by sending the base64 as the body), an
+encoding choice for PR1 that this measurement does not make.
 
 **Reconcile round: one read transaction.** Parse the packed upload,
 then COUNT, scan, hash each identity, diff against the upload, and read
@@ -1893,6 +1902,8 @@ were not repeated.
 
 - **Prerequisites:** bound each record's read (#1377, #1381) before
   the reconcile tool ships; without them no K bounds a round's work.
+  Bound the packed request's structure before it is parsed (above);
+  the byte cap alone does not.
 - **K:** 100 message records and 1,000 occurrence records per round.
   On the largest records measured, with few extras, that is 15.9 MB and
   17.1 MB per response at a peak RSS of 167 MiB and 156 MiB; with the

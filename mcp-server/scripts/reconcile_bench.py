@@ -946,6 +946,13 @@ def write_request_shape(out: Path, shape: str, n: int) -> int:
             {"hashes": [hashlib.sha256(str(i).encode()).hexdigest() for i in range(n)]},
             separators=(",", ":"),
         ).encode()
+    elif shape == "packed_junk":
+        # A packed envelope with no digests and an ignored member holding
+        # as many two-character strings as fit in the byte size of ``n``
+        # packed digests: ``unpack_hashes`` selects
+        # ``hashes`` only after ``json.loads`` has built everything.
+        budget = 4 * ((32 * n + 2) // 3) + 14  # the packed upload's size
+        body = ('{"hashes":"","junk":[' + ",".join(['"00"'] * ((budget - 22) // 5)) + "]}").encode()
     else:
         budget = 67 * n + 12
         body = ('{"hashes":[' + ",".join(['"00"'] * ((budget - 13) // 5)) + "]}").encode()
@@ -960,12 +967,13 @@ def phase_request_shape(path: str, shape: str) -> dict:
     excluded; peak RSS includes the body, as a server holds it."""
     body = Path(path).read_bytes()
     t0 = time.perf_counter()
-    if shape == "packed":
+    if shape in ("packed", "packed_junk"):
         digests = unpack_hashes(body)
     else:
         digests = json.loads(body)["hashes"]
     parse_s = time.perf_counter() - t0
-    return {"elements": len(digests), "parse_s": parse_s, "rss_kib": _rss_kib()}
+    elements = body.count(b'"00"') if shape == "packed_junk" else len(digests)
+    return {"elements": elements, "parse_s": parse_s, "rss_kib": _rss_kib()}
 
 
 def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) -> dict:
@@ -1369,7 +1377,7 @@ def _filtered_runs(db: str, kind: str, filters: dict, repeat: int) -> dict:
 def run_request_shapes(work: Path, n: int) -> dict:
     """Parse cost and peak RSS of each upload shape at ``n`` digests."""
     out = {}
-    for shape in ("packed", "hex_array", "short_array"):
+    for shape in ("packed", "packed_junk", "hex_array", "short_array"):
         path = work / f"shape-{shape}.json"
         size = write_request_shape(path, shape, n)
         result = _child("request_shape", path=str(path), shape=shape)

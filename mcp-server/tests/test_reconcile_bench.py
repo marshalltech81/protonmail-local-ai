@@ -228,6 +228,10 @@ def test_request_shapes_count_their_elements(report):
     # The same byte budget as the hex array holds five times the
     # elements as two-character strings, all parsed before any check.
     assert shapes["short_array"]["bytes"] <= shapes["hex_array"]["bytes"]
+    # A packed envelope with an ignored member is as small as the packed
+    # upload of the same digests yet builds one object per junk string.
+    assert shapes["packed_junk"]["bytes"] <= shapes["packed"]["bytes"] + 64
+    assert shapes["packed_junk"]["elements"] == (shapes["packed"]["bytes"] - 22) // 5
     assert shapes["short_array"]["elements"] == (67 * 1000 + 12 - 13) // 5
     assert shapes["packed"]["bytes"] < shapes["hex_array"]["bytes"]
 
