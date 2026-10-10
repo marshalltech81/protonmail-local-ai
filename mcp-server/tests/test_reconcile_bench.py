@@ -419,7 +419,7 @@ def all_extras(bench, tmp_path_factory):
             "--workdir",
             str(work),
             "--messages",
-            "100",
+            "200",
             "--per-message",
             "1",
             "--records",
@@ -770,4 +770,13 @@ def test_invalid_upload_shapes_are_refused_before_building(bench, kw):
 
 
 def test_all_extras_with_mixed_records_is_accepted(bench):
-    bench._require_balanced_repeat(_ns(all_extras=True, records="mixed", upload_total=[100, 300]))
+    bench._require_balanced_repeat(
+        _ns(all_extras=True, records="mixed", upload_total=[100, 300], messages=6000)
+    )
+
+
+def test_all_extras_needs_enough_worst_records_for_k(bench):
+    with pytest.raises(SystemExit, match="cannot fill K = 100"):
+        bench._require_balanced_repeat(
+            _ns(all_extras=True, records="mixed", upload_total=[100, 300], messages=1000)
+        )

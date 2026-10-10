@@ -1506,6 +1506,14 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
         raise SystemExit("--per-message must not be negative and --messages must be at least 1")
     if args.all_extras and args.records != "mixed":
         raise SystemExit("--all-extras needs --records mixed (the worst-case records it returns)")
+    if args.all_extras:
+        # Every round returns K worst-case records of each kind.
+        worst = sum(1 for i in range(args.messages) if _mixed_worst(i))
+        if worst < max(args.k) or worst * args.per_message < max(args.k):
+            raise SystemExit(
+                f"--all-extras: {worst} worst-case messages and {worst * args.per_message} "
+                f"occurrences cannot fill K = {max(args.k)}; raise --messages or --per-message"
+            )
     if any(k < 1 for k in args.k):
         raise SystemExit(f"--k {args.k}: every K must be at least 1")
     if args.repeat is None:
