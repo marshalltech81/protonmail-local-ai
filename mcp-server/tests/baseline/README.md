@@ -103,6 +103,80 @@ The hashed embedder has no sense of meaning, so the baseline catches
 broken plumbing (ingestion, schema, lanes, fusion, filters). It does
 not measure semantic quality.
 
+## Real-embedder floors (opt-in, #1439)
+
+`make baseline-real-embedder` builds the same synthetic corpus with a
+real embedding model and checks retrieval floors for it. It is
+synthetic regression evidence for one model: it says nothing about how
+well any real mailbox is searched. It calls a paid provider, so it is
+never part of `make test` or CI; `make baseline` stays the per-push
+gate, unchanged.
+
+```bash
+set -a; . ./.env; set +a     # EMBED_BASE_URL, EMBED_MODEL (EMBED_MODE, if set, must be openai)
+make baseline-real-embedder  # key read from .secrets/embed_api_key.txt (mode 600)
+make baseline-real-embedder REAL_EMBED_ARGS="--repeats 5 --max-requests 600"
+```
+
+1. **Build** (`indexer/tests/baseline/real_embedder.py`). Runs the
+   build above once per repeat (`--repeats`, 2 to 5, default 2), each
+   with its own vectors from the provider, recording that provider as
+   the index's embedder identity. Only the synthetic corpus, the golden
+   questions and the calibration sample are sent; the key is read from
+   the secrets file inside the process and is never an argument or
+   printed. Vectors are cached in `REAL_EMBED_CACHE` (default
+   `.real-embedder-cache/`, git-ignored, mode 700/600) under the text,
+   the repeat number, the endpoint, model, batch size, dimensions, SDK
+   version and encoding, so a rerun with nothing changed sends no
+   requests and a corpus edit re-embeds only the texts it changed.
+   Delete the cache to measure the variation afresh.
+2. **Check** (`test_real_embedder_baseline.py`, `REAL_EMBED_DIR` set).
+   Ranks every `search` and `semantic` question in `golden.json`
+   through `hybrid_search` (no reranker) on each repeat, fails if any
+   repeat falls below the model's `real_embedder_floors`, and prints
+   the metrics per repeat (all questions, then each set), the
+   questions with evidence missing from the top 10, the questions
+   whose top 10 differs between repeats, the cosine distance between
+   repeats' vectors for the same text, and the spend: requests, the
+   input tokens the provider reported and the wall time. Per-question
+   `max_rank` and the rank snapshot belong to the hashed baseline and
+   are not checked here.
+
+Every provider request, retries and the calibration request included,
+counts against `--max-requests` (1 to 1,000, default 250; one repeat
+is about 100 requests: seven chunk batches at the default
+`--batch-size` of 64, one calibration request and one request per
+query, each sent alone with a string input and left unnormalised, as
+mcp-server embeds a search query). A query request that fails with a
+connection error, timeout, 408, 429 or 5xx is retried twice (after the
+provider's Retry-After, else 2 and 4 seconds), and the report counts
+the retries. The request
+that would pass the cap is not sent: the build exits 3 and prints
+INCONCLUSIVE, and no floor is checked, so a capped run is never a pass.
+All arguments are checked against one table before anything is built.
+
+**Semantic questions** (`semantic` in `golden.json`) are paraphrases
+sharing few words with their evidence ("teeth cleaned" for the dental
+thread, "Portugal" for the Lisbon threads), including four
+multi-source questions and one with alternative threads. The hashed
+baseline checks only that their evidence threads are indexed.
+
+**Floors** are independent per metric (Hit@10, MRR, evidence
+recall@10, multi-source evidence recall@10), over all 73 questions,
+one set per model. Each is the lowest repeat's value minus one
+question's worth (1/73 for Hit@10, MRR and evidence recall; one group
+of a two-group question, 1/18, for multi-source recall), rounded down
+to two decimals: one question lost to provider variation passes, two
+fail. The `_comment` beside each set records the run it came from and
+the variation behind the margin. On 2026-10-10, five repeats with
+`Qwen/Qwen3-Embedding-8B` on DeepInfra returned different vectors for
+half the queries and about one chunk in twelve (largest cosine
+distance 0.0031) and moved the top 10 of 39 questions; an earlier run
+that batched the queries moved one question across rank 10. A model
+with no recorded floors fails the check after printing its measured
+values: record a set measured over at least three repeats with the
+rule above.
+
 The recall floors are the values the hashed embedder reaches, rounded
 down, so losing any one required source fails them. They are wiring
 checks, not quality targets. Both are 1.0 since the keyword slot

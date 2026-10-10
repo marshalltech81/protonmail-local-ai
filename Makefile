@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead reparse clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead reparse clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -47,6 +47,7 @@ help:
 	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository, then the image gates (needs trivy and the built images)"
 	@echo "  trivy-images Run the CI Trivy image gates of .github/workflows/docker.yml on the built indexer, mcp-server and mbsync images (needs trivy, make build)"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
+	@echo "  baseline-real-embedder  Opt-in retrieval floors on the synthetic corpus with the real EMBED_* model (sends synthetic text only; REAL_EMBED_ARGS=\"--repeats N --max-requests N --batch-size N\")"
 	@echo "  eval-answers Opt-in answer-quality run of the intelligence tools on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
 	@echo "  eval-answers-compare  Compare two answer-evaluation reports (BASELINE=... CANDIDATE=...)"
 	@echo "  clean        Remove all containers and volumes (destructive)"
@@ -381,6 +382,27 @@ baseline: sync-indexer sync-mcp
 	@dir=$$(mktemp -d) && \
 	( cd indexer && uv run python -m tests.baseline.build "$$dir/out" ../mcp-server/tests/baseline/golden.json ../mcp-server/tests/answer_eval/cases.json ) && \
 	( cd mcp-server && BASELINE_DIR="$$dir/out" uv run pytest -q --no-cov tests/baseline $(if $(filter 1,$(UPDATE)),--update-baseline) ); \
+	status=$$?; rm -rf "$$dir"; exit $$status
+
+# Opt-in retrieval baseline with a real embedding model (#1439, stage 1
+# of #1425): builds the synthetic baseline once per repeat with the
+# EMBED_BASE_URL / EMBED_MODEL in the environment and the key read by
+# the build from REAL_EMBED_SECRETS/embed_api_key.txt (default
+# .secrets/; never an argument), then
+# checks golden.json's real_embedder_floors for that model on every
+# repeat and reports ranking flips, vector variation and spend. Only
+# the synthetic corpus and questions are sent. Vectors are cached in
+# REAL_EMBED_CACHE (git-ignored), so a rerun with nothing changed sends
+# no requests. REAL_EMBED_ARGS passes --repeats, --max-requests and
+# --batch-size; a run that reaches the request cap exits 3
+# (inconclusive), never a pass. It calls a paid provider, so it is
+# never part of `make test` or CI.
+REAL_EMBED_CACHE ?= $(CURDIR)/.real-embedder-cache
+REAL_EMBED_SECRETS ?= $(CURDIR)/.secrets
+baseline-real-embedder: sync-indexer sync-mcp
+	@dir=$$(mktemp -d) && \
+	( cd indexer && uv run python -m tests.baseline.real_embedder "$$dir/out" ../mcp-server/tests/baseline/golden.json --cache-dir "$(REAL_EMBED_CACHE)" --secrets-dir "$(REAL_EMBED_SECRETS)" $(REAL_EMBED_ARGS) ) && \
+	( cd mcp-server && REAL_EMBED_DIR="$$dir/out" uv run pytest -q -s --no-cov tests/baseline/test_real_embedder_baseline.py ); \
 	status=$$?; rm -rf "$$dir"; exit $$status
 
 # Opt-in answer-quality evaluation of ask_mailbox, summarize_thread,
