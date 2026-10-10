@@ -236,7 +236,17 @@ _FILENAME_COUNTED = (
     "in test_eml_extractor): inside a leaf .eml no other walk logs it; the line "
     "is for the in-process parser's callers"
 )
+_PARENT_ONLY_HTML = (
+    "a message's own walk converts its HTML parts in the HTML child after the walk "
+    "(#1294); the eml child's body-only walk (a BodyWalk) converts in process and "
+    "never calls it, so its lines are the parent's"
+)
 _EXCLUDED: dict[tuple[str, str], str] = {
+    ("src.parser", "_convert_html_parts"): _PARENT_ONLY_HTML,
+    ("src.extractors", "apply_child_degradation"): (
+        "the parent's re-application of a child's counts, reached here only through "
+        "parser._convert_html_parts (" + _PARENT_ONLY_HTML + ")"
+    ),
     ("src.parser", "_decode_text_header"): _HEADER_COUNTED,
     ("src.parser", "_decode_header_parts"): _HEADER_COUNTED,
     ("src.parser", "_decode_raw_8bit"): _HEADER_COUNTED,

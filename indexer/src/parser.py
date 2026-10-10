@@ -26,14 +26,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-import html2text
-
+from .extractors import html as html_conversion
 from .extractors import (
     note_parser_address_repeats,
     note_parser_caps_message,
     resolved_extractor_module,
     warn_rate_limited,
 )
+from .extractors._runner import ChildError
 from .maildir import parse_flags
 
 log = logging.getLogger("indexer.parser")
@@ -69,6 +69,11 @@ type DateStatus = Literal["parsed", "missing", "invalid"]
 # * ``container_serialize``: a container the generator refuses;
 # * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
 #   of the body;
+# * ``html_body``: ``text/html`` parts whose text the HTML conversion
+#   child left out or cut (#1294): its limits or an error failed the
+#   conversion (every HTML part of the message), or its text budget cut
+#   the part that crossed it and the parts after it; counted only for
+#   parts the body could keep;
 # * ``mime_parts``: parts past the first ``MAX_WALKED_PARTS`` in
 #   document order are left out of the walk (their text and
 #   attachments); counted once per message (#996);
@@ -116,6 +121,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "decoded_bytes",
     "container_serialize",
     "body_parts",
+    "html_body",
     "mime_parts",
     "address_header",
     "address_element",
@@ -141,7 +147,7 @@ PARSE_REPEATS: tuple[str, ...] = ("address_repeated", "from_repeated")
 # names are attributed to the role (From, To, Cc) being read when they
 # fire; ``address_fields`` stops the scan before any role is read and
 # clears all three.
-BODY_LOSS_CAPS: tuple[str, ...] = ("body_parts", "mime_parts")
+BODY_LOSS_CAPS: tuple[str, ...] = ("body_parts", "html_body", "mime_parts")
 ATTACHMENT_LOSS_CAPS: tuple[str, ...] = (
     "attached_depth",
     "attached_fields",
@@ -287,17 +293,15 @@ def _parse_max_bytes() -> int:
 
 
 def _html_to_text(html: str) -> str:
-    """Render HTML to text with a fresh converter.
+    """Render HTML to text in this process, with the converter every
+    HTML conversion uses (``extractors.html.html_to_text``).
 
-    ``HTML2Text`` keeps parser state between ``handle`` calls, so a
-    shared instance let one message's unclosed ``<style>`` blank every
-    later HTML body until some document closed it.
+    Only a body-only walk (``BodyWalk``) converts here: its one caller is
+    the attached-email extractor, which already runs in the extractor
+    child under that child's limits. A message's own parse converts its
+    HTML parts in the HTML child instead (``_convert_html_parts``).
     """
-    h2t = html2text.HTML2Text()
-    h2t.ignore_links = True
-    h2t.ignore_images = True
-    h2t.body_width = 0
-    return h2t.handle(html)
+    return html_conversion.html_to_text(html)
 
 
 def _decoded_payload(part: Any) -> bytes:
@@ -1600,6 +1604,9 @@ def _extract_body_and_attachments(
     inline_lost: list[tuple[int, bool]] = []
     pending: list[tuple[int, email.message.Message | None, bool, bool, int]] = []
     inline_roots: set[int] = set()
+    # The message's own walk: its ``text/html`` parts (node index, decoded
+    # text), converted together once the walk ends (#1294).
+    html_parts: list[tuple[int, str]] = []
 
     # Depth-first in document order, like ``msg.walk()``, but nothing
     # inside an attachment is a candidate for the body: an attached
@@ -1823,10 +1830,17 @@ def _extract_body_and_attachments(
         text = _safe_decode(payload, part.get_content_charset() or "utf-8", fallback)
         if fallback:
             charset_degraded.append((len(nodes) - 1, not is_html))
+        if is_html and walk is None:
+            # Nothing reads a leaf's text before the walk ends, so the
+            # message's HTML parts are converted together below.
+            html_parts.append((len(nodes) - 1, text))
+            continue
         node.text = (_html_to_text(text) if is_html else text).strip()
         node.has_text = bool(node.text)
         node.has_plain = node.has_text and not is_html
 
+    if html_parts:
+        _convert_html_parts(nodes, html_parts, caps)
     if walk is not None:
         walk.parts_left -= walked
         walk.text_parts_left -= text_parts
@@ -1862,6 +1876,54 @@ def _extract_body_and_attachments(
         if inline_lost:
             walk.nested_lost_parts += _capped_parts_lost(nodes, inline_lost)
     return body, attachments
+
+
+def _convert_html_parts(
+    nodes: list[_BodyNode], parts: list[tuple[int, str]], caps: Counter[str]
+) -> None:
+    """Set the text of the message's ``text/html`` body ``parts`` (node
+    index, decoded HTML), converted in one HTML child
+    (``extractors.html.convert_bodies``, #1294).
+
+    A conversion the child cannot finish (its address-space, CPU or
+    wall-clock limit, an error in ``html2text``, broken output) leaves
+    every part without text; its text budget leaves the part that crossed
+    it cut and the parts after it without text. Either is logged at
+    WARNING, rate limited, with the failure's type name and counts, and
+    the parts the body could have kept are counted under ``html_body``,
+    which marks the body incomplete. The rest of the message is indexed
+    as usual. ``OSError`` from starting the child (no process or scratch
+    space left) propagates, so the queue retries the message."""
+    try:
+        texts, cut = html_conversion.convert_bodies([html for _, html in parts])
+    except html_conversion.CHILD_FAILURES as exc:
+        texts, cut = [], False
+        reason = exc.type_name if isinstance(exc, ChildError) else type(exc).__name__
+        warn_rate_limited(
+            log,
+            "HTML body conversion failed (%s); the text of %d HTML parts is left out",
+            reason,
+            len(parts),
+            attachment=False,
+        )
+    for (index, _), text in zip(parts, texts, strict=False):
+        node = nodes[index]
+        node.text = text.strip()
+        node.has_text = bool(node.text)
+    if cut:
+        warn_rate_limited(
+            log,
+            "HTML body conversion stopped at %d chars; %d of %d HTML parts cut or left out",
+            html_conversion._MAX_TEXT_CHARS,
+            len(parts) - len(texts) + 1,
+            len(parts),
+            attachment=False,
+        )
+    affected = parts[len(texts) - 1 :] if cut else parts[len(texts) :]
+    if affected:
+        lost = _capped_parts_lost(nodes, [(index, False) for index, _ in affected])
+        if lost:
+            caps["html_body"] += lost
 
 
 def _open_nested(

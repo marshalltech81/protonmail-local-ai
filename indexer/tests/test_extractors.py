@@ -7449,6 +7449,25 @@ def _cap_image_text_chars(monkeypatch):
     assert pages == [1, 1]
 
 
+def _cap_html_text_chars(monkeypatch):
+    """The child's text budget cuts the HTML text where it crosses it
+    (#1294)."""
+    from src.extractors import html
+
+    calls: list[str] = []
+    real = html.html_to_text
+
+    def convert(source: str) -> str:
+        calls.append(source)
+        return real(source)
+
+    monkeypatch.setattr(html, "html_to_text", convert)
+    monkeypatch.setattr(html, "_MAX_TEXT_CHARS", 9)
+    text, _ = html.extract(f"<p>{_CAP_MARKER}</p>".encode())
+    assert text == _CAP_MARKER[:9]
+    assert len(calls) == 1
+
+
 def _cap_ppt_output_bytes(monkeypatch):
     """The runner returned a cut output: the bytes before the cut are
     kept. That the runner stops reading at the cap and kills the reader
@@ -7570,6 +7589,7 @@ _CAP_TRIGGERS = {
     "eml_nested_messages": _cap_eml_nested_messages,
     "image_text_chars": _cap_image_text_chars,
     "image_pixel_ceiling": _cap_image_pixel_ceiling,
+    "html_text_chars": _cap_html_text_chars,
 }
 
 # Every cap constant in the extractor modules (``module:NAME``) and every
@@ -7605,6 +7625,7 @@ _REPORTED_CAPS = {
     "src.extractors.eml:_MAX_DECODED_BYTES": "eml_nested_messages",
     "src.extractors.image:_MAX_TEXT_CHARS": "image_text_chars",
     "src.extractors.image:CHILD_MAX_IMAGE_PIXELS": "image_pixel_ceiling",
+    "src.extractors.html:_MAX_TEXT_CHARS": "html_text_chars",
 }
 # ... or the reason it is not reported as an extractor cap.
 _WORKBOOK_FAILS = (
@@ -7669,6 +7690,31 @@ _UNREPORTED_CAPS = {
         "the child cannot report it): a failed row with its rate-limited WARNING, counted as "
         "failed="
     ),
+    "src.extractors.html:_MAX_OUTPUT_BYTES": (
+        "child output past it cannot come from a working child: ChildOutputError, a failed row "
+        "with its rate-limited WARNING, counted as failed=; for a message body, the html_body "
+        "parse cap (tests/test_html_child.py)"
+    ),
+    "src.extractors.html:_MAX_PREFIX_DIGITS": (
+        "a longer length prefix cannot come from a working child: ChildOutputError, a failed "
+        "row with its rate-limited WARNING, counted as failed=; for a message body, the "
+        "html_body parse cap (tests/test_html_child.py)"
+    ),
+    "src.extractors.html_child:_MAX_DOCUMENTS": (
+        "more documents cannot come from the parent, which sends one per attachment and at "
+        "most parser.MAX_BODY_TEXT_PARTS per message: ValueError in the child, recorded by "
+        "type (tests/test_html_child.py TestChildArguments)"
+    ),
+    "src.extractors.html:CHILD_MAX_ADDRESS_SPACE_BYTES": (
+        "the child fails (MemoryError, or ToolExitError when it cannot report it): a failed "
+        "row with its rate-limited WARNING, counted as failed=; for a message body, the "
+        "html_body parse cap (tests/test_html_child.py)"
+    ),
+    "src.extractors.html:CHILD_MAX_CPU_SECONDS": (
+        "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
+        "counted as failed=; for a message body, the html_body parse cap "
+        "(tests/test_html_child.py)"
+    ),
     "src.extractors._runner:_MAX_FRAME_LINE": (
         "a longer protocol line cannot come from a working child: ChildOutputError, a failed "
         "row with its rate-limited WARNING, counted as failed="
@@ -7721,6 +7767,7 @@ _EXTRACTOR_MODULES = (
     "src.extractors.docx",
     "src.extractors.eml",
     "src.extractors.html",
+    "src.extractors.html_child",
     "src.extractors.extractor_child",
     "src.extractors.ooxml",
     "src.extractors.image",
