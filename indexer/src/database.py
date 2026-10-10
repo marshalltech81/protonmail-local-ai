@@ -12,7 +12,7 @@ import struct
 import threading
 import weakref
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
@@ -154,7 +154,13 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # thread vector is derived without reading every chunk vector; no
 # reparse, the rows are filled inline and by a backfill sweep
 # (``migrations/0010_thread_vector_sums.sql``).
-SCHEMA_VERSION = 10
+# v11 (#1418): ``attachment_extractions.ocr_pages_cap``,
+# ``digital_pages_cap`` and ``extracted_chars_cap`` record the configured
+# limit that cut a cached result (0 when it did not cut), NULL (unknown)
+# on rows cached before it; no reparse, the startup sweep re-queues the
+# rows a raised limit or the once-only bootstrap arm selects
+# (``migrations/0011_extraction_cap_record.sql``).
+SCHEMA_VERSION = 11
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -175,6 +181,67 @@ _PURGE_ORPHAN_EXTRACTION_SQL = (
     "WHERE a.attachment_id = attachment_extractions.attachment_id "
     "AND a.extractor_module = attachment_extractions.extractor_module)"
 )
+
+# Every column of an ``attachment_extractions`` row, in table order: read
+# whole by the cache lookup and by the purge that keeps a row to restore
+# (#1375), and written back whole by the restore.
+_EXTRACTION_COLUMN_NAMES = (
+    "attachment_id",
+    "extractor_module",
+    "extraction_status",
+    "extractor",
+    "extracted_text",
+    "extraction_error",
+    "extracted_at",
+    "ocr_pages_skipped",
+    "text_complete",
+    "ocr_pages_cap",
+    "digital_pages_cap",
+    "extracted_chars_cap",
+)
+_EXTRACTION_COLUMNS = ", ".join(_EXTRACTION_COLUMN_NAMES)
+
+# The startup sweep's cap-refresh arms (#1418), the SQL twins of
+# ``attachment_indexing.cap_raised`` and ``cap_bootstrap_due``; the
+# lookup applies the same predicates (``_cache_hit_short_circuits``) and
+# a differential test runs a catalogue of rows through both. Only a
+# ``success`` or ``empty`` row qualifies, and while OCR is off never one
+# ``attachment_indexing._ocr_row_kept`` keeps: an ``-ocr`` stamp (before
+# ``@``), or an OCR page cap or skipped pages above 0 (NULL counts as 0).
+_CAP_REFRESH_SQL = """
+    SELECT m.filepath, a.attachment_occurrence_id AS occurrence_id,
+           a.text_complete AS occurrence_complete
+    FROM attachment_extractions e
+    JOIN attachments a ON a.attachment_id = e.attachment_id
+        AND a.extractor_module = e.extractor_module
+    JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+    WHERE e.extraction_status IN ('success', 'empty')
+      AND (:ocr_enabled OR (substr(CASE WHEN instr(COALESCE(e.extractor, ''), '@') > 0
+               THEN substr(e.extractor, 1, instr(e.extractor, '@') - 1)
+               ELSE COALESCE(e.extractor, '') END, -4) <> '-ocr'
+           AND COALESCE(e.ocr_pages_cap, 0) = 0
+           AND COALESCE(e.ocr_pages_skipped, 0) = 0))
+      AND ({arm})
+"""
+# A limit that cut and is now higher: the OCR page limit has no disabled
+# value (``minimum=1``); 0 disables the other two.
+_CAP_RAISED_SQL = """
+    (e.ocr_pages_cap > 0 AND :ocr_pages > e.ocr_pages_cap)
+    OR (e.digital_pages_cap > 0
+        AND (:digital_pages = 0 OR :digital_pages > e.digital_pages_cap))
+    OR (e.extracted_chars_cap > 0
+        AND (:extracted_chars = 0 OR :extracted_chars > e.extracted_chars_cap))
+"""
+# A row cached before the record (all three NULL) that lost text: no
+# record says which limit cut it, so it is extracted once, which records
+# them.
+_CAP_BOOTSTRAP_SQL = """
+    e.text_complete = 0
+    AND e.ocr_pages_cap IS NULL AND e.digital_pages_cap IS NULL
+    AND e.extracted_chars_cap IS NULL
+"""
+_CAP_RAISED_QUERY = _CAP_REFRESH_SQL.format(arm=_CAP_RAISED_SQL)
+_CAP_BOOTSTRAP_QUERY = _CAP_REFRESH_SQL.format(arm=_CAP_BOOTSTRAP_SQL)
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -772,6 +839,12 @@ class Database:
             -- ``text_complete`` is whether the result lost no text
             -- (#1242): 0 / 1, NULL when unknown (a row cached before
             -- schema v6).
+            -- ``ocr_pages_cap``, ``digital_pages_cap`` and
+            -- ``extracted_chars_cap`` are the configured limits that cut
+            -- the result (#1418): the limit's value when it cut, 0 when
+            -- it did not, NULL when unknown (not applicable to the
+            -- module, a status other than success / empty, or a row
+            -- cached before schema v11).
             CREATE TABLE attachment_extractions (
                 attachment_id      TEXT NOT NULL,
                 extractor_module   TEXT NOT NULL,
@@ -782,6 +855,9 @@ class Database:
                 extracted_at       TEXT NOT NULL,
                 ocr_pages_skipped  INTEGER CHECK (ocr_pages_skipped >= 0),
                 text_complete      INTEGER CHECK (text_complete IN (0, 1)),
+                ocr_pages_cap      INTEGER CHECK (ocr_pages_cap >= 0),
+                digital_pages_cap  INTEGER CHECK (digital_pages_cap >= 0),
+                extracted_chars_cap INTEGER CHECK (extracted_chars_cap >= 0),
                 PRIMARY KEY (attachment_id, extractor_module)
             );
 
@@ -1914,9 +1990,8 @@ class Database:
                     )
                     slices += bool(rows)
                 for cached in cur.execute(
-                    "SELECT attachment_id, extractor_module, extraction_status, extractor, "
-                    "extracted_text, extraction_error, extracted_at, ocr_pages_skipped, "
-                    "text_complete FROM attachment_extractions WHERE attachment_id = ?",
+                    f"SELECT {_EXTRACTION_COLUMNS} "  # nosec B608 — fixed column list
+                    "FROM attachment_extractions WHERE attachment_id = ?",
                     (attachment_id,),
                 ).fetchall():
                     purge = cur.execute(
@@ -1956,25 +2031,10 @@ class Database:
         try:
             started = self._begin_if_needed(cur)
             cur.execute(
-                """
-                INSERT INTO attachment_extractions
-                    (attachment_id, extractor_module, extraction_status, extractor,
-                     extracted_text, extraction_error, extracted_at, ocr_pages_skipped,
-                     text_complete)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(attachment_id, extractor_module) DO NOTHING
-                """,
-                (
-                    row["attachment_id"],
-                    row["extractor_module"],
-                    row["extraction_status"],
-                    row["extractor"],
-                    row["extracted_text"],
-                    row["extraction_error"],
-                    row["extracted_at"],
-                    row["ocr_pages_skipped"],
-                    row["text_complete"],
-                ),
+                f"INSERT INTO attachment_extractions ({_EXTRACTION_COLUMNS}) "  # nosec B608
+                f"VALUES ({', '.join('?' * len(_EXTRACTION_COLUMN_NAMES))}) "
+                "ON CONFLICT(attachment_id, extractor_module) DO NOTHING",
+                tuple(row[name] for name in _EXTRACTION_COLUMN_NAMES),
             )
             self._commit_if_started(started)
         except Exception:
@@ -2070,7 +2130,7 @@ class Database:
     def _stream_filepaths(
         self,
         sql: str,
-        params: Sequence[object],
+        params: Sequence[object] | Mapping[str, object],
         qualifies: Callable[[sqlite3.Row], bool],
         assessed: CompletenessClearing | None = None,
     ) -> set[str]:
@@ -2240,6 +2300,36 @@ class Database:
         )
 
     @_synchronized
+    def find_cap_refresh_attachment_filepaths(
+        self,
+        *,
+        ocr_enabled: bool,
+        max_ocr_pages: int,
+        max_pdf_pages: int,
+        max_extracted_chars: int,
+        assessed: CompletenessClearing | None = None,
+    ) -> tuple[set[str], set[str]]:
+        """The Maildir filepaths of the messages with an attachment
+        occurrence whose cached result a configured limit cut and the
+        operator has since raised (#1418), and of those whose cached
+        result predates the cap record and lost text (the once-only
+        bootstrap arm): ``(raised, bootstrap)``. The SQL twin of
+        ``attachment_indexing.cap_raised`` and ``cap_bootstrap_due``;
+        ``max_pdf_pages`` and ``max_extracted_chars`` are 0 for no limit,
+        as the settings are. Each qualifying occurrence that still has a
+        ``text_complete`` record has it cleared through ``assessed``."""
+        params = {
+            "ocr_enabled": int(ocr_enabled),
+            "ocr_pages": max_ocr_pages,
+            "digital_pages": max_pdf_pages,
+            "extracted_chars": max_extracted_chars,
+        }
+        return (
+            self._stream_filepaths(_CAP_RAISED_QUERY, params, lambda _row: True, assessed),
+            self._stream_filepaths(_CAP_BOOTSTRAP_QUERY, params, lambda _row: True, assessed),
+        )
+
+    @_synchronized
     def find_deferred_extraction_filepaths(self) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose extraction the per-message budget deferred
@@ -2271,9 +2361,8 @@ class Database:
         ``extraction_status`` and how recent ``extracted_at`` is.
         """
         return self._conn.execute(
-            "SELECT attachment_id, extractor_module, extraction_status, extractor, "
-            "extracted_text, extraction_error, extracted_at, ocr_pages_skipped, text_complete "
-            "FROM attachment_extractions WHERE attachment_id = ? AND extractor_module = ?",
+            f"SELECT {_EXTRACTION_COLUMNS} FROM attachment_extractions "  # nosec B608 — fixed
+            "WHERE attachment_id = ? AND extractor_module = ?",
             (attachment_id, extractor_module),
         ).fetchone()
 
@@ -2289,6 +2378,9 @@ class Database:
         extraction_error: str | None,
         ocr_pages_skipped: int | None = None,
         text_complete: bool | None = None,
+        ocr_pages_cap: int | None = None,
+        digital_pages_cap: int | None = None,
+        extracted_chars_cap: int | None = None,
     ) -> None:
         """Persist (or replace) the extraction record for ``attachment_id``
         under ``extractor_module`` ('' when the occurrence selects no
@@ -2306,6 +2398,9 @@ class Database:
         ``ocr_pages_skipped`` is the scanned PDF pages the OCR page cap
         left unread (#891), ``None`` when unknown. ``text_complete`` is
         whether the result lost no text (#1242), ``None`` when unknown.
+        ``ocr_pages_cap``, ``digital_pages_cap`` and ``extracted_chars_cap``
+        are the configured limits that cut it (#1418): the limit when it
+        cut, 0 when not, ``None`` when unknown.
 
         The same (attachment_id, extractor_module) is OR-REPLACE'd so a follow-up pass
         (e.g. after enabling OCR or bumping ``INDEXER_OCR_MAX_PAGES``)
@@ -2321,8 +2416,8 @@ class Database:
                 INSERT OR REPLACE INTO attachment_extractions
                     (attachment_id, extractor_module, extraction_status, extractor,
                      extracted_text, extraction_error, extracted_at, ocr_pages_skipped,
-                     text_complete)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     text_complete, ocr_pages_cap, digital_pages_cap, extracted_chars_cap)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attachment_id,
@@ -2334,6 +2429,9 @@ class Database:
                     datetime.now(UTC).isoformat(),
                     ocr_pages_skipped,
                     None if text_complete is None else int(text_complete),
+                    ocr_pages_cap,
+                    digital_pages_cap,
+                    extracted_chars_cap,
                 ),
             )
             self._commit_if_started(started)

@@ -231,6 +231,24 @@ def raw_output_cap(max_extracted_chars: int | None, *, ceiling: int) -> int:
     return min(4 * max_extracted_chars, ceiling)
 
 
+# Which bound a raw tool's output cap is (``raw_output_bound``): the
+# configured character cap, or the hardcoded ceiling.
+BOUND_CHARS = "chars"
+BOUND_CEILING = "ceiling"
+
+
+def raw_output_bound(max_extracted_chars: int | None, *, ceiling: int) -> str:
+    """Which bound ``raw_output_cap`` returns, as a fixed token: the
+    configured character cap's (``BOUND_CHARS``) when it is below the
+    ceiling, else the ceiling's (``BOUND_CEILING``), also when the two are
+    equal, since raising the setting would then not lift the cut. A cut
+    at the character cap's bound is recorded on the result, so raising
+    the setting re-extracts it; one at the ceiling is not (#1418)."""
+    if max_extracted_chars is not None and 4 * max_extracted_chars < ceiling:
+        return BOUND_CHARS
+    return BOUND_CEILING
+
+
 def run_tool(
     argv: list[str],
     payload: bytes,

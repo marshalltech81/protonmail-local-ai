@@ -2998,7 +2998,8 @@ class TestOccurrenceTextComplete:
         self, tmp_path, monkeypatch, cached_flag, expected
     ):
         """A row with no record is refreshed instead
-        (``TestUnrecordedCacheRowsAreRefreshedOnce``)."""
+        (``TestUnrecordedCacheRowsAreRefreshedOnce``), as is an incomplete
+        one with no cap record (``TestCapRefresh``, #1418)."""
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment()
         db.store_attachment_extraction(
@@ -3009,6 +3010,7 @@ class TestOccurrenceTextComplete:
             extracted_text=f"{self.MARKER} cached",
             extraction_error=None,
             text_complete=None if cached_flag is None else bool(cached_flag),
+            extracted_chars_cap=0,
         )
         extractor = MagicMock()
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -3192,6 +3194,9 @@ class TestUnrecordedCacheRowsAreRefreshedOnce:
             extracted_text=f"{self.MARKER} cached" if status == STATUS_SUCCESS else None,
             extraction_error=None,
             text_complete=record,
+            # A cap record, as every row written since v11 has: an
+            # incomplete row without one is the cap bootstrap's (#1418).
+            extracted_chars_cap=None if record is None else 0,
         )
 
     @staticmethod

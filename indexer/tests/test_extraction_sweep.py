@@ -265,7 +265,8 @@ def test_sweep_enqueue_counts_exclusions_and_log_line(mailbox, monkeypatch, capl
         "re-queued 3 of 5 message(s) (0 for a missing text-completeness record) "
         "whose attachments were extracted by an older extractor version (none), skipped "
         "while OCR was off, had no extractor, now fit under "
-        "INDEXER_ATTACHMENT_MAX_BYTES, or were deferred by the per-message extraction "
+        "INDEXER_ATTACHMENT_MAX_BYTES, were cut by a since-raised limit or predate the "
+        "cap record, or were deferred by the per-message extraction "
         "budget; 1 already pending, skipped 1 dead-lettered "
         "(run make requeue-dead to refresh them)."
     )

@@ -14,7 +14,11 @@ stderr discarded. ``-d utf-8`` fixes
 the output charset whatever the locale, and ``-w`` turns off catdoc's
 line wrapping so a paragraph stays one line for the chunker. Output past
 the byte cap is not indexed: the text before it is kept and the cap is
-reported through ``warn_extractor_cap``.
+reported through ``warn_extractor_cap``, with the bound that cut as a
+fixed token (``bound=chars`` for the configured character cap,
+``bound=ceiling`` for ``_MAX_OUTPUT_BYTES``); a cut at the character
+cap's bound is recorded on the result, so raising the setting
+re-extracts it (#1418).
 """
 
 from __future__ import annotations
@@ -23,8 +27,14 @@ import logging
 import shutil
 from collections.abc import Callable
 
-from . import warn_extractor_cap
-from ._runner import ToolNotFoundError, raw_output_cap, run_tool
+from . import CAP_EXTRACTED_CHARS, record_cap_cut, warn_extractor_cap
+from ._runner import (
+    BOUND_CHARS,
+    ToolNotFoundError,
+    raw_output_bound,
+    raw_output_cap,
+    run_tool,
+)
 
 log = logging.getLogger("indexer.extractor.doc")
 
@@ -72,7 +82,7 @@ def extract(
         payload,
         suffix=".doc",
         module="doc",
-        max_output_bytes=raw_output_cap(max_extracted_chars, ceiling=_MAX_OUTPUT_BYTES),
+        max_extracted_chars=max_extracted_chars,
     )
     return text, "doc"
 
@@ -84,10 +94,15 @@ def catdoc_text(
     *,
     suffix: str,
     module: str,
-    max_output_bytes: int,
+    max_extracted_chars: int | None,
 ) -> str:
     """Run one of catdoc's tools on ``payload`` and return its text, read
-    up to ``max_output_bytes``."""
+    up to the output byte cap for ``max_extracted_chars``
+    (``_runner.raw_output_cap``). A cut at the configured character cap's
+    bound records that cap on the result (#1418); a cut at the ceiling
+    records nothing."""
+    max_output_bytes = raw_output_cap(max_extracted_chars, ceiling=_MAX_OUTPUT_BYTES)
+    bound = raw_output_bound(max_extracted_chars, ceiling=_MAX_OUTPUT_BYTES)
     binary = shutil.which(tool)
     if binary is None:
         raise ToolNotFoundError
@@ -104,9 +119,12 @@ def catdoc_text(
         warn_extractor_cap(
             log,
             f"{module}_output_bytes",
-            "%s output cut at %d bytes",
+            "%s output cut at %d bytes (bound=%s)",
             tool,
             max_output_bytes,
+            bound,
         )
+        if bound == BOUND_CHARS and max_extracted_chars is not None:
+            record_cap_cut(CAP_EXTRACTED_CHARS, max_extracted_chars)
     # A cut can split a UTF-8 sequence; catdoc writes valid UTF-8 otherwise.
     return output.data.decode("utf-8", errors="replace")

@@ -1374,6 +1374,30 @@ Queue and maintenance (all INFO unless noted):
   pending ones keep their queued job. WARNING when any
   dead-lettered message was skipped: those keep their old attachment
   text until you run `make requeue-dead`.
+- `cap refresh sweep (INDEXER_OCR_MAX_PAGES=<n>
+  INDEXER_PDF_MAX_DIGITAL_PAGES=<n>
+  INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS=<n>): <n> message(s) with an
+  attachment result a since-raised limit cut, <n> with one cached before
+  the cap record that lost text (bootstrap, once); re-queued <n>, already
+  queued <n>, skipped <n> dead-lettered (run make requeue-dead to refresh
+  them).` (INFO), at startup when a cached attachment result was cut by
+  one of these limits and you have since raised it (or set
+  `INDEXER_PDF_MAX_DIGITAL_PAGES` or
+  `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` to `0`, no limit), #1418.
+  Each cached result records the limit that cut it, so every message
+  using it is re-queued once and the drain extracts it again with the
+  new limit; lowering a limit re-queues nothing, and while OCR is off a
+  PDF or image result OCR produced, or that OCR pages cut or skipped, is
+  kept until OCR is on. The bootstrap count is the one-time pass
+  over results cached before schema v11 that lost text: they carry no
+  record of which limit cut them, so each is extracted once, which
+  records it. Already queued messages pick the refresh up on their own
+  pass; dead-lettered ones keep their old text until `make
+  requeue-dead`. Raising `INDEXER_OCR_MAX_PAGES` lengthens the worst
+  case of each scanned PDF: up to `INDEXER_OCR_MAX_PAGES` ×
+  `INDEXER_OCR_TIMEOUT_SECONDS` of OCR plus its render, so keep
+  `INDEXER_MESSAGE_TIMEOUT_SECONDS` (the stall guard, per attachment)
+  above that, or the indexer restarts mid-extraction.
 - `cleared attachment text completeness on <n> occurrence(s) due a
   refresh; each is unknown until its message is processed again.`, at
   startup when the sweep found occurrences to refresh (a result with no
@@ -1675,16 +1699,16 @@ only, never filenames or text (`make logs`):
   PDF had more pages without a text layer than `INDEXER_OCR_MAX_PAGES`;
   the pages past the cap are not read. Every capped PDF is also counted
   in the attachments line below (`ocr_capped_pdfs`, `ocr_pages_skipped`).
-  Raising the cap applies only to PDFs extracted afterwards, since the
-  result is cached. The cached result keeps the number of pages the cap
-  skipped (#891), so a later message carrying the same PDF, served from
-  the cache, logs `pdf OCR capped: cached result is missing <K> scanned
-  pages` (WARNING, rate limited like the line above) and is counted in
-  `ocr_capped_pdfs` and `ocr_pages_skipped` once its message commits.
-  A PDF cached before schema v3 has no recorded count: it is served as
-  a plain `success`, with no cap line and no count, until the same bytes
-  are extracted again for another reason. Nothing is re-extracted to
-  fill the count in.
+  The cached result records the cap that cut it (#1418), so raising
+  `INDEXER_OCR_MAX_PAGES` re-extracts it: see the `cap refresh sweep`
+  line above. It also keeps the number of pages the cap skipped (#891),
+  so a later message carrying the same PDF, served from the cache, logs
+  `pdf OCR capped: cached result is missing <K> scanned pages` (WARNING,
+  rate limited like the line above) and is counted in `ocr_capped_pdfs`
+  and `ocr_pages_skipped` once its message commits. A PDF cached before
+  schema v3 has no recorded count: it is served with no cap line and no
+  count until it is extracted again (the v11 bootstrap does that once
+  for a result that lost text).
 - `image OCR capped at <N> of at least <N+1> frames` (WARNING): a
   multipage TIFF had more frames than `INDEXER_OCR_MAX_PAGES`; the
   frames past the cap are not read. The indexer looks one frame past
@@ -1694,11 +1718,14 @@ only, never filenames or text (`make logs`):
   frames already read are still indexed. (Before #1292 it named the
   exception type; the type now stays in the extractor child.) Each is
   counted as `ocr_capped_images` in the attachments line below. The
-  same caching applies, but unlike the PDF cap the cached result does
-  not record the image cap: a later message served the cached TIFF
-  reports a plain `success`, with no cap line and no
-  `ocr_capped_images` count, although the cached text still lacks the
-  unread frames (#1201).
+  cached result records the frame cap that cut it (#1418, #1201): a
+  later message served the cached TIFF logs `image OCR capped: cached
+  result stopped at <N> frames` (WARNING, rate limited) and is counted
+  in `ocr_capped_images` once its message commits, and raising
+  `INDEXER_OCR_MAX_PAGES` re-extracts it (the `cap refresh sweep` line
+  above). An image whose next frame could not be read records no cap:
+  a higher limit would only try that frame, so it is neither re-extracted
+  nor counted again from the cache.
 - `extractor eml degraded in the child: <key>=<n> ...` (WARNING, rate
   limited): decoding fallbacks in an attached email's text (#922):
   `eml_headers_degraded` in its headers (an unknown charset, raw 8-bit
@@ -1712,7 +1739,15 @@ only, never filenames or text (`make logs`):
 - `extractor cap <name>: <fixed text and counts>` (WARNING): a cap
   inside an extractor cut the text it returned (#903). Logged once per
   cap per extraction, and counted as `extractor_caps` in the
-  attachments line below. The caps, by name:
+  attachments line below. A result served from the cache that
+  `INDEXER_PDF_MAX_DIGITAL_PAGES` or
+  `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` cut logs the same line
+  (`extractor cap pdf_digital_pages: cached result stopped at <N>
+  pages`, `extractor cap extracted_chars: cached result was cut at <N>
+  chars`) and counts once per occurrence whose message commits (#1418);
+  raising the limit re-extracts it (the `cap refresh sweep` line
+  above). The hardcoded caps below are not refreshed by a setting. The
+  caps, by name:
   - `extracted_chars`: the extracted text was longer than
     `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`; the rest is not stored.
   - `pdf_digital_pages`: the PDF has more pages than
@@ -1740,9 +1775,12 @@ only, never filenames or text (`make logs`):
   - `doc_output_bytes`: catdoc wrote more for a legacy `.doc` than
     four bytes per character of `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`,
     or than 40 MiB when that is larger or disabled (#1308), counted
-    before whitespace is stripped; the rest is not read (#935).
+    before whitespace is stripped; the rest is not read (#935). The line
+    ends `(bound=chars)` when the character setting set the cap, which
+    raising it lifts (#1418), or `(bound=ceiling)` at the 40 MiB
+    ceiling, which no setting lifts.
   - `ppt_output_bytes`: the same cap on the `.ppt` reader's output for a
-    legacy `.ppt` (#957).
+    legacy `.ppt` (#957), with the same `bound=`.
   - `eml_body_structure`: a part of an attached email declared
     `multipart/*` that could not be split into parts (no boundary
     parameter, or a boundary that never appears), so none of its text

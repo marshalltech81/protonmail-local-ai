@@ -20,13 +20,10 @@ The OCR fallback is gated by ``ocr_enabled`` and bounded by
 500-page scanned book attachment does not monopolise CPU. Pages beyond
 the cap are never rendered; the truncation logs a rate-limited
 WARNING with the counts and is counted in the attachments aggregate
-(#871), but is not recorded. If the pages within the cap yield
-text, the dispatcher caches an ordinary ``success`` that cannot be
-told apart from a complete extraction; if they yield none, the usual
-``empty`` (or short digital-text ``success``) applies. The result is
-cached by content hash, so raising the cap later does not re-extract a
-payload already cached; it applies only to payloads extracted after
-the change.
+(#871). The result records the pages skipped (#891) and the cap that
+cut it, as it records the digital-page cap (#1418), so raising either
+setting re-extracts the cached result
+(``attachment_indexing.cap_raised``).
 
 With OCR off, a PDF whose whole text layer is under the floor records
 the OCR-disabled sentinel, which is re-run once OCR is on. A PDF with
@@ -58,10 +55,13 @@ from collections.abc import Callable
 import pypdf
 
 from . import (
+    CAP_DIGITAL_PAGES,
+    CAP_OCR_PAGES,
     note_ocr_capped,
     note_pdf_page_failed,
     note_pdf_pages_unrecovered,
     note_text_lost,
+    record_cap_cut,
     record_ocr_pages_skipped,
     warn_extractor_cap,
     warn_rate_limited,
@@ -174,6 +174,8 @@ def _text_from_pages(
         # The result carries the count too, so the cached row does (#891).
         note_ocr_capped(len(ocr_pages) - max_ocr_pages)
         record_ocr_pages_skipped(len(ocr_pages) - max_ocr_pages)
+        # And the limit that cut, so raising it re-extracts (#1418).
+        record_cap_cut(CAP_OCR_PAGES, max_ocr_pages)
         warn_rate_limited(
             log, "pdf OCR capped at %d of %d scanned pages", max_ocr_pages, len(ocr_pages)
         )
@@ -244,6 +246,8 @@ def _extract_digital_pages(
             warn_extractor_cap(
                 log, "pdf_digital_pages", "pdf-digital stopped at %d pages", max_pdf_pages
             )
+            # The limit that cut, so raising it re-extracts (#1418).
+            record_cap_cut(CAP_DIGITAL_PAGES, max_pdf_pages)
             break
         try:
             text = page.extract_text() or ""
