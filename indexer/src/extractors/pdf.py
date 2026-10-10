@@ -1,91 +1,256 @@
 """PDF extractor with OCR fallback.
 
-Two paths share one entry point:
+The whole extraction runs in the extractor child (``extractor_child.py``
+running ``pdf_child.py``), started through ``_runner.run_child`` (PLAN.md
+decision 42, #1293): pypdf's parse and digital text walk, the page sizes
+that set the OCR DPI, Poppler's ``pdfinfo`` and ``pdftoppm`` (started by
+pdf2image) and Tesseract (started by pytesseract). The launcher lowers
+the child's address space (``RLIMIT_AS``) and CPU time (``RLIMIT_CPU``)
+before it starts; each Poppler and Tesseract process the child starts
+inherits both limits (each process gets its own), and the runner kills
+the child's whole process group when the run ends, at its wall-clock
+timeout included, and removes its scratch directory, where pdf2image
+writes its copies of the payload and the rendered pages and pytesseract
+its temporary files (#1021). See ``pdf_child`` for the extraction itself:
+the digital walk, the per-page OCR fallback and its caps.
 
-1. **Digital PDFs** (most generated invoices, statements, contracts):
-   ``pypdf`` walks the page tree and pulls out the embedded text layer.
-   Cheap — typical page is a few ms — and exact (no OCR error rate).
+The child's result crosses the pipe in the runner's framed protocol, as
+fixed tokens and counts only (#1293):
 
-2. **Scanned pages** (photos of paper, faxes, signed PDFs flattened to
-   image): the digital path returns empty or near-empty text for the
-   page. Each such page falls through to OCR: it is rendered to a PIL
-   image via ``pdf2image`` (which calls out to Poppler's ``pdftoppm``)
-   and the image is passed to Tesseract. The choice is made per page,
-   so a PDF mixing digital and scanned pages OCRs only the scanned
-   ones (#292). Only pages the digital walk reached
-   (``max_pdf_pages``) are candidates.
+* a ``P`` frame per page the digital walk read and per page OCR'd,
+  passed to the dispatcher's ``on_progress`` (#485);
+* a ``C`` frame per cap that cut the text: the digital-page cap
+  (``INDEXER_PDF_MAX_DIGITAL_PAGES``) and the OCR page cap
+  (``INDEXER_OCR_MAX_PAGES``), whose limits this module records on the
+  result (#1418), and the child's text budget;
+* ``N`` frames with the degradation the child recorded: pages pypdf
+  could not read and those OCR never recovered, the OCR cap's skipped
+  pages (also kept on the result, #891), a text loss (#1242) and the
+  OCR DPI when the page-pixel budget lowered it;
+* an ``R`` frame with the type name of an OCR fallback that failed;
+* the text with the extractor name (``pdf-digital``, ``pdf-ocr``, or the
+  OCR-disabled sentinel ``pdf-ocr-disabled``), or ``E`` with the type
+  name of what the extraction raised.
 
-The OCR fallback is gated by ``ocr_enabled`` and bounded by
-``max_ocr_pages``, counted over the pages selected for OCR, so a
-500-page scanned book attachment does not monopolise CPU. Pages beyond
-the cap are never rendered; the truncation logs a rate-limited
-WARNING with the counts and is counted in the attachments aggregate
-(#871). The result records the pages skipped (#891) and the cap that
-cut it, as it records the digital-page cap (#1418), so raising either
-setting re-extracts the cached result
-(``attachment_indexing.cap_raised``).
-
-With OCR off, a PDF whose whole text layer is under the floor records
-the OCR-disabled sentinel, which is re-run once OCR is on. A PDF with
-usable digital text records ``pdf-digital`` even if some pages are
-scanned, and that row is not re-run when OCR is turned on later: its
-scanned pages stay unread until the next ``pdf`` version bump.
-
-Encrypted PDFs: ``pypdf`` opens an encrypted file with the empty user
-password, so an owner-password-only PDF (print / copy restrictions, no
-open password) extracts like any other; AES needs ``cryptography``
-(#691). No other password is ever tried. A PDF that needs a real open
-password raises ``FileNotDecryptedError`` when its pages are read, and
-the dispatcher records that as ``unsupported`` with fixed text, as it
-does a pypdf ``LimitReachedError`` that escapes this module (raised
-while the file is opened or its pages are listed): the same bytes
-always fail the same way (#931). One raised by a single page's text
-extraction is a per-page failure like any other, below.
+The caps, counts and the OCR failure are applied and logged here, from
+``_report``, whether the child then returned text or raised, as the
+in-process extractor applied them before it returned or raised. A
+``FileNotDecryptedError`` or ``LimitReachedError`` (pypdf, matched by
+exact type name) is raised again here so the dispatcher records it
+``unsupported`` (#931); any other error, the child's own
+``MemoryError`` or ``RecursionError`` at its limits included, is
+recorded ``failed`` by type name, as are a limit hit, a timeout and
+output that breaks the protocol.
 """
 
 from __future__ import annotations
 
-import io
 import logging
 import math
-import tempfile
-import time
+import os
 from collections.abc import Callable
 
-import pypdf
+from pypdf.errors import FileNotDecryptedError, LimitReachedError
 
 from . import (
     CAP_DIGITAL_PAGES,
     CAP_OCR_PAGES,
-    note_ocr_capped,
-    note_pdf_page_failed,
-    note_pdf_pages_unrecovered,
-    note_text_lost,
+    CHILD_DEGRADATION_KEYS,
+    CHILD_OCR_PAGES_SKIPPED,
+    CHILD_PDF_OCR_DPI,
+    apply_child_degradation,
     record_cap_cut,
-    record_ocr_pages_skipped,
     warn_extractor_cap,
     warn_rate_limited,
 )
+from ._runner import ChildReport, run_child
 
 log = logging.getLogger("indexer.extractor.pdf")
 
-# Minimum extracted-character count below which we treat a page's
-# digital text as "nothing usable" and OCR the page. A handful of stray
-# whitespace/header tokens from a scanned page sometimes do come out of
-# pypdf — without this floor we'd accept that as "success" and never
-# OCR the actual page contents. The same floor over the whole document
-# decides whether a PDF with OCR off is recorded as needing OCR.
-_MIN_DIGITAL_CHARS = 40
-_OCR_DISABLED_EXTRACTOR = "pdf-ocr-disabled"
+# The extractor names the child may return: the digital text layer, the
+# per-page OCR fallback, and the sentinel for a PDF that needs OCR while
+# it is off.
+EXTRACTOR_DIGITAL = "pdf-digital"
+EXTRACTOR_OCR = "pdf-ocr"
+EXTRACTOR_OCR_DISABLED = "pdf-ocr-disabled"
+_NAMES = frozenset({EXTRACTOR_DIGITAL, EXTRACTOR_OCR, EXTRACTOR_OCR_DISABLED})
 
-# OCR render resolution, and the most pixels any one page may rasterize
-# to. A US-letter page at 200 dpi is ~3.7M pixels; the budget leaves room
-# for A3 / legal while stopping a tiny PDF that declares a huge page from
-# asking Poppler for gigabytes of raster (written to the tmpfs, which
-# counts against the container's memory limit, before Pillow's own
-# size check can run).
-_OCR_DPI = 200
-_MAX_OCR_PAGE_PIXELS = 10_000_000
+# Cap names the child reports: the digital walk stopped at
+# ``max_pdf_pages``, OCR stopped at ``max_ocr_pages``, and the text
+# budget below cut the text.
+CAP_DIGITAL = "pdf_digital_pages"
+CAP_OCR = "pdf_ocr_pages"
+CAP_TEXT = "pdf_text_chars"
+_CAPS = frozenset({CAP_DIGITAL, CAP_OCR, CAP_TEXT})
+
+# OCR render resolution. The child lowers it for the whole document when
+# a page would rasterize past its page-pixel budget, and reports the DPI
+# it used.
+OCR_DPI = 200
+
+# Characters of text the child returns, after stripping it as the
+# dispatcher does, as for images (owner decision 2026-10-08 on #1325):
+# it bounds the child's output, which the parent reads whole. A PDF
+# whose stripped text fits stores what the in-process extractor stored;
+# the indexer keeps at most ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS``
+# (2,000,000 by default) anyway.
+_MAX_TEXT_CHARS = 10_000_000
+
+# Bytes of the child's output read: the text budget at UTF-8's worst case
+# of four bytes a character, plus the frames (a progress frame per page
+# read and OCR'd, the caps and counts).
+_MAX_OUTPUT_BYTES = 4 * _MAX_TEXT_CHARS + 1024 * 1024
+
+# Address space each process in the child's tree may map (``RLIMIT_AS``):
+# the child (pypdf, and Pillow holding one rendered page), and the one
+# Poppler or Tesseract process it starts at a time. Plainly measured in
+# the indexer image (pypdf 6.19, Poppler and Tesseract 5.5.0 from Debian
+# trixie, #1293; ``docs/architecture.md`` has the table) as the smallest
+# limit under which the extraction still succeeds, on synthetic PDFs
+# inside the 32 MiB byte cap: a page whose content stream is 71 MiB of
+# path operators (pypdf decodes at most 75,000,000 bytes of a page's
+# content) needs 1,776 MiB, in pypdf's text walk; 500 pages of kerned
+# text 112 MiB; a scanned page at the 10,000,000-pixel render budget
+# 240 MiB (Tesseract), and Poppler rendering a page that holds a
+# 48-megapixel scan 144 MiB. The limit, 2 GiB, is 1.15 times the
+# largest; the OCR path needs an eighth of it.
+CHILD_MAX_ADDRESS_SPACE_BYTES = 2048 * 1024 * 1024
+
+# The OCR phase's address space (#1450): before it starts the first
+# Poppler or Tesseract process, the child lowers its own limit, soft and
+# hard, and each tool inherits it, so the child and one tool never hold
+# two full parsing limits at once. The limit is the larger of the
+# child's mapped address space at that point plus ``_OCR_CHILD_HEADROOM_BYTES``
+# for what it still allocates (one decoded page, pytesseract's PNG) and
+# ``_OCR_TOOL_ADDRESS_SPACE_BYTES``, the tools' measured need with a
+# margin. Plainly measured in the indexer image: Tesseract needs 240 MiB
+# on a page of noise at the 10,000,000-pixel render budget (208 MiB of
+# text), ``pdftoppm`` 80 MiB and ``pdfinfo`` 48 MiB; the child maps at
+# most 274 MiB when OCR starts, after the heaviest digital page (71 MiB
+# of path operators, 1,829 MiB at its peak, released by then), and grows
+# by at most 17 MiB while it OCRs. A child that maps more than
+# ``_OCR_MAX_ADDRESS_SPACE_BYTES`` less the headroom when OCR would start
+# does not start it (``pdf_child.PdfOcrMemoryBudgetError``), so the
+# child and one tool together stay under twice that limit.
+_OCR_TOOL_ADDRESS_SPACE_BYTES = 768 * 1024 * 1024
+_OCR_CHILD_HEADROOM_BYTES = 256 * 1024 * 1024
+_OCR_MAX_ADDRESS_SPACE_BYTES = 1280 * 1024 * 1024
+
+# Pages one Poppler call renders, and so the most rendered pages (up to
+# about 30 MB each at the page-pixel budget) the scratch directory holds
+# at once, whatever ``INDEXER_OCR_MAX_PAGES`` is (#1450).
+_PAGES_PER_RENDER = 5
+
+# Wall-clock seconds the child may take per page of the digital walk: a
+# kerned page took 0.03 s and a dense one 0.003 s in the image, and the
+# heaviest page measured (the 71 MiB of path operators above) 14.5 s, so
+# 500 pages at 2 s each leave room for many such pages in one PDF.
+_DIGITAL_PAGE_SECONDS = 2.0
+# With the digital-page cap or the OCR page cap off, the wall clock and
+# CPU time are sized for their defaults.
+_DEFAULT_DIGITAL_PAGES = 500
+_DEFAULT_OCR_PAGES = 20
+# Tesseract runs up to four OpenMP threads, and CPU time counts every
+# thread, so a page can use up to four times its wall-clock time in CPU.
+# With no OCR timeout (``INDEXER_OCR_TIMEOUT_SECONDS=0``) the limit for
+# the 60 s default applies, as for images.
+_TESSERACT_THREADS = 4
+_DEFAULT_OCR_TIMEOUT_SECONDS = 60.0
+_CPU_MARGIN_SECONDS = 30
+# Wall-clock seconds per OCR'd page past its OCR timeout (loading the
+# rendered page and pytesseract's temporary file), and for the child's
+# start-up.
+_PAGE_MARGIN_SECONDS = 10.0
+_START_MARGIN_SECONDS = 30.0
+
+# The child's arguments, in order, and the range each must be in; the
+# child checks every one against this table before any work starts
+# (``pdf_child.parse_options``). ``max_pdf_pages`` takes ``none`` for no
+# cap; 0 caps the walk at no pages, as in process. ``max_ocr_pages`` 0
+# and ``ocr_timeout_seconds`` 0 mean no cap and no timeout. ``path`` is
+# the indexer's ``PATH``: the child runs with none (``_runner``), and
+# pdf2image and pytesseract find Poppler and Tesseract through it, as
+# they did in the indexer.
+_MAX_OPTION_INT = 2**63 - 1
+_MAX_OPTION_SECONDS = 1e9
+OPTIONS: tuple[tuple[str, str, float, float], ...] = (
+    ("ocr_enabled", "bool", 0, 1),
+    ("max_ocr_pages", "int", 0, _MAX_OPTION_INT),
+    ("ocr_timeout_seconds", "seconds", 0, _MAX_OPTION_SECONDS),
+    ("max_pdf_pages", "int-or-none", 0, _MAX_OPTION_INT),
+    ("path", "path", 1, 4096),
+)
+
+
+def child_options(
+    *,
+    ocr_enabled: bool,
+    max_ocr_pages: int,
+    ocr_timeout_seconds: float | None,
+    max_pdf_pages: int | None,
+    path: str,
+) -> list[str]:
+    """The child's arguments (``OPTIONS``) for the extractor's settings,
+    with their in-process meanings kept: a page cap at or below 0 is no
+    OCR cap, and a digital cap below 0 stops the walk at once, as 0
+    does; a timeout at or below 0 is none. Values past a range's top
+    are held at it, which no setting can tell apart."""
+    timeout = ocr_timeout_seconds if ocr_timeout_seconds is not None else 0.0
+    return [
+        "1" if ocr_enabled else "0",
+        str(min(max(max_ocr_pages, 0), _MAX_OPTION_INT)),
+        repr(min(max(float(timeout), 0.0), _MAX_OPTION_SECONDS)),
+        "none" if max_pdf_pages is None else str(min(max(max_pdf_pages, 0), _MAX_OPTION_INT)),
+        path,
+    ]
+
+
+def _ocr_timeout(ocr_timeout_seconds: float | None) -> float:
+    """The per-page OCR timeout the limits are sized for."""
+    if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
+        return float(ocr_timeout_seconds)
+    return _DEFAULT_OCR_TIMEOUT_SECONDS
+
+
+def _digital_pages(max_pdf_pages: int | None) -> int:
+    return _DEFAULT_DIGITAL_PAGES if max_pdf_pages is None else max(max_pdf_pages, 0)
+
+
+def child_cpu_seconds(max_pdf_pages: int | None, ocr_timeout_seconds: float | None) -> int:
+    """CPU seconds each process in the child's tree may use: the child's
+    digital walk at its per-page allowance, or a Tesseract at four
+    threads for its whole OCR timeout, whichever is longer, plus a
+    margin."""
+    walk = _DIGITAL_PAGE_SECONDS * _digital_pages(max_pdf_pages)
+    ocr = _TESSERACT_THREADS * _ocr_timeout(ocr_timeout_seconds)
+    return int(math.ceil(max(walk, ocr))) + _CPU_MARGIN_SECONDS
+
+
+def child_timeout_seconds(
+    *,
+    ocr_enabled: bool,
+    max_ocr_pages: int,
+    ocr_timeout_seconds: float | None,
+    max_pdf_pages: int | None,
+) -> float:
+    """Wall-clock seconds the child may run: the digital walk at its
+    per-page allowance, and with OCR on, the render (the OCR timeout for
+    the timed page count and every render, and as much again for
+    pdf2image's untimed page count before each render, #868) and every
+    page it may OCR at its longest (the OCR timeout, or with none the
+    CPU limit of a single-threaded Tesseract, as for images), plus
+    margins."""
+    seconds = _START_MARGIN_SECONDS + _DIGITAL_PAGE_SECONDS * _digital_pages(max_pdf_pages)
+    if ocr_enabled:
+        if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
+            per_page = float(ocr_timeout_seconds)
+        else:
+            per_page = float(
+                _TESSERACT_THREADS * _DEFAULT_OCR_TIMEOUT_SECONDS + _CPU_MARGIN_SECONDS
+            )
+        pages = max_ocr_pages if max_ocr_pages > 0 else _DEFAULT_OCR_PAGES
+        seconds += 2 * per_page + pages * (per_page + _PAGE_MARGIN_SECONDS)
+    return seconds
 
 
 def extract(
@@ -97,331 +262,85 @@ def extract(
     max_pdf_pages: int | None = None,
     on_progress: Callable[[], None] | None = None,
 ) -> tuple[str, str]:
-    """Extract text from a PDF payload, falling back to OCR if needed.
+    """Extract text from a PDF payload in the extractor child, falling
+    back to OCR per page. Returns the text and the extractor name.
 
-    ``max_pdf_pages`` bounds the digital pypdf walk. The OCR cap above
-    only bounds the rendered-image path; a 5 MB text-only PDF can
-    legitimately carry thousands of pages, and at ~ms each that adds
-    up to a meaningful queue stall.
-
-    ``ocr_timeout_seconds`` is forwarded into the OCR fallback for the
-    same reason as ``image.extract`` — see that module's docstring.
-
-    ``on_progress`` (when set) is called after each page the digital
-    walk reads and after each page OCR'd, so the indexer's heartbeat
-    keeps up with a long scan (#485). A page that hangs reports nothing.
+    ``max_pdf_pages`` bounds the digital pypdf walk; ``max_ocr_pages``
+    the pages OCR'd; ``ocr_timeout_seconds`` the render and each page's
+    Tesseract run (see ``pdf_child``). ``on_progress`` (when set) is
+    called after each page the digital walk reads and after each page
+    OCR'd, so the indexer's heartbeat keeps up with a long scan (#485).
     """
-    # Pages pypdf could not read, and the ones OCR then recovered: the
-    # difference is counted for the attachments aggregate as
-    # ``pdf_pages_unrecovered`` (review round 4 on #884), on every return
-    # and raise below.
-    failed: set[int] = set()
-    digital_pages = _extract_digital_pages(
-        payload, max_pdf_pages=max_pdf_pages, on_progress=on_progress, failed=failed
-    )
-    recovered: set[int] = set()
-    try:
-        return _text_from_pages(
-            payload,
-            digital_pages,
-            recovered=recovered,
+
+    def report(child: ChildReport) -> None:
+        _report(child, max_ocr_pages=max_ocr_pages, max_pdf_pages=max_pdf_pages)
+
+    result = run_child(
+        "pdf",
+        payload,
+        options=child_options(
             ocr_enabled=ocr_enabled,
             max_ocr_pages=max_ocr_pages,
             ocr_timeout_seconds=ocr_timeout_seconds,
-            on_progress=on_progress,
-        )
-    finally:
-        if failed:
-            note_pdf_pages_unrecovered(len(failed - recovered))
-
-
-def _text_from_pages(
-    payload: bytes,
-    digital_pages: list[str],
-    *,
-    recovered: set[int],
-    ocr_enabled: bool,
-    max_ocr_pages: int,
-    ocr_timeout_seconds: float | None,
-    on_progress: Callable[[], None] | None,
-) -> tuple[str, str]:
-    """``extract`` from the digital walk's pages on: the digital text,
-    or the OCR fallback for the pages under the floor. Adds to
-    ``recovered`` each page OCR read text from."""
-    digital_text = "\n\n".join(text for text in digital_pages if text)
-
-    if not ocr_enabled:
-        if len(digital_text) >= _MIN_DIGITAL_CHARS:
-            # A page under the floor is one OCR would read: with OCR off
-            # its text, if it is a scan, is lost (#1242).
-            if any(len(text) < _MIN_DIGITAL_CHARS for text in digital_pages):
-                note_text_lost()
-            return digital_text, "pdf-digital"
-        # The digital text layer is below the useful threshold, so this
-        # PDF likely needs OCR. Return a sentinel extractor name so the
-        # dispatcher can cache the same OCR-disabled ``unsupported`` shape
-        # image attachments use; that cache row is re-run when OCR is
-        # enabled later instead of permanently poisoning recall.
-        return digital_text, _OCR_DISABLED_EXTRACTOR
-
-    # The pages to OCR: those whose own text layer is under the floor,
-    # first ``max_ocr_pages`` of them.
-    ocr_pages = [i for i, text in enumerate(digital_pages) if len(text) < _MIN_DIGITAL_CHARS]
-    if 0 < max_ocr_pages < len(ocr_pages):
-        # The pages past the cap are never read (#871): counted for the
-        # attachments aggregate, and the line is rate limited, since one
-        # message can carry many capped PDFs (review round 2 on #884).
-        # The result carries the count too, so the cached row does (#891).
-        note_ocr_capped(len(ocr_pages) - max_ocr_pages)
-        record_ocr_pages_skipped(len(ocr_pages) - max_ocr_pages)
-        # And the limit that cut, so raising it re-extracts (#1418).
-        record_cap_cut(CAP_OCR_PAGES, max_ocr_pages)
-        warn_rate_limited(
-            log, "pdf OCR capped at %d of %d scanned pages", max_ocr_pages, len(ocr_pages)
-        )
-        ocr_pages = ocr_pages[:max_ocr_pages]
-    if not ocr_pages:
-        return digital_text, "pdf-digital"
-
-    try:
-        ocr_text = _extract_ocr(
-            payload,
-            pages=ocr_pages,
+            max_pdf_pages=max_pdf_pages,
+            path=os.pathsep.join(os.get_exec_path()),
+        ),
+        max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
+        max_cpu_seconds=child_cpu_seconds(max_pdf_pages, ocr_timeout_seconds),
+        timeout_seconds=child_timeout_seconds(
+            ocr_enabled=ocr_enabled,
+            max_ocr_pages=max_ocr_pages,
             ocr_timeout_seconds=ocr_timeout_seconds,
-            on_progress=on_progress,
-        )
-    except MemoryError, RecursionError:
-        # Host pressure, not this document: the dispatcher re-raises it.
-        raise
-    except Exception as exc:  # noqa: BLE001
-        # The message can quote the document, so only the type is
-        # logged (#257).
-        # Rate limited (#889): Tesseract timing out on every scanned
-        # PDF would otherwise log once per attachment.
-        warn_rate_limited(log, "PDF OCR fallback failed: %s", type(exc).__name__)
-        if len(digital_text) >= _MIN_DIGITAL_CHARS:
-            # A mixed PDF keeps its digital text, as before page-level
-            # OCR; its unread pages are lost, as past the cap.
-            note_text_lost()
-            return digital_text, "pdf-digital"
-        # The digital text layer was below the usable threshold, so
-        # swallowing the failure would cache the attachment as empty /
-        # partial and make the job look successful. Let the dispatcher
-        # record a failed extraction with the OCR error type so
-        # operators can fix Poppler/Tesseract and re-run extraction.
-        raise
-
-    recovered.update(index for index, text in ocr_text.items() if text)
-    if not any(ocr_text.values()):
-        return digital_text, "pdf-digital"
-    # Each page in order: its digital text, then its OCR text. A scanned
-    # page's few digital characters (a stamped header) are kept beside
-    # the OCR; the chunker normalises whitespace.
-    merged = (
-        "\n\n".join(part for part in (text, ocr_text.get(i, "")) if part)
-        for i, text in enumerate(digital_pages)
+            max_pdf_pages=max_pdf_pages,
+        ),
+        max_output_bytes=_MAX_OUTPUT_BYTES,
+        caps=_CAPS,
+        counts=CHILD_DEGRADATION_KEYS,
+        names=_NAMES,
+        permanent={
+            "FileNotDecryptedError": FileNotDecryptedError,
+            "LimitReachedError": LimitReachedError,
+        },
+        on_progress=on_progress,
+        on_report=report,
     )
-    return "\n\n".join(page for page in merged if page), "pdf-ocr"
+    assert result.name is not None  # ``names`` makes the child send one
+    return result.text, result.name
 
 
-def _extract_digital_pages(
-    payload: bytes,
-    *,
-    max_pdf_pages: int | None = None,
-    on_progress: Callable[[], None] | None = None,
-    failed: set[int] | None = None,
-) -> list[str]:
-    """Pull the embedded text layer out of a PDF: one stripped string
-    per page, empty for a page without text or whose extraction failed.
-
-    ``max_pdf_pages`` (when set) caps page iteration so a pathological
-    PDF with thousands of mostly-blank pages cannot stall the worker.
-    """
-    reader = pypdf.PdfReader(io.BytesIO(payload))
-    pages: list[str] = []
-    for index, page in enumerate(reader.pages):
-        if max_pdf_pages is not None and index >= max_pdf_pages:
-            # The pages past the cap are never read: WARNING, rate
-            # limited, counted for the attachments aggregate (#903).
-            warn_extractor_cap(
-                log, "pdf_digital_pages", "pdf-digital stopped at %d pages", max_pdf_pages
+def _report(child: ChildReport, *, max_ocr_pages: int, max_pdf_pages: int | None) -> None:
+    """Apply and log what the child reported besides its text, as the
+    in-process extractor did where it happened: its degradation counts,
+    the OCR DPI it lowered, the caps that cut it and an OCR fallback that
+    failed. Only fixed text, the configured limits and the child's counts
+    and type names are logged."""
+    counts = dict(child.counts)
+    dpi = counts.pop(CHILD_PDF_OCR_DPI, None)
+    apply_child_degradation(log, "pdf", counts)
+    if dpi is not None:
+        # A lower DPI lowers OCR accuracy for every page (#903).
+        warn_extractor_cap(log, "pdf_ocr_dpi", "pdf OCR rendered at %d dpi, not %d", dpi, OCR_DPI)
+    for cap in child.caps:
+        if cap == CAP_DIGITAL:
+            # The pages past the cap are never read (#903); the limit
+            # that cut, so raising it re-extracts (#1418).
+            warn_extractor_cap(log, cap, "pdf-digital stopped at %d pages", max_pdf_pages)
+            if max_pdf_pages is not None:
+                record_cap_cut(CAP_DIGITAL_PAGES, max_pdf_pages)
+        elif cap == CAP_OCR:
+            # The scanned pages past the cap are never read (#871); the
+            # child counted them. The limit that cut (#1418).
+            record_cap_cut(CAP_OCR_PAGES, max_ocr_pages)
+            skipped = counts.get(CHILD_OCR_PAGES_SKIPPED, 0)
+            warn_rate_limited(
+                log,
+                "pdf OCR capped at %d of %d scanned pages",
+                max_ocr_pages,
+                max_ocr_pages + skipped,
             )
-            # The limit that cut, so raising it re-extracts (#1418).
-            record_cap_cut(CAP_DIGITAL_PAGES, max_pdf_pages)
-            break
-        try:
-            text = page.extract_text() or ""
-        except MemoryError, RecursionError:
-            # Host pressure, not this page: the dispatcher re-raises it.
-            raise
-        except Exception as exc:  # noqa: BLE001
-            # Per-page failures (broken cross-ref tables, cipher
-            # entries pypdf chokes on) shouldn't abort the whole doc.
-            log.debug("pypdf page extract failed: %s", type(exc).__name__)
-            # Counted for the INFO attachments aggregate (#871).
-            note_pdf_page_failed()
-            if failed is not None:
-                failed.add(index)
-            text = ""
-        pages.append(text.strip())
-        if on_progress is not None:
-            on_progress()
-    return pages
-
-
-def _extract_ocr(
-    payload: bytes,
-    *,
-    pages: list[int],
-    ocr_timeout_seconds: float | None = None,
-    on_progress: Callable[[], None] | None = None,
-) -> dict[int, str]:
-    """Render ``pages`` (ascending 0-based indexes) to images and OCR
-    them via Tesseract; returns each page's stripped text by index.
-
-    Each run of consecutive pages is one Poppler call, so no page outside
-    ``pages`` is rendered. The render timeout is one budget shared by
-    the runs, counting only time spent in Poppler, so the whole render
-    stays bounded as when it was one call; Tesseract time is bounded per
-    page by its own timeout. pdf2image's own page count before each
-    render takes no timeout; see the comment at the page-count guard. Each run is OCR'd before the next is
-    rendered, so at most one run's page images are held at once.
-
-    Uses ``pdf2image`` (Poppler) for rendering and ``pytesseract`` for
-    OCR. Both are imported lazily so a missing system dep surfaces here
-    rather than at indexer start.
-
-    The ``output_folder`` passed to ``convert_from_bytes`` is a
-    per-call ``TemporaryDirectory`` rooted at ``/tmp``. Two reasons:
-
-    1. ``pdf2image`` writes one PPM per rendered page (a US-letter page
-       at 200 dpi is ~6 MB). Without an auto-cleaning context manager
-       these files leak into ``/tmp`` for the lifetime of the indexer
-       container, which runs ``/tmp`` as a tmpfs of bounded size. After
-       enough scanned PDFs the tmpfs reaches 100% and every subsequent
-       OCR fallback fails with ``ENOSPC`` until the container restarts.
-    2. ``/tmp`` is the only writable path on the hardened ``read_only``
-       image — ``pdf2image``'s default tempdir falls back to
-       ``/var/tmp`` which is not writable here.
-
-    The temp dir is cleaned on both success and exception, so an
-    ``ENOSPC`` mid-render or a failing tesseract call does not leak.
-    """
-    import pytesseract
-    from pdf2image import convert_from_bytes, pdfinfo_from_bytes
-
-    dpi = _ocr_dpi(payload, pages)
-    runs: list[list[int]] = []
-    for index in pages:
-        if runs and index == runs[-1][-1] + 1:
-            runs[-1].append(index)
         else:
-            runs.append([index])
-    render_budget = (
-        float(ocr_timeout_seconds)
-        if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0
-        else None
-    )
-
-    tesseract_kwargs: dict[str, float] = {}
-    if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
-        # Apply the timeout per page rather than to the whole document
-        # so a slow page does not eat the entire budget for the rest.
-        tesseract_kwargs["timeout"] = float(ocr_timeout_seconds)
-
-    page_count_seconds = 0.0
-    if render_budget is not None:
-        # pdf2image runs Poppler's ``pdfinfo`` for the page count before
-        # each render and passes it no timeout (#781). Time one bounded
-        # run of it here first (pdf2image types the timeout as whole
-        # seconds); a PDF that stalls it raises ``PDFPopplerTimeoutError``
-        # here, which degrades like a hung render. ``pdfinfo`` takes about
-        # as long each time on the same bytes, so each render's timeout
-        # holds back that time for the unbounded call inside it, and a
-        # page count over half the budget leaves no room for one render:
-        # that is an OCR timeout too. The remaining gap, a ``pdfinfo``
-        # much slower on the inner call than on this one, would need
-        # bypassing pdf2image (#868).
-        started = time.monotonic()
-        pdfinfo_from_bytes(payload, timeout=math.ceil(render_budget))
-        page_count_seconds = time.monotonic() - started
-        if page_count_seconds * 2 > render_budget:
-            raise TimeoutError("PDF OCR render budget exhausted")
-        render_budget -= page_count_seconds
-
-    # ``dir="/tmp"`` keeps the temp dir on the writable tmpfs (the
-    # hardened image's only writable path). ``TemporaryDirectory``
-    # removes the dir and its contents on context exit, including the
-    # exception path — so a leaked PPM cannot survive the OCR call.
-    with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:  # nosec B108 — tmpfs
-        texts: dict[int, str] = {}
-        for run in runs:
-            convert_kwargs: dict[str, object] = {
-                "dpi": dpi,
-                "first_page": run[0] + 1,
-                "last_page": run[-1] + 1,
-                "output_folder": tmpdir,
-            }
-            if render_budget is not None:
-                # The same budget bounds the whole Poppler render, so a
-                # hung render cannot block the worker. The render's own
-                # timeout leaves room for pdf2image's unbounded page
-                # count (see above).
-                render_timeout = render_budget - page_count_seconds
-                if render_timeout <= 0:
-                    raise TimeoutError("PDF OCR render budget exhausted")
-                convert_kwargs["timeout"] = render_timeout
-            started = time.monotonic()
-            images = convert_from_bytes(payload, **convert_kwargs)  # type: ignore[arg-type]
-            if render_budget is not None:
-                render_budget -= time.monotonic() - started
-            if dpi < _OCR_DPI and run is runs[0]:
-                # A lower DPI lowers OCR accuracy for every page (#903).
-                # Reported once a render at it has run, not when it is
-                # chosen, so a Poppler failure before any render is only
-                # the failure (review round 3 on #917).
-                warn_extractor_cap(
-                    log, "pdf_ocr_dpi", "pdf OCR rendered at %d dpi, not %d", dpi, _OCR_DPI
-                )
-            for index, image in zip(run, images, strict=False):
-                text = pytesseract.image_to_string(image, **tesseract_kwargs)
-                texts[index] = (text or "").strip()
-                if on_progress is not None:
-                    on_progress()
-        return texts
-
-
-def _ocr_dpi(payload: bytes, pages: list[int]) -> int:
-    """Return the highest DPI, up to ``_OCR_DPI``, at which every OCR'd
-    page fits ``_MAX_OCR_PAGE_PIXELS``.
-
-    Reads each page's MediaBox (scaled by UserUnit), which is what
-    ``pdftoppm`` rasterizes, over ``pages``, the pages the OCR pass will
-    render.
-    Each side is counted as a whole number of pixels, at least one,
-    because that is what gets allocated: a sliver page has a tiny area
-    but can still rasterize to one pixel by hundreds of millions. One DPI
-    applies to the whole document, so an oversized page lowers it for
-    every page. A parse failure propagates: without page sizes the raster
-    size is unknown, so the fallback fails closed.
-    """
-    reader = pypdf.PdfReader(io.BytesIO(payload))
-    pages_inches: list[tuple[float, float]] = []
-    for index in pages:
-        page = reader.pages[index]
-        box = page.mediabox
-        unit = float(page.user_unit)
-        pages_inches.append((abs(float(box.width)) * unit / 72, abs(float(box.height)) * unit / 72))
-
-    def fits(dpi: int) -> bool:
-        return all(
-            max(1, math.ceil(w * dpi)) * max(1, math.ceil(h * dpi)) <= _MAX_OCR_PAGE_PIXELS
-            for w, h in pages_inches
-        )
-
-    # Pixel count only grows with DPI, so the first fit going down is the
-    # highest; at most ``_OCR_DPI`` cheap checks.
-    for dpi in range(_OCR_DPI, 0, -1):
-        if fits(dpi):
-            return dpi
-    raise ValueError("PDF page too large to render for OCR")
+            warn_extractor_cap(log, cap, "pdf text cut at %d chars", _MAX_TEXT_CHARS)
+    for type_name in child.recovered:
+        # Rate limited (#889): Tesseract timing out on every scanned PDF
+        # would otherwise log once per attachment.
+        warn_rate_limited(log, "PDF OCR fallback failed: %s", type_name)

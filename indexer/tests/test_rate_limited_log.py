@@ -144,23 +144,28 @@ class TestPdfOcrFallbackLine:
         """#889: the OCR fallback line logged once per scanned PDF whose
         OCR raised (Tesseract timing out on every page, for example),
         bypassing the limit. It is an attachment line now."""
-        from src.extractors import extract, pdf
+        from src.extractors import extract, pdf_child
 
         caplog.set_level(logging.DEBUG)
         # A mixed PDF: enough digital text to keep, one scanned page.
-        monkeypatch.setattr(pdf, "_extract_digital_pages", lambda payload, **_: ["d" * 100, ""])
+        monkeypatch.setattr(
+            pdf_child, "_extract_digital_pages", lambda payload, **_: ["d" * 100, ""]
+        )
 
         def fail_ocr(payload, **_):
             raise RuntimeError(MARKER)
 
-        monkeypatch.setattr(pdf, "_extract_ocr", fail_ocr)
+        monkeypatch.setattr(pdf_child, "_extract_ocr", fail_ocr)
         limit = extractors._WARNINGS_PER_WINDOW
         for i in range(limit + 4):
             result = extract(content_type="application/pdf", filename="x.pdf", payload=b"%d" % i)
             assert result.extractor.startswith("pdf-digital")
+        # Since #1293 each PDF logs two lines, the child's degradation (its
+        # text loss) and the fallback, both sharing the limit.
         records = [r for r in caplog.records if "PDF OCR fallback failed" in r.getMessage()]
-        assert len(records) == limit
+        degraded = [r for r in caplog.records if "degraded in the child" in r.getMessage()]
+        assert len(records) == len(degraded) == limit // 2
         assert {r.levelno for r in records} == {logging.WARNING}
-        assert extractors.drain_extractor_counts()["warnings_suppressed"] == 4
+        assert extractors.drain_extractor_counts()["warnings_suppressed"] == 2 * (limit + 4) - limit
         assert extractors.drain_suppressed_lines() == 0
         assert MARKER not in caplog.text

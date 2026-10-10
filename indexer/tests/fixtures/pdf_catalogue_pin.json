@@ -1,0 +1,1175 @@
+{
+ "at-digital-cap": {
+  "counts": {},
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.\n\nSynthetic catalogue statement for the account holder, page 2.",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "at-ocr-cap": {
+  "counts": {},
+  "progress": 4,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "OCR words of call 1 timeout 60.0\n\nOCR words of call 2 timeout 60.0",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 2,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "broken-only": {
+  "counts": {
+   "pdf_pages_failed": 1
+  },
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "OCR words of call 1 timeout 60.0",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     1,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "broken-page-ocr-reads-nothing": {
+  "counts": {
+   "pdf_pages_failed": 1,
+   "pdf_pages_unrecovered": 1
+  },
+  "progress": 4,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.\n\nSynthetic catalogue statement for the account holder, page 3.",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     2,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "broken-page-ocr-recovers": {
+  "counts": {
+   "pdf_pages_failed": 1
+  },
+  "progress": 4,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.\n\nOCR words of call 1 timeout 60.0\n\nSynthetic catalogue statement for the account holder, page 3.",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     2,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "deep-page-tree": {
+  "counts": {},
+  "progress": 0,
+  "result": {
+   "digital_pages_cap": null,
+   "error": "PDF structure exceeds pypdf limits",
+   "extracted_chars_cap": null,
+   "extractor": "pdf@6",
+   "ocr_pages_cap": null,
+   "ocr_pages_skipped": null,
+   "status": "unsupported",
+   "text": null,
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "digital": {
+  "counts": {},
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.\n\nSynthetic catalogue statement for the account holder, page 2.",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "digital-cap-zero": {
+  "counts": {
+   "extractor_caps": 1
+  },
+  "progress": 0,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "empty",
+   "text": null,
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "digital-one-page": {
+  "counts": {},
+  "progress": 1,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "empty-pdf-no-text": {
+  "counts": {},
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "empty",
+   "text": null,
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [],
+   "renders": [
+    [
+     1,
+     1,
+     200,
+     null
+    ]
+   ]
+  }
+ },
+ "extracted-chars-cut": {
+  "counts": {
+   "extractor_caps": 1
+  },
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 30,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement ",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "large-page-lowers-dpi": {
+  "counts": {
+   "extractor_caps": 1
+  },
+  "progress": 4,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "OCR words of call 1 timeout 60.0\n\nOCR words of call 2 timeout 60.0",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 2,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     2,
+     15,
+     60.0
+    ]
+   ]
+  }
+ },
+ "large-page-ocr-fails": {
+  "counts": {
+   "extractor_caps": 1
+  },
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     2,
+     2,
+     15,
+     60.0
+    ]
+   ]
+  }
+ },
+ "mixed": {
+  "counts": {},
+  "progress": 3,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.\n\nOCR words of call 1 timeout 60.0",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     2,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "mixed-ocr-reads-nothing": {
+  "counts": {},
+  "progress": 3,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     2,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "mixed-runs": {
+  "counts": {},
+  "progress": 8,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "OCR words of call 1 timeout 60.0\n\nSynthetic catalogue statement for the account holder, page 2.\n\nOCR words of call 2 timeout 60.0\n\nSynthetic catalogue statement for the account holder, page 4.\n\nOCR words of call 3 timeout 60.0",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 3,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     1,
+     200,
+     60.0
+    ],
+    [
+     3,
+     3,
+     200,
+     60.0
+    ],
+    [
+     5,
+     5,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "not-a-pdf": {
+  "counts": {},
+  "progress": 0,
+  "result": {
+   "digital_pages_cap": null,
+   "error": "PdfStreamError",
+   "extracted_chars_cap": null,
+   "extractor": "pdf@6",
+   "ocr_pages_cap": null,
+   "ocr_pages_skipped": null,
+   "status": "failed",
+   "text": null,
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "ocr-cap-off": {
+  "counts": {},
+  "progress": 6,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "OCR words of call 1 timeout 60.0\n\nOCR words of call 2 timeout 60.0\n\nOCR words of call 3 timeout 60.0",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 3,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     3,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "ocr-fails-broken-mixed": {
+  "counts": {
+   "pdf_pages_failed": 1,
+   "pdf_pages_unrecovered": 1
+  },
+  "progress": 3,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.\n\nSynthetic catalogue statement for the account holder, page 3.",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     2,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "ocr-fails-mixed": {
+  "counts": {},
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     2,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "ocr-fails-scanned": {
+  "counts": {},
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": null,
+   "error": "RuntimeError",
+   "extracted_chars_cap": null,
+   "extractor": "pdf@6",
+   "ocr_pages_cap": null,
+   "ocr_pages_skipped": null,
+   "status": "failed",
+   "text": null,
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "ocr-no-timeout": {
+  "counts": {},
+  "progress": 5,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "OCR words of call 1 timeout None\n\nSynthetic catalogue statement for the account holder, page 2.\n\nOCR words of call 2 timeout None",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 2,
+   "pdfinfo": [],
+   "renders": [
+    [
+     1,
+     1,
+     200,
+     null
+    ],
+    [
+     3,
+     3,
+     200,
+     null
+    ]
+   ]
+  }
+ },
+ "ocr-off-broken-page": {
+  "counts": {
+   "pdf_pages_failed": 1,
+   "pdf_pages_unrecovered": 1
+  },
+  "progress": 3,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.\n\nSynthetic catalogue statement for the account holder, page 3.",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "ocr-off-digital": {
+  "counts": {},
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.\n\nSynthetic catalogue statement for the account holder, page 2.",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "ocr-off-mixed": {
+  "counts": {},
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "ocr-off-scanned": {
+  "counts": {},
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": null,
+   "error": "OCR disabled (INDEXER_OCR_ENABLED=false); scanned PDF",
+   "extracted_chars_cap": null,
+   "extractor": null,
+   "ocr_pages_cap": null,
+   "ocr_pages_skipped": null,
+   "status": "unsupported",
+   "text": null,
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "ocr-off-tiny": {
+  "counts": {},
+  "progress": 1,
+  "result": {
+   "digital_pages_cap": null,
+   "error": "OCR disabled (INDEXER_OCR_ENABLED=false); scanned PDF",
+   "extracted_chars_cap": null,
+   "extractor": null,
+   "ocr_pages_cap": null,
+   "ocr_pages_skipped": null,
+   "status": "unsupported",
+   "text": null,
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "ocr-short-timeout": {
+  "counts": {},
+  "progress": 4,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "OCR words of call 1 timeout 7.0\n\nOCR words of call 2 timeout 7.0",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 2,
+   "pdfinfo": [
+    7
+   ],
+   "renders": [
+    [
+     1,
+     2,
+     200,
+     7.0
+    ]
+   ]
+  }
+ },
+ "open-password": {
+  "counts": {},
+  "progress": 0,
+  "result": {
+   "digital_pages_cap": null,
+   "error": "encrypted PDF (open password required)",
+   "extracted_chars_cap": null,
+   "extractor": "pdf@6",
+   "ocr_pages_cap": null,
+   "ocr_pages_skipped": null,
+   "status": "unsupported",
+   "text": null,
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "over-both-caps": {
+  "counts": {
+   "extractor_caps": 1,
+   "ocr_capped_pdfs": 1,
+   "ocr_pages_skipped": 2
+  },
+  "progress": 4,
+  "result": {
+   "digital_pages_cap": 3,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 1,
+   "ocr_pages_skipped": 2,
+   "status": "success",
+   "text": "OCR words of call 1 timeout 60.0",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     1,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "over-digital-cap": {
+  "counts": {
+   "extractor_caps": 1
+  },
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 2,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.\n\nSynthetic catalogue statement for the account holder, page 2.",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "over-digital-cap-ocr-off": {
+  "counts": {
+   "extractor_caps": 1
+  },
+  "progress": 1,
+  "result": {
+   "digital_pages_cap": 1,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "over-digital-cap-scanned": {
+  "counts": {
+   "extractor_caps": 1
+  },
+  "progress": 2,
+  "result": {
+   "digital_pages_cap": 1,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "OCR words of call 1 timeout 60.0",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     1,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "over-ocr-cap": {
+  "counts": {
+   "ocr_capped_pdfs": 1,
+   "ocr_pages_skipped": 3
+  },
+  "progress": 7,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 2,
+   "ocr_pages_skipped": 3,
+   "status": "success",
+   "text": "OCR words of call 1 timeout 60.0\n\nOCR words of call 2 timeout 60.0",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 2,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "over-ocr-cap-mixed": {
+  "counts": {
+   "ocr_capped_pdfs": 1,
+   "ocr_pages_skipped": 2
+  },
+  "progress": 8,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 2,
+   "ocr_pages_skipped": 2,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.\n\nOCR words of call 1 timeout 60.0\n\nSynthetic catalogue statement for the account holder, page 3.\n\nOCR words of call 2 timeout 60.0",
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 2,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     2,
+     2,
+     200,
+     60.0
+    ],
+    [
+     4,
+     4,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "over-ocr-cap-ocr-fails": {
+  "counts": {
+   "ocr_capped_pdfs": 1,
+   "ocr_pages_skipped": 2
+  },
+  "progress": 3,
+  "result": {
+   "digital_pages_cap": null,
+   "error": "RuntimeError",
+   "extracted_chars_cap": null,
+   "extractor": "pdf@6",
+   "ocr_pages_cap": null,
+   "ocr_pages_skipped": null,
+   "status": "failed",
+   "text": null,
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 1,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     1,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "owner-password-only-aes": {
+  "counts": {},
+  "progress": 1,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "owner-password-only-rc4": {
+  "counts": {},
+  "progress": 1,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "Synthetic catalogue statement for the account holder, page 1.",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ },
+ "pdfinfo-fails-scanned": {
+  "counts": {},
+  "progress": 1,
+  "result": {
+   "digital_pages_cap": null,
+   "error": "RuntimeError",
+   "extracted_chars_cap": null,
+   "extractor": "pdf@6",
+   "ocr_pages_cap": null,
+   "ocr_pages_skipped": null,
+   "status": "failed",
+   "text": null,
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [
+    60
+   ],
+   "renders": []
+  }
+ },
+ "scanned": {
+  "counts": {},
+  "progress": 6,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "OCR words of call 1 timeout 60.0\n\nOCR words of call 2 timeout 60.0\n\nOCR words of call 3 timeout 60.0",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 3,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     3,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "scanned-ocr-reads-nothing": {
+  "counts": {},
+  "progress": 4,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-digital@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "empty",
+   "text": null,
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 2,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "tiny-text-only": {
+  "counts": {},
+  "progress": 4,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "p1\n\nOCR words of call 1 timeout 60.0\n\np2\n\nOCR words of call 2 timeout 60.0",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 2,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     2,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "tiny-text-pages": {
+  "counts": {},
+  "progress": 5,
+  "result": {
+   "digital_pages_cap": 0,
+   "error": null,
+   "extracted_chars_cap": 0,
+   "extractor": "pdf-ocr@6",
+   "ocr_pages_cap": 0,
+   "ocr_pages_skipped": 0,
+   "status": "success",
+   "text": "p1\n\nOCR words of call 1 timeout 60.0\n\nSynthetic catalogue statement for the account holder, page 2.\n\np3\n\nOCR words of call 2 timeout 60.0",
+   "text_complete": true
+  },
+  "work": {
+   "ocr_calls": 2,
+   "pdfinfo": [
+    60
+   ],
+   "renders": [
+    [
+     1,
+     1,
+     200,
+     60.0
+    ],
+    [
+     3,
+     3,
+     200,
+     60.0
+    ]
+   ]
+  }
+ },
+ "truncated": {
+  "counts": {},
+  "progress": 0,
+  "result": {
+   "digital_pages_cap": null,
+   "error": "PdfStreamError",
+   "extracted_chars_cap": null,
+   "extractor": "pdf@6",
+   "ocr_pages_cap": null,
+   "ocr_pages_skipped": null,
+   "status": "failed",
+   "text": null,
+   "text_complete": false
+  },
+  "work": {
+   "ocr_calls": 0,
+   "pdfinfo": [],
+   "renders": []
+  }
+ }
+}

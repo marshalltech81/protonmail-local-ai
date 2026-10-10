@@ -418,6 +418,7 @@ class TestChildSide:
             "eml",
             "image",
             "html",
+            "pdf",
             "container",
         }
         for name in extractor_child.MODULES.values():

@@ -559,8 +559,7 @@ is exactly what this forbids.
   stderr. A limit hit in a child is a per-payload `failed` row; a
   parent `MemoryError` or `RecursionError` stays host pressure. Body
   HTML conversion uses the `html` child. Process separation is not
-  filesystem or network confinement. Until #1293 lands, `pdf` still
-  runs in-process. Measure a
+  filesystem or network confinement. Measure a
   candidate library on crafted input with plain timing and RSS before
   choosing it: two `.xls` readers failed that test (#935).
 - A review finding that calls for new parsing of untrusted input, or
