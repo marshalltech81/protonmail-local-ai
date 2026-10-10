@@ -579,6 +579,10 @@ class ExtractionResult:
 # that only with a raised OCR page limit or crafted input — owner
 # exception, 2026-10-08, no bump (bumping would reset completeness and
 # re-OCR with new failure modes).
+# image 3 still: converts frames in modes Pillow cannot write as PNG
+# (CMYK, ...) to RGB (#1400), no bump. Those images were recorded
+# ``failed``, which is re-run once its bytes arrive again after 7 days; a bump would re-OCR
+# every cached image for those few payloads.
 # doc 2, ppt 2: the raw tool's output byte cap follows the configured
 # ``max_extracted_chars`` (four bytes a character, up to a 40 MiB
 # ceiling) instead of a fixed 8 MiB (#1308), so the same bytes can

@@ -1605,7 +1605,8 @@ only, never filenames or text (`make logs`):
   decompression bomb is `DecompressionBombError` (or
   `DecompressionBombWarning` between the pixel cap and twice it), a
   Tesseract failure `TesseractError` and a Tesseract timeout
-  `RuntimeError`; an image whose decode or Tesseract needs more than
+  `RuntimeError` (an image in a mode Pillow cannot write as PNG, such as
+  CMYK, is converted to RGB first, #1400); an image whose decode or Tesseract needs more than
   the child's 1 GiB is `MemoryError` or `TesseractError`, and one that
   runs past the child's CPU or wall-clock limit `ToolCrashError` or
   `ToolTimeoutError` (limits in `docs/architecture.md`, "Image

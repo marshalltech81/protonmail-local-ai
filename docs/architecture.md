@@ -1762,6 +1762,14 @@ characters (`image_text_chars`, an extractor cap) so its output, read
 whole by the parent, has a fixed bound (40 MiB plus 1 MiB of frames);
 the indexer keeps at most `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`
 (2,000,000 by default) anyway.
+pytesseract saves each frame as PNG before Tesseract runs, and Pillow
+cannot write some modes (CMYK, YCbCr, HSV, F, `RGBa`, `RGBX`) as PNG, so
+the child converts a frame in such a mode to RGB, frame by frame, after
+the EXIF rotation; modes PNG holds (`1`, `L`, `P`, `RGB`, the alpha
+modes, ...) go through unchanged (#1400). The #1400 fix needs no bump:
+a CMYK image was recorded `failed`, a failed row is re-run when the
+same bytes arrive again after 7 days, and a bump would re-OCR every
+cached image for those few payloads.
 The version stays `image@3` (owner exception, 2026-10-08): a row cached
 before this change may hold more text when the stripped OCR output
 exceeds 10,000,000 characters and the character cap is off or above
