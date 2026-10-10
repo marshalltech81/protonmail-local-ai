@@ -160,3 +160,12 @@ def test_annotations_leave_names_descriptions_and_schemas_unchanged(empty_db, mo
         assert {"name", "description", "inputSchema", "outputSchema"} <= set(
             tool.model_dump(by_alias=True, exclude=unchanged)
         )
+
+
+def test_search_emails_routes_latest_from_a_person_to_query_messages(empty_db):
+    """#1208: search_emails ranks by relevance, so "latest from <person>"
+    must reach query_messages (newest first). The line has to sit in the
+    first section, which is all a client receives (#1011)."""
+    description = _wire_tools(_server(empty_db))["search_emails"]["description"]
+    assert "latest" in description
+    assert "query_messages(sender=" in description
