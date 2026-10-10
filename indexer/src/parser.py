@@ -79,6 +79,12 @@ type DateStatus = Literal["parsed", "missing", "invalid"]
 # * ``mime_parts``: parts past the first ``MAX_WALKED_PARTS`` in
 #   document order are left out of the walk (their text and
 #   attachments); counted once per message (#996);
+# * ``delivery_status_parts``: a parsed tree (the message, or an attached
+#   email decoded from its transfer encoding) of more than
+#   ``MAX_WALKED_PARTS`` parts, one of whose delivery reports may hold an
+#   OLE2 or ZIP container: no report in that tree gets its bytes as sent,
+#   so such a container is not identified (#1416, review round 6 on
+#   #1444); counted once per tree;
 # * ``address_header``: an address header over
 #   ``_MAX_ADDRESS_HEADER_CHARS`` loses all its recipients;
 # * ``address_element`` / ``address_length``: one address-list element
@@ -125,6 +131,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "body_parts",
     "html_body",
     "mime_parts",
+    "delivery_status_parts",
     "address_header",
     "address_element",
     "address_length",
@@ -158,6 +165,7 @@ ATTACHMENT_LOSS_CAPS: tuple[str, ...] = (
     "decoded_bytes",
     "container_serialize",
     "mime_parts",
+    "delivery_status_parts",
 )
 ADDRESS_LOSS_CAPS: tuple[str, ...] = (
     "address_header",
@@ -1188,6 +1196,7 @@ def _attachment_payload(
     decode_depth: int = 0,
     transport_lost: list[bool] | None = None,
     delivery_status: _DeliveryStatusBytes | None = None,
+    decoded_status: list[_DeliveryStatusBytes] | None = None,
 ) -> tuple[bytes, email.message.Message | None, bool]:
     """The bytes an attachment carries, for a transfer-encoded attached
     email its decoded tree to traverse (else ``None``), and whether the
@@ -1239,6 +1248,11 @@ def _attachment_payload(
     attached email in any other non-identity transfer encoding (uuencode
     and its aliases included) keeps the empty payload, counted as
     ``transport_decode`` when an extractor would read it.
+
+    ``delivery_status`` reads the delivery reports of the tree ``part``
+    belongs to; ``decoded_status`` (when given) gets the
+    ``_DeliveryStatusBytes`` of a returned decoded tree, read from the
+    bytes that tree was parsed from (review round 6 on #1444).
     """
     if not part.is_multipart():
         return _decoded_payload(part), None, False
@@ -1292,6 +1306,12 @@ def _attachment_payload(
         if decoded is None:
             caps["transport_decode"] += 1
             return b"", None, False
+        if decoded_status is not None:
+            # A delivery report inside the decoded tree is recovered from
+            # the bytes that tree was parsed from (review round 6 on #1444).
+            decoded_status.append(
+                _DeliveryStatusBytes(_transport_form_bytes(raw, content_type), decoded, caps)
+            )
         # From here the decoded container is the part: the same depth
         # check, serialization and traversal as an identity-encoded one.
         part = decoded
@@ -1421,6 +1441,14 @@ def _decode_transport_bytes(data: bytes, encoding: str) -> bytes | None:
         return None
 
 
+def _transport_form_bytes(decoded: bytes, content_type: str) -> bytes:
+    """The bytes ``_parse_transport_form`` parses: a ``Content-Type``
+    header of ``content_type`` over the decoded bytes. Raises
+    ``UnicodeError`` for a label that is not ASCII."""
+    header = b"Content-Type: " + content_type.encode("ascii", "surrogateescape") + b"\r\n\r\n"
+    return header + decoded
+
+
 def _parse_transport_form(decoded: bytes, content_type: str) -> email.message.Message | None:
     """Parse a container's decoded bytes as a container of
     ``content_type`` (the part's own), so an attached email is one nested
@@ -1428,8 +1456,7 @@ def _parse_transport_form(decoded: bytes, content_type: str) -> email.message.Me
     an identity-encoded part. ``None`` when they nest too deeply for the
     parser."""
     try:
-        header = b"Content-Type: " + content_type.encode("ascii", "surrogateescape") + b"\r\n\r\n"
-        return email.message_from_bytes(header + decoded)
+        return email.message_from_bytes(_transport_form_bytes(decoded, content_type))
     except RecursionError, UnicodeError:
         return None
 
@@ -1508,16 +1535,24 @@ _DELIVERY_STATUS_AS_LEAF = email.policy.compat32.clone(message_factory=_Delivery
 
 class _DeliveryStatusBytes:
     """The bytes as sent of each identity-encoded ``message/delivery-status``
-    part of one message, read from a second stdlib parse of the message's
-    bytes in which that label is a leaf (``_DELIVERY_STATUS_AS_LEAF``),
-    done at most once and only when a part needs it (#1416). The two
-    parses match part for part in document order once the first's
-    delivery reports are not descended into; any other difference
-    (a type that does not match) gives no bytes for any part."""
+    part of one parsed tree (the message, or an attached email the walk
+    decoded from its transfer encoding), read from a second stdlib parse
+    of the bytes that tree was parsed from in which that label is a leaf
+    (``_DELIVERY_STATUS_AS_LEAF``), done at most once and only when a
+    part needs it (#1416). The two parses match part for part in
+    document order once the first's delivery reports are not descended
+    into; any other difference (a type that does not match) gives no
+    bytes for any part.
 
-    def __init__(self, raw: bytes, msg: email.message.Message) -> None:
+    Each tree's parts are enumerated only up to ``MAX_WALKED_PARTS``
+    (review round 6 on #1444), the walk's own cap: a tree over it gives
+    no bytes for any part, without the second parse, counted as
+    ``delivery_status_parts`` in ``caps``."""
+
+    def __init__(self, raw: bytes, msg: email.message.Message, caps: Counter[str]) -> None:
         self._raw = raw
         self._msg = msg
+        self._caps = caps
         self._by_part: dict[int, bytes] | None = None
 
     def get(self, part: email.message.Message) -> bytes | None:
@@ -1526,13 +1561,17 @@ class _DeliveryStatusBytes:
         return self._by_part.get(id(part))
 
     def _read(self) -> dict[int, bytes]:
+        first_parts = _parts_in_order(self._msg, MAX_WALKED_PARTS)
+        if first_parts is None:
+            caps = self._caps
+            caps["delivery_status_parts"] += 1
+            return {}
         try:
             second = email.message_from_bytes(self._raw, policy=_DELIVERY_STATUS_AS_LEAF)
         except RecursionError:
             return {}
-        first_parts = _parts_in_order(self._msg)
-        second_parts = _parts_in_order(second)
-        if len(first_parts) != len(second_parts):
+        second_parts = _parts_in_order(second, MAX_WALKED_PARTS)
+        if second_parts is None or len(first_parts) != len(second_parts):
             return {}
         found: dict[int, bytes] = {}
         for ours, theirs in zip(first_parts, second_parts, strict=True):
@@ -1544,19 +1583,26 @@ class _DeliveryStatusBytes:
         return found
 
 
-def _parts_in_order(msg: email.message.Message) -> list[email.message.Message]:
+def _parts_in_order(msg: email.message.Message, limit: int) -> list[email.message.Message] | None:
     """Every part of ``msg`` in document order, not descending into a
-    ``message/delivery-status`` part. Iterative."""
+    ``message/delivery-status`` part, or ``None`` once there are more
+    than ``limit``. Iterative, and a container's children are taken one
+    at a time, as the walk takes them, so the work stops at the limit."""
     found: list[email.message.Message] = []
-    stack: list[email.message.Message] = [msg]
-    while stack:
-        part = stack.pop()
+    frames: list[Iterator[email.message.Message]] = [iter((msg,))]
+    while frames:
+        part = next(frames[-1], None)
+        if part is None:
+            frames.pop()
+            continue
+        if len(found) >= limit:
+            return None
         found.append(part)
         if email.message.Message.get_content_type(part) == _DELIVERY_STATUS:
             continue
         children = part.get_payload() if part.is_multipart() else None
         if isinstance(children, list):
-            stack.extend(c for c in reversed(children) if isinstance(c, email.message.Message))
+            frames.append(c for c in children if isinstance(c, email.message.Message))
     return found
 
 
@@ -1781,17 +1827,27 @@ def _extract_body_and_attachments(
     # parser exposes such an email as its encoded transport text, not
     # its content, so none of it is body text.
     budget = _SerializationBudget()
-    delivery_status = None if raw is None else _DeliveryStatusBytes(raw, msg)
     # One frame per open container: its children, taken one at a time as
     # they are visited (review round 1 on #1020), so the walk keeps the
     # first MAX_WALKED_PARTS parts in document order and never queues a
-    # container's children all at once.
-    frames: list[tuple[Iterator[email.message.Message], bool, int, int, bool]] = [
-        (iter((msg,)), False, 0, -1, False)
+    # container's children all at once. Each frame carries the delivery
+    # reports' bytes of the parsed tree its children belong to: the
+    # message's, or a decoded attached email's (review round 6 on #1444).
+    frames: list[
+        tuple[Iterator[email.message.Message], bool, int, int, bool, _DeliveryStatusBytes | None]
+    ] = [
+        (
+            iter((msg,)),
+            False,
+            0,
+            -1,
+            False,
+            None if raw is None else _DeliveryStatusBytes(raw, msg, caps),
+        )
     ]
     walked = 0
     while frames:
-        siblings, in_attachment, decode_depth, parent, no_body = frames[-1]
+        siblings, in_attachment, decode_depth, parent, no_body, delivery_status = frames[-1]
         part = next(siblings, None)
         if part is None:
             frames.pop()
@@ -1804,6 +1860,7 @@ def _extract_body_and_attachments(
         filename = _part_filename(part, None if walk is None else walk.degraded)
         is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None
+        decoded_status: list[_DeliveryStatusBytes] = []
         # An OLE2 or ZIP container labelled ``message/*``: a leaf the walk
         # does not open (#1416).
         leaf = False
@@ -1839,6 +1896,7 @@ def _extract_body_and_attachments(
                 decode_depth=decode_depth,
                 transport_lost=transport_lost,
                 delivery_status=delivery_status,
+                decoded_status=decoded_status,
             )
             # Read once: it scans the payload (#1288).
             leaf_lost = not part.is_multipart() and _decode_lost_bytes(part, payload)
@@ -1909,7 +1967,7 @@ def _extract_body_and_attachments(
                 # and headers are this node's text if the body keeps it.
                 in_place.append((index, inner, node_depth))
                 inline_roots.add(id(inner))
-                frames.append((iter((inner,)), False, decode_depth, index, False))
+                frames.append((iter((inner,)), False, decode_depth, index, False, None))
                 continue
             if (
                 walk is not None
@@ -1935,8 +1993,10 @@ def _extract_body_and_attachments(
             # children are one decode deeper.
             if decoded is not None:
                 children, depth = decoded.get_payload(), decode_depth + 1
+                tree_status = decoded_status[0] if decoded_status else None
             else:
                 children, depth = part.get_payload(), decode_depth
+                tree_status = delivery_status
             if isinstance(children, list):
                 index = -1 if node is None else len(nodes) - 1
                 encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
@@ -1951,6 +2011,7 @@ def _extract_body_and_attachments(
                         depth,
                         index,
                         skip,
+                        tree_status,
                     )
                 )
             continue

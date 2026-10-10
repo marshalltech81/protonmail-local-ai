@@ -21,6 +21,10 @@ LABELS = (
     "message/delivery-status",
 )
 ENCODINGS = ("none", "7bit", "8bit", "binary", "base64", "quoted-printable")
+# The transfer encodings of the attached email around a nested part: the
+# parser reads an identity-encoded one in place and decodes the others
+# into a tree of their own (review round 6 on #1444).
+OUTER_ENCODINGS = ("none", "base64", "quoted-printable")
 
 # Bytes whose first bytes are an OLE2 or ZIP signature: identification
 # receives them as sent. Blank lines inside the bytes split a delivery
@@ -70,10 +74,13 @@ def encode(payload: bytes, encoding: str) -> bytes:
     return payload
 
 
-def message_bytes(label: str, encoding: str, payload: bytes, *, nested: bool = False) -> bytes:
+def message_bytes(
+    label: str, encoding: str, payload: bytes, *, nested: bool = False, outer: str = "none"
+) -> bytes:
     """A message whose second part is ``payload`` under ``label`` and
     ``encoding`` (no Content-Transfer-Encoding field for ``none``), or,
-    with ``nested``, an attached email carrying that part."""
+    with ``nested``, an attached email carrying that part, itself in the
+    ``outer`` transfer encoding (one of ``OUTER_ENCODINGS``)."""
     cte = (
         b"" if encoding == "none" else b"Content-Transfer-Encoding: " + encoding.encode() + b"\r\n"
     )
@@ -92,9 +99,14 @@ def message_bytes(label: str, encoding: str, payload: bytes, *, nested: bool = F
             + part
             + b"\r\n--in--\r\n"
         )
+        outer_cte = (
+            b"" if outer == "none" else b"Content-Transfer-Encoding: " + outer.encode() + b"\r\n"
+        )
         part = (
             b"Content-Type: message/rfc822\r\n"
-            b'Content-Disposition: attachment; filename="outer.eml"\r\n\r\n' + inner
+            + outer_cte
+            + b'Content-Disposition: attachment; filename="outer.eml"\r\n\r\n'
+            + encode(inner, outer)
         )
     return (
         b"From: s@example.test\r\nTo: r@example.test\r\nSubject: catalogue\r\n"

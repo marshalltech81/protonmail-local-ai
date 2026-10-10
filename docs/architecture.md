@@ -916,7 +916,7 @@ semantics, `0` a known loss, `NULL` not assessed, with no default:
 |---|---|---|
 | `subject_complete` | the subject was cut (`subject_length`) | phase 1, with the row |
 | `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete` | an `address_*` parser cap fired while that role's headers were read, or an entry yielded no storable address (`address_unparsed`); all three when the header scan stopped (`address_fields`); From also for a repeated `From`, whose later headers are not parsed | phase 1, with the row |
-| `attachments_manifest_complete` | a cap stopped the walk or left an attached email unwalked (`attached_depth`, `attached_fields`, `transport_decode`, `transport_lossy`, `decoded_bytes`, `container_serialize`, `mime_parts`) | phase 1, with the row |
+| `attachments_manifest_complete` | a cap stopped the walk or left an attached email unwalked (`attached_depth`, `attached_fields`, `transport_decode`, `transport_lossy`, `decoded_bytes`, `container_serialize`, `mime_parts`, `delivery_status_parts`) | phase 1, with the row |
 | `body_complete` | text parts were left out of the body (`body_parts`, `html_body`, `mime_parts`) | phase 2c, in the transaction that commits the body chunks |
 
 `_write_message_record` writes the phase-1 columns from the parse and
