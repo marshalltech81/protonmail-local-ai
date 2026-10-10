@@ -194,6 +194,19 @@ def test_benchmark_rows_are_the_rows_the_indexer_writes(bench, tmp_path, monkeyp
     assert problems == []
 
 
+def test_benchmark_extraction_stamps_are_the_indexers(bench):
+    # The script runs in the mcp-server image, which has no indexer
+    # package, so it keeps its own copies of the values the indexer
+    # stamps on a PDF's cached extraction. Checked against their source
+    # here, so a version bump names the copy to move (#1444 bumped the
+    # schema under #1376's benchmark).
+    from src.extractors import NOT_CONTAINER_IDENTIFIER, _stamp_extractor
+    from src.extractors.pdf import EXTRACTOR_DIGITAL
+
+    assert bench.PDF_EXTRACTOR == _stamp_extractor(bench.PDF_MODULE, EXTRACTOR_DIGITAL)
+    assert bench.PDF_IDENTIFIER == NOT_CONTAINER_IDENTIFIER
+
+
 def test_benchmark_token_estimate_is_the_indexers(bench):
     from src.chunker import estimate_tokens
 

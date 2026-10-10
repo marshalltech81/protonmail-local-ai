@@ -435,6 +435,7 @@ class TestBodyDegradation:
             parse_email(path)
 
 
+@pytest.mark.serial
 class TestLimitHit:
     @real_child
     def test_an_oversized_body_hits_the_cpu_limit_as_a_recorded_degradation(

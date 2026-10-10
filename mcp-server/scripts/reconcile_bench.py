@@ -191,6 +191,7 @@ CREATE TABLE attachment_extractions (
     ocr_pages_cap      INTEGER CHECK (ocr_pages_cap >= 0),
     digital_pages_cap  INTEGER CHECK (digital_pages_cap >= 0),
     extracted_chars_cap INTEGER CHECK (extracted_chars_cap >= 0),
+    identifier         TEXT,
     PRIMARY KEY (attachment_id, extractor_module)
 );
 CREATE TABLE pending_deletions (
@@ -555,9 +556,13 @@ def authority(address: str) -> tuple[str, str | None]:
 
 
 # The extractor stamp, ``extractor_module`` and per-result fields the
-# indexer stores for a payload its PDF extractor reads in full.
+# indexer stores for a payload its PDF extractor reads in full, and the
+# container identifier it certifies a payload with no OLE2 or ZIP
+# signature with (``NOT_CONTAINER_IDENTIFIER``). Copies: this script runs
+# without the indexer package, and the fidelity test checks them.
 PDF_MODULE = "pdf"
 PDF_EXTRACTOR = "pdf-digital@6"
+PDF_IDENTIFIER = "none@2"
 
 
 def build(
@@ -726,8 +731,16 @@ def build(
                     "INSERT INTO attachment_extractions (attachment_id, extractor_module, "
                     "extraction_status, extractor, extracted_text, extracted_at, "
                     "ocr_pages_skipped, text_complete, ocr_pages_cap, digital_pages_cap, "
-                    "extracted_chars_cap) VALUES (?, ?, 'success', ?, ?, ?, 0, 1, 0, 0, 0)",
-                    (attachment_id, PDF_MODULE, PDF_EXTRACTOR, stress_text or text, now),
+                    "extracted_chars_cap, identifier) "
+                    "VALUES (?, ?, 'success', ?, ?, ?, 0, 1, 0, 0, 0, ?)",
+                    (
+                        attachment_id,
+                        PDF_MODULE,
+                        PDF_EXTRACTOR,
+                        stress_text or text,
+                        now,
+                        PDF_IDENTIFIER,
+                    ),
                 )
                 if not stress_text:
                     chunk_rows.append(

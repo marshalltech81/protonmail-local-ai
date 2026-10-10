@@ -8291,6 +8291,7 @@ class TestMessageRecordsEndToEnd:
         assert _chunk_ids(db, "restored-bomb@example.com")
         assert not any("(" in addr for _role, addr, _name in participants)
 
+    @pytest.mark.serial
     def test_group_syntax_inside_encoded_words_parses_in_linear_time(self, tmp_path):
         """Group syntax carried inside encoded-words drove the standard
         library's group parser quadratic via the From header (3.1 s at
@@ -8317,6 +8318,7 @@ class TestMessageRecordsEndToEnd:
         assert msg is not None
         assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
 
+    @pytest.mark.serial
     def test_rejected_huge_group_header_parses_in_linear_time(self, tmp_path):
         """A header strict parsing rejects must not fall through to work that
         grows quadratically with its size: a 600 KB ``)Group: ...;`` header
@@ -8344,6 +8346,7 @@ class TestMessageRecordsEndToEnd:
         assert msg is not None
         assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
 
+    @pytest.mark.serial
     def test_malformed_encoded_prefixes_parse_in_linear_time(self, tmp_path):
         """Thousands of unfinished ``=?utf-8?q?`` prefixes in one name must
         not trigger a quadratic re-scan (the worker is synchronous, so a

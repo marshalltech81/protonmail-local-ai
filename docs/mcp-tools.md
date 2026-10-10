@@ -1616,7 +1616,7 @@ included.
 
 **The benchmark.** `mcp-server/scripts/reconcile_bench.py` builds a
 synthetic index (generated values only, never mail) whose tables mirror
-indexer schema v11 and hold the rows the indexer writes for the
+indexer schema v12 and hold the rows the indexer writes for the
 messages the benchmark renders
 (`indexer/tests/test_reconcile_bench_fidelity.py` indexes those files
 with the indexer and compares every row). `--identity utf8x4` is the
