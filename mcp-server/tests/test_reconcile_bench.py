@@ -160,9 +160,7 @@ def test_cardinality_records_read_every_stored_row(bench, cardinality):
     # stored cardinality, not K times the listed one.
     for k, round_ in cardinality["reconcile"]["messages"]["stream"].items():
         assert round_["returned"] == int(k)
-        assert round_["participant_rows"] == int(k) * (
-            bench.MAX_MESSAGE_ADDRESSES - bench.MAX_EXTRA_PARTICIPANT_NAMES
-        )
+        assert round_["participant_rows"] == int(k) * bench.MAX_MESSAGE_ADDRESSES
         assert round_["references"] == int(k) * 1000
 
 
@@ -437,9 +435,7 @@ def all_extras(bench, tmp_path_factory):
 
 def test_cardinality_corpus_stores_names_for_every_participant(bench, cardinality):
     built = cardinality["build"]
-    assert built["participant_rows"] == 40 * (
-        bench.MAX_MESSAGE_ADDRESSES - bench.MAX_EXTRA_PARTICIPANT_NAMES
-    )
+    assert built["participant_rows"] == 40 * bench.MAX_MESSAGE_ADDRESSES
     # A first name per participant, plus the extra names of one address.
     assert built["name_rows"] == 40 * bench.MAX_MESSAGE_ADDRESSES
 
@@ -750,6 +746,7 @@ def _ns(**kw):
         "missing_from": "spread",
         "chunk_tokens": 40,
         "chunks": 1,
+        "references": 0,
         "wal": False,
         "writer_commit_bytes": [131072],
     }
@@ -820,3 +817,16 @@ def test_common_prefix_claimants_share_998_bytes_and_stay_distinct(bench, tmp_pa
     assert len({c[:998] for c in cids}) == 1
     assert all(len(c.encode()) == 998 + 17 for c in cids)
     assert len(threads) > 1
+
+
+def test_alternate_names_trade_participants_within_the_address_budget(bench, tmp_path):
+    db = tmp_path / "names.db"
+    built = bench.build(db, 3, 1, "typical", "cardinality_names", references=2)
+    unique = bench.MAX_MESSAGE_ADDRESSES - bench.MAX_EXTRA_PARTICIPANT_NAMES
+    assert built["participant_rows"] == 3 * unique
+    assert built["name_rows"] == 3 * bench.MAX_MESSAGE_ADDRESSES
+
+
+def test_negative_references_are_refused_before_building(bench):
+    with pytest.raises(SystemExit):
+        bench._require_balanced_repeat(_ns(references=-1))

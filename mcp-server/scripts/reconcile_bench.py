@@ -298,10 +298,15 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
         "filename": "file.pdf",
         "content_type": "application/pdf",
     }
-    if records == "cardinality":
+    if records in ("cardinality", "cardinality_names"):
         # The parser's address budget is shared by every kept occurrence,
-        # the repeats that carry an address's further names included.
-        unique = MAX_MESSAGE_ADDRESSES - MAX_EXTRA_PARTICIPANT_NAMES
+        # the repeats that carry an address's further names included. The
+        # first name of each unique address spends no extra-name budget,
+        # so ``cardinality`` keeps 10,000 uniquely named addresses and
+        # ``cardinality_names`` trades 1,000 of them for repeats that
+        # carry alternate names.
+        extra = MAX_EXTRA_PARTICIPANT_NAMES if records == "cardinality_names" else 0
+        unique = MAX_MESSAGE_ADDRESSES - extra
         counts = (("from", 1), ("to", 4_999), ("cc", unique - 5_000))
         return {
             **base,
@@ -313,9 +318,7 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
             ],
             # The parser also keeps up to MAX_EXTRA_PARTICIPANT_NAMES
             # further names of one address: name rows only.
-            "extra_names": [
-                ("to", "to0@x.example", f"Alias {n}") for n in range(MAX_EXTRA_PARTICIPANT_NAMES)
-            ],
+            "extra_names": [("to", "to0@x.example", f"Alias {n}") for n in range(extra)],
         }
     return {
         **base,
@@ -390,7 +393,7 @@ def build(
         conn.executescript(_SCHEMA)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        batch = 2000 if records != "cardinality" and not extracted_chars else 10
+        batch = 2000 if not records.startswith("cardinality") and not extracted_chars else 10
         if commit_each:
             # The indexer commits one message at a time, so FTS5 creates
             # and merges segments per message.
@@ -1534,6 +1537,8 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
         raise SystemExit(
             "--filtered needs --chunk-tokens of at least 20 (sparse chunks hide FTS5 growth)"
         )
+    if args.references < 0:
+        raise SystemExit("--references must not be negative")
     if args.chunks < 1 or args.chunk_tokens < 1:
         raise SystemExit("--chunks and --chunk-tokens must be at least 1")
     if args.wal and any(b < 0 for b in args.writer_commit_bytes):
@@ -1575,7 +1580,9 @@ def main(argv: list[str] | None = None) -> dict:
         "--identity", choices=("typical", "ascii998", "ascii998common", "utf8x4"), default="typical"
     )
     p.add_argument(
-        "--records", choices=("typical", "worst", "mixed", "cardinality"), default="typical"
+        "--records",
+        choices=("typical", "worst", "mixed", "cardinality", "cardinality_names"),
+        default="typical",
     )
     p.add_argument(
         "--upload-total",
