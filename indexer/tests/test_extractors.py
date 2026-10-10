@@ -5183,6 +5183,17 @@ class TestLegacyOfficeLabels:
         assert calls == []
         assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text
 
+    def test_a_legacy_only_payload_logs_a_rate_limited_warning(self, caplog):
+        """#1227: a permanent skip is logged like the other permanent declines,
+        with fixed text and no payload bytes."""
+        caplog.set_level("WARNING")
+        payload = b"{\\rtf1 SYNTHETIC_RTF_MARKER}"
+        extract(content_type="application/msword", filename="a.doc", payload=payload)
+        messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(messages) == 1, messages
+        assert "not an OLE2 or OOXML container" in messages[0]
+        assert "SYNTHETIC_RTF_MARKER" not in caplog.text
+
     def test_a_legacy_only_payload_is_cached_under_its_legacy_module(self):
         """#1227: the ``unsupported`` row for bytes that are neither OLE2 nor
         ZIP is keyed by the legacy module, so an OOXML-labelled occurrence of

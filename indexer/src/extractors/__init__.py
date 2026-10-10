@@ -930,6 +930,12 @@ def extract(
     if module_name in _LEGACY_TO_OOXML and not payload.startswith(
         (*_ZIP_SIGNATURES, _OLE2_SIGNATURE)
     ):
+        # Logged like the other permanent declines: fixed text, no payload (#1227).
+        warn_rate_limited(
+            log,
+            "%s payload is not an OLE2 or OOXML container; recorded unsupported, not retried",
+            module_name,
+        )
         return ExtractionResult(
             status=STATUS_UNSUPPORTED,
             extractor=None,
