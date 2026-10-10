@@ -556,7 +556,7 @@ def authority(address: str) -> tuple[str, str | None]:
 # The extractor stamp, ``extractor_module`` and per-result fields the
 # indexer stores for a payload its PDF extractor reads in full.
 PDF_MODULE = "pdf"
-PDF_EXTRACTOR = "pdf-digital@5"
+PDF_EXTRACTOR = "pdf-digital@6"
 
 
 def build(
