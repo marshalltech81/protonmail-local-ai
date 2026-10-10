@@ -2725,8 +2725,15 @@ Failure isolation is preserved across phases:
 - Phase 1 error for one message → that message marked failed, the
   rest of the batch continues.
 - Phase 2a error (chunk/extract) → marked failed, batch continues.
-- Phase 2b (embed) error → a one-string health probe decides whose
-  fault it is:
+- Phase 2b (embed) error → a transport error, timeout, 408 or 429 on
+  the whole batch (infrastructure) is not any message's fault and
+  splitting it would multiply the request rate against a throttling
+  provider: the whole batch is deferred without a probe or a split,
+  `attempts` unchanged, a WARNING with the message count is logged,
+  and the breaker opens for its usual backoff or the provider's
+  `Retry-After` (seconds form), whichever is longer, capped at the
+  breaker's 10 min cap. Any other error: a one-string health probe
+  decides whose fault it is:
   - **Probe fails** (embedder down, rate-limited, or rejecting the
     key/model): every in-flight message is *deferred* — `attempts`
     unchanged, class `retryable` or `operator_action_required` — and
