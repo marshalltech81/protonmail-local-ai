@@ -1597,6 +1597,426 @@ State the scope and disclose
 unread pages, missing indexed bodies and unavailable attachment text
 instead of claiming full coverage.
 
+#### Certifying a paged run: sizing (planned)
+
+No tool certifies a paged run yet. The owner chose a certificate plus a
+read-only reconcile tool for it
+([#1218](https://github.com/marshalltech81/protonmail-local-ai/issues/1218),
+Design A); this section records the measurement that sizes that design
+before any protocol code exists. The protocol itself will be documented
+here when it ships.
+
+**Pending re-measurement.** The figures below were taken on an earlier
+synthetic corpus whose rows differed from what the indexer writes
+(thread headers and dates, insertion order and commit cadence, file
+paths and flags, entities, chunk sizes, attachment rows and chunks).
+The benchmark now builds the indexer's rows
+(`indexer/tests/test_reconcile_bench_fidelity.py` checks them) and
+every figure here is being measured again on it; until then they
+describe the earlier corpus only, and some of the commands below use
+options that changed.
+
+**How it was measured.** `mcp-server/scripts/reconcile_bench.py` builds
+a synthetic index (generated values only, never mail) on the schema the
+server reads (the tables mirror indexer schema v11, with the v9
+`extraction_deferred_at` column; the figures before "Combined worst case"
+below were taken on the v8 layout, which lacks it), and runs each step in a fresh child
+process, on the server's own read-only connection and with the server's
+own predicate compiler (unfiltered: Trash left out, so 95% of the
+synthetic messages match). Records are read and serialized with the
+server's own `query_messages` and `query_attachments` helpers. Every
+message has a 40-word body chunk drawn from 5,000 distinct words.
+Timings are plain `perf_counter` medians of the runs of each step (`--repeat`: three in the early tables, two in the cap-sized run and in the filtered runs from round 10 on; the benchmark now defaults to two, or six with `--filtered`), without a
+profiler, with the page cache warm; peak RSS is the child's `VmHWM`.
+Run inside the mcp-server image (SQLite 3.46.1, Python 3.14.8; figures
+below from an 18-core OrbStack VM):
+
+```bash
+docker build -t mcp-bench mcp-server
+docker run --rm --entrypoint python \
+  -v "$PWD/mcp-server/scripts:/app/scripts:ro" mcp-bench \
+  scripts/reconcile_bench.py --messages 50000 --identity typical --wal --filtered
+```
+
+`--identity` sets the Message-ID width: `typical` (about 50 ASCII
+characters), `ascii998` (998 characters, the longest the indexer
+accepts, so a 1,015-byte claimant ID) or `utf8x4` (998 four-byte
+characters, 4,009 bytes). The parser cannot produce a `utf8x4` ID: a raw
+non-ASCII Message-ID reaches `_clean_id` as an `email.header.Header` and
+fails
+([#1424](https://github.com/marshalltech81/protonmail-local-ai/issues/1424)),
+and an RFC 2047 form stays ASCII, so 1,015 bytes (`ascii998`) is the
+longest reachable claimant ID. Every `utf8x4` figure here is a stress shape the indexer cannot build, not
+a limit input; the final cap-sized run below used `ascii998`. `--records worst`
+fills every character-clipped field of a record past its clip with what
+the parser can store: four-byte characters in the subject, the 11
+display names per role and the filename, ASCII in the 11 addresses per
+role (with an `@`), In-Reply-To, 11 References entries and the MIME
+type, and a nested folder and source path of about 3.5 KB. The record
+tables below were first taken with four-byte addresses, IDs and MIME
+type, which the parser cannot store; the K bullet gives the reachable
+sizes. `--records cardinality` gives each message the most rows a record can
+carry 10,000 uniquely named addresses (the parser's `MAX_MESSAGE_ADDRESSES`; `--records cardinality_names` trades 1,000 of them for repeats that carry one address's further names, 9,000 participant rows and 10,000 name rows) and
+`--references` References entries (100,000 here; the parser caps their
+length, not their count). `--extracted-chars` stores that many
+four-byte characters of extracted text on every extraction row.
+Occurrence IDs are always 64 hex characters. `--per-message` sets the
+attachment occurrences per message (3 by default), `--extras` the
+uploaded hashes the server does not hold, `--filtered` adds the
+filtered queries below, and `--request-shapes N` times parsing each
+upload shape at N digests.
+
+**Certificate: one read transaction.** `COUNT(*)`, then every matching
+identity scanned, sorted by UTF-8 bytes and hashed with a length
+prefix. "Stream" lets SQLite order the scan through the primary-key
+index; "collect" fetches the identities and sorts them in Python. Both
+gave the same digest in every run, and the scanned count always equalled
+the `COUNT(*)` from the same transaction.
+
+| Corpus (matching messages / occurrences) | Messages: stream / collect | Occurrences: stream / collect |
+|---|---|---|
+| 50,000, typical IDs (47,500 / 142,500) | 0.08 s / 0.03 s | 0.67 s / 0.34 s |
+| 50,000, 998 ASCII (47,500 / 142,500) | 0.26 s / 0.12 s | 3.7 s / 2.0 s |
+| 50,000, 998 four-byte (47,500 / 142,500) | 0.54 s / 0.36 s | 4.5 s / 2.4 s |
+| 200,000, typical (190,000 / 570,000) | 0.29 s / 0.13 s | 3.5 s / 1.7 s |
+| 50,000, 998 ASCII, 10 per message (47,500 / 475,000) | 0.27 s / 0.13 s | 15 s / 4.1 s |
+
+Stream adds nothing to peak RSS. Collect adds what it holds: for
+messages 6 MiB (typical), 49 MiB (998 ASCII) and 185 MiB (998
+four-byte); for occurrences 17 MiB at 142,500, 57 MiB at 475,000 and
+68 MiB at 570,000. 998-character IDs are longer than an index key
+SQLite keeps in its page, so every key spills to an overflow page: the
+synthetic database file is 6.1 GB with 998-ASCII IDs and 9.8 GB with
+four-byte ones, against 0.33 GB with typical IDs, and the occurrence
+scan, which looks up each occurrence's message, slows five- to
+sevenfold. On the 11 GB index the same `COUNT(*)` took 2.4 s in one
+phase and 5.9 s in another, so these figures depend on the operating
+system's page cache.
+
+**Filtered queries.** A certificate evaluates the query's own
+predicate, so its cost follows that predicate, not the size of the
+matching set. Each filter was timed as one production page of the same
+query (`limit=1`, with its counts) and as a certificate by each scan
+method:
+
+| Filter (50,000 messages, typical IDs) | Matches | Page | Certificate: stream / collect |
+|---|---|---|---|
+| `participant` substring matching nothing | 0 | 0.54 s | 0.28 s / 0.25 s |
+| `participant` substring of an address | 1,100 | 0.53 s | 0.29 s / 0.26 s |
+| `sender` exact address | 100 | 0.04 s | 0.06 s / 0.03 s |
+| `subject` substring | 10 | 0.06 s | 0.07 s / 0.03 s |
+| `text`, a word in one body / in every fiftieth | 1 / 1,000 | 0.06 s / 0.05 s | 0.05 s / 0.07 s; 0.02 s / 0.04 s |
+| `authority_class` | 9,500 | 0.09 s | 0.11 s / 0.08 s |
+| date range (one year) | 2,500 | 0.04 s | 0.05 s / 0.02 s |
+| Occurrences, `participant` substring matching nothing | 0 | 0.43 s | 0.69 s / 0.25 s |
+| Occurrences, date range (one year) | 7,500 | 0.06 s | 0.44 s / 0.04 s |
+
+With 998-ASCII IDs the participant substring took 8.7 s for a message
+page and 4.3 s for its streamed certificate, and 6.0 s for an
+occurrence page and 3.9 s for its collected certificate (7.4 s
+streamed). At 200,000 messages: 2.3 s and 1.2 s for messages, 1.7 s
+and 1.0 s for occurrences (3.2 s streamed), and an occurrence date
+range 0.30 s and 0.17 s (2.3 s streamed). Across every filter and
+corpus in these early runs (stream first), a certificate (stream for
+messages, collect for occurrences) cost at most 1.6 times one page of
+the same message query and 0.9 times one occurrence page; streaming the
+occurrences instead cost up to 7.6 times a page. The balanced runs under
+"Proposed limits" give the ratios for the proposed scan method. The set caps below
+bound the scan, hash and response, not this predicate cost, which every
+page of the same query already pays.
+
+**Upload shapes.** One SHA-256 per identity the client received.
+Parsing 600,000 digests: a packed upload (one JSON string of base64
+over the concatenated 32-byte digests, 25.6 MB) took 0.05 s and peaked
+at 136 MiB; an array of 600,000 hex strings (40.2 MB) took 0.04 s and
+169 MiB. An array is unsafe under a byte cap: the same 40.2 MB holds
+8,039,999 two-character strings, which `json.loads` builds before any
+length check, taking 0.16 s and 530 MiB. A packed upload that holds
+only the `hashes` string is one element whatever its size, and its
+digest count is its decoded length over 32, known before any
+per-digest object exists. That holds only while nothing else is in
+the JSON body: an envelope of the same 25.6 MB with an empty `hashes`
+and an ignored member of 5,119,998 two-character strings took 0.13 s
+and 347 MiB, because `json.loads` builds the whole body before any
+member is selected. A byte cap alone therefore does not bound a packed
+request; its structure must be bounded before it is parsed (for
+example by requiring the body to be exactly the fixed prefix, the
+base64 and the fixed suffix, or by sending the base64 as the body), an
+encoding choice for PR1 that this measurement does not make.
+
+**Reconcile round: one read transaction.** Parse the packed upload,
+then COUNT, scan, hash each identity, diff against the upload, and read
+the first K missing records in the same transaction. The upload left
+out 5,000 members and added 100 hashes the server does not hold.
+
+| Corpus | Messages, K = 100 to 5,000: stream / collect | Occurrences: stream / collect |
+|---|---|---|
+| 50,000, typical | 0.09–0.24 s / 0.05–0.18 s | 0.75–0.84 s / 0.40–0.48 s |
+| 50,000, 998 ASCII | 0.24–0.57 s / 0.16–0.48 s | 3.1–4.2 s / 1.9–2.2 s |
+| 50,000, 998 four-byte | 0.59–1.14 s / 0.49–1.04 s | 4.4–4.6 s / 2.5–2.7 s |
+| 200,000, typical | 0.40–0.54 s / 0.22–0.35 s | 3.9–4.4 s / 2.0–2.4 s |
+| 50,000, 998 ASCII, 475,000 occurrences | 0.26–0.65 s / 0.16–0.50 s | 9.5–10.4 s / 4.0–4.5 s |
+
+On typical records the scan dominates; worst-case records cost more
+(below). The full collect round on occurrences peaked at 290 MiB at
+570,000 (231 MiB streamed) and 301 MiB at 475,000 (251 MiB); on
+messages with four-byte IDs at 472 MiB (449 MiB streamed).
+
+**Response bytes per record** (UTF-8 JSON, as the query tools return
+it):
+
+| Record | Message | Occurrence |
+|---|---|---|
+| Typical fields, typical IDs | 1.2 KB | 1.0 KB |
+| Typical fields, 998 ASCII IDs | 4.9 KB | 3.9 KB |
+| Typical fields, 998 four-byte IDs | 16.9 KB | 12.8 KB |
+| Four-byte fields past their clips, 998 ASCII IDs | 149.9 KB | 8.1 KB |
+| Four-byte fields past their clips, 998 four-byte IDs | 158.9 KB | 17.1 KB |
+
+A response grows by K times the record size. On the largest message
+records, 100 records are 15.9 MB (read in 0.09 s, peak RSS 167 MiB),
+500 are 79.5 MB (482 MiB), 1,000 are 159 MB (0.8 s, 746 MiB) and
+5,000 are 795 MB (5.4 s in this run, 28 s in an earlier one; 2.8 GiB).
+On the largest occurrence records, 1,000 are 17.1 MB (153 MiB
+streamed, 156 MiB collected), 2,000 are 34.1 MB (207 / 210 MiB) and
+5,000 are 85.3 MB (371 / 373 MiB).
+
+**Full Maildir paths.** The benchmark's worst-case records carry the
+unclipped folder and source path (nested folders of 252 bytes to about
+3.5 KB), which the tables of record sizes above predate: with them a worst-case
+message record is 7.1 KB larger and an occurrence record 7.1 KB larger
+(measured on 4-byte IDs: 158.9 to 166.0 KB and 17.1 to 24.1 KB). The
+cap-sized run above includes them.
+
+**Rows behind a record.** The server's record readers load every
+participant row and every References entry of a message before the
+output clips each list to 10
+([#1377](https://github.com/marshalltech81/protonmail-local-ai/issues/1377)).
+With 10,000 participants and 100,000 References entries per message, a
+round read 1 record in 0.013 s, 10 in 0.17 s and 100 in 1.8 s, with
+peak RSS 98 MiB, 216 MiB and 1.4 GiB, while the response stayed under
+200 KB. A References header near the parser's 50 MB file limit holds
+far more entries than that. An occurrence record selects
+`extracted_at` and `ocr_pages_skipped`, stored after `extracted_text`,
+so reaching them walks the text's overflow pages
+([#1381](https://github.com/marshalltech81/protonmail-local-ai/issues/1381)):
+with 2,000,000 four-byte characters (the indexer's default cap, 8 MB)
+on every payload, 100 records took 0.10 s, and with 10,000,000 (the
+extractors' cap when the setting is off, 40 MB) 50 records took 0.22 s,
+at flat RSS and with the cache warm (0.15 to 0.48 s in an earlier run).
+K therefore bounds records, not the work of reading them, until #1377
+and #1381 bound each record's read.
+
+**Extras.** Hashes the client holds that are not in the snapshot come
+back as hex, 67 bytes each. Packed uploads of 642,500 and 737,500
+digests (27.4 MB and 31.5 MB; 600,000 of them extras) took 0.09 to
+0.12 s to parse, returned 40.3 to 41.4 MB and peaked at 354 to
+400 MiB.
+
+**Combined worst case at the caps, without planner statistics.** The
+figures above were taken on a synthetic index that had been `ANALYZE`d;
+neither the indexer nor the server runs `ANALYZE` or `PRAGMA optimize`,
+so a deployed index has no `sqlite_stat1` and the benchmark no longer
+builds one. The run below
+([#1395](https://github.com/marshalltech81/protonmail-local-ai/issues/1395))
+builds 200,000 messages and 600,000 occurrences (a 28.7 GB database,
+1,790 s to build) with the longest claimant ID the parser can produce
+(`ascii998`, 1,015 bytes), one message in fifty with worst-case records
+and full nested Maildir paths. 190,000 messages and 570,000 occurrences
+match (5 % are in Trash). The upload is the largest accepted: exactly
+200,000 and 600,000 digests that hold no member, all extras the server
+does not hold (`--all-extras`), so every member is missing and each
+round returns K worst-case records and all the extras. Two runs of each
+step, with the scan method and K order alternating; each figure is the
+median of the two, which for two is their mean.
+
+| Cap-sized | Certificate, stream / collect | Round, K = 100, stream / collect | Round, K = 1,000, stream / collect |
+|---|---|---|---|
+| Messages | 13.2 s, 84 MiB / 3.5 s, 281 MiB | 1.4 s, 310 MiB / 0.8 s, 503 MiB | 3.0 s, 849 MiB / 1.2 s, 853 MiB |
+| Occurrences | 96.8 s, 84 MiB / 79.7 s, 152 MiB | 49.4 s, 522 MiB / 47.1 s, 522 MiB | 70.8 s, 574 MiB / 42.5 s, 574 MiB |
+
+The responses were 29.1 MB (100 message records), 170 MB (1,000 message
+records), 41.7 MB (100 occurrence records) and 55.3 MB (1,000
+occurrence records), each with the extras (67 bytes each as hex). Under
+a concurrent writer (a streamed round) at ten commits a second the WAL
+grew by 56 MB over an 18.5 s message round and 425 MB over a 141 s
+occurrence round; unthrottled, by 3.6 GB (11,291 commits, 17.5 s) and
+25.4 GB (80,461 commits, 176 s). The rounds under a writer last longer
+than the same rounds alone. After each round the truncating checkpoint
+returned busy 0 and left the WAL at 0 bytes.
+
+What the figures show, for one round at a time: memory peaked at 853
+MiB (a message round of 1,000 records; the extras and the records
+dominate, not the scan), and time is the larger limit for occurrences.
+A round at the caps holds one read snapshot for 0.8 to 3.0 s on
+messages and 42 to 71 s on occurrences, longer under a writer (141 s at
+ten commits a second), and the indexer's truncating checkpoint cannot
+finish meanwhile. Concurrent rounds were not measured
+([#1423](https://github.com/marshalltech81/protonmail-local-ai/issues/1423)).
+Whether those snapshot times are acceptable, or the caps should be
+lower, is an owner decision; nothing here measures a larger set.
+
+Stream against collect, order balanced: collect was faster in every row
+but one tie, by 3.8 times on the message certificate and 1.8 to 2.5
+times on message rounds, and by 1.2 times on the occurrence certificate
+and 1.05 to 1.7 times on occurrence rounds. Peak RSS was higher for
+collect on the message certificate (281 MiB against 84) and at K = 100
+(503 against 310 MiB), and equal elsewhere. An earlier run on a
+4,009-byte ID shape, which the parser cannot produce (#1424), showed
+collect 1.8 to 1.9 times faster on occurrences and made streaming
+messages look necessary (collected message rounds peaked at 1.58 GiB);
+with the reachable width it does not.
+
+**Method notes.** Each scan method runs as its own process, but the page
+cache is the host's, so a method that always ran second would inherit
+the pages the first read. From this revision the benchmark alternates
+which method runs first at each repeat (and in the filtered runs), and
+reports in `first_runs` how often each ran first. The tables before
+"Combined worst case" were taken with stream first, so their
+collect-over-stream speedups may be overstated; the cap-sized run
+above was taken in alternating order and is not affected.
+The benchmark refuses a `--repeat` that cannot balance the orders (one,
+or a multiple of two, or of six with `--filtered`); the cap-sized run used
+two. The collect scan time covers fetching, ordering and hashing, as the
+streamed one does (`fetch_s` is the fetch alone). `--all-extras` builds the accepted worst upload
+(no member held, `--upload-total` digests, all extras) and returns
+worst-case records first; the `extras` field of each round and of the
+`request` is the count actually generated.
+
+**WAL under a concurrent writer.** A second process committed, in a
+loop, eight message updates plus a ballast blob per transaction while
+one round held its snapshot; commits are counted by their time inside
+the round's transaction. The WAL keeps every frame written during the
+round, so its growth is the round's duration times the writer's commit
+rate times the WAL bytes one commit writes. Measured per overlapping
+commit: about 315 KB for a 128 KB ballast and 3.7 to 4.2 MB for 2 MB.
+With the writer unthrottled that was 184 MB during a 0.25 s message
+round and 3.1 GB during a 5.5 s occurrence round. At no more than ten
+commits a second it stayed within 4.5 MB (the steady state is 4.2 to
+4.6 MB) during message rounds, reached 5.1 MB during a 0.7 s
+occurrence round and 15 to 17 MB during 4.0 to 4.6 s ones, and 34 MB
+during a 0.9 s occurrence round with 2 MB commits. An indexer commit's
+WAL bytes depend on its chunks, vectors and FTS rows, so these figures
+size the rule, not the indexer's own rate. After each round a
+`wal_checkpoint(TRUNCATE)` returned busy 0 and left the WAL at 0
+bytes. The indexer's own truncating checkpoint (every 10 minutes)
+cannot finish while a round holds its snapshot; it logs busy and
+retries on its next pass.
+
+The WAL figures above were taken with the earlier method: the runs
+before the final cap-sized one timed the window from the end of the
+`COUNT` scan, and every run sampled the WAL size every 5 ms and read it
+again as the window closed, with no boundary shared with the commit
+count, so a maximum could miss the last commits' frames and
+`wal_bytes_per_commit` could be off by a commit or more at each end. The
+benchmark now takes both sizes and the count from the writer's own
+record after each commit (`wal_window`), split at the window's two
+timestamps; the only remaining bias is that a window's first commits
+can reuse WAL space freed before the snapshot, which lowers growth per
+commit by at most the starting size over the commit count.
+
+The writer of the runs before the final cap-sized one also inserted one
+row into a table per commit, to time the commits; it is removed. The
+same small configuration (20,000 messages, an unthrottled writer, about
+17,000 commits per round) with and without it left 319.1 KB (messages)
+and 319.2 KB (occurrences) of WAL per overlapping commit with the
+insert and 315.0 KB and 315.1 KB without, 1.3 % less: about one 4 KB
+page per commit. Discount those WAL figures by that much; the final cap-sized
+run has no such insert.
+
+**Proposed limits, from these figures.**
+
+- **Prerequisites:** bound each record's read (#1377, #1381) before
+  the reconcile tool ships; without them no K bounds a round's work.
+  Bound the packed request's structure before it is parsed (above);
+  the byte cap alone does not.
+- **K:** 100 message records and 1,000 occurrence records per round.
+  With the largest accepted upload (all extras, 200,000 and 600,000
+  of them) the cap-sized run measured 29.1 MB and 503 MiB (collect;
+  310 MiB streamed) for 100
+  message records and 55.3 MB and 574 MiB for 1,000 occurrence records
+  (a round of 1,000 message records: 170 MB, 849 MiB). Those runs used
+  worst-case records with fields the parser cannot store (addresses
+  without an `@`, four-byte In-Reply-To and References, a four-byte
+  MIME type); with parser-reachable fields, at small scale, a message
+  record is 96.0 KB (157.0 KB in the run) and an occurrence record
+  13.6 KB (15.1 KB), so the response sizes and peak RSS above are upper
+  bounds and were not repeated at the caps. A typical response is 0.1
+  MB and 1.0 MB. A larger K would need a byte budget per response
+  alongside it to keep the worst case bounded, which the approved
+  design does not include.
+- **Retry bound:** at most ceil(M / K) + 3 rounds per run, where M is
+  the missing count of the run's first round: ceil(M / K) rounds that
+  each return up to K records, plus three for churn. When they run out,
+  the verdict is not certified with a fixed reason. After a paged run
+  that missed a few members it is one round; a repair from nothing at
+  47,500 messages is 475 rounds (under a minute streamed with typical
+  IDs, about 5 minutes with 4,009-byte ones, which the parser cannot
+  produce), and at 142,500 occurrences
+  143 rounds (about a minute collected).
+- **Request size:** a packed upload as above, 43 bytes per digest. At
+  most 200,000 messages (8.5 MB) and 600,000 occurrences (25.6 MB) per
+  certified set, checked against the round's `COUNT(*)` before the
+  scan; a larger set is not certified with a fixed reason (narrow the
+  filters). A request body over the cap's packed size plus 64 KiB is
+  refused before it is parsed. Extras number at most the uploaded
+  digests, so they add at most 67 bytes each as hex (43 packed) to a
+  response.
+- **Scan method:** collect, for both kinds. At the caps with the
+  longest reachable ID (1,015 bytes), order balanced, collect was
+  faster than stream in every cap-sized row but one tie (3.8 times on
+  the message certificate, 1.8 to 2.5 on message rounds, 1.2 and 1.05
+  to 1.7 on occurrences), for at most 193 MiB more peak RSS (281
+  against 84 MiB on the message certificate, 503 against 310 MiB at
+  K = 100, equal elsewhere). A collected certificate cost at most 1.06
+  times one page in the balanced filtered runs, where a streamed one
+  reached 2.8 times (7.6 times in the earlier runs, stream first).
+  Streaming messages was proposed on a 4,009-byte ID shape the parser
+  cannot produce.
+  Claimant IDs that share their first 998 bytes (many files claiming
+  one maximum-length Message-ID, one thread, `--identity
+  ascii998common`) were measured only at 20,000 messages and 3
+  occurrences each: collect stayed faster (certificate 0.05 s against
+  1.03 s on messages, 0.9 s against 2.23 s on occurrences; rounds 0.07 s
+  against 0.15 s and 1.08 s against 1.58 s at K = 100), as for distinct
+  prefixes (0.05 s and 1.01 s against 1.01 s and 2.64 s); the cap-sized
+  run used distinct prefixes
+  and the common-prefix shape was not repeated at the caps. The
+  cap-sized run also used `message_chunks` IDs of about 1 KB; the
+  benchmark now uses the 64-character digest the indexer writes, and no
+  reconcile step reads that table.
+- **Filtered queries:** no bound is proposed or claimed. The work of
+  a filtered predicate per message is not bounded by the message-count
+  cap (a message can carry the parser's maximum of chunks, participant
+  rows and name rows, and a `where` expression can combine up to 16
+  such leaves), and it was not measured at cap size
+  ([#1396](https://github.com/marshalltech81/protonmail-local-ai/issues/1422)).
+  What was measured, with two repeats that put the page first once and
+  last once (the benchmark now rotates page, stream and collect over
+  repeats, balanced when the count is a multiple of three), without
+  planner statistics: on 50,000 messages
+  (142,500 occurrences) a certificate cost 0.14 to 1.56 times one page
+  of the same query streamed and 0.14 to 1.06 times collected; on the
+  `query_attachments` clauses (filename, MIME type, extraction status,
+  thread) streamed it reached 2.83 times. On 300 messages that each
+  carry 10,000 participant rows and 11,000 display-name rows (3.0 and
+  3.3 million rows; the parser can store 10,000 name rows with 10,000
+  participants, or 10,000 name rows with 9,000, so the name rows are up
+  to 10 % above what it stores), a participant predicate took a certificate
+  4.5 s against a page of 9.0 to 11.9 s (messages) and 6.8 s
+  (occurrences), and a `where` expression 0.6 to 1.3 s against 18.4 to
+  18.6 s. On 15,000 messages of 20 chunks of 1,000 words (300,000
+  chunks), each message committed on its own as the indexer does
+  (`--commit-each`), a 16-term `text` or `body_words` value took a
+  certificate 2.5 to 2.6 s against a page of 5.2 to 6.4 s (FTS rowids in insertion order). The FTS index holds body chunks only; production also indexes
+  attachment chunks, so `text` and `body_words` timings are not claimed
+  for an index with attachment postings. Every other
+  corpus here was built in transactions of 2,000 messages (10 for the
+  cardinality corpus), which lays out FTS5 segments differently from
+  per-message commits, so their `text` and `body_words` timings are not
+  claimed for a production-built index; the reconcile rounds read no
+  FTS table.
+
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,
 grouped by one dimension, without listing them
