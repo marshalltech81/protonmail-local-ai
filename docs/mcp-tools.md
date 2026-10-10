@@ -1765,6 +1765,26 @@ digests (27.4 MB and 31.5 MB; 600,000 of them extras) took 0.09 to
 0.12 s to parse, returned 40.3 to 41.4 MB and peaked at 354 to
 400 MiB.
 
+**Combined worst case, without planner statistics.** The figures above
+were taken on a synthetic index that had been `ANALYZE`d; neither the
+indexer nor the server runs `ANALYZE` or `PRAGMA optimize`, so a
+deployed index has no `sqlite_stat1` and the benchmark no longer builds
+one (`--records mixed` and `--upload-total` build the combined shape).
+On 60,000 messages with four-byte IDs (4,009 bytes) and 180,000
+occurrences, one message in fifty carrying worst-case records, an
+upload filled to 60,000 and 180,000 digests with extras, and the
+missing members all worst-case records: a 100-record message round took
+1.1 to 1.2 s and peaked at 181 MiB streamed (537 MiB collected); 1,000
+message records (159 MB) took 1.8 to 5.2 s at 757 MiB; a 1,000-record
+occurrence round (17.7 MB) took 10.7 s streamed (197 MiB) and 6.3 s
+collected (216 MiB). That occurrence round is slower than the analyzed
+475,000-occurrence run above (4.0 to 4.5 s collected, with 998 ASCII
+IDs), so the time at 600,000 occurrences is not extrapolated: the
+cap-sized combined run (200,000 messages, 600,000 occurrences, 600,000
+extras) has not been measured. Its build is expected to take about 25 minutes and
+45 GB (scaled from the 60,000-message build), and the limits below hold only until it is
+([#1376](https://github.com/marshalltech81/protonmail-local-ai/pull/1376)).
+
 **WAL under a concurrent writer.** A second process committed, in a
 loop, eight message updates plus a ballast blob per transaction while
 one round held its snapshot; commits are counted by their time inside
@@ -1819,9 +1839,14 @@ retries on its next pass.
   certificate stayed under one page's cost for every filter, where a
   streamed one reached 7.6 times.
 - **Filtered queries:** no further cap. With that scan method a
-  certificate cost at most 1.6 times one page of the same query in
-  these runs; the predicate cost itself is the query's, as it is for
-  paging.
+  certificate cost at most 1.6 times one page of the same message query
+  in these runs; the predicate cost itself is the query's, as it is for
+  paging. On 50,000 messages (142,500 occurrences), without planner
+  statistics, the `query_attachments` clauses (a filename substring that
+  matches nothing and one that matches all, MIME type, extraction status
+  `success` and `none`, one thread) cost a collected certificate 0.5 to
+  1.03 times one page, and a streamed one up to 3.1 times (the filename
+  that matches nothing).
 
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,
