@@ -216,7 +216,7 @@ _V0_EXTRACTIONS = [
     (("h-docx", "success", "docx@5", "SYNTHETIC_DOCX_TEXT", None), "docx"),
     (("h-pdf-ocr", "success", "pdf-ocr@4", "SYNTHETIC_OCR_TEXT", None), "pdf"),
     (("h-html", "success", "html", "SYNTHETIC_HTML_TEXT", None), "html"),
-    (("h-image", "empty", "image-ocr@4", None, None), "image"),
+    (("h-image", "empty", "image-ocr@3", None, None), "image"),
     (("h-text", "failed", "text@2", None, "ValueError"), "text"),
     (
         (
@@ -350,8 +350,9 @@ class TestMigrationV1:
     def test_migrated_rows_keep_their_stamps_so_no_version_is_stale(self, tmp_path):
         """No ``EXTRACTOR_VERSIONS`` bump comes with the re-keying: rows
         keep their stamps, so the current ones stay current. ``pdf-ocr@4``
-        is stale from #931's own ``pdf`` bump and ``docx@5`` from #1031's
-        ``docx`` bump, not from the migration."""
+        is stale from #931's own ``pdf`` bump, ``docx@5`` from #1031's
+        ``docx`` bump and ``image-ocr@3`` from #1400's ``image`` bump,
+        not from the migration."""
         from src.extractors import is_stale_extractor
 
         _build_v0_database(tmp_path / "v0.db")
@@ -359,7 +360,7 @@ class TestMigrationV1:
         try:
             assert sorted(
                 name for name in db.get_extractor_names() if is_stale_extractor(name)
-            ) == ["docx@5", "pdf-ocr@4", "text@2"]
+            ) == ["docx@5", "image-ocr@3", "pdf-ocr@4", "text@2"]
         finally:
             db.close()
 
