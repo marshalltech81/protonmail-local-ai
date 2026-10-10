@@ -170,11 +170,15 @@ jobs:
           cache-from: ${{ github.event_name == 'pull_request' && 'type=gha,scope=indexer-ppt' || '' }}
           cache-to: type=gha,mode=max,scope=indexer-ppt,ignore-error=true
 
+      # -n auto runs one pytest-xdist worker per CPU (four on
+      # ubuntu-latest); pytest-cov combines the workers' data, so the
+      # floor and coverage.xml cover the whole suite (#1472). Local runs
+      # stay serial unless -n is passed.
       - name: Run pytest with coverage
         working-directory: indexer
         env:
           INDEXER_TEST_PPT_HOME: ${{ runner.temp }}/ppt/opt/ppt
-        run: uv run pytest -q --cov-report=xml:coverage.xml --cov-report=term
+        run: uv run pytest -q -n auto --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload indexer coverage report
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -206,9 +210,10 @@ jobs:
         working-directory: mcp-server
         run: uv sync --locked --dev
 
+      # Parallel as in the indexer job (#1472).
       - name: Run pytest with coverage
         working-directory: mcp-server
-        run: uv run pytest -q --cov-report=xml:coverage.xml --cov-report=term
+        run: uv run pytest -q -n auto --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload mcp-server coverage report
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
