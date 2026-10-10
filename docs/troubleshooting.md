@@ -1730,10 +1730,11 @@ only, never filenames or text (`make logs`):
     with whitespace, when the body keeps that part. A leading `From `
     envelope line, as in an mbox export, is not counted.
   - `eml_body_decode`: a body text part of an attached email whose
-    base64 decoding lost bytes, or any quoted-printable one, whose loss
-    cannot be detected yet, or one in an encoding not decoded here
-    (uuencode and its aliases, or an unknown value), which can come back
-    as its transport text (#922, #1288). Only a part the body keeps (or
+    base64 decoding lost bytes, a quoted-printable one with an `=` that
+    is neither an escape nor a soft line break, a uuencode one (any
+    alias) that fell back to its transport text, or one in an encoding
+    not decoded here (an unknown value), which can come back as its
+    transport text (#922, #1288). Only a part the body keeps (or
     would keep, had it decoded whole) counts; an alternative rendering
     set aside does not.
   - `eml_header_chars`, `eml_text_chars`, `eml_parts`, `eml_text_parts`,
@@ -1744,8 +1745,8 @@ only, never filenames or text (`make logs`):
     nested email left out (more than 20 levels deep, past 64 MB of
     transfer-decoded nested emails, or a transfer encoding that does
     not decode) or read with bytes lost (a malformed base64 encoding,
-    or any quoted-printable one, whose loss cannot be detected yet:
-    #1288), or left unread because no decoder here reads its transfer
+    or a quoted-printable one with an `=` that is neither an escape nor
+    a soft line break: #1288), or left unread because no decoder here reads its transfer
     encoding (uuencode and its aliases, or any other): only its
     `[Attached message, depth N]` label is indexed.
   - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
@@ -1886,7 +1887,7 @@ something searchable is lost:
 - The attachments inside a base64 or quoted-printable attached email
   are not read.
 - A base64 or quoted-printable attached email is decoded with bytes
-  lost, or possibly lost (`transport_lossy`).
+  lost (`transport_lossy`).
 - The container's own payload is emptied while an extractor would have
   read it: an attached email, whose text the `eml` extractor reads
   (#922), or for example a delivery report named `status.txt`.
@@ -1901,8 +1902,8 @@ with no extractor's file name) is not logged.
 | `attached_depth` | An attached email nested more than 20 levels deep (or 20 transfer-encoded levels) |
 | `attached_fields` | The same, once the message's attached emails exceed the per-message part and header budget |
 | `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read; or an attached email in another transfer encoding (uuencode and its aliases, or an unknown value), whose transport text is not extracted |
-| `transport_lossy` | A base64 attached email whose transport decoded with bytes lost, or any quoted-printable one, whose loss cannot be detected yet (#1288): its decoded text is kept and indexed but marked incomplete, and the attachments inside it are read, though one whose boundary was lost is missing, so the attachment list is incomplete |
-| `leaf_transport_lossy` | An attachment an extractor reads whose base64 decoding lost bytes, or an `application/eml` or `.eml` attachment in any transfer encoding other than base64 or none (quoted-printable, uuencode): its text is kept but marked incomplete. The attachments inside it are never read by the parser, so the attachment list is not affected |
+| `transport_lossy` | A base64 attached email whose transport decoded with bytes lost, or a quoted-printable one with an `=` that is neither an escape nor a soft line break (#1288): its decoded text is kept and indexed but marked incomplete, and the attachments inside it are read, though one whose boundary was lost is missing, so the attachment list is incomplete |
+| `leaf_transport_lossy` | An attachment an extractor reads whose base64, quoted-printable or uuencode decoding lost bytes (#1288), or an `application/eml` or `.eml` attachment in a transfer encoding nothing here decodes: its text is kept but marked incomplete. The attachments inside it are never read by the parser, so the attachment list is not affected |
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |

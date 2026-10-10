@@ -55,13 +55,14 @@ type DateStatus = Literal["parsed", "missing", "invalid"]
 # * ``transport_decode``: a transfer-encoded attached email that does
 #   not decode;
 # * ``transport_lossy``: a transfer-encoded attached email that decoded
-#   with bytes lost (base64), or whose loss cannot be detected
-#   (quoted-printable, #1288): its lenient decode is kept, marked
+#   with bytes lost (base64, or quoted-printable with an ``=`` that is
+#   no escape or soft break, #1288): its lenient decode is kept, marked
 #   incomplete, and the attachments inside it are walked, though one
 #   whose boundary was lost is missing (review round 13 on #1311);
 # * ``leaf_transport_lossy``: a leaf attachment an extractor reads whose
-#   base64 decode lost bytes, or an email carried as a leaf for the
-#   ``eml`` extractor in any encoding other than identity or base64: its
+#   base64, quoted-printable or uuencode decode lost bytes (#1288), or an
+#   email carried as a leaf for the ``eml`` extractor in an encoding
+#   nothing here decodes: its
 #   text is partial, but the parser never walks a leaf for attachments;
 # * ``decoded_bytes``: one past ``MAX_DECODED_ATTACHMENT_BYTES``;
 # * ``container_serialize``: a container the generator refuses;
@@ -312,12 +313,61 @@ _DECODE_LOSS_DEFECTS = (
 )
 
 
+# A quoted-printable ``=`` that starts neither an escape (two hex digits)
+# nor a soft line break (``=\n`` or ``=\r\n``). The stdlib decoder keeps
+# such an ``=`` as written, or, for a trailing ``=`` or an ``=`` before a
+# lone CR, drops it and what follows on the line, and records no defect,
+# so this scan is the only signal (#1288). Linear, no backtracking.
+_QP_BAD_ESCAPE_TEXT = re.compile(r"=(?![0-9A-Fa-f]{2}|\r?\n)")
+_QP_BAD_ESCAPE_BYTES = re.compile(rb"=(?![0-9A-Fa-f]{2}|\r?\n)")
+
+# The four uuencode labels the stdlib decodes (``email.message``).
+_UU_ENCODINGS = frozenset({"x-uuencode", "uuencode", "uue", "x-uue"})
+
+
+def _uu_decode_fell_back(part: email.message.Message) -> bool:
+    """Whether the stdlib's uuencode decode of this leaf part gave up and
+    returned the transport text unchanged (no ``begin`` line, a blank
+    line before ``end``): the decoded bytes then equal the payload bytes,
+    which a real decode, shorter by a quarter, never does. A payload with
+    non-ASCII text is not valid uuencode and counts as failed (#1288)."""
+    payload = part.get_payload()
+    if not isinstance(payload, str):
+        return False
+    try:
+        raw = payload.encode("ascii", "surrogateescape")
+    except UnicodeEncodeError:
+        return True
+    return part.get_payload(decode=True) == raw
+
+
 def _decode_lost_bytes(part: email.message.Message) -> bool:
     """Whether decoding this leaf part's payload (``_decoded_payload``,
     which fills ``part.defects``) lost bytes (#1242, review round 2 on
-    #1286). Quoted-printable and uuencode failures record no defect, so
-    they are not detected."""
-    return any(isinstance(d, _DECODE_LOSS_DEFECTS) for d in part.defects)
+    #1286). Base64 records a defect; quoted-printable and uuencode record
+    none, so they are checked here (#1288): a quoted-printable ``=`` that
+    is no escape or soft break, and a uuencode decode that fell back to
+    the transport text. A truncation that leaves valid encoding is not
+    detectable."""
+    if any(isinstance(d, _DECODE_LOSS_DEFECTS) for d in part.defects):
+        return True
+    encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+    if encoding == "quoted-printable":
+        payload = part.get_payload()
+        return isinstance(payload, str) and _QP_BAD_ESCAPE_TEXT.search(payload) is not None
+    if encoding in _UU_ENCODINGS:
+        return _uu_decode_fell_back(part)
+    return False
+
+
+def _transfer_decode_unchecked(part: email.message.Message) -> bool:
+    """Whether this leaf part's transfer encoding is one whose loss
+    ``_decode_lost_bytes`` cannot see: anything but the identity
+    encodings, base64, quoted-printable and the uuencode labels. The
+    stdlib returns the transport text for it as it does for a failed
+    uuencode, so a text part in it counts as lossy."""
+    encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+    return encoding not in (_IDENTITY_ENCODINGS | {"base64", "quoted-printable"} | _UU_ENCODINGS)
 
 
 # Defects recording a header-block line the parse dropped: a first line
@@ -362,6 +412,14 @@ def _base64_transport_lost(data: bytes) -> bool:
     pseudo.set_payload(data.decode("ascii", "surrogateescape"))
     pseudo.get_payload(decode=True)
     return _decode_lost_bytes(pseudo)
+
+
+def _transport_decode_lost(transport: bytes, encoding: str) -> bool:
+    """Whether a container's base64 or quoted-printable transport text
+    loses bytes when decoded (#1242, #1288)."""
+    if encoding == "quoted-printable":
+        return _QP_BAD_ESCAPE_BYTES.search(transport) is not None
+    return _base64_transport_lost(transport)
 
 
 @dataclass
@@ -1113,9 +1171,9 @@ def _attachment_payload(
     would read this attachment's payload).
 
     ``transport_lost`` (when given) gets ``True`` appended when a base64
-    transport decoded but lost bytes (``_base64_transport_lost``), or the
-    transport is quoted-printable, whose loss cannot be detected (#1288),
-    and the loss is counted as ``transport_lossy``; the returned bytes are
+    or quoted-printable transport decoded but lost bytes
+    (``_transport_decode_lost``), and the loss is counted as
+    ``transport_lossy``; the returned bytes are
     the lenient decode's either way (#1242). An
     attached email in any other non-identity transfer encoding (uuencode
     and its aliases included) keeps the empty payload, counted as
@@ -1155,13 +1213,11 @@ def _attachment_payload(
         if decoded is None:
             caps["transport_decode"] += 1
             return b"", None
-        # A quoted-printable loss records nothing to detect, so its bytes
-        # (the lenient decode's) are kept but never certified until
-        # #1288 detects the loss (review round 4 on #1311).
+        # The lenient decode's bytes are kept either way; a loss makes
+        # them incomplete (base64 round 4 on #1311, quoted-printable
+        # #1288).
         if transport_lost is not None and (
-            encoding == "quoted-printable"
-            or _base64_transport_lost(transport)
-            or _transport_lines_dropped(part)
+            _transport_decode_lost(transport, encoding) or _transport_lines_dropped(part)
         ):
             transport_lost.append(True)
             # Counted so the loss is logged, not only flagged (review
@@ -1432,8 +1488,8 @@ class BodyWalk:
     ``degraded`` counts the decoders' fallbacks (``HEADER_DEGRADED``,
     ``FILENAME_DEGRADED``, ``CHARSET_DEGRADED``), whose lines a caller in
     the extractor child cannot log; ``decode_lost_parts`` counts the text
-    parts whose transfer decoding lost bytes (``_decode_lost_bytes``) or
-    may have (any quoted-printable part, #1288), and
+    parts whose transfer decoding lost bytes (``_decode_lost_bytes``,
+    #1288) or is in an encoding not decoded here, and
     ``structure_lost_parts`` the parts declared ``multipart/*`` that the
     standard library could not decompose (no or a missing boundary), whose
     text is lost, and ``header_lost_parts`` the text parts whose header
@@ -1567,25 +1623,20 @@ def _extract_body_and_attachments(
                 decode_depth=decode_depth,
                 transport_lost=transport_lost,
             )
+            # Read once: it scans the payload (#1288).
+            leaf_lost = not part.is_multipart() and _decode_lost_bytes(part)
             if (
                 module is not None
                 and not part.is_multipart()
-                and (
-                    _decode_lost_bytes(part)
-                    or (
-                        module == "eml"
-                        and str(part.get("Content-Transfer-Encoding", "")).strip().lower()
-                        not in _IDENTITY_ENCODINGS | {"base64"}
-                    )
-                )
+                and (leaf_lost or (module == "eml" and _transfer_decode_unchecked(part)))
             ):
-                # A leaf an extractor reads whose base64 decode lost bytes
-                # (round 14), or an email carried as a leaf
-                # (``application/eml``, or named ``.eml``) in a transfer
-                # encoding whose loss is not detected (#1288; round 8):
-                # its decode is kept, never complete, and counted. A leaf
-                # is never walked for attachments, so the manifest stays
-                # whole (review round 13 on #1311).
+                # A leaf an extractor reads whose decode lost bytes
+                # (base64 round 14, quoted-printable and uuencode #1288),
+                # or an email carried as a leaf (``application/eml``, or
+                # named ``.eml``) in an encoding nothing here decodes
+                # (round 8): its decode is kept, never complete, and
+                # counted. A leaf is never walked for attachments, so the
+                # manifest stays whole (review round 13 on #1311).
                 transport_lost.append(True)
                 caps["leaf_transport_lossy"] += 1
             attachments.append(
@@ -1603,7 +1654,7 @@ def _extract_body_and_attachments(
                     payload_complete=(
                         bool(payload) and not transport_lost
                         if part.is_multipart()
-                        else not transport_lost and not _decode_lost_bytes(part)
+                        else not transport_lost and not leaf_lost
                     ),
                 )
             )
@@ -1701,16 +1752,11 @@ def _extract_body_and_attachments(
             continue
         text_parts += 1
         payload = _decoded_payload(part)
-        # A quoted-printable loss records no defect to read, and a part
-        # in any other encoding not decoded here (uuencode, its aliases,
-        # anything unknown) can come back as its transport text, so in a
-        # body-only walk each counts as lossy until #1288 detects it
-        # (review rounds 3 and 5 on #1311).
-        if walk is not None and (
-            _decode_lost_bytes(part)
-            or str(part.get("Content-Transfer-Encoding", "")).strip().lower()
-            not in _IDENTITY_ENCODINGS | {"base64"}
-        ):
+        # A part whose decode lost bytes (``_decode_lost_bytes``), or in
+        # an encoding not decoded here (anything unknown can come back as
+        # its transport text), counts as lossy in a body-only walk
+        # (review rounds 3 and 5 on #1311, #1288).
+        if walk is not None and (_decode_lost_bytes(part) or _transfer_decode_unchecked(part)):
             decode_lossy.append((len(nodes) - 1, not is_html))
         if (
             walk is not None

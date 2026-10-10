@@ -350,15 +350,11 @@ def _inner_message(
         if decoded is None:
             return None, True
         # A lenient decode can drop bytes and still succeed: the email
-        # is rendered, but its text is not whole. Base64 loss is detected
-        # (review round 1); quoted-printable loss records nothing to
-        # detect, so every quoted-printable nested email counts as lossy
-        # until #1288 detects it (review round 2).
-        # A transport line the parse dropped is lost too (review round 8).
-        lossy = (
-            encoding == "quoted-printable"
-            or parser._base64_transport_lost(transport)
-            or parser._transport_lines_dropped(part)
+        # is rendered, but its text is not whole (base64 review round 1,
+        # quoted-printable #1288). A transport line the parse dropped is
+        # lost too (review round 8).
+        lossy = parser._transport_decode_lost(transport, encoding) or (
+            parser._transport_lines_dropped(part)
         )
         container = decoded
     children = container.get_payload()
