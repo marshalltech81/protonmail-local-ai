@@ -1,9 +1,18 @@
 {
-  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. required_evidence is a list of groups: every group is required, and any one thread in a group satisfies it. max_rank (1-based) bounds the first hit from any group; groups missing from the top 10 lower evidence recall instead. The recall floors are the hashed embedder's measured values rounded down: wiring checks, not semantic quality. vector_only questions must be answerable only by the vector lanes. unanswerable questions have no answer in the corpus: none of their absent_terms occurs in any message's subject, body or attachment (case-insensitive), and an abstaining agent must have asked for one of them. evidence_queries are get_evidence queries the outstanding-items reachability checks (#798, #907) and the OCR shape checks (#908, #1113) make; the build embeds them and they rank nothing in the snapshot.",
+  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. required_evidence is a list of groups: every group is required, and any one thread in a group satisfies it. max_rank (1-based) bounds the first hit from any group; groups missing from the top 10 lower evidence recall instead. The recall floors are the hashed embedder's measured values rounded down: wiring checks, not semantic quality. vector_only questions must be answerable only by the vector lanes. unanswerable questions have no answer in the corpus: none of their absent_terms occurs in any message's subject, body or attachment (case-insensitive), and an abstaining agent must have asked for one of them. evidence_queries are get_evidence queries the outstanding-items reachability checks (#798, #907) and the OCR shape checks (#908, #1113) make; the build embeds them and they rank nothing in the snapshot. semantic questions are paraphrases sharing few words with their evidence; only the real-embedder run (make baseline-real-embedder, #1439) ranks them, against real_embedder_floors, which hold one independent floor per metric for each embedding model measured: synthetic regression evidence, not a mailbox-quality claim.",
   "floors": {
     "mrr": 0.9,
     "evidence_recall_at_10": 1.0,
     "multi_source_evidence_recall_at_10": 1.0
+  },
+  "real_embedder_floors": {
+    "Qwen/Qwen3-Embedding-8B": {
+      "_comment": "make baseline-real-embedder, 2026-10-10, DeepInfra, batch size 64, queries sent one per request as mcp-server sends them, 5 repeats over all 73 search and semantic questions (#1439). Measured per repeat: hit_at_10 0.9589, mrr 0.8575-0.8587, evidence_recall_at_10 0.9384, multi_source_evidence_recall_at_10 0.7222. Between repeats 164 of 328 query vectors and 119 of 1,388 chunk vectors differed (max cosine distance 0.0031), moving 39 questions' top 10, and an earlier run with batched queries moved one question across rank 10. A second fresh five-repeat run, with chunk vectors cached per request, gave the same values. Each floor is the lowest repeat minus one question's worth (1/73 for hit, MRR and evidence recall; one group of a two-group question, 1/18, for multi-source recall), rounded down to two decimals: one question lost to variation passes, two fail.",
+      "hit_at_10": 0.94,
+      "mrr": 0.84,
+      "evidence_recall_at_10": 0.92,
+      "multi_source_evidence_recall_at_10": 0.66
+    }
   },
   "search": [
     {"id": "roof-estimate", "query": "roof repair estimate", "required_evidence": [["t01"]], "max_rank": 1},
@@ -59,6 +68,28 @@
     {"id": "attach-pdf-ocr-capped", "query": "Dunlin rowing scan", "required_evidence": [["t91"]], "max_rank": 1, "_comment": "#908: a scanned PDF with one page more than the build's lowered OCR page cap; the query uses the body's words, never the OCR'd ones."},
     {"id": "attach-tiff-ocr-capped", "query": "headland fax pages", "required_evidence": [["t92"]], "max_rank": 1, "_comment": "#1113: a multipage TIFF with one frame more than the build's lowered OCR page cap; the query uses the body's words, never the OCR'd ones."},
     {"id": "conflict-attach-body", "query": "Holloway allotment wall", "required_evidence": [["t93"]], "max_rank": 1, "evidence": "$3,840", "_comment": "#910: the body gives one sum and its attachment another; the evidence is the attachment's."}
+  ],
+  "semantic": [
+    {"id": "sem-dentist", "query": "when do I see the dentist to get my teeth cleaned", "required_evidence": [["t06"]]},
+    {"id": "sem-dog-shots", "query": "my dog needs her shots at the vet", "required_evidence": [["t07"]]},
+    {"id": "sem-flight-time", "query": "what time does our plane take off for Portugal", "required_evidence": [["t08"]]},
+    {"id": "sem-hotel-meal", "query": "does our Portugal accommodation come with a morning meal", "required_evidence": [["t09"]]},
+    {"id": "sem-insurer-payout", "query": "how much is the insurer paying out for the leak under the sink", "required_evidence": [["t10"]]},
+    {"id": "sem-tax-paperwork", "query": "which paperwork does my bookkeeper still need before filing my income taxes", "required_evidence": [["t11"]]},
+    {"id": "sem-garage-digits", "query": "new digits for getting into the parking garage", "required_evidence": [["t12"]]},
+    {"id": "sem-car-servicing", "query": "when is my car booked in for its routine servicing", "required_evidence": [["t15"]]},
+    {"id": "sem-swiss-pay", "query": "how much would the Swiss employer pay me per year", "required_evidence": [["t17"]]},
+    {"id": "sem-shed-lock", "query": "what number opens the lock on the neighbour's storage hut", "required_evidence": [["t18"]]},
+    {"id": "sem-computer-cost", "query": "how much did I spend on the new notebook computer", "required_evidence": [["t19"]]},
+    {"id": "sem-yard-boundary", "query": "where exactly does my yard end and the neighbour's begin", "required_evidence": [["t20"]]},
+    {"id": "sem-apartment-papers", "query": "deadline to send back the signed papers to keep renting the apartment", "required_evidence": [["t23"]]},
+    {"id": "sem-bread-pickup", "query": "is my bread order ready to collect", "required_evidence": [["t35"]]},
+    {"id": "sem-walker-rate", "query": "how much does the person who walks the dog charge", "required_evidence": [["t75"]]},
+    {"id": "sem-multi-canoe", "query": "total price for renting canoes for everyone in our group", "required_evidence": [["t21"], ["t22"]]},
+    {"id": "sem-multi-repaint", "query": "how much is repainting the outside of the house and when do the workers arrive", "required_evidence": [["t25"], ["t26"]]},
+    {"id": "sem-multi-portugal", "query": "Portugal holiday plane and accommodation dates", "required_evidence": [["t08"], ["t09"]]},
+    {"id": "sem-multi-street-party", "query": "what day is the neighbourhood street gathering", "required_evidence": [["t29"], ["t30"]]},
+    {"id": "sem-alt-lodge", "query": "address of the woodland lodge we rented", "required_evidence": [["t27", "t28"]]}
   ],
   "enumerate": [
     {"id": "sender", "args": {"sender": "adjuster@keystoneins.example"}, "expect": ["t10.1", "t10.3"]},
