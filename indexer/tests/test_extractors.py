@@ -3541,7 +3541,8 @@ class TestPdfExtractorVersion:
     instead of failing, #707 stops caching a success with pages
     dropped by host pressure, and #931 records a PDF that needs an open
     password or exceeds pypdf's limits ``unsupported``, so rows written
-    before any of them must re-extract."""
+    before any of them must re-extract. Pypdf 6.20 changes stream decoding
+    and malformed page-tree recovery, so version 5 rows also refresh."""
 
     @pytest.mark.parametrize(
         "name",
@@ -3558,12 +3559,15 @@ class TestPdfExtractorVersion:
             "pdf-digital@4",
             "pdf-ocr@4",
             "pdf@4",
+            "pdf-digital@5",
+            "pdf-ocr@5",
+            "pdf@5",
         ],
     )
     def test_pre_bump_pdf_rows_are_stale(self, name):
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["pdf"] == 5
+        assert EXTRACTOR_VERSIONS["pdf"] == 6
         assert stale_extractor_module(name) == "pdf"
 
     @pytest.mark.parametrize("name", ["pdf-digital@6", "pdf-ocr@6", "pdf@6"])
