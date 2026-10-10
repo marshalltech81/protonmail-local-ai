@@ -553,7 +553,12 @@ _UNAVAILABLE_REASONS = {
     None: "no extraction is recorded for this attachment yet (not run yet, or attachment "
     "extraction is off)",
     "failed": "extraction failed",
-    "unsupported": "no extractor reads this file type",
+    # Every cause the dispatcher records as unsupported (#1343): no extractor
+    # for the type, an extractor missing from this image, or one that declined
+    # the bytes (an encrypted PDF, a work cap).
+    "unsupported": "no extractor could read this file: its type has no extractor, the "
+    "extractor is missing from this image, or it declined the file (for example an "
+    "encrypted PDF or a work cap)",
     "too_large": "the file is over the indexer's attachment size limit, so it was not extracted",
     # A success row is read only when it stored text.
     "success": "the extraction succeeded but stored no text",
@@ -2001,7 +2006,8 @@ def register_retrieval_tools(server, db):
         left unread. Only a ``success`` extraction has text; an
         ``empty`` one returns "". Otherwise ``text`` is null and
         ``unavailable_reason`` says why (no extraction recorded yet,
-        extraction failed, no extractor for the file type, OCR off, or
+        extraction failed, no extractor could read the file (unsupported
+        type, missing extractor, encrypted PDF or work cap), OCR off, or
         the file over the size limit): report it as unread text, not as
         an attachment that says nothing relevant.
 
