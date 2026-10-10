@@ -2026,14 +2026,25 @@ by the child is raised again in the parent and recorded `unsupported`
 (#931); any other error, the child's own `MemoryError` and
 `RecursionError` included, is `failed` under its type name, where in
 process those two were host pressure that stopped the indexing pass.
-The version stays `pdf@5`: on a catalogue of synthetic PDF shapes
-(digital, scanned, mixed, encrypted, broken pages, over each page cap,
-OCR on and off, OCR failing, a lowered DPI;
+The move takes no version bump (`pdf@6` stays; owner exception
+2026-10-10, as for `image` on #1325): on a catalogue of synthetic PDF
+shapes (digital, scanned, mixed, encrypted, broken pages, over each
+page cap, OCR on and off, OCR failing, a lowered DPI;
 `indexer/tests/test_pdf_catalogue.py`) every stored field, count and
-progress callback is the same as the in-process extractor's on `main`,
-and `make baseline` is unchanged; only a PDF whose stripped text passes
-10,000,000 characters with the character cap off or above that, or
-whose parse passes the child's limits, is stored differently.
+progress callback is the same as the in-process extractor's, and
+`make baseline` is unchanged. A result is stored differently only for
+a PDF whose parse passes the child's limits, and in two text-cap
+cases: with `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` set to `0` or
+above 10,000,000, a PDF whose stripped text passes 10,000,000
+characters is stored cut there and marked incomplete; and a text with
+a whitespace run from below the configured cap through the
+10,000,000-character cut is stored without that whitespace and with no
+configured cap recorded (`text_complete` 0, `extracted_chars_cap` 0),
+where in process it kept the whitespace up to the cap and recorded the
+setting. The hardcoded cut records
+no configured cap, so raising a setting does not refresh such a row,
+and cached `pdf@6` rows over 10,000,000 characters keep their fuller
+text (`TestTextCeiling` in `indexer/tests/test_pdf_child.py`).
 
 The limits were measured plainly in the indexer image (pypdf 6.19,
 Poppler and Tesseract 5.5.0 from Debian trixie), through the real
@@ -2078,17 +2089,32 @@ is budgeted. The CPU limit is the longer of the digital walk's
 allowance and four times the OCR timeout (Tesseract's four threads),
 plus 30 s, so the per-page timeouts fire first.
 
-Memory under the indexer's 6 GiB `mem_limit`: the child and one Poppler
-or Tesseract process run at once, each under its own 2 GiB, and the
-scratch directory on the `/tmp` tmpfs holds the payload twice (the
-runner's copy and pdf2image's) and one run of rendered pages
-(up to `INDEXER_OCR_MAX_PAGES` pages of up to 30 MB each). The largest
-tree measured above is 1.75 GiB with 28 MiB of scratch, and the largest
-OCR tree 309 MiB with 236 MiB of scratch. The bound, two processes at
-2 GiB plus about 0.7 GiB of scratch at the defaults, is about 4.7 GiB;
-with the indexer's own 1.6 GiB (image section above) that is more than
-the 6 GiB limit, reachable only when one PDF drives both pypdf and a
-Poppler or Tesseract process to the address-space limit at once (#1450).
+Memory under the indexer's 6 GiB `mem_limit` (#1450): the child parses
+under 2 GiB, and before it starts the first Poppler or Tesseract
+process it lowers its own address-space limit, soft and hard, which
+each tool inherits, to the larger of what it maps then plus 256 MiB and
+768 MiB (`pdf_child._limit_for_ocr`). The tools' own minimums are
+240 MiB (Tesseract, a 10 MP page of noise), 80 MiB (`pdftoppm`) and
+48 MiB (`pdfinfo`). A child whose limit would pass 1,280 MiB (it maps
+more than 1,024 MiB when OCR would start) starts no tool: the OCR
+fallback fails (`PdfOcrMemoryBudgetError`) and a mixed PDF keeps its
+digital text. Each Poppler call renders at most 5 pages
+into its own scratch directory, removed once they are OCR'd, so the
+scratch on the `/tmp` tmpfs holds the payload twice (the runner's copy
+and pdf2image's) and at most 5 rendered pages of up to 30 MB each,
+whatever `INDEXER_OCR_MAX_PAGES` is. Measured in the image with pypdf
+6.20 (wall and CPU times were not re-taken): the 71 MiB page still
+needs 1,776 MiB; the child maps at most 274 MiB when OCR starts, after
+that page peaked at 1,829 MiB, and grows by at most 17 MiB while it
+OCRs; every tool ran at 768 MiB; two mixed PDFs, a 64 MiB path page
+followed by four 10 MP scans or by 40 scanned letter pages (OCR page
+cap 100), peaked at 1.58 to 1.60 GiB of tree RSS during the digital
+walk, with no tool running, and at most 171 MiB of scratch; 60 scanned
+pages (OCR page cap 100) held at most 121 MiB of scratch. The bound in the OCR phase is the
+indexer's own 1.6 GiB (image section above), the child and one tool at
+1.25 GiB each and about 0.25 GiB of scratch, about 4.35 GiB; in the
+digital phase it is 1.6 + 2 GiB plus the payload copy, about 3.6 GiB;
+both are under the 6 GiB limit.
 
 PDFs labelled as images (#1415): a payload under an image label
 (an `image/*` type or an image extension) that starts with `%PDF-`
