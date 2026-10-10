@@ -8,9 +8,10 @@
 
 -- No default: every existing row starts NULL. The bytes are not in the
 -- database, so the migration cannot tell; the reparse below sends every
--- occurrence through the cache lookup once, with no re-embedding, which
--- stamps '' on a row whose payload has neither signature (its result
--- kept) and identifies and re-extracts the rest. The startup sweep
+-- occurrence through the cache lookup once, which stamps '' on a row
+-- whose payload has neither signature (its result kept) and identifies
+-- and re-extracts the rest. Unchanged chunks keep their vectors; text a
+-- re-identified container now yields is embedded as new chunks. The startup sweep
 -- queues the same rows and clears their occurrences' text completeness
 -- first, so a message with an extraction continuation already queued
 -- (which the reparse leaves as it is) refreshes them too.

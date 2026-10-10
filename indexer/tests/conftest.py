@@ -103,13 +103,15 @@ def _ole2_entry(name: str, kind: int, *, left: int, right: int, child: int) -> b
     )
 
 
-def make_ole2(*stream_names: str, trailer: bytes = b"") -> bytes:
+def make_ole2(*stream_names: str, trailer: bytes = b"", storages: tuple[str, ...] = ()) -> bytes:
     """A synthetic, valid OLE2 compound file (version 3, 512-byte
     sectors) whose root storage holds empty streams named
-    ``stream_names``, followed by ``trailer``. Identification (#1416)
-    reads only these names; the bytes carry no document."""
+    ``stream_names`` and empty storages named ``storages``, followed by
+    ``trailer``. Identification (#1416) reads only these names; the bytes
+    carry no document."""
     entries_per_sector = 4
-    count = len(stream_names) + 1
+    children = [(name, 2) for name in stream_names] + [(name, 1) for name in storages]
+    count = len(children) + 1
     dir_sectors = -(-count // entries_per_sector)
     fat = [0xFFFFFFFD] + [i + 2 if i < dir_sectors - 1 else _OLE2_END for i in range(dir_sectors)]
     fat += [_OLE2_FREE] * (128 - len(fat))
@@ -128,9 +130,9 @@ def make_ole2(*stream_names: str, trailer: bytes = b"") -> bytes:
     entries = [
         _ole2_entry("Root Entry", 5, left=_OLE2_NOSTREAM, right=_OLE2_NOSTREAM, child=root_child)
     ]
-    for sid, name in enumerate(stream_names, start=1):
+    for sid, (name, kind) in enumerate(children, start=1):
         left, right = links[sid]
-        entries.append(_ole2_entry(name, 2, left=left, right=right, child=_OLE2_NOSTREAM))
+        entries.append(_ole2_entry(name, kind, left=left, right=right, child=_OLE2_NOSTREAM))
     directory = b"".join(entries).ljust(dir_sectors * 512, b"\0")
     header = (
         b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"

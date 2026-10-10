@@ -8,7 +8,8 @@ directory and names the one extractor that reads the payload, without
 extracting anything:
 
 * OLE2 compound file: olefile reads the header, the FAT and the
-  directory; the root storage's stream names decide. ``WordDocument``
+  directory; the root storage's stream names decide (a storage's name
+  never does). ``WordDocument``
   is ``doc``, ``Workbook`` or ``Book`` (BIFF5) is ``xls``,
   ``PowerPoint Document`` is ``ppt``. ``EncryptionInfo`` with
   ``EncryptedPackage`` is an encrypted OOXML file, which no extractor
@@ -161,7 +162,9 @@ def _identify_ole2(payload: bytes) -> str:
     # A file object, never the bytes: olefile reads bytes shorter than
     # 1,536 as a file name.
     with _BoundedOleFile(io.BytesIO(payload)) as ole:
-        names = {_ole2_name(kid) for kid in ole.root.kids}
+        # Streams only: a storage named like a format's stream names
+        # nothing (Codex round 1 on #1444).
+        names = {_ole2_name(kid) for kid in ole.root.kids if kid.entry_type == olefile.STGTY_STREAM}
     kinds = {_OLE2_STREAMS[name] for name in names if name in _OLE2_STREAMS}
     if len(kinds) > 1:
         return AMBIGUOUS

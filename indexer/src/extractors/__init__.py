@@ -1371,7 +1371,11 @@ def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
 # The legacy (OLE2) extractor for a legacy label, and the OOXML one the
 # same label selects for a payload that is not OLE2.
 _LEGACY_TO_OOXML = {"doc": "docx", "xls": "xlsx"}
-_ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06")
+# The lead signatures of a ZIP: a local file header, an empty archive's
+# end-of-central-directory record, and the split / spanned marker and the
+# temporary spanning marker (``PK00``, before a local header) a ZIP can
+# start with (Codex round 1 on #1444).
+_ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08", b"PK00PK\x03\x04")
 _PDF_SIGNATURE = b"%PDF-"
 # The prefixes whose payloads are identified by their directory (#1416).
 _CONTAINER_SIGNATURES = (_OLE2_SIGNATURE, *_ZIP_SIGNATURES)

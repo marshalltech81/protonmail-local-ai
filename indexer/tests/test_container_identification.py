@@ -100,6 +100,23 @@ class TestIdentification:
         assert container_child.extract_text(make_ole2(*streams)) == (token, [])
 
     @pytest.mark.parametrize(
+        ("streams", "storages", "token"),
+        [
+            ((), ("WordDocument",), "ole2-other"),
+            ((), ("Workbook", "PowerPoint Document"), "ole2-other"),
+            ((), ("EncryptionInfo", "EncryptedPackage"), "ole2-other"),
+            (("EncryptionInfo",), ("EncryptedPackage",), "ole2-other"),
+            (("Workbook",), ("WordDocument",), "xls"),
+            (("WordDocument",), ("ObjectPool",), "doc"),
+        ],
+    )
+    def test_only_streams_name_a_format(self, streams, storages, token):
+        """Codex round 1: a root storage named like a format's stream
+        names nothing; only stream entries decide."""
+        payload = make_ole2(*streams, storages=storages)
+        assert container_child.extract_text(payload) == (token, [])
+
+    @pytest.mark.parametrize(
         ("fixture", "token"),
         [
             ("legacy.doc", "doc"),
@@ -129,6 +146,21 @@ class TestIdentification:
     )
     def test_zip_member_names_decide(self, names, token):
         assert container_child.extract_text(make_zip(*names)) == (token, [])
+
+    @pytest.mark.parametrize(
+        "lead", [b"", b"PK\x07\x08", b"PK00"], ids=["local-header", "spanned", "spanning-temp"]
+    )
+    def test_every_zip_lead_signature_is_a_container(self, stubbed_extractors, lead):
+        """Codex round 1: a ZIP may start with the split / spanned marker
+        (``PK\\x07\\x08``) or the temporary spanning marker (``PK00``)
+        before its first local header; zipfile reads it, so it is
+        identified like one that starts with the header, under any label."""
+        payload = lead + _ooxml("docx")
+        assert extractors.has_container_prefix(payload)
+        assert container_child.extract_text(payload) == ("docx", [])
+        result = extract(content_type="text/plain", filename="a.txt", payload=payload)
+        assert (result.status, result.identifier) == (STATUS_SUCCESS, CONTAINER_IDENTIFIER)
+        assert stubbed_extractors == ["docx"]
 
     def test_no_member_is_opened(self, monkeypatch):
         """Only the central directory is read: no member is decompressed."""
