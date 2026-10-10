@@ -612,6 +612,10 @@ participants, date range, folder, and a short snippet. To read the
 contents of a returned thread, follow up with `get_thread` or
 `summarize_thread` using the result's `Thread ID`.
 
+For the latest or N most recent messages from a person, use
+`query_messages(sender=..., limit=N)`, newest first, then `get_message`
+or `get_thread`. This tool ranks by relevance, not date.
+
 For outstanding-item questions, the description gives the same
 verification guidance as [`query_messages`](#query_messages): look for
 completion, corrections, reopening and later guidance across threads

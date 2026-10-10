@@ -260,7 +260,9 @@ def register_search_tools(
         cannot answer "all" or "how many" questions ("every email from
         Jane in 2024", "how many invoices arrived in March") — use
         query_messages for those; it enumerates the complete set with an
-        exact count.
+        exact count. For the latest or N most recent messages from a
+        person, use query_messages(sender=..., limit=N): it returns the
+        newest first, where this tool ranks by relevance.
 
         Filtering by sender — read this before iterating queries:
             - User said a NAME or ROLE ("Jane Smith", "the accountant",
