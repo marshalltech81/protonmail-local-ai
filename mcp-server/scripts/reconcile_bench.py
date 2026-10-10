@@ -1382,28 +1382,33 @@ def phase_writer(
         times.append((time.monotonic(), os.stat(wal).st_size))
         Path(stop + ".ready").touch()
 
-        def commit() -> None:
-            # COMMIT and its stamp under the order lock (``_ordered``):
-            # a commit is in a round's window only once it is durable,
-            # and its frames are in the size.
+        @contextmanager
+        def transaction() -> Iterator[None]:
+            # The whole transaction, BEGIN to COMMIT and its stamp, under
+            # the order lock (``_ordered``): a commit is in a round's
+            # window only once it is durable, and every frame it writes
+            # (a large one spills dirty pages into the WAL before COMMIT)
+            # falls on the same side of each boundary as its stamp.
             with _ordered(order):
+                conn.execute("BEGIN IMMEDIATE")
+                yield
                 conn.execute("COMMIT")
                 times.append((time.monotonic(), os.stat(wal).st_size))
 
         while not os.path.exists(stop):
-            conn.execute("BEGIN IMMEDIATE")
-            flipped = conn.execute(
-                "UPDATE messages SET seen = 1 - seen WHERE rowid = ?", (rng.randint(1, top),)
-            ).rowcount
-            if flipped != 1:
-                raise RuntimeError(f"writer updated {flipped} messages, not 1")
-            commit()
-            conn.execute("BEGIN IMMEDIATE")
-            cur = conn.execute(
-                "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
-            )
-            conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - BALLAST_ROWS,))
-            commit()
+            with transaction():
+                flipped = conn.execute(
+                    "UPDATE messages SET seen = 1 - seen WHERE rowid = ?", (rng.randint(1, top),)
+                ).rowcount
+                if flipped != 1:
+                    raise RuntimeError(f"writer updated {flipped} messages, not 1")
+            with transaction():
+                cur = conn.execute(
+                    "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
+                )
+                conn.execute(
+                    "DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - BALLAST_ROWS,)
+                )
             commits += 2
             resume = time.monotonic() + interval
             while not os.path.exists(stop):

@@ -1057,10 +1057,8 @@ def test_writer_commits_each_message_as_the_indexer_does(bench, tmp_path):
 
     built, _ = state()
     stop = tmp_path / "stop"
-    import threading
 
-    timer = threading.Timer(0.3, stop.touch)
-    timer.start()
+    timer = _stop_after_ready(stop, 0.3)
     out = bench.phase_writer(str(db), str(stop), 16, 0.01)
     timer.join()
     assert out["commits"] > 0 and out["commits"] % 2 == 0
@@ -1220,13 +1218,11 @@ def test_writer_wal_size_is_its_logical_end(bench, tmp_path):
     # An automatic checkpoint would restart the WAL and refill its
     # allocated file without growing it, hiding retained frames. With
     # it off, every commit grows the file, so its size is the WAL's end.
-    import threading
 
     db = tmp_path / "grow.db"
     bench.build(db, 8, 0, "typical", "typical")
     stop = tmp_path / "stop"
-    timer = threading.Timer(0.5, stop.touch)
-    timer.start()
+    timer = _stop_after_ready(stop, 0.5)
     out = bench.phase_writer(str(db), str(stop), 262_144, 0.0)
     timer.join()
     sizes = [size for _, size in out["commit_times"]]
@@ -1237,7 +1233,6 @@ def test_writer_wal_size_is_its_logical_end(bench, tmp_path):
 def test_writer_survives_a_tiny_interval(bench, tmp_path, monkeypatch):
     # The pause is computed from one clock read: a clock that passes
     # ``resume`` between reads never yields a negative sleep.
-    import threading
 
     db = tmp_path / "tiny.db"
     bench.build(db, 8, 0, "typical", "typical")
@@ -1249,8 +1244,7 @@ def test_writer_survives_a_tiny_interval(bench, tmp_path, monkeypatch):
         real(seconds)
 
     monkeypatch.setattr(bench.time, "sleep", checked)
-    timer = threading.Timer(0.3, stop.touch)
-    timer.start()
+    timer = _stop_after_ready(stop, 0.3)
     out = bench.phase_writer(str(db), str(stop), 16, 0.000001)
     timer.join()
     assert out["commits"] > 0
@@ -1281,10 +1275,8 @@ def test_writer_delay_ends_when_stop_appears(bench, tmp_path):
     db = tmp_path / "delay.db"
     bench.build(db, 8, 0, "typical", "typical")
     stop = tmp_path / "stop"
-    import threading
 
-    timer = threading.Timer(0.5, stop.touch)
-    timer.start()
+    timer = _stop_after_ready(stop, 0.5)
     started = time.monotonic()
     out = bench.phase_writer(str(db), str(stop), 16, 3600.0)
     timer.join()
@@ -1356,3 +1348,36 @@ def test_a_writer_that_dies_mid_round_fails_the_measurement(bench, tmp_path):
 def test_wal_results_name_the_round_they_measured(bench, report):
     # Kind, scan method and K: the workload each WAL figure belongs to.
     assert all(w["k"] == max(report["config"]["k"]) for w in report["wal"])
+
+
+def _stop_after_ready(stop: Path, delay: float):
+    """A started thread that creates ``stop`` ``delay`` seconds after
+    the writer reaches its steady state (``stop.ready``), so the delay
+    counts commits, not the ballast reset, however slow the disk."""
+    import threading
+
+    def run() -> None:
+        ready = Path(str(stop) + ".ready")
+        deadline = time.monotonic() + 120
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(delay)
+        stop.touch()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
+def test_writer_transactions_run_wholly_under_the_order_lock(bench):
+    # A large commit spills dirty pages into the WAL before COMMIT, so
+    # BEGIN as well as COMMIT and its stamp must be under the lock.
+    import inspect
+
+    src = inspect.getsource(bench.phase_writer)
+    loop = src[src.index("def transaction()") :]
+    assert loop.count('"BEGIN IMMEDIATE"') == 1
+    lock = loop.index("with _ordered(order):")
+    assert lock < loop.index('"BEGIN IMMEDIATE"') < loop.index("yield")
+    assert loop.index("yield") < loop.index('"COMMIT"') < loop.index("times.append")
+    assert loop.count("with transaction():") == 2
