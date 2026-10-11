@@ -3005,8 +3005,10 @@ def register_intelligence_tools(
         This and ``extract_from_emails`` are the tools that synthesize
         over attachment content (``search_attachments`` and
         ``get_evidence`` return the raw extracted text).
-        The local index extracts text from every PDF (digital and
-        OCR'd) and runs OCR on every image. Once a thread is
+        The local index holds the text the indexer extracted from PDF
+        and image attachments (scans and images through OCR, when the
+        operator has OCR on); an attachment whose extraction failed,
+        was skipped or has not run yet has no text here. Once a thread is
         surfaced by retrieval — via BM25, dense thread vector, dense
         chunk vector, sender / date / attachment filename filter, or
         any combination thereof — the most-relevant passages of that
@@ -3016,8 +3018,8 @@ def register_intelligence_tools(
         and indexed text exclude attachment extracts. Reaching for an
         external tool (Google Drive, web search, etc.) to read a PDF
         that arrived as an email attachment is the wrong shape —
-        that PDF's text is already in the local index, and
-        ``ask_mailbox`` will surface it.
+        when its extraction succeeded, that PDF's text is already in
+        the local index, and ``ask_mailbox`` will surface it.
 
         Each thread gives at most six passages, ordered by similarity
         to the question, after up to two that lead: when the question
@@ -3077,7 +3079,7 @@ def register_intelligence_tools(
             from_addr: Optionally scope to a sender ADDRESS or domain
                        ("jane@example.com", "@example.com"). For a
                        name, use ``from_name`` or ``participant``.
-            date_from: Optionally scope to emails after this date (ISO 8601)
+            date_from: Optional date lower bound (ISO 8601), inclusive.
                        A thread qualifies when its span (its
                        messages' occurred_at, else sent_at, else when first
                        indexed, #1373) overlaps
@@ -3088,11 +3090,13 @@ def register_intelligence_tools(
                        in_scope when its own message meets every
                        sender, participant, date and folder filter,
                        else context (the citation's scope).
-            date_to: Optionally scope to emails before this date (ISO 8601)
+            date_to: Optional date upper bound (ISO 8601), inclusive; a
+                     date-only value covers the whole UTC day.
             folders: Optionally scope to specific folders. Without it,
                      threads filed only in Trash are left out; name
                      "Trash" to include them.
-            max_threads: Maximum threads to use as context (default: 5)
+            max_threads: Maximum threads to use as context (default 5,
+                         clamped to [1, 10]).
             from_name: Optionally scope to mail FROM a named person or
                        role ("Jane Smith", "the accountant"), as in
                        search_emails: resolved through find_contact
@@ -3402,7 +3406,8 @@ def register_intelligence_tools(
                        lookup misses.
             style: "brief" (2-3 sentences), "detailed" (full summary),
                    "action-items" (bullet list of actions), or
-                   "timeline" (chronological sequence of events)
+                   "timeline" (chronological sequence of events);
+                   any other value gives "brief"
 
         Returns:
             A summary of the available indexed thread context in the
@@ -3642,9 +3647,10 @@ def register_intelligence_tools(
         Use this when the user wants a *structured list* across many
         threads — invoice numbers and amounts, tracking numbers,
         flight confirmations, RSVPs, dates of all dentist appointments.
-        Returns one record per thread that matches, fitted to the
-        schema you pass in. Attachment text (digital and OCR'd PDFs,
-        images) that ranks for the query is part of each thread's
+        Returns the records found in each thread searched (none, one
+        or several per thread), fitted to the schema you pass in.
+        Attachment text (digital and OCR'd PDFs, images) that ranks
+        for the query is part of each thread's
         context, so fields that live only in an attached invoice or
         statement can be extracted. For prose answers across threads
         use ask_mailbox; for one specific thread use summarize_thread
@@ -3674,8 +3680,9 @@ def register_intelligence_tools(
                     required fields and JSON types only; one that fails
                     is dropped and reported as an incomplete thread.
                     Must not declare _source_thread, _date or _evidence:
-                    every record carries those as its source thread, date
-                    and evidence labels.
+                    every record carries those as its source thread's
+                    subject (not its thread ID), the thread's last date
+                    and its evidence labels.
             folders: Optionally scope to specific folders. Without it,
                      threads filed only in Trash are left out; name
                      "Trash" to include them.
@@ -3688,7 +3695,8 @@ def register_intelligence_tools(
                        give that passage's own dates, which can fall
                        outside the range.
             date_to: Optional date upper bound (ISO 8601)
-            limit: Max threads to search through (default: 20)
+            limit: Max threads to search through (default 20, clamped
+                   to [1, 50])
             from_name: Optionally scope to mail FROM a named person or
                        role, as in search_emails: resolved through
                        find_contact to the most active matching

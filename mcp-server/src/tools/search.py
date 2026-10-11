@@ -259,9 +259,11 @@ def register_search_tools(
         Results are ranked and capped at ``limit`` threads, so this tool
         cannot answer "all" or "how many" questions ("every email from
         Jane in 2024", "how many invoices arrived in March") — use
-        query_messages for those; it enumerates the complete set with an
-        exact count. For the latest or N most recent messages from a
-        person, use query_messages(sender=..., limit=N): it returns the
+        query_messages for those; it enumerates every message its
+        filters match, with a count and the number of messages it could
+        not decide (indeterminate). For the latest or N most recent
+        messages from a person, use query_messages(sender=..., limit=N):
+        it returns the
         newest first, where this tool ranks by relevance. A page holds at
         most 100 messages, so follow next_cursor until N are collected.
 
@@ -343,7 +345,8 @@ def register_search_tools(
                          from_addr/from_name, which are sender-only.
                          Accepts an address, a domain (@example.com),
                          or a bare name fragment.
-            limit: Maximum number of threads to return (default 10)
+            limit: Maximum number of threads to return (default 10,
+                   clamped to [1, 50])
             authority_class: Keep only threads with a message whose
                              sender the operator's rules file classes
                              as this: "counsel", "management",
@@ -1240,7 +1243,8 @@ def register_search_tools(
         files whose filename and MIME type do not match. There is no pagination
         beyond the 50-result cap, so report limited results and unread document text
         as coverage limits; do not claim an exhaustive attachment audit.
-        For a complete list or an exact count, use query_attachments.
+        For every match with a count (and the number it could not
+        decide, indeterminate), use query_attachments.
         With ``from_addr``, the sender filter runs after a bounded candidate
         scan: even fewer than 50 results (including zero) can omit matches.
         ``sender`` is applied inside the search, before the cap. With

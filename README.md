@@ -146,7 +146,8 @@ If a service doesn't come up, see
 [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
 The MCP server is read-only:
-- search, retrieval, and intelligence tools are available
+- search, retrieval and status tools are available; the intelligence
+  tools only when `INFERENCE_MODE` is not `none` (the default)
 - there are no mail-changing tools (no send, move, flag, or draft)
 - retrieval is served from the local SQLite index rather than direct IMAP access
 
