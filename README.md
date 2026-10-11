@@ -38,7 +38,8 @@ provider, including a host-side server you install yourself.
   [platform support](docs/setup.md#platform-support))
 - **[Proton Mail Bridge](https://proton.me/mail/bridge)** app installed
   on the same machine and signed in
-- **Claude Desktop** with MCP support
+- **An MCP client** on the same machine, such as Claude Desktop, Claude
+  Code or Codex (see [Connect an MCP client](#6-connect-an-mcp-client))
 - **Proton Mail paid account** (required for Bridge access)
 - **Full-disk encryption** on the host (FileVault on macOS). The stack
   keeps your decrypted mail and its search index unencrypted on disk;
@@ -128,10 +129,13 @@ make up
 make logs  # verify everything is running
 ```
 
-`make up` now runs a security preflight first: it validates `.env` (including
-`BRIDGE_CERT_FINGERPRINT`), checks that
-the Bridge password secret exists and is non-empty, and enforces `600`
-permissions on secret files before Docker Compose starts the stack.
+`make up` runs a preflight first and refuses to start the stack when
+`.env` or a secret file is wrong: for example an unset
+`BRIDGE_CERT_FINGERPRINT`, an empty Bridge password, an empty API key
+file for an enabled layer, or a secret file whose mode is not `600`
+(it reports the mode; it does not change it).
+[Step 6 of the setup guide](docs/setup.md#6-start-the-full-stack) lists
+every check.
 If a service doesn't come up, see
 [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
@@ -177,8 +181,7 @@ have a non-ASCII character or `&` move to a new directory name, and
 would be downloaded and indexed a second time. Check and migrate them
 first, by renaming, never deleting: a folder already gone from Proton
 exists only in the Maildir. See
-[the upgrade note](docs/setup.md) ("Upgrading to the isync 1.5.1 mbsync
-image").
+[the upgrade note](docs/setup.md#upgrading-to-the-isync-151-mbsync-image-debian-trixie).
 
 **Upgrading from a release that served `/sse`:** the legacy SSE
 transport was removed. Change client URLs from `/sse` to `/mcp`, and

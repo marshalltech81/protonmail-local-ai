@@ -20,7 +20,7 @@ help:
 	@echo "  build        Build all Docker images"
 	@echo "  build-nocache Rebuild all Docker images from scratch (skips BuildKit cache)"
 	@echo "  ppt-checksums Rewrite indexer/java/checksums/checksums.sha256 after an indexer/java/pom.xml change (downloads from Maven Central)"
-	@echo "  up           Start the full stack (mbsync reaches the Bridge app on the host)"
+	@echo "  up           Create missing secret files and run validate-env, then start the full stack (mbsync reaches the Bridge app on the host)"
 	@echo "  down         Stop the full stack"
 	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml or config/identity.toml)"
 	@echo "  logs         Tail logs from all containers"
