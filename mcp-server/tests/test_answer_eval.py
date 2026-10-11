@@ -509,7 +509,7 @@ class TestConfig:
         ("mode", "ambient"), [("openai", "OPENAI_BASE_URL"), ("anthropic", "ANTHROPIC_BASE_URL")]
     )
     def test_ambient_sdk_endpoint_is_refused(self, mode, ambient):
-        """Review round 1: JUDGE_BASE_URL=default with the SDK's own
+        """JUDGE_BASE_URL=default with the SDK's own
         endpoint variable set would be reported as the SDK default."""
         env = {**self.ENV, "JUDGE_MODE": mode, "JUDGE_API_KEY": "k", ambient: "https://x.example"}
         with pytest.raises(ConfigError, match=ambient):
@@ -518,7 +518,7 @@ class TestConfig:
         assert load_layer("JUDGE", explicit) is not None
 
     def test_label_tells_configured_endpoints_apart(self):
-        """Review round 2: two remote judges had identical labels."""
+        """Two remote judges had identical labels."""
         a = _judge_config(base_url="https://judge-a.example/v1").label()
         b = _judge_config(base_url="https://judge-b.example/v1").label()
         assert a["endpoint"] == b["endpoint"] == "remote"
@@ -609,7 +609,7 @@ class TestConfig:
 
     @pytest.mark.parametrize(("layer", "name"), _INTEGER_SETTINGS)
     def test_integer_settings_past_the_digit_limit_are_config_errors(self, layer, name):
-        """#997 Codex round 1: digits only, but past Python's 4300-digit
+        """#997: digits only, but past Python's 4300-digit
         int() limit, raised an uncaught ValueError."""
         with pytest.raises(ConfigError) as e:
             load_layer(layer, {**self._layer_env(layer), name: "9" * 5000})
@@ -678,7 +678,7 @@ class TestRunner:
         assert set(run.timings_ms) >= {"answer_total", "inference", "query_embedding"}
 
     def test_cut_passage_is_marked_truncated(self):
-        """Review round 2: a passage cut to fit is captured as truncated."""
+        """A passage cut to fit is captured as truncated."""
         chunk = ChunkResult(
             chunk_id="c1",
             message_id="m@x",
@@ -1024,7 +1024,7 @@ class TestDeterministicGraders:
         assert det.checks["required_evidence_cited"] == FAIL
 
     def test_coverage_note_does_not_excuse_a_retrieval_miss(self):
-        """Review round 1: the note reports retrieved passages the budget
+        """The note reports retrieved passages the budget
         left out, so it cannot disclose a group retrieval never found. An
         abstention with t22 unretrieved fails, and the miss is attributed
         to retrieval, even though t21's omission was disclosed."""
@@ -1052,7 +1052,7 @@ class TestDeterministicGraders:
         assert none.checks["abstention"] == FAIL
 
     def test_cut_required_passage_counts_as_a_disclosed_omission(self):
-        """Review round 2: t21's passage reached the prompt but was cut to
+        """t21's passage reached the prompt but was cut to
         fit, and t22's was left out; the note reports both, so a correct
         abstention passes."""
         case = CASES["ask-kayak-tight-budget"]
@@ -1070,7 +1070,7 @@ class TestDeterministicGraders:
         assert det.prompt_coverage == 0.5  # the cut passage still reached the prompt
 
     def test_cut_passage_that_keeps_the_fact_is_not_an_omission(self):
-        """Review round 3: only the trailing text was cut, so the fact was
+        """Only the trailing text was cut, so the fact was
         visible; the note cannot excuse ignoring it."""
         case = CASES["ask-kayak-tight-budget"]
         kept = "Tandem kayaks rent for $65 per boat for the"
@@ -1087,7 +1087,7 @@ class TestDeterministicGraders:
         assert budget_omitted_facts(case, run) == ["f2"]
 
     def test_budget_omitted_facts_exclude_retrieval_misses(self):
-        """Review round 2: only facts whose evidence was retrieved and then
+        """Only facts whose evidence was retrieved and then
         left out or cut by the budget may be credited to the note."""
         case = CASES["ask-kayak-tight-budget"]
         cut = _run(
@@ -1137,7 +1137,7 @@ class TestDeterministicGraders:
 
     @pytest.mark.parametrize("case_id", ["ask-swim-practice-date", "ask-swim-scope-stated"])
     def test_later_schedule_as_context_passes_without_a_judge(self, case_id):
-        """Review round 7: naming November as a later change is not the
+        """Naming November as a later change is not the
         prohibited assertion (``must_not_assert``), and plain containment
         cannot tell the two apart, so the swim cases leave it to the judge."""
         case = CASES[case_id]
@@ -1151,7 +1151,7 @@ class TestDeterministicGraders:
         assert det.passed, det.checks
 
     def test_guess_stating_an_omitted_fact_fails_beside_an_intact_citation(self):
-        """Review round 9: the $65 passage is supplied and cited, the
+        """The $65 passage is supplied and cited, the
         headcount passage was left out, and the answer still states the
         headcount-dependent total. A dropped group is excused only when
         the answer abstains or states none of its facts' values."""
@@ -1179,7 +1179,7 @@ class TestDeterministicGraders:
         assert grade_run(case, honest).checks["required_evidence_cited"] == PASS
 
     def test_uncited_guess_about_omitted_evidence_fails(self):
-        """Review round 8: every required passage was left out, and the
+        """Every required passage was left out, and the
         answer states a total with no citation. The note excuses an
         omission only for an abstention or an answer whose claims rest
         on at least one intact citation."""
@@ -1191,7 +1191,7 @@ class TestDeterministicGraders:
         assert "synthesis" in attribute(case, run, det, False, False)
 
     def test_cut_passage_guess_is_attributed_to_synthesis(self):
-        """Review round 8: citing a passage cut before the fact is the
+        """Citing a passage cut before the fact is the
         model's guess, not only a prompt-assembly loss."""
         case = CASES["ask-kayak-tight-budget"]
         run = _run(
@@ -1205,7 +1205,7 @@ class TestDeterministicGraders:
         assert "synthesis" in attribute(case, run, det, False, False)
 
     def test_citing_a_passage_cut_before_its_fact_fails(self):
-        """Review round 7: a guess cited to a passage the budget cut before
+        """A guess cited to a passage the budget cut before
         the fact is not excused by the coverage note."""
         case = CASES["ask-kayak-tight-budget"]
         run = _run(
@@ -1230,8 +1230,8 @@ class TestDeterministicGraders:
         ],
     )
     def test_out_of_scope_decoy_values_fail_without_a_judge(self, case_id, ref, answer):
-        """Review round 5: a judge-less run must still catch the decoy
-        message's values in a date- or Trash-scoped answer."""
+        """A judge-less run must still catch the decoy
+        message's values in a Trash-scoped answer."""
         case = CASES[case_id]
         decoy = ref.replace(".1", ".2")
         passages = [_passage("E1", ref), _passage("E2", decoy)]
@@ -1240,7 +1240,7 @@ class TestDeterministicGraders:
         assert det.checks["forbidden_values"] == FAIL
 
     def test_incomplete_swim_schedule_fails_without_a_judge(self):
-        """Review round 6: the wrong time and a missing weekday fail the
+        """The wrong time and a missing weekday fail the
         deterministic values, so a judge-less run cannot pass them."""
         case = CASES["ask-swim-practice-date"]
         passages = [_passage("E1", "t76.1")]
@@ -1250,7 +1250,7 @@ class TestDeterministicGraders:
         assert grade_run(case, _run(right, passages, ["E1"])).passed
 
     def test_fact_cut_without_a_note_is_attributed_to_prompt_assembly(self):
-        """Review round 6: a required passage cut before its fact, with no
+        """A required passage cut before its fact, with no
         coverage note, is a prompt-assembly failure, not ``unknown``."""
         case = CASES["ask-kayak-tight-budget"]
         passages = [_passage("E1", "t21", truncated=True), _passage("E2", "t22")]
@@ -1295,7 +1295,7 @@ class TestDeterministicGraders:
         ],
     )
     def test_expected_values_match_whole_values_only(self, answer, ok):
-        """Review round 1: substring matching passed wrong numbers."""
+        """Substring matching passed wrong numbers."""
         case = CASES["ask-claim-payout"]
         det = grade_run(case, _run(f"{answer} [E1].", [_passage("E1", "t10.3")], ["E1"]))
         assert det.checks["expected_values"] == (PASS if ok else FAIL)
@@ -1325,7 +1325,7 @@ class TestDeterministicGraders:
             ("The slip asks for chaperone volunteers", False),
             ("The trip needs four chaperones", True),
             ("It says: chaperone volunteers needed: 4", True),
-            # Codex round 1 on #763: a 4 that is not the count.
+            # #763: a 4 that is not the count.
             ("The 4th-grade class needs three chaperones", False),
             ("On May 4 the trip needs three chaperones", False),
             ("Room 4 needs three chaperone volunteers", False),
@@ -1471,7 +1471,7 @@ class TestChronologyGraders:
     @pytest.mark.parametrize(
         "actor",
         [
-            # Review round 1: a role alias inside the relayer's own
+            # A role alias inside the relayer's own
             # description, and a name that only contains an accepted one.
             "Rafe Dunmore relaying the parish clerk",
             "Nellie Garsideson",
@@ -1485,7 +1485,7 @@ class TestChronologyGraders:
 
     @pytest.mark.parametrize("date_source", ["sent", "mentioned"])
     def test_relative_date_accepts_either_source(self, date_source):
-        """Review round 1: "phoned me this morning" dates the call by the
+        """ "phoned me this morning" dates the call by the
         message itself, so either date source is right."""
         case = CASES["brief-dispenser-hire-charge"]
         event = self._event("2026-07-16", date_source, "Ruben Kestle", ["E1"])
@@ -1498,7 +1498,7 @@ class TestChronologyGraders:
     @pytest.mark.parametrize(
         ("text", "expected"),
         [
-            # Review round 1: another rendering of a labelled value is
+            # Another rendering of a labelled value is
             # still that value, so its citation is still checked.
             ("Hazel Pim gives 60 dollars [E1].", FAIL),
             ("Hazel Pim gives USD 60 [E1].", FAIL),
@@ -1750,7 +1750,7 @@ class TestJudge:
     def test_temporal_rubric_covers_effective_dates(self):
         """#911: the darkroom cases grade a value with a stated effective
         date, which neither a later correction nor a newer message covers
-        (Codex round 2 on #1190)."""
+        (#1190)."""
         assert "effective date" in RUBRIC["temporal_reasoning"]
         assert "effective date" in JUDGE_SYSTEM
 
@@ -1771,7 +1771,7 @@ class TestJudge:
         assert "coverage note" not in build_judge_prompt(CASES["ask-padlock"], "a", {}, [])
 
     def test_prompt_names_the_facts_the_budget_left_out(self):
-        """Review round 2: the note may excuse only the listed facts, so a
+        """The note may excuse only the listed facts, so a
         retrieval miss is never credited as disclosed."""
         case = CASES["ask-kayak-tight-budget"]
         prompt = build_judge_prompt(
@@ -1784,7 +1784,7 @@ class TestJudge:
         assert "Reference facts whose evidence the tool retrieved but left out or cut: none" in bare
 
     def test_empty_prompt_is_not_described_as_an_empty_search(self):
-        """Review round 2: with every passage left out by the budget, the
+        """With every passage left out by the budget, the
         prompt must not also say the search returned nothing."""
         case = CASES["ask-kayak-tight-budget"]
         prompt = build_judge_prompt(case, "a", {}, [], coverage_note="Evidence note: 3 left out.")
@@ -1830,14 +1830,14 @@ class TestJudge:
         assert e.value.detail == "claim statement"
 
     def test_judge_may_not_credit_a_label_the_answer_did_not_cite(self):
-        """Review round 1: the answer cites E1; a verdict supporting the
+        """The answer cites E1; a verdict supporting the
         claim with E2 (a supplied passage) is rejected, not graded."""
         client = ScriptedClient(_verdict(CASES["ask-padlock"], [["E2"]]))
         outcome = self._judge(client)
         assert outcome.error == "judge_unknown_evidence_id" and outcome.grade is None
 
     def test_judge_labels_must_match_one_statement(self):
-        """Review round 2: the answer cites E1 in one statement and E2 in
+        """The answer cites E1 in one statement and E2 in
         another; a claim citing both is not any statement's citation."""
         case = CASES["ask-padlock"]
         mixed = _verdict(case, [["E1", "E2"]])
@@ -1931,7 +1931,7 @@ def _identity(**overrides):
 
 class TestHarnessAndReports:
     def test_detail_record_keeps_the_judges_omission_inputs(self):
-        """Review round 9: the detail artifact keeps what the judge was
+        """The detail artifact keeps what the judge was
         allowed to excuse (coverage note, omitted facts) and each
         passage's truncation, so a verdict can be audited."""
         case = CASES["ask-kayak-tight-budget"]
@@ -2059,7 +2059,7 @@ class TestHarnessAndReports:
         assert "not comparable" in rendered
 
     def test_runtime_budget_caps_each_call(self, chunked_db):
-        """Review round 1: a case starting just before the deadline got the
+        """A case starting just before the deadline got the
         full case timeout (900 s)."""
 
         async def slow(system, user):
@@ -2095,7 +2095,7 @@ class TestHarnessAndReports:
         assert records[0]["timings_ms"]["judge"] < 5000
 
     def test_judge_errors_stay_in_dimension_and_fact_denominators(self, chunked_db):
-        """Review round 2: an errored assessment dropped out of the
+        """An errored assessment dropped out of the
         dimension and missing-fact rates, raising them."""
         case = CASES["ask-roof-total"]
         records, _ = _records(
@@ -2107,14 +2107,14 @@ class TestHarnessAndReports:
         assert judge["missing_fact_rate"] == 0.5
 
     def test_failed_cases_count_as_zero_coverage(self):
-        """Review round 1: a timed-out case left the coverage means."""
+        """A timed-out case left the coverage means."""
         ok = {"status": "ok", "required_groups": 1, "deterministic": {"retrieval_recall": 1.0}}
         failed = {"status": "timeout", "required_groups": 1, "deterministic": {}}
         no_groups = {"status": "ok", "required_groups": 0, "deterministic": {}}
         assert _coverage([ok, failed, no_groups], "retrieval_recall") == 0.5
 
     def test_compare_flags_different_case_selections(self, chunked_db):
-        """Review round 1: different --case selections compared silently."""
+        """Different --case selections compared silently."""
         records, _ = _records(
             chunked_db, ["14,200 [E1].", "14,200 [E1]."], [None, None], judge=False
         )
@@ -2260,7 +2260,7 @@ class TestCli:
         assert not (tmp_path / "r.json").exists()
 
     def test_bad_input_files_are_configuration_errors(self, tmp_path, capsys):
-        """Review round 2: these raised tracebacks instead of exit 3."""
+        """These raised tracebacks instead of exit 3."""
         out = str(tmp_path / "r.json")
         missing = tmp_path / "no-index"
         assert cli.main(["run", "--index-dir", str(missing), "--out", out]) == cli.EXIT_CONFIG
@@ -2295,7 +2295,7 @@ class TestCli:
             (["cases", 0, "id"], ["MARKER-677"]),
             (["cases", 0, "judge"], ["MARKER-677"]),
             (["cases", 0, "deterministic"], None),
-            # Codex round 1 on #761: wrong-typed values that print fine.
+            # #761: wrong-typed values that print fine.
             (["counts", "selected"], "MARKER-677"),
             (["counts", "errors"], -1),
             (["aggregates", "dev", "deterministic_pass_rate"], "MARKER-677"),
@@ -2305,7 +2305,7 @@ class TestCli:
             (["cases", 0, "id"], "MARKER-677 x"),
             (["cases", 0, "category"], "MARKER-677 x"),
             (["cases", 0, "held_out"], "MARKER-677"),
-            # Codex round 2 on #761: the flags compare turns into
+            # #761: the flags compare turns into
             # regressions and improvements.
             (["cases", 0, "status"], ["MARKER-677"]),
             (["cases", 0, "deterministic", "passed"], "MARKER-677"),
@@ -2321,7 +2321,7 @@ class TestCli:
             (["aggregates", "by_category", "CATEGORY", "judge"], {}),
             # #771: a case ID the case loader refuses (over 64 characters).
             (["cases", 0, "id"], "ask-" + "a" * 61),
-            # #997 Codex round 1: compare reads the timeouts, so a missing
+            # #997: compare reads the timeouts, so a missing
             # or malformed one would compare equal on both sides.
             (["identity", "settings"], None),
             (["identity", "settings"], ["MARKER-677"]),
@@ -2380,7 +2380,7 @@ class TestCli:
     def test_loader_and_report_share_the_case_id_rule(self, chunked_db, tmp_path):
         """#771: the report check limited case IDs to 64 characters and the
         loader did not, so a valid --cases file wrote a report compare
-        called malformed. One rule now serves both."""
+        called malformed. The loader and the report check share one rule."""
         longest, too_long = "ask-" + "a" * 60, "ask-" + "a" * 61
         data = json.loads(CASES_PATH.read_text())
         row = next(r for r in data["cases"] if r["id"] == "ask-roof-total")
@@ -2400,7 +2400,7 @@ class TestCli:
         assert cli.main(["compare", str(report), str(report)]) == cli.EXIT_OK
 
     def test_compare_rejects_a_non_utf8_report(self, chunked_db, tmp_path, capsys):
-        """Codex round 2 on #761: invalid UTF-8 raised an uncaught
+        """#761: invalid UTF-8 raised an uncaught
         UnicodeDecodeError instead of exit 3."""
         good = self._report(chunked_db, tmp_path, "a.json")
         bad = tmp_path / "bad.json"
@@ -2458,7 +2458,7 @@ class TestCli:
         assert {p: p.read_bytes() for p in reports.iterdir()} == before
 
     def test_run_rejects_detail_overwriting_the_report(self, tmp_path, capsys):
-        """Review round 1: --detail equal to --out overwrote the report."""
+        """--detail equal to --out overwrote the report."""
         out = str(tmp_path / "r.json")
         code = cli.main(["run", "--index-dir", str(tmp_path), "--out", out, "--detail", out])
         assert code == cli.EXIT_CONFIG
@@ -2599,7 +2599,7 @@ class TestCostGuard:
         assert MARKER not in caplog.text + str(raised.value)
 
     def test_cli_judge_usage_limit_stops_the_run(self, chunked_db):
-        """Codex review round 1 on #866: a subscription judge's usage-limit
+        """#866: a subscription judge's usage-limit
         refusal was recorded per case and the CLI launched again for every
         remaining case."""
         inference = ScriptedClient("14,200 [E1].")
@@ -2675,7 +2675,7 @@ class TestCostGuard:
     def test_cli_judge_is_counted_in_launches_not_provider_calls(
         self, tmp_path, monkeypatch, capsys, mode
     ):
-        """Codex review round 2 on #866: a CLI judge launch can make more
+        """#866: a CLI judge launch can make more
         than one model request (the claude CLI retries a reply cut off at
         its token limit) and neither CLI offers a flag to cap that, so the
         plan and the cap count CLI launches, not provider calls."""

@@ -127,7 +127,7 @@ def test_chronology_labels_resolve(
     "this morning") is dated with that message's sent date, so the
     labels rest on the corpus, not on what an answer cites. A mentioned
     date differs from the sent date, or it would be labelled ``sent``,
-    and is written in the source's text (review round 1)."""
+    and is written in the source's text."""
     assert case.chronology is not None
     for p in case.chronology.positions:
         message = _ref_message(p.source)
@@ -164,7 +164,7 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
         "UPDATE threads SET body_text = body_text || ' privatemarker' WHERE rowid = "
         "(SELECT MIN(rowid) FROM threads)",
         "UPDATE threads SET subject = 'privatemarker' WHERE rowid = (SELECT MIN(rowid) FROM threads)",
-        # Review round 2: every other field a prompt carries.
+        # Every other field a prompt carries.
         "UPDATE threads SET display_subject = 'privatemarker' WHERE rowid = "
         "(SELECT MIN(rowid) FROM threads)",
         "UPDATE message_participants SET name = 'privatemarker' WHERE rowid = "
@@ -206,7 +206,8 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
     ],
 )
 def test_tampered_index_is_refused(baseline_dir: Path, tmp_path: Path, tamper: str) -> None:
-    """Review round 1: baseline-looking IDs alone are not enough."""
+    """Baseline-looking claimant IDs alone are not enough: each tampered
+    field or row is refused."""
     copy = tmp_path / "mail.db"
     shutil.copy(baseline_dir / "mail.db", copy)
     conn = sqlite3.connect(copy)
@@ -569,7 +570,10 @@ _MUTATION_CATCHES = {
 
 def test_every_mutation_and_chronology_shape_is_exercised() -> None:
     """Each mutation is tried on some case, and every labelled case whose
-    evidence the scripted run supplies has a mutation of its own."""
+    evidence the scripted run supplies has a mutation of its own, except
+    ``ask-footbridge-closure``: it has no change or conflict, and
+    ``chronology_dated``, which ``sender_dated`` targets, applies to
+    ``brief_issue`` only."""
     assert {m for _, m in _MUTATION_CATCHES} == set(MUTATIONS)
     mutated = {cid for cid, _ in _MUTATION_CATCHES}
     assert mutated <= {c.id for c in CHRONOLOGY_CASES}
@@ -586,7 +590,8 @@ def test_mutated_answer_is_caught(
     baseline_db: Database,
     records: dict[str, dict],
 ) -> None:
-    """#291: the correct scripted answer passes every check; the mutated
+    """#291: the correct scripted answer passes the check named for the
+    mutation; the mutated
     one fails the check named for it. A citation moved to the superseded
     message still resolves to a supplied passage and passes the tool's
     own citation checks: only the chronology labels catch it."""
@@ -620,7 +625,7 @@ def test_supplied_evidence_lets_a_correct_answer_pass(case: Case, records: dict[
 
 
 def test_answerer_finds_every_value_where_evidence_arrived(records: dict[str, dict]) -> None:
-    """Codex round 2 on #763: whenever the evidence reached the prompt,
+    """#763: whenever the evidence reached the prompt,
     the scripted answerer must cite a passage for every ``must_include``
     group a source states; an ``[unsupported]`` value would let the
     baseline pass without showing the value is in cited evidence. A
@@ -638,7 +643,7 @@ def test_answerer_finds_every_value_where_evidence_arrived(records: dict[str, di
         assert stated == [], cid
 
 
-# Each #755 decoy case's out-of-scope sibling message (review round 6).
+# Each #755 decoy case's out-of-scope sibling message.
 _DECOYS = {
     "ask-walker-rate-sender": "t75.2",
     "ask-swim-practice-date": "t76.2",
@@ -674,7 +679,7 @@ def _decoy_shown(case_id: str, passages: list[dict]) -> bool:
 
 @pytest.mark.parametrize("case_id", sorted(_DECOYS))
 def test_decoy_reaches_the_answering_model(case_id: str, records: dict[str, dict]) -> None:
-    """Review round 6: a decoy case tests nothing unless the out-of-scope
+    """A decoy case tests nothing unless the out-of-scope
     sibling's passage is in the prompt the model received, whole."""
     assert _decoy_shown(case_id, list(_DETAILS[case_id]["passages"].values())), case_id
 
@@ -718,7 +723,7 @@ def test_attachment_shape_reaches_the_answering_model(
     names messages, so the grader counts any passage of a message as
     its evidence (#1182); this test is what pins the passages. Each must
     reach the prompt whole: a passage cut to the budget may have lost the
-    sentence or value the shape rests on (Codex round 2 on #1177)."""
+    sentence or value the shape rests on (#1177)."""
     supplied = _whole_passages(case_id)
     wanted = {(message_id_of(ref), source) for ref, source in _ATTACHMENT_SHAPES[case_id]}
     assert wanted <= supplied, (case_id, sorted(wanted - supplied))
@@ -853,7 +858,7 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
 def test_prompt_budget_case_detects_omitted_evidence(records: dict[str, dict]) -> None:
     budget = [c for c in CASES if c.category == "prompt_budget"]
     assert {c.tool for c in budget} == {"ask_mailbox", "summarize_thread"}
-    # Codex round 2 on #656's PR: the summary's thread text (E1) the
+    # #656: the summary's thread text (E1) the
     # window cut short is captured as truncated; the newest message
     # shown whole is not.
     passages = _DETAILS["summarize-hall-open-points"]["passages"]

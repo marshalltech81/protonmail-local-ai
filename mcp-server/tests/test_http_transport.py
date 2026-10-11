@@ -605,10 +605,11 @@ def _rejection_summaries(caplog) -> list[str]:
 
 
 class TestRejectionLogging:
-    """#878: every rejected request logs one WARNING with a fixed reason,
-    never the token or a Host/Origin value; the MCP SDK's own warning,
-    which quotes the raw value, is suppressed. The responses are
-    unchanged (the tests above pin them)."""
+    """#878: a rejected request is recorded under a fixed reason, never
+    the token or a Host/Origin value (the first per reason in a window
+    is logged at WARNING; ``TestRejectionRateLimit`` covers the rest);
+    the MCP SDK's own warning, which quotes the raw value, is
+    suppressed. The responses are unchanged (the tests above pin them)."""
 
     def test_missing_token(self, caplog):
         with caplog.at_level(logging.INFO):
@@ -667,7 +668,7 @@ class TestRejectionLogging:
 
 
 class TestRejectionRateLimit:
-    """Codex review round 1 on #883: a prober must not be able to flood
+    """#883: a prober must not be able to flood
     the log. The first rejection per reason in a 60-second window is
     logged; the rest are counted and reported as one fixed-text line
     per window, logged with the first rejection after the window ends."""
@@ -741,7 +742,7 @@ class TestRejectionRateLimit:
         assert _rejections(caplog) == ["invalid_token", "invalid_token"]
 
     def test_fastmcp_auth_error_line_is_dropped(self, caplog, rejection_clock):
-        """Codex review round 2 on #883: fastmcp's own per-request
+        """#883: fastmcp's own per-request
         ``Auth error returned`` line would flood the log the rate limit
         protects, so it is filtered; the responses are unchanged."""
         app = _app()

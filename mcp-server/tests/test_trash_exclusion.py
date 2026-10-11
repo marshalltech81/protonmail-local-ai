@@ -112,7 +112,7 @@ class TestSearchTools:
     def test_from_name_resolves_within_the_folder_scope(self, tmp_path):
         """The sender is resolved among in-scope threads: a Trash-only
         sender with more threads must not win the lookup and then be
-        filtered away by the default scope (review round 1 on #475)."""
+        filtered away by the default scope (#475)."""
         tools = _tools(self._two_jordans(tmp_path))
         out = asyncio.run(tools["search_emails"](query="invoice", from_name="Jordan"))
         assert out.structured_content["resolved_from_addr"] == "vale@inbox.example"

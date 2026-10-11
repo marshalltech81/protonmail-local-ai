@@ -177,7 +177,8 @@ MAILBOX = [
         ],
         "markers": ["INJ-SPLIT-A", "INJ-SPLIT-B"],
     },
-    # Every ASCII spelling of the delimiter the escaping covers.
+    # Every ASCII-bracket spelling of the delimiter the escaping covers
+    # (case, whitespace and long-s variants included).
     {
         "thread_id": "t-variants",
         "subject": "invoice variants " + " ".join(_ASCII_VARIANTS),
@@ -418,7 +419,7 @@ class TestAskMailbox:
         assert f"Subject: {clip(huge['subject'], HEADER_CHAR_LIMIT)}\n" in user
         attachment = huge["attachment"]
         # A labelled header that would pass _LABELLED_HEADER_MAX_CHARS is
-        # rebuilt with each value cut shorter (#284, review round 1).
+        # rebuilt with each value cut shorter (#284).
         header = next(
             line
             for line in user.splitlines()

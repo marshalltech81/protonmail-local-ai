@@ -326,11 +326,11 @@ class TestCaseSchema:
             (SUMMARIZE, lambda r: r["arguments"].update(thread_id="the pool thread")),
             (SUMMARIZE, lambda r: r["arguments"].pop("thread_id")),
             (SUMMARIZE, lambda r: r["arguments"].update(style=3)),
-            # Codex round 1: the handler summarizes an unknown style as
+            # The handler summarizes an unknown style as
             # brief, so a typo would grade a task the case does not state.
             (SUMMARIZE, lambda r: r["arguments"].update(style="action_item")),
             (SUMMARIZE, lambda r: r["arguments"].update(style="Brief")),
-            # Codex round 3: the handler sees only the named thread, so
+            # The handler sees only the named thread, so
             # evidence or a fact source in another thread can never be
             # retrieved and would grade as a product regression.
             (SUMMARIZE, lambda r: r["required_evidence"].append(["t01.1"])),
@@ -346,7 +346,7 @@ class TestCaseSchema:
             (EXTRACT, lambda r: r["arguments"].update(query=3)),
             (EXTRACT, lambda r: r["arguments"].update(schema="vendor")),
             (EXTRACT, lambda r: r["arguments"].update(schema={})),
-            # Codex round 3 on #1129: the handler refuses a schema declaring
+            # #1129: the handler refuses a schema declaring
             # a provenance field before any work, which would grade as a
             # tool error rather than a bad case.
             (EXTRACT, lambda r: r["arguments"]["schema"].update(_source_thread="string")),
@@ -558,7 +558,7 @@ class TestCapture:
         assert run.prompt_consistent is False
 
     def test_extract_all_threads_failed_is_incomplete_not_an_abstention(self, chunked_db):
-        """Codex round 2 on #1129: a reply cut off for every searched thread
+        """#1129: a reply cut off for every searched thread
         gives no records with the handler's ``Incomplete:`` notice, which
         must not grade as a genuine empty result."""
         case = dataclasses.replace(
@@ -578,7 +578,7 @@ class TestCapture:
         assert "synthesis" in attribute(case, run, det, False, False)
 
     def test_extract_all_threads_failed_can_be_judged(self, chunked_db):
-        """Codex round 2 on #1273: a non-abstaining answer needs a statement
+        """#1273: a non-abstaining answer needs a statement
         for the judge's claims to name, so the incomplete marker is one
         (citing nothing); a valid verdict is then possible and the case is
         not recorded as an evaluator error."""
@@ -668,7 +668,7 @@ class TestCapture:
         assert set(OUTPUT_MODELS) == set(TOOLS)
 
     def test_window_cut_summary_passages_are_marked_truncated(self):
-        """Codex round 2: when the window cut the summary context, the
+        """When the window cut the summary context, the
         handler also builds the map its caps alone would show; a passage
         shorter in the shown map than there (E1's thread text included,
         which has no chunk offsets) was cut by the window."""
@@ -866,7 +866,7 @@ class TestViews:
             view_of("search_emails", SimpleNamespace())
 
     def test_abstention_is_the_tools_own_not_found_text_only(self):
-        """Codex round 4 on #1129: abstention is recognized from the tools'
+        """#1129: abstention is recognized from the tools'
         own not-found and no-results texts, for every tool alike; an
         extraction's no-records marker is not among them (its view sets
         the abstention flag instead), so a summary or answer that merely
@@ -877,7 +877,7 @@ class TestViews:
         assert not is_abstention(NO_RECORDS) and not is_abstention(EXTRACTION_INCOMPLETE)
 
     def test_prose_opening_with_the_no_records_marker_is_an_answer(self):
-        """Codex round 4 on #1129: a summary that starts with the
+        """#1129: a summary that starts with the
         extraction marker's words is graded as an answer, not an
         abstention (``ask_mailbox`` shares ``is_abstention``, pinned above)."""
         answer = f"{NO_RECORDS} were disputed: Bluewater Pools bid $38,400 [E1]."
@@ -918,7 +918,7 @@ class TestViews:
 
     @pytest.mark.parametrize("absent", [None, "", [], {}])
     def test_absent_values_are_not_statements(self, absent):
-        """Codex round 3 on #1273: the values the tool's own citation check
+        """#1273: the values the tool's own citation check
         treats as no value (``None``, ``""``, ``[]``, ``{}``) need no
         evidence there, so they are not rendered as uncited claims; a
         record holding only such values states nothing, and records that
@@ -965,7 +965,7 @@ class TestViews:
         ],
     )
     def test_incomplete_extraction_is_never_an_abstention(self, records, notice):
-        """Codex round 2 on #1129: the handler's ``Incomplete:`` notice means
+        """#1129: the handler's ``Incomplete:`` notice means
         some thread's reply was cut off, malformed or nonconforming, so
         data may be missing with or without records; it is never a
         genuine empty result."""
@@ -974,7 +974,7 @@ class TestViews:
         assert view.coverage_note == notice
         if not records:
             assert view.answer == EXTRACTION_INCOMPLETE
-            # Codex round 2 on #1273: one statement for the judge to name.
+            # #1273: one statement for the judge to name.
             assert view.statements == [
                 AnswerStatement(text=EXTRACTION_INCOMPLETE, labels=[], status="not_checked")
             ]
@@ -1122,7 +1122,7 @@ class TestGrading:
             {**_pool_record(), "_evidence": ["E1"]},
             {**_pool_record(), "_date": None},
             {**_pool_record(), "_source_thread": 3},
-            # Codex round 3 on #1273: the _evidence mapping's contents, as
+            # #1273: the _evidence mapping's contents, as
             # the tool writes them: a list of supplied labels per field
             # that has a value.
             {**_pool_record(), "_evidence": {"bid": "E1"}},
@@ -1167,7 +1167,7 @@ class TestGrading:
         assert det.checks["answer_complete"] == PASS
 
     def test_failed_extraction_is_not_a_correct_abstention(self):
-        """Codex round 2 on #1129: the unanswerable smoke case passes only
+        """#1129: the unanswerable smoke case passes only
         on a genuine empty result; every thread failing is a failure, and
         a partial failure is reported alongside the records it kept."""
         case = CASES[EXTRACT_ABSTAIN]
@@ -1194,7 +1194,7 @@ class TestGrading:
 
 
 class TestJudgePrompt:
-    def test_ask_prompt_opens_with_the_question_as_before(self):
+    def test_ask_prompt_opens_with_the_question_and_no_task_line(self):
         case = CASES["ask-roof-total"]
         prompt = build_judge_prompt(case, "a [E1]", {"E1": _passage("E1", "t01.1")}, ["a [E1]"])
         assert prompt.startswith(f"Question: {case.question}\n")

@@ -99,11 +99,11 @@ ENUMERATING_TOOL = "query_messages"
 # start and the next page's start (``None`` at the end).
 READ_FIELDS = ("message", "body", "body_offset", "next_offset")
 READING_TOOL = "get_message"
-# Its arguments that page rather than filter: the agent picks the page
-# size, and the cursor is checked against the previous page.
+# ``query_messages`` arguments that page rather than filter: the agent
+# picks the page size, and the cursor is checked against the previous page.
 _PAGING_ARGUMENTS = ("limit", "cursor")
 # Its string filters that ``Database.query_messages`` strips, a blank one
-# being absent (``src/lib/sqlite.py``).
+# being absent (``src/lib/predicates.py`` ``query_messages_leaves``).
 _STRIPPED_FILTERS = (
     "sender",
     "recipient",
@@ -1154,8 +1154,9 @@ _ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 def load_outstanding_truth(path: Path, sid: str) -> dict:
-    """The raw ground-truth entry for scenario ``sid`` (layer A reads its
-    ``evidence``; ``_load_outstanding`` the rest)."""
+    """The raw ground-truth entry for scenario ``sid``, which
+    ``_load_outstanding`` validates (the baseline's layer A reads the
+    file's ``evidence`` directly)."""
     truth = json.loads(path.read_text(encoding="utf-8"))["scenarios"]
     if sid not in truth:
         raise ValueError(f"{sid}: no ground truth in {path.name}")

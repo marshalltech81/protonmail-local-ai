@@ -257,7 +257,7 @@ class TestAttachmentFilters:
         assert len(names(None)) == 3
 
     def test_thread_id_is_the_carrying_message_thread(self, tmp_path):
-        """Codex round 1: a reparse that moves a message to another thread
+        """A reparse that moves a message to another thread
         updates ``messages.thread_id`` but not an existing
         ``attachments.thread_id``; the filter and the row follow the
         message."""
@@ -626,7 +626,7 @@ class TestTool:
                 bad = await client.call_tool_mcp(
                     "query_attachments", {"extraction_status": "pending"}
                 )
-                # Codex round 1: a client that sends unset strings as ""
+                # A client that sends unset strings as ""
                 # gets the blank-filter rule, as for every other filter.
                 blanks = [
                     await client.call_tool_mcp(
@@ -634,7 +634,7 @@ class TestTool:
                     )
                     for value in ("", "   ", "\t")
                 ]
-                # Codex round 2: every value the database accepts, padded
+                # Every value the database accepts, padded
                 # or not, passes the schema; anything else does not.
                 accepted = [
                     await client.call_tool_mcp(
@@ -662,7 +662,7 @@ class TestTool:
         assert not any(r.is_error for r in accepted)
         assert all(r.is_error for r in rejected)
         assert "extraction_status" in tool.input_schema["properties"]
-        # Codex round 1: the served description asks for a count and a
+        # The served description asks for a count and a
         # disclosure before paging metadata; #796 PR 2 names the reader.
         description = " ".join(tool.description.split())
         assert "limit=1" in description

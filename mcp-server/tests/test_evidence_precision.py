@@ -401,9 +401,7 @@ class TestValidation:
             ("max_chars_per_chunk", 1601),
         ],
     )
-    def test_out_of_range_values_are_rejected_with_fixed_text(
-        self, precision_db, caplog, field, value
-    ):
+    def test_invalid_values_are_rejected_with_fixed_text(self, precision_db, caplog, field, value):
         embed = FakeEmbedClient()
         server = FakeMCPServer()
         register_search_tools(server, precision_db, embed)
@@ -447,8 +445,9 @@ def _new_db(tmp_path: Path, name: str) -> tuple[sqlite3.Connection, Path]:
     return conn, path
 
 
-class TestReviewRoundOne:
-    """Codex review round 1 on PR #1038."""
+class TestPrecisionControlEdges:
+    """Scope, counts and logging of the precision controls at their edges
+    (PR #1038)."""
 
     def test_scope_considers_passages_ranked_below_the_six_passage_cap(self, tmp_path):
         # Seven context passages rank above the only in-scope one.

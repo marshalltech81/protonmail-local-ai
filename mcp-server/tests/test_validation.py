@@ -27,10 +27,10 @@ class TestClampInt:
         # than leaking an out-of-range value.
         assert clamp_int("not-a-number", default=999, minimum=1, maximum=50) == 50
 
-    def test_float_is_rejected_to_default(self):
-        # int("1.5") raises ValueError — we fall back to default rather
-        # than silently truncating, to make the LLM-input failure mode
-        # explicit.
+    def test_decimal_string_falls_back_to_default(self):
+        # int("1.5") raises ValueError, so a decimal string falls back to
+        # the default rather than being truncated. (A float value is
+        # truncated by int(): clamp_int(1.5, ...) returns 1.)
         assert clamp_int("1.5", default=10, minimum=1, maximum=50) == 10
 
     def test_zero_minimum_accepts_zero(self):

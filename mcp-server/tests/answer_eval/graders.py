@@ -167,7 +167,7 @@ def _shows_evidence(case: Case, passage: Passage) -> bool:
     """Whether a supplied passage still shows the evidence it carries: a
     whole passage does; one cut to fit the budget does when it keeps the
     excerpt of some reference fact sourced from its message. A cut that
-    removed only trailing text is no omission (review round 3)."""
+    removed only trailing text is no omission."""
     if not passage.truncated:
         return True
     text = _fold(passage.text)
@@ -359,11 +359,11 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         # cut before that evidence (a guess, not a disclosure). The excuse
         # also needs an answer that abstains or rests on at least one
         # intact citation: an uncited claim about omitted evidence is a
-        # guess too (review round 8).
+        # guess too.
         grounded = abstained or any(g.cited_intact for g in result.groups)
         stated = _fold(answer)
         for refs, g in zip(case.required_evidence, result.groups, strict=True):
-            # Review round 9: when the group's facts list the values that
+            # When the group's facts list the values that
             # assert them, the excuse needs an abstention or an answer
             # stating none of them; one intact citation elsewhere is not
             # enough.
@@ -431,8 +431,8 @@ def attribute(
     # A supplied group left uncited, or cited only through a passage cut
     # before its evidence (a guess), is the model's doing, as is a group
     # the budget dropped that stays unmet after the server disclosed the
-    # omission: only the answer's own claims can fail it then (review
-    # round 8). A group retrieval never found is not counted here.
+    # omission: only the answer's own claims can fail it then. A group
+    # retrieval never found is not counted here.
     guessed = det.checks.get("omission_disclosed") == PASS and any(
         not g.met and g.retrieved and not g.whole for g in det.groups
     )

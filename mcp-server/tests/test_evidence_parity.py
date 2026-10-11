@@ -4,9 +4,8 @@
 ``ask_mailbox`` fetches each surfaced thread's evidence with the
 attachments whose filename or MIME type matched the question floated to
 the front. The documented audit call ``get_evidence(query, thread_id)``
-ordered by vector distance alone, so a cited low-similarity attachment
-chunk in a long thread could fall outside its slice. All data is
-synthetic.
+orders passages the same way, so a cited low-similarity attachment
+chunk in a long thread stays inside its slice. All data is synthetic.
 
 
 ``get_evidence(max_threads=N)`` selects threads exactly as
@@ -278,7 +277,7 @@ class TestMailboxWideParity:
     def test_smaller_limit_returns_a_rank_order_prefix(self, parity_db):
         """A ``limit`` below the full evidence set cuts it in rank order:
         the first ``limit`` chunks of ask_mailbox's evidence, and the
-        threads past the cut are left out (review round 2, documented)."""
+        threads past the cut are left out (documented)."""
         asked = _ask_evidence(parity_db, "budget", max_threads=2)
         flat = [(tid, c) for tid, ids in asked.items() for c in ids]
         assert len(asked) == 2 and len(flat) > PROMPT_EVIDENCE_CHUNKS_PER_THREAD
@@ -297,7 +296,7 @@ class TestMailboxWideParity:
     )
     def test_thread_limit_is_clamped_like_ask_mailbox(self, parity_db, given, expected):
         """``max_threads`` takes ask_mailbox's clamp; omitted, the thread
-        limit stays the chunk ``limit`` (default 12), as before."""
+        limit is the chunk ``limit`` (default 12)."""
         limits = _spy_limits(parity_db)
         kwargs = {} if given is None else {"max_threads": given}
         _get_evidence(parity_db, "budget", **kwargs)
@@ -317,7 +316,7 @@ class TestMailboxWideParity:
 class TestChunklessThreads:
     """A surfaced thread with no indexed chunks reaches ask_mailbox's
     prompt as its indexed thread text, so the audit keeps it, in place
-    and with no chunks (review round 1)."""
+    and with no chunks."""
 
     @pytest.fixture
     def db_with_chunkless(self, parity_db):
@@ -353,7 +352,7 @@ class TestChunklessThreads:
         assert "get_thread" in text
 
     def test_only_chunkless_threads_still_list_them(self, db_with_chunkless):
-        """Folder-scoped to the chunkless thread alone: the result names
+        """Sender-scoped to the chunkless thread alone: the result names
         it rather than reporting no evidence."""
         audited = _get_evidence(
             db_with_chunkless, "budget memo", max_threads=3, from_addr="dave@example.net"

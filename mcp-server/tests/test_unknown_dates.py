@@ -85,8 +85,8 @@ def dates_db(tmp_path) -> Database:
 
 
 def _shown(sent: str | None, status: str | None) -> str | None:
-    """The send date a tool returns: only a parsed one (review round 1:
-    a row not yet assessed may hold the v7 fallback, so it is withheld)."""
+    """The send date a tool returns: only a parsed one (a row not yet
+    assessed may hold the v7 fallback, so it is withheld)."""
     return sent if status == "parsed" else None
 
 
@@ -252,7 +252,7 @@ def test_message_scope_never_places_an_undated_message_in_range(dates_db):
 
 @pytest.mark.parametrize("message_id", ["dated", "undated", "unchecked", "unchecked_delivered"])
 def test_evidence_passages_carry_only_a_parsed_send_date(dates_db, message_id):
-    """Review round 1: every consumer of a passage's date (the prompt
+    """Every consumer of a passage's date (the prompt
     headers, citations, brief_issue's as_of) reads ``message_date``, so
     a send date not yet assessed never reaches it."""
     sent, status, occurred, _first = _ROWS[message_id]
@@ -263,7 +263,7 @@ def test_evidence_passages_carry_only_a_parsed_send_date(dates_db, message_id):
 
 
 def test_a_cursor_from_before_the_date_change_is_foreign(dates_db, monkeypatch):
-    """Review round 1: query_attachments' cursor digest covers
+    """query_attachments' cursor digest covers
     ``QUERY_DIGEST_FORMAT``, so a page issued under the old date
     semantics is not resumed under the new ones."""
     first = dates_db.query_attachments(limit=1, **_MARCH)
@@ -296,7 +296,7 @@ def test_an_ambiguous_message_id_lists_each_claimants_send_date(tmp_path):
     ],
 )
 def test_intelligence_prose_says_why_a_date_is_unknown(status, words):
-    """Review round 2: the Citations list (ask_mailbox) and the finding
+    """The Citations list (ask_mailbox) and the finding
     sources (check_conclusion, brief_issue) tell a missing or
     unparseable header from a date not yet checked."""
     chunk = ChunkResult(
@@ -333,7 +333,7 @@ def test_intelligence_prose_says_why_a_date_is_unknown(status, words):
     ],
 )
 def test_the_model_sees_why_a_date_is_unknown(date, status, field):
-    """Review round 3: the evidence header the model reads (ask_mailbox,
+    """The evidence header the model reads (ask_mailbox,
     brief_issue, check_conclusion, extract_from_emails) tells a missing
     or unparseable Date header from one not yet checked, within the
     header budget."""

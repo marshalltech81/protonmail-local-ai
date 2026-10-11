@@ -13,8 +13,8 @@ evaluator reimplements neither retrieval nor prompt building.
 Two narrow wrappers capture the run, in memory only:
 
 - ``RecordingInference`` wraps the inference client, the boundary every
-  prompt crosses, and keeps each request's text and the reply. For the
-  other tools the first request is the prompt after truncation,
+  prompt crosses, and keeps each request's text and the reply. For every
+  tool but ``extract_from_emails`` the first request is the prompt after truncation,
   deduplication, fallback thread text and budgeting; a repair call
   resends it with a fixed instruction appended, so the evidence
   available to the final answer is the first request's.
@@ -178,7 +178,7 @@ class CaseRun:
 class RecordingInference:
     """Inference client wrapper that records every request and reply.
 
-    It sees the provider's exception before ``ask_mailbox`` turns it into
+    It sees the provider's exception before the tool's handler turns it into
     a ``ToolError``, so it notes a billing refusal there (#839)."""
 
     def __init__(self, inner: Any) -> None:
@@ -251,7 +251,8 @@ class PrecomputedEmbedder:
 
 
 class _ToolServer:
-    """The FastMCP surface ``register_intelligence_tools`` uses."""
+    """The FastMCP surface ``register_intelligence_tools`` and
+    ``register_experimental_tools`` use."""
 
     def __init__(self) -> None:
         self.tools: dict[str, Callable[..., Any]] = {}
@@ -468,7 +469,7 @@ class CorpusMessage:
 
 def _parsed_message_id(raw: bytes) -> str:
     """The Message-ID as the indexer's parser derives it from a file's
-    bytes (``parser.parse_message``: a compat32 parse, then
+    bytes (``parser.parse_email_bytes``: a compat32 parse, then
     ``_clean_id``)."""
     header = str(email.message_from_bytes(raw).get("Message-ID", ""))
     message_id = header.strip().strip("<>").strip()
@@ -611,9 +612,9 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
                 None,
             ):
                 raise refused
-        # Per-message text a prompt can carry: chunk text, and the chunk
-        # header's sender and attachment name and type, each against its
-        # own claimant's tokens.
+        # Per-message text a prompt can carry: chunk text, message subject,
+        # the chunk header's sender, every stored display name, and
+        # attachment name and type, each against its own claimant's tokens.
         per_message = (
             "SELECT claimant_id, text FROM message_chunks",
             "SELECT claimant_id, subject FROM messages",

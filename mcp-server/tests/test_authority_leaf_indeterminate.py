@@ -160,7 +160,7 @@ class TestTool:
         assert "No messages match." not in text
 
     def test_served_text_states_the_spam_exception(self, fake_server, authority_db):
-        """Codex round 1 on #1207: every client-facing description of
+        """#1207: every client-facing description of
         an authority filter's indeterminate count says "outside Spam"."""
         register_retrieval_tools(fake_server, authority_db)
         doc = " ".join((fake_server.tools["query_messages"].__doc__ or "").split())

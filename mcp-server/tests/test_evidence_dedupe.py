@@ -2,8 +2,8 @@
 ``get_evidence(dedupe_attachments=True)`` (#989): one attachment carried
 by several messages of a thread is returned once.
 
-Attachment passages with the same content hash (``attachment_id``) and
-chunk index collapse onto the earliest carrying message, which lists
+Attachment passages with the same content hash (``attachment_id``),
+chunk index and text collapse onto the earliest carrying message, which lists
 the other carriers in ``carried_by``. A different document under the
 same filename stays separate, body passages are untouched, and the
 default output does not change. All data is synthetic.
@@ -287,8 +287,9 @@ def _copies_db(tmp_path: Path, texts: list[str]) -> Database:
     return Database(str(path))
 
 
-class TestReviewRoundOne:
-    """Codex review round 1 on PR #1046."""
+class TestCopiesAndCarriers:
+    """Copies whose text differs stay separate; the carrier list is
+    capped and its count reported (PR #1046)."""
 
     def test_copies_with_different_text_stay_separate(self, tmp_path):
         # One payload whose copies were chunked differently (another

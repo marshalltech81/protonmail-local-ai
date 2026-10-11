@@ -128,8 +128,7 @@ _CASE_ID = re.compile(r"(?:ask|summarize|extract|brief|check)-[a-z0-9]+(?:-[a-z0
 _THREAD_NUMBER = r"t(?:[0-9]{2}|[1-9][0-9]{2})"
 # A baseline thread's ID: its root message (``thread_id_of``).
 _THREAD_ID = re.compile(_THREAD_NUMBER + r"\.1" + re.escape(BASELINE_DOMAIN))
-# The handler summarizes any other style as ``brief`` (Codex round 1 on
-# #656's PR): a typo would grade a task the case does not state.
+# The handler summarizes any other style as ``brief`` (#656): a typo would grade a task the case does not state.
 _SUMMARY_STYLES = frozenset(get_args(SummaryStyle))
 CASE_ID_MAX_LEN = 64
 _FACT_ID = re.compile(r"f[1-9][0-9]*")

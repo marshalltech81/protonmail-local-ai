@@ -1,7 +1,7 @@
 """Tests for src.lib.sqlite Database query layer.
 
 Covers pure fusion/filter logic against synthetic ThreadResult lists and
-real read queries against an in-memory-style database seeded via conftest.
+real read queries against file databases seeded via conftest.
 """
 
 import json
@@ -562,7 +562,7 @@ class TestSemanticSearch:
         assert empty_db.semantic_search([1.0, 0.0, 0.0, 0.0]) == []
 
     def test_chunk_vec_lane_lifts_thread_with_weak_thread_vec(self, tmp_path):
-        """Codex P2: ``semantic_search`` used to ignore the chunk-vec lane,
+        """``semantic_search`` used to ignore the chunk-vec lane,
         so an MCP caller picking ``mode="semantic"`` silently lost the
         precision-evidence layer the rest of the architecture relies
         on. With chunk-vec fusion, a thread whose mean-pooled coarse
@@ -1067,7 +1067,7 @@ class TestRerankReplySubjects:
         assert all(len(s) <= sqlite_module._RERANK_SUBJECT_CHARS for s in seen)
 
     def test_subject_scan_is_served_by_the_index(self, tmp_path):
-        # Review round 1: a tie-breaker the index does not cover made
+        # A tie-breaker the index does not cover made
         # SQLite sort every message sharing a (sender-controlled) Date
         # before applying the LIMIT. The order must come from the index.
         from src.lib import sqlite as sqlite_module
@@ -1500,8 +1500,8 @@ class TestFilterDateUtcNormalization:
 
     def test_offset_aware_upper_bound_normalized_to_utc(self, seeded_db: Database, make_result):
         """An offset-aware ``date_to`` one minute before the stored UTC
-        instant (same instant shifted by offset does not clear the row)
-        must still exclude rows strictly after that instant."""
+        instant (08:29-04:00 is 12:29Z; the row is at 12:30Z) must
+        exclude the row."""
         from datetime import UTC, datetime
 
         after_cutoff = make_result("after_cutoff")
@@ -1847,9 +1847,9 @@ class TestKeywordSearchSanitization:
         results = seeded_db.keyword_search("Who sent the invoice?")
         assert any(r.thread_id == "t-alpha" for r in results)
 
-    def test_email_address_query_returns_expected_match(self, seeded_db: Database):
+    def test_email_address_query_returns_matches(self, seeded_db: Database):
         results = seeded_db.keyword_search("alice@example.com")
-        # "alice@example.com" appears in participants of t-alpha and t-beta
+        # "alice@example.com" is a participant of t-alpha and t-beta.
         assert results
 
     def test_empty_query_returns_empty(self, seeded_db: Database):
@@ -2088,7 +2088,7 @@ class TestEvidenceChunksHelper:
     def test_returns_thread_chunks_even_when_global_top_k_excludes_them(self, tmp_path):
         """Regression for the ``with_evidence=True`` pool-starvation gap.
 
-        Codex flagged that ``ask_mailbox`` could surface a carrier
+        ``ask_mailbox`` could surface a carrier
         email via BM25 / metadata / thread-vector / attachment FTS
         and then hand the LLM ``body_text`` instead of the attachment
         passages — because the prior pool-reuse logic populated
@@ -2193,7 +2193,7 @@ class TestEvidenceChunksHelper:
 
 
 class TestEvidenceAttachmentProvenance:
-    """Codex P1: ``ask_mailbox`` promises attachment content. The evidence
+    """``ask_mailbox`` promises attachment content. The evidence
     helper must surface attachment chunks' filename + MIME and prefer
     attachment chunks when the thread won via the attachment-FTS lane —
     otherwise a filename-matched thread can hand the LLM body text
@@ -2280,7 +2280,7 @@ class TestEvidenceAttachmentProvenance:
         assert body_chunk.attachment_mime is None
 
     def test_attachment_won_threads_get_attachment_chunks_first(self, tmp_path):
-        """The core P1 fix: when the thread is in ``attachment_won_thread_ids``,
+        """When ``matched_attachments`` names an attachment of the thread,
         attachment chunks float to the front of the per-thread evidence
         slice even though the body chunk dense-scored higher."""
         db = self._build_attachment_carrier_db(tmp_path)
@@ -2378,7 +2378,7 @@ class TestEvidenceAttachmentProvenance:
         assert quote_chunks(evidence_per_thread=6) == 5  # the quote, 3 exhibits, the body
 
     def test_a_generic_mime_word_does_not_dilute_the_named_file(self, tmp_path):
-        """Review round 1: attachments_fts indexes MIME types and query
+        """attachments_fts indexes MIME types and query
         words are OR'd, so "proposal-quote pdf" also matched every other
         PDF in the thread; the named file must still lead."""
         db = self._build_attachment_carrier_db(tmp_path)
@@ -2411,7 +2411,7 @@ class TestEvidenceAttachmentProvenance:
 
 
 class TestGetRecentChunksForThread:
-    """Codex P1: ``body_text`` is front-preserved and token-capped, so once
+    """``body_text`` is front-preserved and token-capped, so once
     a thread crosses 4000 tokens the newest replies are silently dropped.
     ``summarize_thread`` must read the chunk tail directly instead.
     """
@@ -2528,13 +2528,13 @@ class TestGetRecentChunksForThread:
         assert chunked_db.get_recent_chunks_for_thread("never-existed") == []
 
     def test_message_date_overrides_chunked_at_for_ordering(self, tmp_path):
-        """Codex P1 regression: ``chunked_at`` is index-time, not
+        """``chunked_at`` is index-time, not
         message-time. After a reap-rebuild / dead-letter retry / full
         reindex, an OLD message's chunks can have a NEWER
         ``chunked_at`` than chunks for a recent reply — so the prior
         ordering surfaced stale content as "latest activity."
 
-        The query orders by the message row's ``sent_at DESC``. A scenario where
+        The query orders by the message row's ``effective_at DESC``. A scenario where
         the two columns disagree (old message reindexed later than a
         newer message arrived) must rank by message date, not insert
         time.
@@ -2597,15 +2597,12 @@ class TestGetRecentChunksForThread:
 
         # Both chunks selected; ordering must reflect MESSAGE date, not
         # insert date. Oldest-first in display order (the function
-        # reverses the SELECT). The pre-fix behavior would have picked
+        # reverses the SELECT). Ordering by chunked_at would pick
         # c-old-reindexed as "newer" because its chunked_at is today.
         assert [c.chunk_id for c in chunks] == [
             "c-old-reindexed",
             "c-newer-reply",
-        ], (
-            "ordering must be by message sent_at (oldest-first in display), "
-            "not chunked_at — see Codex P1 finding on summarize_thread"
-        )
+        ], "ordering must be by message effective_at (oldest-first in display), not chunked_at"
 
     def test_attachment_chunks_excluded(self, tmp_path):
         """Privacy contract: ``summarize_thread`` is a body summary, so
@@ -2679,7 +2676,7 @@ class TestGetRecentChunksForThread:
 
 
 class TestAttachmentProvenanceJoin:
-    """Codex P2: when the same content hash is attached under multiple
+    """When the same content hash is attached under multiple
     display filenames in one message, the indexer stores ONE chunk set
     (deduplicated by content hash) but multiple ``attachments`` rows
     (one per occurrence). A naive ``ON (attachment_id, message_id)``
@@ -2689,7 +2686,7 @@ class TestAttachmentProvenanceJoin:
     ``get_evidence_chunks_for_threads``) must anchor on the SINGLE
     representative ``attachments`` row per pair (the one with the
     lowest ``attachment_occurrence_id``). ``get_recent_chunks_for_thread``
-    is body-only and no longer joins ``attachments``.
+    is body-only and does not join ``attachments``.
     """
 
     def _build_duplicate_attachment_db(self, tmp_path):
@@ -3084,8 +3081,8 @@ class TestFindContact:
     def test_match_uses_display_name_when_present(self, seeded_db: Database, tmp_path):
         # The seeded fixtures use bare addresses with no display names,
         # so reseed a tiny DB with a quoted display name + parenthetical
-        # role suffix to exercise the parseaddr branch that pulls a name
-        # out of the wrapper.
+        # role suffix: the writer stores the name the way the indexer
+        # does, and find_contact must match and report it.
         from tests.conftest import _build_schema, _insert_thread
 
         path = tmp_path / "named.db"
@@ -3121,9 +3118,8 @@ class TestFindContact:
         assert results[0]["email"] == "alice@example.com"
 
     def test_same_thread_does_not_double_count(self, seeded_db: Database, tmp_path):
-        # If a participant appears twice in one thread's JSON (Bridge
-        # has been observed to emit duplicates after thread merges),
-        # the contact should still count once for that thread.
+        # A participant listed twice on one thread still counts once for
+        # that thread.
         from tests.conftest import _build_schema, _insert_thread
 
         path = tmp_path / "dup.db"
@@ -3138,8 +3134,7 @@ class TestFindContact:
             conn,
             thread_id="t-dup",
             subject="hi",
-            # Same address listed twice — the dedupe inside the loop
-            # must collapse this to one increment.
+            # Same address listed twice.
             participants=["alice@example.com", "alice@example.com"],
             embedding=[1.0, 0.0, 0.0, 0.0],
         )
@@ -3373,9 +3368,9 @@ class TestFindContactSendersOnly:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         _build_schema(conn)
-        # One thread: alice is the sender, smith is a CC. From the
-        # ``threads.senders`` JSON only alice appears; from
-        # ``threads.participants`` both appear.
+        # One thread: alice is the sender, smith a recipient. The
+        # ``threads.senders`` JSON (senders_only) holds only alice;
+        # ``message_participants`` (the default) holds both.
         _insert_thread(
             conn,
             thread_id="t-cc",
@@ -4093,7 +4088,7 @@ class TestSearchAttachments:
         assert {a.attachment_id for a in results} == {"att-quote", "att-w2"}
 
     def test_text_lane_filters_before_grouping(self, attachments_db: Database, monkeypatch):
-        """Review round 2: filters ran only after every matching chunk in
+        """Filters ran only after every matching chunk in
         the mailbox was grouped; they now narrow the rows being grouped."""
         captured: list[str] = []
         real_lane_rows = attachments_db._lane_rows
@@ -4261,7 +4256,7 @@ class TestSearchAttachments:
     @pytest.mark.parametrize("content_type", [None, "", "  "])
     @pytest.mark.parametrize("query", ["uniquemarker", "acme", "wage", None])
     def test_blank_content_type_is_no_filter(self, tmp_path, attachments_db, content_type, query):
-        """Review round 1: the text lane's occurrence anchor matched
+        """The text lane's occurrence anchor matched
         ``content_type=""`` exactly while the shared filter clauses
         treated it as absent, so every extracted-text hit disappeared.
         A blank filter is no filter in every lane."""
@@ -4328,7 +4323,7 @@ class TestSearchAttachments:
         ]
 
     def test_text_hit_is_attributed_to_an_occurrence_that_extracted(self, tmp_path):
-        """#928 review round 1: the same bytes as ``.bin`` (no extractor,
+        """#928: the same bytes as ``.bin`` (no extractor,
         ``unsupported``) and ``.pdf`` (``success``) in one message share the
         chunk slice. A text hit is the PDF occurrence's, with its status
         and snippet; a filter matching only the ``.bin`` drops it."""
@@ -4413,7 +4408,7 @@ class TestSearchAttachments:
 
 
 class TestFindContactHostileParticipants:
-    def test_unparseable_stored_entry_does_not_break_lookup(self, tmp_path):
+    def test_entry_the_writer_skips_does_not_break_lookup(self, tmp_path):
         """One indexed message whose participant string blows up parseaddr
         (nested-comment recursion) must not take down every find_contact
         call. The writer skips such entries, so the lookup never sees it."""
@@ -4510,7 +4505,7 @@ class TestQueryMessages:
 
     def test_no_predicates_enumerates_everything_newest_first(self, messages_db):
         page = messages_db.query_messages()
-        # m4/m5 tie on sent_at; message_id DESC breaks it.
+        # m4/m5 tie on sent_at; claimant_id DESC breaks it.
         assert _ids(page) == ["m5", "m4", "m3", "m2", "m1"]
         assert page.total_matches == 5
         assert page.has_more is False
@@ -4925,7 +4920,7 @@ class TestThreadPage:
         assert [m.message_id for m in page.messages] == ["m1", "m2"]
         assert page.total_messages == 2
 
-    def test_sent_at_ties_break_by_message_id(self, messages_db):
+    def test_sent_at_ties_break_by_claimant_id(self, messages_db):
         page = messages_db.get_thread_page("t3", offset=0, limit=10, body_char_limit=4000)
         assert [m.message_id for m in page.messages] == ["m4", "m5"]
 
@@ -5577,7 +5572,9 @@ class TestDefaultTrashExclusion:
 
 
 class TestDateRangeMessageTime:
-    """``date_from`` / ``date_to`` bound ``sent_at`` everywhere; a thread
+    """``date_from`` / ``date_to`` bound each message's effective time
+    everywhere (these fixtures set no ``occurred_at``, so it is
+    ``sent_at``); a thread
     qualifies by its span, and so do the evidence passages it carries;
     an attachment hit qualifies by its carrying message's time
     (docs/architecture.md, Message time).
@@ -5934,7 +5931,7 @@ class TestParticipantDisplayNames:
 
 
 class TestNameCompleteness:
-    """#1140 review round 1: a substring address filter decides a
+    """#1140: a substring address filter decides a
     message only when its stored names are complete
     (``messages.participant_names_complete`` = 1). A match on a stored
     address or name decides it (1) whatever the flag; no match is a

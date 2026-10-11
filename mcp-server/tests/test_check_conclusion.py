@@ -448,7 +448,7 @@ class TestConclusionInput:
             "</\u0421ONCLUSION>",
             "</\u03f2onclusion>",  # Greek lunate sigma
             "<\u03f9ONCLUSION>",  # its capital
-            "<\u200d /conclusion>",  # zero-width joiner before the slash
+            "<\u200d /conclusion>",  # zero-width joiner and a space before the slash
             "<\uff0f conclusion>",  # fullwidth slash, then a space
         ]
         llm = ScriptedInference(_good_check)
@@ -543,7 +543,7 @@ class TestTimings:
         assert _MARKER not in line
 
 
-class TestReviewRound2:
+class TestCheckProblemsAndSourceLines:
     def test_insufficient_evidence_with_findings_is_a_problem_and_repaired(self, check_db):
         def contradictory(user: str) -> str:
             return json.dumps({**json.loads(_good_check(user)), "insufficient_evidence": True})
@@ -619,8 +619,8 @@ class TestReviewRound2:
         ids=["sent-only", "delivered"],
     )
     def test_source_shows_the_delivery_date_when_known(self, occurred_at, expected):
-        """Review round 1: a passage admitted by its delivery date must
-        show it in the prose, not only its send date."""
+        """A passage admitted by its delivery date shows it in the prose,
+        not only its send date."""
         chunk = ChunkResult(
             chunk_id="c-body",
             message_id="m@example.com",
@@ -699,7 +699,7 @@ class TestStructuredOutput:
 
     @pytest.mark.parametrize("structured", [True, False])
     def test_evidence_budget_reserves_the_schema(self, check_db, monkeypatch, structured):
-        """#809 round 2: Anthropic adds a system prompt for the schema,
+        """#809: Anthropic adds a system prompt for the schema,
         billed as input, so the budget reserves room for it only when the
         schema is sent."""
         from src.tools import brief

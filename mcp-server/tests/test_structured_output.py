@@ -95,7 +95,7 @@ def _call(server: FastMCP, name: str, **args) -> dict:
     return result.structured_content
 
 
-def test_every_listed_tool_publishes_a_typed_output_schema(messages_db):
+def test_each_tool_in_structured_tools_publishes_a_typed_output_schema(messages_db):
     tools = _tools(_server(messages_db))
     for name, key in STRUCTURED_TOOLS.items():
         schema = tools[name].output_schema
@@ -207,7 +207,7 @@ class TestQueryMessages:
 class TestQueryMessagesFields:
     """#990: ``fields`` projects each row (structured and prose) onto the
     named fields plus ``claimant_id`` and ``thread_id``; without it the
-    output is exactly what it was before the parameter existed."""
+    output carries every field (``ALL_FIELDS``)."""
 
     ALL_FIELDS = [
         "message_id",
@@ -329,7 +329,7 @@ class TestQueryMessagesFields:
         assert _call(server, "query_messages", **args, cursor=plain["next_cursor"]) == rest
 
     def test_overlong_fields_list_is_rejected_with_fixed_text(self, messages_db, caplog):
-        # Review round 1: more names than a row has fields is rejected
+        # More names than a row has fields is rejected
         # before any check per name; the log line stays bounded.
         with caplog.at_level("DEBUG"):
             result = _wire(_server(messages_db), "query_messages", {"fields": ["subject"] * 10_000})
@@ -355,7 +355,7 @@ class TestQueryMessagesFields:
         assert "query_messages rejected invalid fields" in caplog.text
 
     def test_repeated_rejections_are_rate_limited(self, messages_db, caplog):
-        # Review round 2: a client repeating a rejected projection gets
+        # A client repeating a rejected projection gets
         # one WARNING per reason per window, not one per request.
         server = _server(messages_db)
         marker = "privatemarkerg990"
@@ -478,10 +478,10 @@ class TestDateBoundsEcho:
 class TestSizeBoundsOnTheWire:
     """``size_min`` / ``size_max`` are checked strictly (a string or a
     bool is not coerced to an int) and within SQLite's INTEGER range, so
-    an oversized value never reaches the bind (#1085, Codex round 1).
+    an oversized value never reaches the bind (#1085).
     The published schema states the contract, and the check runs in the
     handler, so a rejection reaches the rate-limited per-field log
-    rather than only FastMCP's argument-model warning (Codex round 3)."""
+    rather than only FastMCP's argument-model warning."""
 
     def test_schema_states_the_range(self, messages_db):
         props = _tools(_server(messages_db))["query_messages"].input_schema["properties"]
@@ -515,8 +515,8 @@ class TestSizeBoundsOnTheWire:
         assert _call(server, "query_messages", size_max=99)["total_matches"] == 0
 
     def test_replied_coerces_like_the_other_flag_filters(self, messages_db):
-        # The bool filters share the argument model's lax bool parsing
-        # (seen, flagged, has_attachments before it); replied is no stricter.
+        # The bool filters (seen, flagged, has_attachments, replied) share
+        # the argument model's lax bool parsing; replied is no stricter.
         server = _server(messages_db)
         for name in ("replied", "seen"):
             assert _call(server, "query_messages", **{name: "false"})["filters"] == [
@@ -525,8 +525,8 @@ class TestSizeBoundsOnTheWire:
 
 
 class TestQueryMessagesServedContract:
-    """What a client receives for ``query_messages`` (#1085, Codex
-    round 7): FastMCP serves only the docstring's first section, so the
+    """What a client receives for ``query_messages`` (#1085): FastMCP
+    serves only the docstring's first section, so the
     count guidance must be there."""
 
     def test_count_promises_are_conditional_on_indeterminate(self, messages_db):
@@ -686,9 +686,10 @@ def test_get_message_pages_the_body(tmp_path):
 
 
 def test_query_messages_cuts_each_long_header_value(tmp_path):
-    """Review round 1: query_messages bounded list lengths but not the
-    values in them, so one message with a huge In-Reply-To, Reference,
-    subject, or display name made a multi-megabyte page at limit=1. Both
+    """query_messages bounds the values in its lists as well as their
+    lengths, so one message with a huge In-Reply-To, References entry,
+    subject, or display name cannot make a multi-megabyte page at
+    limit=1. Both
     the prose and the structured side cut every value at 500 characters,
     as get_message does (#489)."""
     huge = "x" * 100_000
@@ -723,10 +724,10 @@ def test_query_messages_cuts_each_long_header_value(tmp_path):
 
 
 def test_get_thread_rows_do_not_repeat_the_thread_id(tmp_path):
-    """Security review round 2: a thread ID is the root Message-ID, which
+    """A thread ID is the root Message-ID, which
     the sender controls and which cannot be cut without breaking chaining.
     get_thread states it once at the top; repeating it in every message
-    row turned one 100K ID into megabytes on a 20-message page."""
+    row would turn one 100K ID into megabytes on a 20-message page."""
     long_id = "T" * 100_000
     with _open_fixture_db(tmp_path) as (conn, db):
         for i in range(20):
@@ -747,7 +748,7 @@ def test_get_thread_rows_do_not_repeat_the_thread_id(tmp_path):
 
 
 def test_listing_tools_cut_long_participant_values(tmp_path):
-    """Security review round 2: search_emails and list_threads list ten
+    """search_emails and list_threads list ten
     participants (search_attachments ten senders) where the prose shows
     two or three, so each value is cut at 500 characters."""
     people = [f"{'N' * 100_000}{i} <p{i}@example.com>" for i in range(12)]

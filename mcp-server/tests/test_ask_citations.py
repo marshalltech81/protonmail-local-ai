@@ -303,7 +303,7 @@ class TestValidation:
             ("m1@example.com", "2024-03-01T09:00:00+00:00", None),
             ("m2@example.com", "2024-03-04T10:30:00+00:00", delivered),
         }
-        # Review round 1: the prose Citations list shows it too.
+        # The prose Citations list shows it too.
         text = out.content[0].text
         assert "bob@example.com, 2024-03-04, delivered 2024-03-04" in text
         assert "alice@example.com>, 2024-03-01 (thread" in text
@@ -350,8 +350,8 @@ class TestHostileImitation:
         ]
 
 
-class TestReviewRound1:
-    """Codex round 1 on #457: sender-controlled header values are bounded
+class TestBoundedAttribution:
+    """#457: sender-controlled header values are bounded
     where they are fetched, and a labelled header cannot crowd its
     passage out of a single thread's share."""
 
@@ -913,8 +913,8 @@ class TestHandlerStatementsAndQuotes:
         assert _MARKER not in report
 
 
-class TestReviewRound1Statements:
-    """Codex round 1 on #495: checker syntax inside quotations, Markdown
+class TestQuotedSyntaxAndMarkdown:
+    """#495: checker syntax inside quotations, Markdown
     emphasis closers, nested quotations and '#' that is not a heading."""
 
     def test_labels_and_marks_inside_a_quotation_are_quoted_text(self):
@@ -977,8 +977,8 @@ _CJK_EVIDENCE = {
 }
 
 
-class TestReviewRound2Statements:
-    """Codex round 2 on #495: whole-word quotes, CJK sentence ends and
+class TestWholeWordAndCjkChecks:
+    """#495: whole-word quotes, CJK sentence ends and
     word counts, and quotes compared with the escaped text shown."""
 
     @pytest.mark.parametrize(
@@ -1103,7 +1103,7 @@ class TestOverlongQuotes:
         assert calls == 0
 
     def test_the_output_schema_lists_overlong_quotations(self):
-        # Review round 1: the advertised contract covers what is returned.
+        # The advertised contract covers what is returned.
         from src.tools.outputs import AskMailboxOutput
 
         description = AskMailboxOutput.model_fields["quotes"].description or ""
@@ -1206,7 +1206,7 @@ class TestLongLabels:
     statement citing it is invalid and the single repair runs."""
 
     @pytest.mark.parametrize("label", ["E1", "E12", "E123", "E1234"])
-    def test_one_to_four_digit_labels_are_read_as_before(self, label):
+    def test_one_to_four_digit_labels_name_their_passages(self, label):
         known = _evidence("E1", "E12", "E123", "E1234")
         check = _check_answer(f"Moved [{label}].", known)
         assert (check.used, check.unknown) == ([label], [])
@@ -1265,7 +1265,7 @@ class TestLongLabels:
         assert check.unknown == unknown
 
     def test_many_distinct_labels_are_sorted_in_linear_time(self):
-        """Review round 1: each label is classified once and deduplicated
+        """Each label is classified once and deduplicated
         with a set, not by scanning the labels kept so far."""
         labels = [f"E{n}" for n in range(10_001, 50_001)]
         answer = "Moved [" + ", ".join(labels + labels) + "]."
@@ -1289,7 +1289,7 @@ class TestLongLabels:
 
     @pytest.mark.parametrize("digits", [40, 41, 1_000])
     def test_a_long_label_after_a_full_stop_belongs_to_the_statement_before(self, digits):
-        """Review round 1: a citation of any length written after the full
+        """A citation of any length written after the full
         stop ends the statement before it, like a short one."""
         label = "E" + "1" * digits
         check = _check_answer(f"Fact one is here. [{label}] Fact two is here [E1].", _EVIDENCE)

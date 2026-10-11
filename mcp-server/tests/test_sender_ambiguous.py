@@ -215,7 +215,7 @@ class TestPassages:
 
 
 def test_fixture_dates_are_utc():
-    # Guards the parametrized dates above against a local-time reading.
+    # Guards the fixed date in _chunk above against a local-time reading.
     assert datetime.fromisoformat("2024-03-04T10:30:00+00:00").tzinfo == UTC
 
 

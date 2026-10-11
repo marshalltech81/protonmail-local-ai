@@ -199,9 +199,11 @@ def test_evaluability_is_declared(name):
     assert LEAVES[name].evaluability is Evaluability.UNKNOWN_WHEN_NULL
 
 
-def test_a_message_complete_in_every_flag_is_decided_by_every_leaf(db):
-    """With every flag 1, no leaf reads unknown: the gates are the only
-    other sources, and they are open here."""
+def test_every_truth_table_decides_the_complete_messages(db):
+    """Guard the tables: with every flag 1 (``full``, ``x1``) each table
+    expects a decided value, since the gates are the only other sources
+    of unknown and they are open here. ``test_truth_table`` checks the
+    code against these tables."""
     for (name, value), truth in _TRUTH.items():
         assert truth["full"] is not None
         assert truth["x1"] is not None, (name, value)
@@ -250,7 +252,7 @@ def test_scope_labels_keep_an_unknown_message_out_of_scope(db):
 
 def test_search_emails_thread_filters_are_unchanged(db):
     """``search_emails`` decides sender and participant on the thread
-    row, as before; ``authority_class`` reads a message through the
+    row; ``authority_class`` reads a message through the
     leaf, so an incomplete From list without a classified address does
     not select its thread."""
     threads = [db.get_thread(f"t-{m}") for m in _ROWS]
@@ -260,7 +262,7 @@ def test_search_emails_thread_filters_are_unchanged(db):
     assert {r.thread_id for r in kept} == {"t-full", "t-s0", "t-sN", "t-jfrom0"}
 
 
-# Every query_messages parameter, with a value that builds its leaves.
+# Every flat query_messages filter, with a value that builds its leaves.
 _TOOL_ARGS = {
     "sender": "jane",
     "recipient": "bob",

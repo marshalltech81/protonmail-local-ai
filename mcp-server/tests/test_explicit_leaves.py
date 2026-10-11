@@ -2,7 +2,7 @@
 
 ``address_is``, ``address_contains``, ``display_name_contains``,
 ``address_or_name_contains`` and ``domain_is`` each take a role and a
-value; ``body_words`` takes the words of today's ``text``. Each answers
+value; ``body_words`` takes the words of the flat ``text`` filter. Each answers
 1, 0 or NULL (unknown) under the same completeness rules as the leaves
 it shares data with: a stored match decides, finding nothing is false
 only when the role's addresses are complete (#1086), when the names it
