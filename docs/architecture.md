@@ -735,7 +735,9 @@ accumulated text, quoted text and signatures included (users
 legitimately search them): each message's first 2,000 characters
 (`PER_MESSAGE_BODY_CAP_CHARS`) in arrival order, cut to 4,000 tokens
 (`THREAD_BODY_TEXT_MAX_TOKENS`), so a message added after the thread
-reaches that cap adds nothing to it. Chunk inputs are first passed through
+reaches that cap adds nothing to it. A reap that rebuilds a thread
+rebuilds this text from the survivors in date order, so after a reap
+the cap keeps the oldest survivors' text. Chunk inputs are first passed through
 `segment_for_embedding` (`indexer/src/quoting.py`), which keeps a
 message's own text as its `body` and leaves quotes, signatures and
 forwarded text out of it, so chunk vectors track substantive content of
@@ -850,8 +852,8 @@ body always produces the same ID set. The indexer's per-message chunk
 write diffs the new chunk IDs against stored IDs, embeds only the new
 ones, and deletes any that are no longer present. Re-running on
 unchanged input with the same chunk budgets (`INDEXER_CHUNK_*`) is
-therefore zero embed cost; changed budgets cut different chunks, whose
-new IDs are embedded. A body chunk's
+therefore zero embed cost; a chunk that changed budgets cut
+differently gets a new ID and is embedded. A body chunk's
 `message_pk` is its message's claimant ID (see Per-Message Records);
 attachment chunks use a composite `message_pk` of
 `f"{claimant_id}::{attachment_id}"` so their chunk IDs are distinct from
@@ -2983,8 +2985,9 @@ startup rather than picking a mode.
    (re-parsed; the thread vector is the survivors' chunk mean, derived
    from the stored sums with no re-embedding, #1356) or deletes the
    thread entirely when nothing remains. Only when no chunk survives does
-   the rebuild embed a subject (the oldest survivor's); an embedding
-   failure there makes the reaper back off and retry on the next pass.
+   the rebuild embed a subject (the first non-empty subject among the
+   survivors, oldest first, or `(empty thread)` when none has one); an
+   embedding failure there makes the reaper back off and retry on the next pass.
 
 **Reaped-source records.** A citation or search hit from an earlier
 answer can name a message or thread the reaper has since removed. Such
@@ -3453,11 +3456,12 @@ a `failed` result past its 7-day window): a chunk whose text is
 unchanged keeps its ID and is not embedded again, and text the
 re-extraction changes is embedded as new chunks (the v12 reparse embeds
 the newly readable Office attachments this way). Chunks are cut with
-the current `INDEXER_CHUNK_*` budgets, so budgets changed since a
-message was indexed give its chunks new IDs, which are embedded. A
-thread vector still at the zero placeholder, and a thread whose last
-chunk goes with a dropped attachment occurrence (#1375), embed the
-thread's subject once. Retries, dead letters, the stall guard and heartbeats are the
+the current `INDEXER_CHUNK_*` budgets, so a chunk that budgets changed
+since a message was indexed cut differently gets a new ID and is
+embedded. A thread vector still at the zero placeholder, and a thread
+whose last chunk goes with a dropped attachment occurrence (#1375),
+embed the thread's subject, once for each such message in a pass
+(chunkless siblings in one batch each reserve the fallback). Retries, dead letters, the stall guard and heartbeats are the
 queue's own, and a message that fails to parse dead-letters instead of
 failing a migration. A reparse job whose file is gone while its path is
 still indexed waits for the rename like any other job for an indexed

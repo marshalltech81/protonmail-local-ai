@@ -867,7 +867,7 @@ kind of reindex that needs depends on whether search data changes too:
   `reparse` at startup; the indexer re-reads each file and rewrites its
   per-message rows, embedding only text with no stored chunk (attachment
   text comes from the extraction cache; a refreshed cached result whose
-  text changed, chunk budgets changed since indexing, and a thread left
+  text changed, a chunk that changed chunk budgets cut differently, and a thread left
   with no chunk embed again; `docs/architecture.md`, "Reparse in place"). Search keeps working throughout; the data the
   release adds is missing for a message until its reparse runs (after
   the release that added `sender_ambiguous`, `query_messages` counts

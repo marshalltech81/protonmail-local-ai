@@ -613,11 +613,13 @@ OVERFLOW_RESCAN_RETRY_SECS = 60
 #      threads — protects them from Phase 2 failure clobbering.
 #   3. Neither → this zero placeholder. Truly new threads, or
 #      post-crash recovery on a thread that already had a zero row.
-# A zero vector is the same for every query: its L2 distance (vec0's
-# default metric) to a normalized query vector is always 1.0, so it
-# favours no particular query, but until Phase 2c lands the real vector
-# it ranks above every thread whose cosine similarity to the query is
-# below 0.5 (#1518). Keyword search via threads_fts is unaffected.
+# A zero vector favours no particular query: its L2 distance (vec0's
+# default metric) to a query vector is that vector's norm, the same for
+# every zero row. It still outranks a stored unit vector whose dot
+# product with the query is below 0.5 (cosine below 0.5 for a normalized
+# query; mcp-server does not normalize the provider's query vector), so
+# until Phase 2c lands the real vector it can rank above real threads
+# (#1518). Keyword search via threads_fts is unaffected.
 _ZERO_THREAD_VECTOR = [0.0] * EMBEDDING_DIM
 
 

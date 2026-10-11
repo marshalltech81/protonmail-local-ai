@@ -232,9 +232,10 @@ requeue-dead:
 # statement a migration that needs one ends with. For recovery; the
 # running indexer drains the jobs, embedding only text with no stored
 # chunk: attachment text a stale cached result now extracts differently,
-# chunks cut under INDEXER_CHUNK_* budgets changed since indexing, and the
-# subject of a thread left with no chunk (#1375) or still at the zero
-# placeholder (docs/architecture.md, "Reparse in place").
+# chunks that INDEXER_CHUNK_* budgets changed since indexing cut
+# differently, and the subject of a thread left with no chunk (#1375) or
+# still at the zero placeholder (docs/architecture.md, "Reparse in
+# place").
 reparse:
 	docker exec indexer python -m src.reparse
 
