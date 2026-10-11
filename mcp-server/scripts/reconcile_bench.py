@@ -2443,7 +2443,13 @@ def phase_writer(
             ]
 
         def idle() -> None:
-            # Nothing left to do: wait for the round to end.
+            # A drain's backlog is done: the writer has been idle since
+            # its last commit, so that commit's stamp (taken under the
+            # order lock, as the round's window boundaries are) is the
+            # time it ran out, whenever the empty queue was seen. Then
+            # it waits for the round to end.
+            nonlocal exhausted_at
+            exhausted_at = times[-1][0]
             while not os.path.exists(stop):
                 time.sleep(0.05)
 
@@ -2471,8 +2477,8 @@ def phase_writer(
                     next_i += batch
                     jobs = claim()
                 if not jobs:
-                    # A drain's backlog is done: the indexer goes idle.
-                    exhausted_at = time.monotonic()
+                    # A drain's backlog is done: the indexer is idle from
+                    # its last commit (``idle``).
                     idle()
                     break
                 paths = [path for _, path, _ in jobs]
@@ -2517,10 +2523,8 @@ def phase_writer(
                     with transaction():
                         conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (path,))
                 if lifecycle == "drain" and not claim():
-                    # The backlog's last job is done: idle from its last
-                    # commit, not from the next claim after the pause,
-                    # which ``stop`` can pre-empt.
-                    exhausted_at = time.monotonic()
+                    # The backlog's last job is done: checked before the
+                    # pause, which ``stop`` can pre-empt.
                     idle()
                     break
                 resume = time.monotonic() + interval
@@ -2747,18 +2751,26 @@ def run_wal(
             except RuntimeError as exc:  # raised after the writer stops (finally)
                 raise RuntimeError("reconcile round failed") from exc
         finally:
-            # Published under the order lock: a commit under way finishes
-            # before ``stop`` exists, or sees it and rolls back.
-            with _ordered(order):
-                stop.touch()
             try:
-                out, _ = writer.communicate(timeout=60)
-            except subprocess.TimeoutExpired:
-                writer.kill()
-                out, _ = writer.communicate()
-            stop.unlink()
-            ready.unlink(missing_ok=True)
-            Path(order).unlink(missing_ok=True)
+                # Published under the order lock: a commit under way
+                # finishes before ``stop`` exists, or sees it and rolls
+                # back.
+                with _ordered(order):
+                    stop.touch()
+                try:
+                    out, _ = writer.communicate(timeout=60)
+                except subprocess.TimeoutExpired:
+                    writer.kill()
+                    out, _ = writer.communicate()
+            finally:
+                # A writer that could not be told to stop (``stop`` not
+                # published: a full disk, say) is killed and reaped too.
+                if writer.poll() is None:
+                    writer.kill()
+                    writer.communicate()
+                stop.unlink(missing_ok=True)
+                ready.unlink(missing_ok=True)
+                Path(order).unlink(missing_ok=True)
         # A writer that stopped early (an error, or killed above) left
         # the round without the commits its figures assume.
         if writer.returncode != 0:

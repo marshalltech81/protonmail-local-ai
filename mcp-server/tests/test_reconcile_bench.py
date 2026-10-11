@@ -1298,9 +1298,11 @@ def test_drain_enqueues_its_backlog_before_it_is_ready_and_drains_it(bench, tmp_
 
 
 def test_drain_records_exhaustion_at_its_last_commit_whatever_the_pause(bench, tmp_path):
-    # The backlog's last job deleted, the writer is idle at once: the
-    # time is recorded then, not at the next claim after the pause,
-    # which ``stop`` can pre-empt (an exhausted drain then passed).
+    # The backlog's last job deleted, the writer is idle from that
+    # commit: its stamp (taken under the order lock, like the round's
+    # window) is the time, not a clock read at the next claim after the
+    # pause, which ``stop`` can pre-empt, or after the empty check, which
+    # the round's end can precede.
     db = tmp_path / "pause.db"
     bench.build(db, 8, 1, "typical", "typical")
     stop = tmp_path / "stop"
@@ -1311,7 +1313,7 @@ def test_drain_records_exhaustion_at_its_last_commit_whatever_the_pause(bench, t
     timer.join()
     assert out["jobs_left"] == 0
     assert out["backlog_exhausted_at"] is not None
-    assert out["backlog_exhausted_at"] >= out["commit_times"][-1][0]
+    assert out["backlog_exhausted_at"] == out["commit_times"][-1][0]
 
 
 def test_arrival_never_runs_out(bench, tmp_path):
@@ -1466,6 +1468,48 @@ def test_run_wal_publishes_stop_under_the_order_lock(bench):
     lock = end.index("with _ordered(order):")
     assert lock < end.index("stop.touch()") < end.index("writer.communicate")
     assert src.count("stop.touch()") == 1
+
+
+def test_a_writer_that_cannot_be_told_to_stop_is_reaped(bench, tmp_path, monkeypatch):
+    # Publishing ``stop`` can fail (a full disk after the writer grew the
+    # WAL): the writer is then killed and reaped, not left committing.
+    import errno
+
+    db = tmp_path / "full.db"
+    bench.build(db, 20, 0, "typical", "typical")
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"hashes": ""}))
+    real_touch = Path.touch
+
+    def touch(self, *args, **kwargs):
+        if self.name.endswith(".stop"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_touch(self, *args, **kwargs)
+
+    writers = []
+    real_popen = bench.subprocess.Popen
+
+    def popen(argv, *args, **kwargs):
+        process = real_popen(argv, *args, **kwargs)
+        if "writer" in argv:
+            writers.append(process)
+        return process
+
+    monkeypatch.setattr(Path, "touch", touch)
+    monkeypatch.setattr(bench.subprocess, "Popen", popen)
+    try:
+        with pytest.raises(OSError, match="No space left"):
+            bench.run_wal(str(db), "messages", 5, str(request), 1, 0.0)
+        (writer,) = writers
+        reaped = writer.returncode is not None
+    finally:
+        # A writer left running would commit until the disk fills.
+        for process in writers:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+    assert reaped
+    assert not (tmp_path / ("full.db" + bench.WAL_COPY_SUFFIX + ".stop.ready")).exists()
 
 
 def test_writer_tokenizer_is_the_indexers_pinned_version():
