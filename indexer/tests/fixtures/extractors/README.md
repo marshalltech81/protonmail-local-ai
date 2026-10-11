@@ -18,11 +18,12 @@ authors) are not read (#1010); check those by hand before committing.
 
 `cff-font.pdf` (2,189 bytes) is the extraction canary for the fontTools
 gap: pypdf reads the built-in encoding of an embedded CFF font only with
-fontTools, which stays out of the image until py-pdf/pypdf#4156 bounds
-its cost. `tests/test_extractors.py` `TestCffFontPdf` asserts the
-sentence under a strict `xfail`, so the suite shows the gap today and
-fails the day fontTools lands, which is also when `EXTRACTOR_VERSIONS["pdf"]`
-must be bumped so cached rows re-extract.
+fontTools, which stays out of the image until decision #691 adds it
+(the cost fix for py-pdf/pypdf#4156 shipped in pypdf 6.20.0).
+`tests/test_extractors.py` `TestCffFontPdf` asserts the sentence under
+a strict `xfail`, so the suite shows the gap today and fails the day
+fontTools lands, which is also when `EXTRACTOR_VERSIONS["pdf"]` must be
+bumped so cached rows re-extract.
 
 - **Tool:** `cff-src/generate-cff-pdf.py`, run with
   `uv run cff-src/generate-cff-pdf.py` from this directory. Its inline
@@ -45,10 +46,17 @@ must be bumped so cached rows re-extract.
   None`, so pypdf writes no `/Producer`), no XMP stream and no `/ID`.
   `TestCffFontPdf` checks the metadata and the font shape on every run.
 
+## Digital-text PDF
+
+`digital.pdf` is a one-page PDF with a text layer, written with pypdf by
+`tests/test_extractors.py` (`test_extracts_text_from_minimal_digital_pdf`),
+which regenerates it when the file is missing.
+
 ## Legacy binary Office files (#935)
 
-`legacy.doc`, `legacy.xls`, `legacy.ppt` and `legacy-lo.ppt` are real
-OLE2 files written by a tool, not hand-made bytes.
+`legacy.doc`, `legacy.xls` and `legacy-lo.ppt` are real OLE2 files
+written by LibreOffice, not hand-made bytes (`legacy.ppt`, written by
+PowerPoint, is below).
 
 - **Tool:** LibreOffice 26.8.0.3 (`soffice --version`:
   `LibreOffice 26.8.0.3 bce0998afefdbc355585ca324285661a2170ba77`),
@@ -72,6 +80,8 @@ OLE2 files written by a tool, not hand-made bytes.
     --convert-to 'doc:MS Word 97' --outdir <tmp> legacy-src/legacy-doc.txt
   soffice -env:UserInstallation=file://<tmp>/profile --headless \
     --convert-to 'xls:MS Excel 97' --outdir <tmp> legacy-src/legacy-xls.fods
+  soffice -env:UserInstallation=file://<tmp>/profile --headless \
+    --convert-to 'ppt:MS PowerPoint 97' --outdir <tmp> legacy-src/legacy-ppt.fodp
   ```
 
   Running it again can change bytes such as timestamps, but not the text

@@ -4,8 +4,8 @@ Hashes each word and each padded character trigram into a fixed
 4096-slot vector (signed feature hashing) and L2-normalises it. There
 is no semantics: "car" and "vehicle" share no features. What it does
 give is a vector lane that differs from FTS5 — trigrams still overlap
-for misspellings and joined or split compounds ("maintenence",
-"passcode" vs "pass code") where porter-stemmed keyword search finds
+for misspellings that change the stem and joined or split compounds
+("passcode" vs "pass code") where porter-stemmed keyword search finds
 nothing — so golden questions can prove the vector lanes are wired in.
 
 ``blake2b`` rather than ``hash()`` so vectors are identical across

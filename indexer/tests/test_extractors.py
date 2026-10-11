@@ -3999,7 +3999,7 @@ class TestEncryptedPdf:
 class TestCffFontPdf:
     """#691: pypdf reads the built-in encoding of an embedded CFF
     (``/FontFile3`` ``/Type1C``) font only with fontTools, which is held
-    back until py-pdf/pypdf#4156 bounds its cost. Without it the codes
+    back until decision #691 adds it. Without it the codes
     fall through to StandardEncoding and the text comes out garbled, as
     a ``success`` row no retrieval test can tell from real text. The
     fixture pins that gap: its page's only text is set in such a font,
