@@ -53,13 +53,17 @@ services:
     # Bridge runs outside Compose, so there is no health check to wait for;
     # the entrypoint's bounded IMAP wait covers an app that is not running.
     environment:
+      # The source selector; empty means proton-bridge, the only value
+      # accepted (PLAN.md decision 46). Read once at startup; no control
+      # depends on it.
+      SOURCE_MODE: ${SOURCE_MODE:-}
       # The container's name for this Mac, which forwards to its 127.0.0.1;
       # empty means host.docker.internal. Only the names in
       # mbsync/proton-settings.sh are accepted, by validate-env.sh and by
       # the entrypoint (PLAN.md decision 46); a Bridge elsewhere waits on
       # #1499.
       BRIDGE_HOST: ${BRIDGE_HOST:-}
-      # The app's IMAP port, shown with its IMAP credentials.
+      # The app's IMAP port, shown with its IMAP credentials; 1 to 65535.
       BRIDGE_IMAP_PORT: ${BRIDGE_IMAP_PORT:-1143}
       # The name the app's certificate is issued for (its CN); empty means
       # 127.0.0.1, the only name the app's own certificate holds. The
@@ -74,6 +78,11 @@ services:
       PROTON_REMOTE_STORE_NAME: ${PROTON_REMOTE_STORE_NAME:-}
       PROTON_LOCAL_STORE_NAME: ${PROTON_LOCAL_STORE_NAME:-}
       PROTON_CHANNEL_NAME: ${PROTON_CHANNEL_NAME:-}
+      # Folder patterns mbsync stops syncing (mail already synced stays;
+      # docs/troubleshooting.md), separated by |; empty means
+      # All Mail|Labels/*|Starred, and those three must always stay in the
+      # list (mbsync/proton-settings.sh).
+      PROTON_FOLDER_EXCLUSIONS: ${PROTON_FOLDER_EXCLUSIONS:-}
       # Required: the SHA-256 fingerprint of the app's certificate, taken
       # on the host (docs/setup.md). Another local account could hold the
       # app's loopback port while it is down, so the first certificate is
@@ -87,7 +96,8 @@ services:
       # deliberately rotated (and BRIDGE_CERT_FINGERPRINT updated to it),
       # then recreate mbsync with it false: the value survives restarts of
       # the same container. mbsync refuses to sync on a fingerprint
-      # mismatch otherwise. See docs/troubleshooting.md.
+      # mismatch otherwise. See docs/troubleshooting.md. Only true or false,
+      # in lower case, is accepted.
       BRIDGE_CERT_PIN_ROTATE: ${BRIDGE_CERT_PIN_ROTATE:-false}
     volumes:
       - maildir-volume:/maildir

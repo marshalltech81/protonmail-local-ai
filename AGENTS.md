@@ -194,6 +194,13 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not remove `Expunge None`.
 - Do not add `All Mail`, `Labels/*` or the top-level `Starred` to mbsync Patterns.
   Labels come from metadata (#1313), never from syncing these folders.
+  `PROTON_FOLDER_EXCLUSIONS` may add exclusions but must keep these
+  three; `mbsync/proton-settings.sh` refuses a value without them, with
+  fixed text, at `scripts/validate-env.sh` and at mbsync startup. Do not
+  relax that check. An added exclusion only stops further syncing: mail
+  already synced stays in the Maildir and the index until the operator
+  removes it (`docs/troubleshooting.md`); do not add automatic removal
+  without an owner decision.
 - Do not weaken or bypass TLS verification casually.
 
 ### TLS and connection security constraints
@@ -964,14 +971,19 @@ Notes:
   `BRIDGE_IMAP_PORT` (a port) and `BRIDGE_CERT_HOST` (an exact loopback
   name) are validated before they reach `mbsyncrc` or the tunnel's
   shell command
-- the Proton settings (`BRIDGE_HOST`, `BRIDGE_CERT_HOST` and the
-  `PROTON_*_NAME` isync names) have one implementation of their
+- the Proton settings (`SOURCE_MODE`, `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
+  `BRIDGE_CERT_HOST`, `BRIDGE_CERT_PIN_ROTATE`, `PROTON_FOLDER_EXCLUSIONS`
+  and the `PROTON_*_NAME` isync names) have one implementation of their
   defaults and validators, `mbsync/proton-settings.sh` (Bash 3.2
   compatible), run by `scripts/validate-env.sh` and by the entrypoint's
   `require_prerequisites` before rendering or any network use; a
   refusal is fixed text that never repeats the value. Change it in that
   file only, and keep `mbsync/tests/entrypoint_test.sh`'s table, which
   runs every value at both sites, in step
+- `SOURCE_MODE` (trimmed, lower case; empty means `proton-bridge`, the
+  only accepted value) is read once at startup and checked first; no
+  control, sourced file or function name depends on it. Any dispatch on
+  it is an owner decision after panel review (PLAN.md decision 46)
 - the output filter's patterns take the channel and far store names
   from the same values the template renders, as literal text; a channel
   line no rule matches is cut, never passed on (#1498)
@@ -1140,7 +1152,7 @@ Notes:
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
 - mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic implicit-TLS server)
-- changes to `mbsync/mbsyncrc.template`, or to the Patterns exclusion sets in `mbsync/entrypoint.sh` (`PROTON_FOLDER_EXCLUSIONS`, Proton provider policy; `ISYNC_LAYOUT_EXCLUSIONS`, isync transport; #1481), should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery), and a deliberate change to the template or to what `render_mbsync_config` writes updates `mbsync/tests/mbsyncrc.golden`, which `make test-mbsync` compares byte for byte with the rendered file (#1480)
+- changes to `mbsync/mbsyncrc.template`, or to the Patterns exclusion sets (`PROTON_FOLDER_EXCLUSIONS`, Proton provider policy, with its default and renderer in `mbsync/proton-settings.sh`; `ISYNC_LAYOUT_EXCLUSIONS` in `mbsync/entrypoint.sh`, isync transport; #1481), should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery), and a deliberate change to the template or to what `render_mbsync_config` writes updates `mbsync/tests/mbsyncrc.golden`, which `make test-mbsync` compares byte for byte with the rendered file (#1480)
 - a base-image digest bump in `indexer/Dockerfile` or `mcp-server/Dockerfile` (Dependabot's or by hand) moves `PYTHON_IMAGE` in `mbsync/tests/tls_check.sh` with it; `scripts/tests/image_pin_test.sh` (`make test-image-pins`, also in CI) fails while the three differ, since Dependabot does not update the script. The same test fails while `.github/workflows/docker.yml` and `.github/workflows/tests.yml` pass `docker/setup-buildx-action` different `driver-opts: image=moby/buildkit:...` references (#1122): Dependabot does not track a driver option, so a BuildKit bump moves both by hand, together
 - a change to `indexer/java/pom.xml` (Dependabot's or by hand) rewrites `indexer/java/checksums/checksums.sha256` with `make ppt-checksums` in the same PR: the indexer build and the Trivy dependency job check every Maven artifact against it and fail while it lags (#1117). `scripts/tests/maven_checksums_test.sh` (`make test-maven-checksums`, also in CI) fails while the file lacks a line for a pinned artifact or the Maven flags in `indexer/Dockerfile` and `.github/workflows/security.yml` differ from the required set. Never edit a line by hand to make a build pass
 - Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list

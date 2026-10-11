@@ -298,11 +298,16 @@ _NOT_READ_BY_PYTHON = {
 # ``--variables``; the shell read itself is not checked.
 _SHELL_ONLY = {
     "BRIDGE_USER": ("mbsync", "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template"),
-    "BRIDGE_IMAP_PORT": ("mbsync", "mbsync/entrypoint.sh"),
     "BRIDGE_CERT_FINGERPRINT": ("mbsync", "mbsync/entrypoint.sh"),
-    "BRIDGE_CERT_PIN_ROTATE": ("mbsync", "mbsync/entrypoint.sh"),
     # PLAN.md decision 46: checked by mbsync/proton-settings.sh, which the
     # entrypoint and scripts/validate-env.sh both source.
+    "SOURCE_MODE": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
+    "BRIDGE_IMAP_PORT": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
+    "BRIDGE_CERT_PIN_ROTATE": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
+    "PROTON_FOLDER_EXCLUSIONS": (
+        "mbsync",
+        "mbsync/entrypoint.sh and mbsync/proton-settings.sh, rendered into mbsync/mbsyncrc.template",
+    ),
     "BRIDGE_HOST": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
     "BRIDGE_CERT_HOST": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
     "PROTON_IMAP_ACCOUNT_NAME": (

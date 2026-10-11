@@ -59,10 +59,11 @@ Inbox /maildir/INBOX
 SubFolders Legacy
 
 # Channel — connects remote Bridge IMAP to local Maildir.
-# Its Patterns exclusions are filled in from two constants in
-# entrypoint.sh: PROTON_FOLDER_EXCLUSIONS (Proton provider policy: All
-# Mail, Labels/*, Starred) and ISYNC_LAYOUT_EXCLUSIONS (isync's own state
-# and layout files), PLAN.md decision 45.
+# Its Patterns exclusions are filled in by entrypoint.sh from the
+# PROTON_FOLDER_EXCLUSIONS setting (Proton provider policy: always All
+# Mail, Labels/* and Starred, plus any the operator adds; PLAN.md decision
+# 46) and then the ISYNC_LAYOUT_EXCLUSIONS constant (isync's own state and
+# layout files), PLAN.md decision 45.
 # Patterns excludes All Mail and Labels/*. All Mail is a virtual view that
 # Bridge's operation guard refuses to change. Labels are excluded by project
 # policy, not by a Bridge restriction: the index does not model label
