@@ -672,15 +672,18 @@ def register_retrieval_tools(server, db):
         attachment chunks are not in the result. For any question
         that requires the text of an attached PDF or image — "what
         does the quote PDF say?", "compare the attached statement
-        against the email body" — call ``ask_mailbox`` or
-        ``search_attachments`` instead. Iterating ``get_thread``
-        across multiple threads to find attachment content is the
-        wrong shape and will not surface it; the extracted attachment
-        text lives in a separate chunk lane that get_thread never
-        reads. Reaching for an external tool (Google Drive, web
-        search) to read a PDF that arrived as an email attachment is
-        also wrong — when its extraction succeeded, the local index
-        already holds that PDF's text.
+        against the email body" — call ``ask_mailbox``,
+        ``get_evidence`` or ``search_attachments`` instead, or list the
+        thread's attachments with ``query_attachments`` (``thread_id``,
+        plus ``folder="Trash"`` for messages in Trash) and read one
+        whole with ``get_attachment``. Iterating
+        ``get_thread`` across multiple threads to find attachment
+        content is the wrong shape and will not surface it; the
+        extracted attachment text lives in a separate chunk lane that
+        get_thread never reads. Reaching for an external tool (Google
+        Drive, web search) to read a PDF that arrived as an email
+        attachment is also wrong — when its extraction succeeded, the
+        local index already holds that PDF's text.
 
         ``thread_id`` is OPAQUE: pass only a ``Thread ID`` that a tool
         result returned. Do NOT pass a subject line, a
@@ -812,7 +815,9 @@ def register_retrieval_tools(server, db):
                 lines.append("")
                 lines.append(
                     "Attachments are present in this thread; use search_attachments "
-                    "to search their extracted text."
+                    "to search their extracted text, or query_attachments (thread_id, "
+                    'plus folder="Trash" for messages in Trash) and get_attachment to '
+                    "read one whole."
                 )
 
             next_offset = offset + len(messages)
@@ -876,8 +881,9 @@ def register_retrieval_tools(server, db):
         with each ``next_offset`` in turn returns the whole body.
         Attachment text is NOT included here; use get_evidence or
         ask_mailbox for attachment content, or list the message's
-        attachments with query_attachments (``claimant_id``) and read
-        one in full with get_attachment. When no body chunks are
+        attachments with query_attachments (``claimant_id``, plus
+        ``folder="Trash"`` for a message in Trash) and read one in
+        full with get_attachment. When no body chunks are
         indexed for the message, ``body: null`` means no indexed body;
         ``indexed_thread_text`` is conversation context, not this
         message's text (``indexed_thread_text_scope`` says context, as

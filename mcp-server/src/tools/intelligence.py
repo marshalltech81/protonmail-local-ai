@@ -3003,8 +3003,9 @@ def register_intelligence_tools(
         text content of their PDF and image attachments.
 
         This and ``extract_from_emails`` are the tools that synthesize
-        over attachment content (``search_attachments`` and
-        ``get_evidence`` return the raw extracted text).
+        over attachment content (``search_attachments``,
+        ``get_evidence`` and ``get_attachment`` return the raw
+        extracted text).
         The local index holds the text the indexer extracted from PDF
         and image attachments (scans and images through OCR, when the
         operator has OCR on); an attachment whose extraction failed,
@@ -3686,7 +3687,7 @@ def register_intelligence_tools(
             folders: Optionally scope to specific folders. Without it,
                      threads filed only in Trash are left out; name
                      "Trash" to include them.
-            date_from: Optional date lower bound (ISO 8601).
+            date_from: Optional date lower bound (ISO 8601), inclusive.
                        A thread qualifies when its span (its
                        messages' occurred_at, else sent_at, else when first
                        indexed, #1373) overlaps
@@ -3694,7 +3695,8 @@ def register_intelligence_tools(
                        each evidence entry's occurred_at and sent_at
                        give that passage's own dates, which can fall
                        outside the range.
-            date_to: Optional date upper bound (ISO 8601)
+            date_to: Optional date upper bound (ISO 8601), inclusive; a
+                     date-only value covers the whole UTC day.
             limit: Max threads to search through (default 20, clamped
                    to [1, 50])
             from_name: Optionally scope to mail FROM a named person or
