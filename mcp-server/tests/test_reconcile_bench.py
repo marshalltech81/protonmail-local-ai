@@ -1891,8 +1891,9 @@ def test_round_measures_only_the_reconcile_algorithm(bench):
     t0 = src.index("t0 = time.perf_counter()")
     # The benchmark-only choice of worst-case records is made before
     # the timed region, not inside the round.
-    assert src.index("bench_worst") < t0
-    assert src.count("bench_worst") == 1
+    assert src.index("_worst_targets(") < t0
+    assert src.count("_worst_targets(") == 1
+    assert "bench_worst" in inspect.getsource(bench._worst_targets)
     # The diff keeps no set of the server's hashes: each scanned hash is
     # discarded from the upload, so memory is bounded by the upload.
     assert "server.add(" not in src
