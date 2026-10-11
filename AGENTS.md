@@ -84,7 +84,7 @@ High-level data flow:
 2. mbsync pulls from Bridge (via `host.docker.internal`) into Maildir.
 3. indexer parses Maildir messages, builds conversation threads, generates embeddings via an OpenAI-compatible `/v1/embeddings` endpoint (operator-supplied), and writes SQLite.
 4. MCP server reads from SQLite and exposes tools over Streamable HTTP at `/mcp`.
-5. Only the MCP server is exposed to the host on `localhost:3000` by default.
+5. Only the MCP server is exposed to the host, on `127.0.0.1:3000` by default (`MCP_PORT`).
 
 Important architecture facts:
 
@@ -364,8 +364,9 @@ Secrets are a hard boundary.
   not secret and belongs in `.env`
 - Each operator-supplied layer has one Docker secret:
   `.secrets/inference_api_key.txt`, `.secrets/embed_api_key.txt`,
-  `.secrets/rerank_api_key.txt`. Each file must exist with mode 600
-  so the docker-compose `secrets:` reference resolves cleanly. The
+  `.secrets/rerank_api_key.txt`. Each file must exist, since Compose
+  cannot create a container whose `secrets:` file is missing, and have
+  mode 600, which `make validate-env` requires of every secret file. The
   file must be **non-empty** when the matching layer's `*_MODE` is
   enabled (set to anything other than `none`); for unauthenticated
   host-side servers the operator supplies any placeholder string

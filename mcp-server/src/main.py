@@ -608,11 +608,12 @@ class _HostOriginGuard:
     scheme, which this allowlist does not. It runs ahead of the Streamable
     HTTP session manager, so a rejected request creates no session.
 
-    It also logs every rejected request once at WARNING with a fixed
-    reason (#878): ``bad_host`` or ``bad_origin`` for its own 421 or 403,
-    and ``missing_token`` or ``invalid_token`` for the 401 the bearer
-    check answers further in, told apart by whether an
-    ``Authorization`` header was sent. Only the response status is
+    It also records every rejected request with a fixed reason (#878):
+    ``bad_host`` or ``bad_origin`` for its own 421 or 403, and
+    ``missing_token`` or ``invalid_token`` for the 401 the bearer check
+    answers further in, told apart by whether an ``Authorization``
+    header was sent. ``_RejectionLog`` logs the first rejection per
+    reason in each window at WARNING and counts the rest. Only the response status is
     read; the token and the header values are never logged, and the
     responses are unchanged.
     """

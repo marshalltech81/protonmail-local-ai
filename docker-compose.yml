@@ -65,7 +65,8 @@ services:
       # 127.0.0.1, the only name the app's own certificate holds. The
       # entrypoint verifies the certificate against this name and connects
       # to BRIDGE_HOST:BRIDGE_IMAP_PORT through a tunnel. Loopback names
-      # only, checked like BRIDGE_HOST.
+      # only, written exactly (no trimming or case folding), checked
+      # where BRIDGE_HOST is.
       BRIDGE_CERT_HOST: ${BRIDGE_CERT_HOST:-}
       # isync's account, store and channel names in the rendered mbsyncrc;
       # empty means today's names (mbsync/proton-settings.sh).
