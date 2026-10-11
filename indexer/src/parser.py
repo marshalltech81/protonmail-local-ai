@@ -787,11 +787,10 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
 
     Other content-pathology errors (a malformed MIME structure ``email`` cannot
     decompose, anything raised by the body / attachment walker that is
-    not already caught locally) propagate; an HTML conversion failure is
-    caught, and counted as ``html_body`` when the failed part could have
-    contributed to the body; only a parent-side ``OSError`` (the child's
-    scratch, its launch or its pipes) or a ``MemoryError`` in this
-    process (host pressure) propagates. They are not collapsed into the
+    not already caught locally) propagate. A failure inside the HTML
+    child is caught, and counted as ``html_body`` when the failed part
+    could have contributed to the body (``_convert_html_parts``); an
+    error raised in this process propagates. They are not collapsed into the
     ``None`` channel of a missing Message-ID, which would silently
     un-index the file with no dead-letter visibility: letting the
     exception escape routes the row through the queue's retry +
