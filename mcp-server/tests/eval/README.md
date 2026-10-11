@@ -188,15 +188,11 @@ outstanding items have their own sections below):
 ### Counting (`counting`)
 
 A "how many, and what were they" question, where the obvious lookups
-also match messages that do not belong in the answer. It regresses a
-real failure on an operator's mailbox (no content from it is in the
-repository): asked about "TOFU" mail (one-time codes and email
-verifications), an assistant counted keyword matches as relevant
-messages (food mentioning tofu, repeated document-signing boilerplate,
-general security advice), counted a message twice because it matched
-two searches, read only the first page of a long body (`get_message`
-returns 20,000-character pages with `next_offset`) and stated its
-estimate too confidently.
+also match messages that do not belong in the answer. It regresses
+these agent mistakes: counting keyword matches as relevant messages,
+counting a message twice because it matched two searches, reading only
+the first page of a long body (`get_message` returns 20,000-character
+pages with `next_offset`) and stating an estimate too confidently.
 
 `tofu-count` asks "How many TOFU emails did I get, and what were they
 for?" over corpus threads 38-45 (`indexer/tests/baseline/corpus.py`):

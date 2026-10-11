@@ -974,8 +974,9 @@ backup="${maildir}-utf7-backup"
    its final name, since one folder's target can be another's current
    name (`A&-` becomes `A&` while `A&--` becomes `A&-`).
    Without `--apply` it only prints the plan, with your folder names, to
-   your terminal. It renames nothing if any target already exists, or if
-   a name is not modified UTF-7 (for example, when run after upgrading).
+   your terminal. It renames nothing if any target or temporary name
+   (`.utf7-migrating-<n>`) already exists, or if a name is not modified
+   UTF-7 (for example, when run after upgrading).
    Apply it once only: a second run could decode a name twice (`A&--B`
    becomes `A&-B`, then `A&B`), so `--apply` records a marker in the
    backup volume and the script refuses to run again.
@@ -1023,13 +1024,20 @@ backup="${maildir}-utf7-backup"
    clash = 0
    for parent in order:
        sources = {src for src, _ in batches[parent]}
+       temps = {f".utf7-migrating-{i}" for i in range(len(batches[parent]))}
        for src, dst in batches[parent]:
            print(os.path.join(parent, src), "->", os.path.join(parent, dst))
            # A target that is another source here is moved out of the way first.
            if os.path.exists(os.path.join(parent, dst)) and dst not in sources:
                clash += 1
+           # A target spelled like a temporary name would land on a staged folder.
+           if dst in temps:
+               clash += 1
+       # Temporary names must be free: a rename onto one would replace an
+       # empty directory, or stop half way through on anything else.
+       clash += sum(os.path.lexists(os.path.join(parent, t)) for t in temps)
    if clash:
-       sys.exit(f"stopped: {clash} target(s) already exist; nothing was renamed")
+       sys.exit(f"stopped: {clash} target or temporary name(s) taken; nothing was renamed")
    if sys.argv[1:] == ["--apply"]:
        open(MARKER, "x").close()
        for parent in order:
