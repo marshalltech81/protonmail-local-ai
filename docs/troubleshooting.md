@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Diagnostics and recovery steps for a running stack. For first-time
+Diagnostic and recovery steps for a running stack. For first-time
 installation and configuration, see [`setup.md`](setup.md).
 
 ## Which layer is failing
