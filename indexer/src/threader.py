@@ -58,9 +58,11 @@ _SUBJECT_WHITESPACE_RE = re.compile(r"\s+")
 # with the same normalized subject in the same folder would otherwise
 # collapse into a single thread. That produces false merges for common
 # subjects ("Re: Hello", "Invoice", "Follow up"), which is particularly
-# dangerous for invoice/legal/HOA records. Require at least one shared
-# participant AND proximity in time before accepting a subject-only
-# match; otherwise start a new thread.
+# dangerous for invoice/legal/HOA records. Require a shared correspondent
+# pair (the incoming author and another of its recipients, each in a
+# sender-assessed message of the thread; ``_subject_fallback_accepts``)
+# AND proximity in time before accepting a subject-only match; otherwise
+# start a new thread.
 SUBJECT_FALLBACK_WINDOW = timedelta(days=60)
 
 # Cap for the stored thread body text (the thread-level FTS input; the

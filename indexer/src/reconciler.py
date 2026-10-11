@@ -22,7 +22,8 @@ mode); ``INDEXER_DELETION_ENABLED=false`` opts out (archive mode):
    mcp-server can report a cited source as reaped; records
    expire after ``REAPED_RECORD_RETENTION_DAYS``.
 
-A mass-delete brake caps how many messages the reaper may touch in one pass,
+A mass-delete brake skips a whole reap pass, reaping nothing, when more
+tombstones are past the grace window than a fraction of the mailbox allows,
 so a transient Bridge outage (vault rebuild, folder rename, auth glitch) that
 causes mbsync to mark a large batch as ``T`` cannot silently wipe the index.
 """

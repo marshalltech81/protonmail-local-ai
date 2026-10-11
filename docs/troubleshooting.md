@@ -865,9 +865,10 @@ kind of reindex that needs depends on whether search data changes too:
   table) but changes no chunk, chunk text, embedding input, Message-ID
   or threading. Its migration queues every indexed message with reason
   `reparse` at startup; the indexer re-reads each file and rewrites its
-  per-message rows, with no embedding calls (attachment text comes from
-  the extraction cache; a thread left with no chunk by a dropped
-  attachment occurrence embeds its subject once, #1375). Search keeps working throughout; the data the
+  per-message rows, embedding only text with no stored chunk (attachment
+  text comes from the extraction cache; a refreshed cached result whose
+  text changed, chunk budgets changed since indexing, and a thread left
+  with no chunk embed again; `docs/architecture.md`, "Reparse in place"). Search keeps working throughout; the data the
   release adds is missing for a message until its reparse runs (after
   the release that added `sender_ambiguous`, `query_messages` counts
   such a message as `indeterminate` under a sender filter, or under an
@@ -1174,9 +1175,9 @@ indexer as described above.
 
 Every discovered Maildir file is written to an `indexing_jobs` table
 and drained by a worker loop. A failure specific to one message
-(parser error, SQLite lock contention, input the embedder rejects)
-gets exponential backoff and transitions the row to `dead` after
-`INDEXER_MAX_ATTEMPTS` attempts. An embedder outage or
+(parser error, SQLite lock contention) gets exponential backoff and
+transitions the row to `dead` after `INDEXER_MAX_ATTEMPTS` attempts;
+input the embedder rejects is dead-lettered at once. An embedder outage or
 misconfiguration (unreachable, rate-limited, bad key or model) is
 **not** charged to messages: their jobs are deferred without
 spending attempts, and indexing pauses — 30 s, doubling to 10 min —
@@ -1186,7 +1187,7 @@ EMBED_MODEL and the embed API key" error.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `INDEXER_MAX_ATTEMPTS` | `5` | Max retries before a row becomes `dead`. |
+| `INDEXER_MAX_ATTEMPTS` | `5` | Attempts, the first included, before a row becomes `dead`. |
 | `INDEXER_RETRY_BASE_SECONDS` | `30` | Base backoff. Each attempt multiplies by `2^(attempts-1)`, capped at 6 h. |
 | `INDEXER_MESSAGE_TIMEOUT_SECONDS` | `3600` | Stall guard: the indexer exits (and Compose restarts it) when one message's parse, or one attachment's extraction, runs this long. `0` disables. |
 
@@ -1430,11 +1431,11 @@ Queue and maintenance (all INFO unless noted):
   record of which limit cut them, so each is extracted once, which
   records it. Already queued messages pick the refresh up on their own
   pass; dead-lettered ones keep their old text until `make
-  requeue-dead`. Raising `INDEXER_OCR_MAX_PAGES` lengthens the worst
-  case of each scanned PDF: up to `INDEXER_OCR_MAX_PAGES` ×
-  `INDEXER_OCR_TIMEOUT_SECONDS` of OCR plus its render, so keep
-  `INDEXER_MESSAGE_TIMEOUT_SECONDS` (the stall guard, per attachment)
-  above that, or the indexer restarts mid-extraction.
+  requeue-dead`. Raising `INDEXER_OCR_MAX_PAGES` lengthens the PDF
+  child's wall clock (`docs/architecture.md`, the limits table: 2,550 s
+  at the defaults), so keep `INDEXER_MESSAGE_TIMEOUT_SECONDS` (the stall
+  guard, per attachment) above it, or the indexer restarts
+  mid-extraction.
 - `container identification sweep (version <n>, signature set <n>): <n>
   message(s) with an attachment result cached before its OLE2 / ZIP
   container certification, under an older identification version or

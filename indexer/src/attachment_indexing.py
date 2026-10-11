@@ -425,8 +425,9 @@ def _unsupported_still_holds(
     #932, #957, #1227), so they hold for good. So do an encrypted PDF, a
     PDF over a pypdf limit, a workbook over the eager-part budget, a
     deck or document over a pre-open package budget and an encrypted
-    legacy ``.ppt``: the module that raised them would decline the same
-    bytes again, and the row is that module's own (#931, #1032, #983).
+    legacy ``.ppt`` and an image over the image child's pixel ceiling: the
+    module that raised them would decline the same bytes again, and the
+    row is that module's own (#931, #1032, #983, #1401).
     So do the container results (#1416: an OLE2 file with no Office
     stream, an encrypted Office file, a ZIP that is not an Office
     package, an ambiguous container), decided by the bytes alone. A row

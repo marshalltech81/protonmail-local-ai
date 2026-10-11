@@ -5,7 +5,8 @@ reparse itself (``queue.REPARSE_ENQUEUE_SQL``); this is the same
 statement by hand, for recovery (for example after a reparse's
 dead-lettered jobs were cleared another way). Run inside the indexer
 container while the indexer is up; its drain loop re-parses the jobs on
-the next pass, without embedding calls:
+the next pass, embedding only text that has no stored chunk
+(docs/architecture.md, "Reparse in place"):
 
     make reparse
 
