@@ -2381,10 +2381,11 @@ and change client URLs from `/sse` to `/mcp`.
 Sign in again in the Bridge app. If its IMAP username or password
 changed (the app shows them in the account's mailbox details), copy the
 new username into `.env` and write the new password into
-`.secrets/bridge_pass.txt`:
+`.secrets/bridge_pass.txt` (paste it at the silent prompt and press
+Enter, so it stays out of your shell history):
 
 ```bash
-printf '%s' 'new-bridge-generated-pass' > .secrets/bridge_pass.txt
+(umask 077; IFS= read -rs pass && printf '%s' "$pass" > .secrets/bridge_pass.txt)
 chmod 600 .secrets/bridge_pass.txt
 make up
 ```

@@ -353,11 +353,12 @@ relays bytes. (`nc` cannot be the relay: isync waits for the server to
 close the connection after `LOGOUT`, and `nc` does not pass that close
 on unless Bridge sends a TLS close_notify.) The trust anchors are
 unchanged: `CertificateFile` holds only the certificate the entrypoint
-extracted and checked against the persistent pin (isync also loads the
+extracted and checked against `BRIDGE_CERT_FINGERPRINT` and the
+persistent pin (isync also loads the
 system CA store, and public CAs do not issue certificates
 for `127.0.0.1`), so a different
-certificate at that address is refused twice, by the pin at startup and
-by isync's chain check on every sync. `mbsync/tests/tls_check.sh` (`make
+certificate at that address is refused at startup, by the fingerprint
+and the pin, and by isync's chain check on every sync. `mbsync/tests/tls_check.sh` (`make
 test-mbsync-tls`, run in CI) exercises both with a synthetic server
 whose certificate has this shape and which speaks implicit TLS, along
 with recovery from a Bridge that is down at startup and the refusal of
@@ -3950,7 +3951,7 @@ reference.
 | Email storage | ✅ | Never |
 | Vector index | ✅ (SQLite) | Never |
 | Keyword search | ✅ (SQLite FTS5) | Never |
-| Send/Move/Flag | Disabled by default | Never |
+| Send/Move/Flag | Not implemented: no mail-changing tool, and mbsync is pull-only | Never |
 
 ### At rest (on the host's disk)
 
@@ -3964,7 +3965,7 @@ the project adds no encryption of its own:
 | The index: thread and message text, chunks, extracted attachment text, participants, vectors | `sqlite-volume` (`mail.db` and its WAL) | Unencrypted |
 | Sync state, folder names and the Bridge certificate pin | `mbsync-state` and the Maildir | Unencrypted |
 | Credentials: the Bridge IMAP password, the MCP bearer token, provider API keys | `.secrets/*.txt` in the checkout | Unencrypted (mode 600) |
-| Operator configuration naming real people: source-authority rules (addresses, domains), the Bridge username | `config/authority.toml`, `.env` in the checkout | Unencrypted |
+| Operator configuration naming real people: source-authority rules (addresses, domains), the operator's own addresses, the Bridge username | `config/authority.toml`, `config/identity.toml`, `.env` in the checkout | Unencrypted |
 
 Protecting them is the host's job, which makes it a setup requirement:
 
@@ -3989,7 +3990,7 @@ Protecting them is the host's job, which makes it a setup requirement:
   never inside the checkout. A backup of the checkout itself carries
   every git-ignored file, and any of them can hold private data:
   credentials (`.secrets/`, `*.pem`, `*.key`), addresses
-  (`config/authority.toml`, `.env`), eval queries grounded in the real
+  (`config/authority.toml`, `config/identity.toml`, `.env`), eval queries grounded in the real
   mailbox (`mcp-server/tests/eval/queries.json`, `eval-queries.md`),
   local Maildir or data copies (`maildir/`, `data/`) and logs. So
   protect a checkout backup like the volumes, or leave out every ignored
@@ -4063,7 +4064,7 @@ content regardless of `INFERENCE_MODE`.
 |---|---|
 | Claude Desktop | Anthropic (Claude runs in the cloud; tool results go back as conversation context) |
 | Local-LLM MCP client | Stays on machine |
-| Direct `docker exec` into mcp-server | Stays on machine |
+| Your own program calling the tools on this machine | Stays on machine |
 
 `INFERENCE_MODE` and the MCP client choice are independent boundaries and must
 both be set deliberately if "fully local conversations" is a goal.
@@ -4089,8 +4090,9 @@ compared in constant time (`hmac.compare_digest`). `/health` is a custom
 route outside that wrapper and stays open for the container
 healthcheck. The Host/Origin allowlist runs as before and still rejects
 a bad Host (`421`) or Origin (`403`) whatever the token. Startup fails
-when the token is empty, and neither the token nor the `Authorization`
-header is logged. Rejections are logged with a fixed reason
+when the token is empty, shorter than 32 characters or outside the
+RFC 6750 bearer-token characters, and neither the token nor the
+`Authorization` header is logged. Rejections are logged with a fixed reason
 (`missing_token`, `invalid_token`, `bad_host`, `bad_origin`; #878),
 rate-limited to the first per reason in each 60-second window plus one
 per-window count line, and

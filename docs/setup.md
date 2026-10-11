@@ -157,10 +157,12 @@ is back. Freshness is reported by `make status` as usual.
    BRIDGE_USER=your@proton.me          # the app's IMAP username
    ```
 
-   Write the password into the Docker secret file:
+   Write the password into the Docker secret file. The command reads it
+   without echoing it, so it stays out of your shell history; paste it
+   and press Enter:
 
    ```bash
-   printf '%s' 'bridge-generated-pass' > .secrets/bridge_pass.txt
+   (umask 077; IFS= read -rs pass && printf '%s' "$pass" > .secrets/bridge_pass.txt)
    chmod 600 .secrets/bridge_pass.txt
    ```
 
@@ -355,7 +357,7 @@ When disabled, hybrid search returns RRF-only ranking.
 make up
 ```
 
-`make up` now validates `.env` and the secret files first. It checks the
+`make up` validates `.env` and the secret files first. It checks the
 values Compose will use: a variable exported in your shell overrides `.env`,
 and a key left empty or out takes its `docker-compose.yml` default, so
 `SYNC_INTERVAL`, `MCP_PORT` and (in `anthropic` mode)
@@ -374,6 +376,9 @@ services strip it. It fails fast if:
   set described above).
   For unauthenticated host-side servers, write any non-empty placeholder
   string (e.g. `unauthenticated`).
+- `INFERENCE_API_KEY`, `EMBED_API_KEY` or `RERANK_API_KEY` is set in
+  `.env`: Compose never passes it to the containers, so move the value
+  to the matching `.secrets/` file
 - any enabled layer's `{LAYER}_BASE_URL` is empty: set the provider's
   URL, or `default` for the SDK's default endpoint (OpenAI proper,
   Anthropic API, Cohere API); see the migration note in step 5
@@ -383,8 +388,8 @@ services strip it. It fails fast if:
   `openai` mode cannot use)
 - inference / embed / rerank secret placeholder files are missing or not `600`
   (validation requires the files to exist with `600` permissions even when the
-  matching layer is `none`, so the docker-compose `secrets:` references
-  resolve cleanly)
+  matching layer is `none`: Compose cannot create a container whose
+  `secrets:` file is missing, and every secret file is held to `600`)
 - `config/authority.toml`, when present, is not a regular file (a symlink
   counts as not one) or is not `600`; on a Linux host, also when it does
   not grant the indexer (UID 1002) read access through an ACL naming
@@ -864,6 +869,12 @@ connect to `http://127.0.0.1:3000/mcp` directly, sending the
 `Authorization: Bearer <token>` header. A client that cannot send a
 custom header cannot connect.
 
+The server answers only requests addressed to `localhost`,
+`127.0.0.1`, `[::1]` or `mcp-server` (its name inside the Compose
+network), on any port: a request with another `Host` header gets
+`421 Misdirected Request`, and a browser `Origin` other than those
+names over `http` gets `403`.
+
 **Rotating the token.** Write a new token to
 `.secrets/mcp_auth_token.txt` (the `openssl` command above), restart the
 server with `docker compose restart mcp-server` (the token is read once
@@ -1040,11 +1051,6 @@ that exports it, since an exported value wins over `.env` (or set it to
 steps. Change each client from `http://localhost:3000/sse` to
 `http://127.0.0.1:3000/mcp`, and for a client that picks its transport,
 choose Streamable HTTP (`http`), not SSE.
-
-The server answers only requests addressed to `localhost`,
-`127.0.0.1` or `[::1]` (any port): a request with another `Host` header
-gets `421 Misdirected Request`, and a browser `Origin` other than those
-names over `http` gets `403`.
 
 A Streamable HTTP session that sees no request for
 `MCP_SESSION_IDLE_TIMEOUT_SECS` seconds (default 1800) is ended, so a
