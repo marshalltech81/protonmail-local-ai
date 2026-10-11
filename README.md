@@ -24,7 +24,7 @@ provider, including a host-side server you install yourself.
 | Proton Mail Bridge | The official Bridge app, running on the host (not in a container): decrypts ProtonMail and exposes IMAP on the host's loopback. See [platform support](docs/setup.md#platform-support) |
 | mbsync | Incremental pull-only sync to local Maildir, `SYNC_INTERVAL` seconds after each sync ends |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
-| Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings` returning 4096-dim vectors (the schema's fixed width — e.g. Qwen3-Embedding-8B). Point `EMBED_BASE_URL` at a remote provider (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
+| Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings` returning 4096-dim vectors (the schema's fixed width — e.g. Qwen3-Embedding-8B). Point `EMBED_BASE_URL` at a remote provider (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI) |
 | Inference (operator-supplied) | Off by default (`INFERENCE_MODE=none`); `INFERENCE_MODE=anthropic` for an Anthropic-compatible Messages API, or `INFERENCE_MODE=openai` for any OpenAI-compatible chat-completions endpoint, at `INFERENCE_BASE_URL` |
 | SQLite (FTS5 + sqlite-vec) | Hybrid keyword + vector search index |
 | MCP Server | Exposes tools to MCP clients over Streamable HTTP at `127.0.0.1:3000/mcp` |
@@ -100,7 +100,7 @@ Edit `.env` to point at the providers you want to use:
 
 - `EMBED_BASE_URL` + `EMBED_MODEL` — OpenAI-compatible
   embedder. Remote (DeepInfra, OpenRouter) or a host-side server you
-  install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`). Containers
+  install yourself (LM Studio, vLLM, TEI). Containers
   reach a host-side server via `host.docker.internal`.
   The schema reserves a fixed 4096-dim vector — pick a model that
   produces 4096-dim vectors (Qwen3-Embedding-8B variants) or run a
@@ -226,7 +226,7 @@ endpoint is not host-local (`127.0.0.1`, `::1`, `localhost`,
 | Data | Where it lives |
 |---|---|
 | Your emails (Maildir) | Local Docker volume — never leaves your machine |
-| Embeddings | Wherever `EMBED_BASE_URL` points. A host-side server (LM Studio, vLLM, `mlx_lm.server`, TEI, etc.) keeps the embedded text on your machine; a remote provider (DeepInfra, OpenRouter, etc.) receives message subjects, body text and extracted attachment text at index time, and search-query strings at retrieval time. |
+| Embeddings | Wherever `EMBED_BASE_URL` points. A host-side server (LM Studio, vLLM, TEI, etc.) keeps the embedded text on your machine; a remote provider (DeepInfra, OpenRouter, etc.) receives message subjects, body text and extracted attachment text at index time, and search-query strings at retrieval time. |
 | Search index (SQLite FTS5 + sqlite-vec) | Local Docker volume |
 | Bridge ↔ Proton traffic | The only mandatory path off your machine for mail data |
 

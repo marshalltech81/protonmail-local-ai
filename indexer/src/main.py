@@ -7,7 +7,7 @@ and writes to the SQLite index.
 The embedder is operator-supplied: any OpenAI-compatible provider
 works (OpenAI proper, remote alternatives like DeepInfra / OpenRouter,
 or a host-side server the operator installs themselves: LM Studio,
-vLLM, ``mlx_lm.server``, TEI). Configure via ``EMBED_MODEL`` +
+vLLM, TEI). Configure via ``EMBED_MODEL`` +
 ``EMBED_API_KEY`` Docker secret + ``EMBED_BASE_URL`` (all required,
 non-empty). ``EMBED_BASE_URL`` is the endpoint URL, or ``default`` to
 use the openai SDK's documented default (OpenAI proper); an empty
@@ -435,7 +435,7 @@ def _validate_embed_config() -> str:
     the openai SDK); empty fails (``_resolve_base_url``, #750), the same
     rule the mcp-server applies to every enabled layer. Operators
     pointing at an unauthenticated host-side server (LM Studio, vLLM,
-    ``mlx_lm.server``, TEI) supply any placeholder string for
+    TEI) supply any placeholder string for
     ``EMBED_API_KEY``; the compat server ignores the bearer header.
     """
     if not EMBED_MODEL.strip():

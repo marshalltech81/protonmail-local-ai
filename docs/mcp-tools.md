@@ -2528,81 +2528,97 @@ inflated values fan out into that many model calls.
 **Building a population
 ([#976](https://github.com/marshalltech81/protonmail-local-ai/issues/976)).**
 The threads searched are the top `limit` hits for `query`, not every
-match, and nothing names the threads left out. For every occurrence
-backed by an attachment (every invoice line for one product code from
-one vendor, say; a body-only population such as RSVPs has nothing to
-enumerate and uses `extract_from_emails` alone), follow this recipe.
-It covers an unscoped, non-Trash population only: `search_attachments`
-has no folder filter and always leaves out Trash, so it cannot
-reconcile a run scoped with `folders` or one that includes Trash;
-reconcile those by hand.
+match, and nothing names the threads left out. No tool extracts from an
+explicit list of messages or attachments yet
+([#976](https://github.com/marshalltech81/protonmail-local-ai/issues/976),
+[#1382](https://github.com/marshalltech81/protonmail-local-ai/issues/1382)),
+so a population run enumerates the population with the exact tools
+first and then reconciles the extraction against that list.
 The tool description says only that the top `limit` threads are
 searched, points here, and asks the model to tell the user how much
 mail a population run will read; the steps are not sent to clients:
 
-1. Before the first call, say the date windows, the most attachment
-   previews and the most threads the run will read:
-   `search_attachments` already returns extracted-text previews to
-   the calling model, and each extracted thread is one model call
-   whose passages reach the inference provider.
-2. Enumerate the attachments with `search_attachments`, a lexical
-   match on the product code or its description, plus `sender` (the
-   vendor's address, matched on the message carrying each attachment;
-   `from_addr` would take every attachment in the vendor's threads)
-   and `content_type` where they help, and `limit=50` (the default,
-   20, would look like a window under the cap). There is no
-   pagination, so split the period into `date_from` / `date_to`
-   windows narrow enough that each returns fewer than 50 results.
-   Before narrowing a window that returns 50, tell the user the added
-   windows and previews, as in step 1. Every hit is dated by its
-   carrying message, so 50 or more matching attachments with one
-   effective time (one message carrying them all, or several messages
-   with the same timestamp) cannot be separated by any window: when a
-   window at the smallest interval the bounds can express still
-   returns 50, report the population as truncated rather than
-   narrowing further.
-3. Run `extract_from_emails` per window, with `participant` set to
-   the vendor's address (the tool has no `from_addr`) and a schema
-   that declares its own `invoice_date` and `invoice_number`. The
-   windows do not select the same set:
-   `search_attachments` dates the message carrying the attachment,
-   while `extract_from_emails` takes any thread whose span overlaps the
-   window, so a January invoice in a thread with a June reply is listed
-   for January but can be extracted (and take one of the `limit`
-   slots) in June. Set `limit` to at least the window's thread count.
-   `participant` selects whole threads, so attachments carried by
-   other people's messages in the vendor's threads are extracted too,
-   though step 2's `sender` leaves them out of the enumeration: check
-   a record's sender from its citation's `sender` before counting it.
+1. Before the first call, say the scope and the most rows, attachment
+   text and threads the run will read: enumeration rows carry private
+   metadata to the calling model, `get_attachment` returns stored text
+   to it, and each extracted thread is one model call whose passages
+   reach the inference provider. A first call with `limit=1` gives the
+   count.
+2. Enumerate the population, paging each query to the end with
+   `next_cursor`:
+   - For occurrences backed by an attachment (every invoice line for
+     one product code from one vendor, say), use
+     [`query_attachments`](#query_attachments) with `sender` (the
+     vendor's address, matched on the message carrying each
+     attachment), `content_type` or `filename` where they help, the
+     date bounds, and `folder="Trash"` in a separate query for
+     attachments on messages in Trash. It has no text filter: whether
+     an occurrence holds the product code is read from its stored text
+     with [`get_attachment`](#get_attachment).
+     [`search_attachments`](#search_attachments) matches extracted
+     text, but it ranks, stops at 50 results and has no cursor, so it
+     can suggest candidates, not enumerate them.
+   - For a body-backed population (RSVPs, say), use
+     [`query_messages`](#query_messages) with `sender`, `subject` or
+     `text` and the same bounds; a broad one needs several lanes (its
+     multi-lane recipe).
+
+   The list is complete for its filters only when `indeterminate` is
+   0; otherwise report both counts. In `query_attachments`,
+   `status_counts` counts the occurrences with no extracted text (any
+   status but `success`): report them as unread, not as not matching.
+3. Run `extract_from_emails` with `participant` set to the vendor's
+   address (the tool has no `sender`) and a schema that declares its
+   own `invoice_date` and `invoice_number`, splitting the period into
+   date windows that each hold at most 50 of the enumerated threads
+   (`limit` is clamped to 50); set `limit` to at least the window's
+   thread count. The two tools do not select the same set:
+   - Dates: the enumeration dates the carrying message, while
+     `extract_from_emails` takes any thread whose span overlaps the
+     window, so a January invoice in a thread with a June reply is
+     listed for January but can be extracted (and take one of the
+     `limit` slots) in June.
+   - Folders: `query_attachments` and `query_messages` filter on the
+     message's own folder, while `folders` takes every thread with a
+     message in a named folder.
+   - Senders: `participant` selects whole threads, so attachments
+     carried by other people's messages in the vendor's threads are
+     extracted too, though the enumeration's `sender` leaves them out:
+     check a record's sender from its citation's `sender` before
+     counting it.
+
    That `sender`, like the `sender` and `participant` filters, is the
-   claimed From address:
-   the index does not authenticate senders and Spam stays searchable
-   (`docs/architecture.md`, "Known limitation"), so a forged From
-   matches too. Counting a record as the vendor's mail needs
-   provenance these results do not give (the vendor's own records, or
-   checking the message by hand). An occurrence with no record has no
-   sender in these results; report it as unverified rather than
-   reading each message with `get_message`.
+   claimed From address: the index does not authenticate senders and
+   Spam stays searchable (`docs/architecture.md`, "Known limitation"),
+   so a forged From matches too. Counting a record as the vendor's mail
+   needs provenance these results do not give (the vendor's own
+   records, or checking the message by hand).
 4. Reconcile across all windows, not per window. A record links to
    its source through its `_evidence` labels: look each label up by
    `label` in that call's top-level `citations` list, whose entries
    carry `thread_id`, `claimant_id`, `attachment_id`, `sent_at` and
-   `occurred_at`. Key each occurrence by `claimant_id` and
-   `attachment_id` together: `attachment_id` is the payload's content
-   hash, shared by every message carrying the same bytes, and
-   `claimant_id` names the message. Count a record once, against the
-   enumerated occurrence its citations name; drop duplicates, set
-   aside for review a record that cites no enumerated occurrence, and
-   report each enumerated occurrence with no record. Copies of the
-   same bytes attached twice to one message share both IDs, so they
-   cannot be reconciled one by one.
+   `occurred_at`. Key each attachment occurrence by `claimant_id` and
+   `attachment_id` together, as `query_attachments` rows carry them:
+   `attachment_id` is the payload's content hash, shared by every
+   message carrying the same bytes, and `claimant_id` names the
+   message; key a body-backed record by `claimant_id`. Count a record
+   once, against the enumerated item its citations name; drop
+   duplicates, set aside for review a record that cites no enumerated
+   item, and report each enumerated item with no record (its stored
+   text can be read with `get_attachment` or `get_message`, after
+   telling the user how much). Copies of the same bytes attached twice
+   to one message share both IDs, so they cannot be reconciled one by
+   one.
 
 Limits the recipe does not remove:
 
-- `search_attachments` leaves out Trash and attachments whose text
-  extraction did not succeed and whose filename and MIME type do not
-  match; its `from_addr` filter (not `sender`) runs after a bounded
-  candidate scan, so a window under 50 filtered by it can miss matches.
+- The enumeration covers its filters, not the topic: an item sent from
+  another address, filed under another name or type, or whose
+  attachment text was not extracted is not found by them, and nothing
+  shows it is missing.
+- Each page is read in a fresh snapshot, so mail indexed or moved while
+  paging can be missed ([`query_messages`](#query_messages) paging,
+  [#1218](https://github.com/marshalltech81/protonmail-local-ai/issues/1218)).
 - Each thread's passages are chosen by similarity to `query` (with
   the exceptions under `ask_mailbox`) and cut to a budget, so an invoice page whose line is not near the query
   can be missing from a searched thread

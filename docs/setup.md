@@ -292,9 +292,10 @@ server running a 4096-dim model (Qwen3-Embedding-8B family), reached
 from the containers via `host.docker.internal`:
 
 ```bash
-# Edit .env — host-side server (mlx_lm.server, LM Studio, vLLM, TEI):
+# Edit .env — host-side server (LM Studio, vLLM, TEI):
 EMBED_BASE_URL=http://host.docker.internal:8001/v1
-EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
+# the model name your server serves the 4096-dim model under
+EMBED_MODEL=Qwen/Qwen3-Embedding-8B
 # write any placeholder string to .secrets/embed_api_key.txt (chmod 600);
 # unauthenticated compat servers ignore the bearer header but the
 # secret must be non-empty so the startup contract holds.
@@ -613,11 +614,12 @@ OpenAI-compatible `/v1/embeddings` shape, so any compliant provider is
 a single env change away. Examples:
 
 ```bash
-# Host-side server (mlx_lm.server, LM Studio, vLLM, TEI, etc.) —
+# Host-side server (LM Studio, vLLM, TEI, etc.) —
 # the privacy-preserving option; embedding requests stay on the host.
 # (EMBED_BASE_URL=default selects OpenAI proper; empty fails startup.)
+# EMBED_MODEL is the name your server serves the 4096-dim model under.
 EMBED_BASE_URL=http://host.docker.internal:8001/v1
-EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
+EMBED_MODEL=Qwen/Qwen3-Embedding-8B
 # put any placeholder string (e.g. `unauthenticated`) in
 # .secrets/embed_api_key.txt — compat servers ignore the bearer header
 

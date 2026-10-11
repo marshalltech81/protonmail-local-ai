@@ -61,17 +61,22 @@ Outcomes:
 1. **Every attachment in a defined scope can be listed and read in
    full**, with paging and message and folder filters (#796).
    **In progress:** every stored occurrence can be listed
-   (`query_attachments`) and its stored text read (`get_attachment`).
-   Open: whether an extraction cap cut the stored text (#1261),
-   per-occurrence text completeness (#1242) and occurrences missing from
-   a message whose attachment manifest is incomplete (#1282).
+   (`query_attachments`) and its stored text read (`get_attachment`),
+   and per-occurrence text completeness is recorded (#1242, done).
+   Open: whether an extraction cap cut the stored text (#1261) and
+   occurrences missing from a message whose attachment manifest is
+   incomplete (#1282).
 2. **A population can be built and counted on the server** through
    bounded Boolean filters, explicit address, body, header and
    attachment predicates, grouped counts and exhaustive thread
    grouping. Incomplete parsing or extraction answers `indeterminate`,
    never a confident "no". **In progress:** per-message completeness
    is done (#1086), explicit leaves through `where` (#1088) and the
-   bounded `any` / `negate` form over them (#1087); next #823.
+   bounded `any` / `negate` form over them (#1087), and grouped counts
+   by sender, domain, folder, year, month and authority class
+   (`aggregate_messages`). Open: the rest of #823 (selectable clocks,
+   further dimensions and identity counts) and exhaustive thread
+   grouping (#1166).
 3. **Source metadata stays evidence:** bounded ordered headers,
    unknown send dates kept unknown, verified arrival time, participant
    and Bcc semantics, authority from the stored sender only when it is
@@ -325,10 +330,11 @@ schema change needs a numbered migration.
    bounds of `query_messages` and `query_attachments` never read
    `first_indexed_at`, thread spans and `search_attachments` do,
    #1373) (`docs/architecture.md`,
-   "Message time"). **Done.** Per decision 35 the effective time stays
-   the default; `date_basis` lets a caller choose `sent`, `occurred` or
-   `internal` (#1150, #1092), and a missing `Date:` stays unknown
-   (#1080). Bitemporal claims wait for Phase 5.
+   "Message time"). **Done** for the effective time; a missing `Date:`
+   stays unknown (#1080). Per decision 35 the effective time stays the
+   default; a `date_basis` letting a caller choose `sent`, `occurred` or
+   `internal` is still open (#1150, #1092; item 5). Bitemporal claims
+   wait for Phase 5.
 4. **Deletion/retention semantics.** Mirror is the default, archive
    (`INDEXER_DELETION_ENABLED=false`) the opt-in, Trash indexed but
    hidden from default search. A reaped source reads as removed for 30
@@ -350,8 +356,10 @@ schema change needs a numbered migration.
    attachment-text completeness (#1242), and the bounded `all` / `any`
    / `negate` form with a node cap that also counts `any` groups (empty
    groups rejected) and three-valued evaluation, fixed at two levels so
-   there is no nesting to bound (#1087). **Open, in order:** grouped
-   aggregation as its own tool over the same engine (#823); the
+   there is no nesting to bound (#1087), and grouped aggregation as its
+   own tool over the same engine (`aggregate_messages`, first slice of
+   #823). **Open, in order:** the rest of #823 (selectable clocks,
+   further dimensions and identity counts); the
    selectable clock `date_basis` (#1150, depending on #1080 for
    `sent`; updated 2026-10-11: #1080 is done), counting its own NULL clocks the same way so no basis ever
    drops unknown rows silently; leaves
@@ -891,7 +899,10 @@ superseded entries keep their number and one line.
     the configured input budget times the decode's worst expansion).
     Only `text` is exempt: a fixed codec set and constant-pass decoding
     with no structural parsing, to be locked by a CI test (#1295;
-    updated 2026-10-11: not written yet, #1295 is open). Order:
+    updated 2026-10-11: not written yet, #1295 is open). Not yet met
+    (2026-10-11): the dispatcher's OOXML ZIP-size guard
+    (`_validate_zip_payload`) still reads the central directory in the
+    indexer process until #1438 moves it. Order:
     #1230, the runner (#1291), `image` (#1292), `pdf` (#1293), `html`
     with body HTML conversion (#1294), then #922; extracted text stays
     byte-identical. The stdlib message parse stays in-process for now:

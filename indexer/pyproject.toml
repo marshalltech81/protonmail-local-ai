@@ -9,7 +9,7 @@ dependencies = [
     "tenacity==9.2.1",
     # Official OpenAI SDK for the operator-supplied OpenAI-compatible
     # ``/v1/embeddings`` endpoint. Operator-supplied compat servers
-    # (LM Studio / vLLM / mlx_lm.server / TEI / DeepInfra / OpenRouter)
+    # (LM Studio / vLLM / TEI / DeepInfra / OpenRouter)
     # target the SDK as their reference client by design, so pointing
     # the SDK at them via ``base_url`` is the supported path.
     "openai==3.28.0",
