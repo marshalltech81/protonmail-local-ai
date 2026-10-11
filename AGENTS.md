@@ -231,8 +231,8 @@ Do not make any of the following changes unless the repository owner explicitly 
   deployment (2026-10-03).
 - A migration that adds per-message data only the parser can produce
   (it keeps chunk IDs) ends with `queue.REPARSE_ENQUEUE_SQL`, copied
-  verbatim, so existing mail is re-parsed through the job queue with
-  no re-embedding (#1078; `docs/architecture.md` "Reparse in place").
+  verbatim, so existing mail is re-parsed through the job queue without
+  re-embedding unchanged chunks (#1078; `docs/architecture.md` "Reparse in place").
   Never walk the Maildir inside a migration. Until a message is
   re-parsed, its new column is unknown, not false: a NULL answers
   "can't tell" and never qualifies a message for anything (owner,
@@ -561,7 +561,10 @@ is exactly what this forbids.
   `run_tool` (PLAN.md decision 42, #1290); parent-side byte limits and
   constant-size signature routing may stay in the parent. Only `text`
   is exempt: a fixed codec set and constant-pass decoding with no
-  structural parsing, locked by a CI test (#1295). `run_tool` enforces
+  structural parsing; the CI test that is to lock that implementation
+  is not written yet (#1295). The OOXML ZIP-size guard
+  (`_validate_zip_payload`) still reads the central directory in the
+  parent until #1438 moves it. `run_tool` enforces
   a wall-clock timeout and an output cap, and starts the tool through
   `_launcher.py`, which sets `RLIMIT_AS` and `RLIMIT_CPU` to the limits
   the caller passes before the parser loads; every caller passes both,

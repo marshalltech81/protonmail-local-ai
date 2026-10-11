@@ -613,11 +613,13 @@ OVERFLOW_RESCAN_RETRY_SECS = 60
 #      threads — protects them from Phase 2 failure clobbering.
 #   3. Neither → this zero placeholder. Truly new threads, or
 #      post-crash recovery on a thread that already had a zero row.
-# A zero vector is safe between phases: cosine/L2 similarity to a
-# normalized query vector is constant, so a zero-vec thread cannot
-# inflate ranking on any specific query — it just deprioritizes
-# uniformly until Phase 2c lands the real vector. Keyword search via
-# threads_fts is unaffected.
+# A zero vector favours no particular query: its L2 distance (vec0's
+# default metric) to a query vector is that vector's norm, the same for
+# every zero row. It still outranks a stored unit vector whose dot
+# product with the query is below 0.5 (cosine below 0.5 for a normalized
+# query; mcp-server does not normalize the provider's query vector), so
+# until Phase 2c lands the real vector it can rank above real threads
+# (#1518). Keyword search via threads_fts is unaffected.
 _ZERO_THREAD_VECTOR = [0.0] * EMBEDDING_DIM
 
 
@@ -668,10 +670,10 @@ INDEXER_OCR_TIMEOUT_SECONDS = _int_env("INDEXER_OCR_TIMEOUT_SECONDS", 60, minimu
 # Longest one unit of work — a message's parse, or one attachment's
 # extraction — may run before the stall guard exits the process for
 # Compose to restart (``stall_guard``). Each attachment restarts the
-# clock, so a message with many slow attachments is fine; one scanned
-# PDF legitimately takes up to ``INDEXER_OCR_MAX_PAGES`` x
-# ``INDEXER_OCR_TIMEOUT_SECONDS`` plus its render (~21 min at the
-# defaults). Set to 0 to disable.
+# clock, so a message with many slow attachments is fine; one PDF may
+# legitimately run up to its child's wall clock
+# (``extractors.pdf.child_timeout_seconds``, 2,550 s at the defaults), so
+# keep this above it. Set to 0 to disable.
 INDEXER_MESSAGE_TIMEOUT_SECONDS = _int_env("INDEXER_MESSAGE_TIMEOUT_SECONDS", 3600, minimum=0)
 # Page cap for the digital pypdf path. The OCR cap above doesn't bound
 # this — a 5 MB text-only PDF can carry thousands of pages, and even
@@ -3864,9 +3866,10 @@ def main():
     )
     touch_health_file()
 
-    # Startup reconciliation sweep — detect tombstones and path renames that
-    # landed while the indexer was offline. Safe to run every startup: it only
-    # writes to pending_deletions and updates stored filepaths.
+    # Startup reconciliation — the sweep records tombstones, path renames and
+    # identical-copy remaps that landed while the indexer was offline, then
+    # the reaper removes messages whose tombstones are past the grace window
+    # (subject to the mass-delete brake).
     if reconciler is not None:
         try:
             reconciler.sweep()

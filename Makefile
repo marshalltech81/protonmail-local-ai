@@ -28,7 +28,7 @@ help:
 	@echo "  backup-index Copy the live index to BACKUP_DIR=<dir outside the checkout> (mode 700/600), checked with integrity_check"
 	@echo "  restore-index Replace the index with BACKUP=<file from backup-index> (asks first; stops indexer and mcp-server, restarts mcp-server once the indexer verifies the index)"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
-	@echo "  reparse      Queue every indexed message to be parsed again in place, without embedding calls (except a thread left with no chunk embeds its subject once)"
+	@echo "  reparse      Queue every indexed message to be parsed again in place; unchanged chunks are not embedded again (docs/architecture.md, Reparse in place)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
 	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status, index backup, image pin, Trivy flag and Maven checksum script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
@@ -231,9 +231,12 @@ requeue-dead:
 
 # Queue every indexed message for an in-place reparse (#1078), the same
 # statement a migration that needs one ends with. For recovery; the
-# running indexer drains the jobs without embedding calls, except that a
-# thread a drop of stale attachment occurrences leaves with no chunk embeds
-# its subject once (#1375).
+# running indexer drains the jobs, embedding only text with no stored
+# chunk: attachment text a stale cached result now extracts differently,
+# chunks that INDEXER_CHUNK_* budgets changed since indexing cut
+# differently, and the subject of a thread left with no chunk (#1375) or
+# still at the zero placeholder (docs/architecture.md, "Reparse in
+# place").
 reparse:
 	docker exec indexer python -m src.reparse
 
