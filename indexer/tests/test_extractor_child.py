@@ -1,7 +1,7 @@
 """The extractor child's framed protocol (#1291).
 
-Every extractor that runs in the extractor child (the OOXML formats,
-``xls`` and ``image``) reports its result through the same frames, parsed by
+Every extractor that runs in the extractor child
+(``extractor_child.MODULES``) reports its result through the same frames, parsed by
 ``_runner.run_child`` (``src/extractors/_runner.py`` documents them).
 Output that breaks the protocol, or that the runner cut at its byte
 cap, is a ``failed`` row and never text; progress frames reach the
@@ -52,7 +52,8 @@ _MIME = {
     "xls": "application/vnd.ms-excel",
     "image": "image/png",
 }
-# Every module the dispatcher runs in the extractor child.
+# The modules these protocol tests run through the dispatcher (OOXML,
+# xls and image; the other child modules have their own test files).
 _MODULES = tuple(_MIME)
 # The modules whose caps are all logged as extractor caps (the image
 # extractor's frame caps are logged and counted as OCR-capped images,
@@ -411,8 +412,9 @@ class TestChildSide:
         assert extractor_child.result_frames("\ud800", []) == b"T 1\n?"
 
     def test_the_child_runs_every_module_the_dispatcher_sends_it(self):
-        """The modules whose extractors call ``run_child`` and the child's
-        list agree, and each listed module has the extraction entry."""
+        """The child's list is the dispatcher's child modules, written out
+        (OOXML, xls, eml, image, html, pdf, container), and each listed
+        module has the extraction entry."""
         assert set(extractor_child.MODULES) == OOXML_MODULES | {
             "xls",
             "eml",

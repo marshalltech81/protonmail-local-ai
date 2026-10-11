@@ -502,7 +502,7 @@ def test_a_dropped_env_example_key_is_caught(repo_copy):
     assert "RERANK_CANDIDATES" in _undocumented(repo_copy)
 
 
-# --- Review round 7: names read through the identity-settings tuples ---------
+# --- Names read through the identity-settings tuples ----------------------
 
 
 def test_the_identity_settings_tuples_are_collected():
@@ -638,7 +638,7 @@ def test_a_not_read_by_python_entry_dropped_from_compose_is_stale(reverse_copy):
     assert _stale_not_read_by_python(reverse_copy) == {"indexer:HOME"}
 
 
-# --- Review round 1 ----------------------------------------------------------
+# --- Compose delivery edge cases: overlays, fixed values, validators -------
 
 
 def _replace_once(path: Path, old: str, new: str) -> None:

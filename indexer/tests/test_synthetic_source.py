@@ -4,9 +4,10 @@ PLAN.md decision 45 puts provider policy and the transport (mbsync and
 Maildir today) on one side of the bytes-plus-``SourceMetadata`` seam
 (#1077) and the core on the other, and requires that the core never
 needs a provider identity. These tests feed the seam what an ordinary
-IMAP server would deliver: mailbox names that are not Proton's
-(``Folders/*``, ``Labels/*``), no ``X-Pm-*`` headers, and missing
-optional metadata. They record what ``parse_email_bytes`` and the
+IMAP server would deliver: mailbox names outside Proton's
+``Folders/*`` / ``Labels/*`` layout (``Sent Items``,
+``Archive/2024``), no ``X-Pm-*`` headers, and missing optional
+metadata. They record what ``parse_email_bytes`` and the
 Maildir adapter produce today, including where the handoff stops short
 of what a general source would need:
 

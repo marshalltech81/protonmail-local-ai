@@ -880,7 +880,8 @@ class TestRealChild:
 
     @requires_ocr_tools
     def test_the_childs_poppler_and_tesseract_launches_are_counted(self):
-        """#1236: the child reports the processes it started: the timed
+        """#1236: the parent counts the child itself, and the child
+        reports the processes it started: the timed
         page count, then per run pdf2image's page count, Poppler's version
         check and the render, and one Tesseract per page."""
         before = _runner.process_launches()

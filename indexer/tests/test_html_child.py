@@ -46,7 +46,7 @@ linux_only = pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS appli
 
 def _in_process(source: str) -> str:
     """The conversion as the indexer ran it in process before #1294
-    (``extractors/html.py`` and ``parser._html_to_text`` on main), kept
+    (``extractors/html.py`` and ``parser._html_to_text`` as they were), kept
     verbatim as the ground truth of the differential tests."""
     h2t = html2text.HTML2Text()
     h2t.ignore_links = True
@@ -138,14 +138,14 @@ def _expected_body(*sources: bytes) -> str:
 
 
 class TestDifferentialCatalogue:
-    """Old in-process conversion against the new child, on every shape:
+    """The in-process conversion against the child, on every shape:
     the text is byte-identical, through the real child process."""
 
     @real_child
     @pytest.mark.parametrize("shape", sorted(_SHAPES))
     def test_attachment_text_is_identical(self, shape):
         payload = _SHAPES[shape]
-        # Stripped as the dispatcher strips every result (review round 3).
+        # Stripped as the dispatcher strips every result.
         assert html.extract(payload) == (_attachment_in_process(payload).strip(), "html")
 
     @real_child
@@ -191,7 +191,7 @@ class TestDifferentialCatalogue:
         """A UTF-7 part can decode to a lone surrogate, which UTF-8 cannot
         carry: it crosses as ``?``. In process the surrogate stayed in the
         body, whose UTF-8 encode (the chunker's) then failed. The
-        replacement is logged with its count (review round 1); like any
+        replacement is logged with its count; like any
         decoder replacement it does not mark the body incomplete (#1315)."""
         caplog.set_level("DEBUG")
         data = b"<p>a +2DQ- b +2DQ-</p><p>" + MARKER.encode() + b"</p>"
@@ -398,7 +398,7 @@ class TestBodyDegradation:
         assert MARKER not in caplog.text
 
     def test_whitespace_does_not_use_the_budget(self, tmp_path, monkeypatch):
-        """Review round 3: each text is stripped before the budget charges
+        """Each text is stripped before the budget charges
         it, so whitespace both callers discard can neither cut a part nor
         starve the parts after it."""
         monkeypatch.setattr(html, "_MAX_TEXT_CHARS", 5)
@@ -421,7 +421,7 @@ class TestBodyDegradation:
 
     def test_a_launch_failure_propagates_so_the_queue_retries(self, tmp_path, monkeypatch):
         """No process or scratch space left is the host's trouble, not the
-        message's: the parse raises, as an ``OSError`` did before."""
+        message's: the parse raises the ``OSError``."""
 
         def fail(*_a, **_k):
             raise OSError(11, "Resource temporarily unavailable")

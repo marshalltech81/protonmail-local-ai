@@ -99,9 +99,7 @@ class TestEstimateTokens:
         )
 
         _cached_estimate_tokens.cache_clear()
-        # A unique large string that nothing else in the test process
-        # has cached. Use a distinct prefix so other tests' inputs
-        # cannot collide with this one's cache key.
+        # A string just over the threshold; the cache was cleared above.
         big = "z" * (_TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES + 1)
         before = _cached_estimate_tokens.cache_info().currsize
         _ = estimate_tokens(big)
@@ -249,7 +247,8 @@ class TestPackingAndSplitting:
             max_tokens=300,
             overlap_tokens=40,
         )
-        # Some slack for the renderer including inter-paragraph whitespace.
+        # Looser than the guarantee: max_tokens is a hard ceiling on the
+        # rendered chunk (#208, #550; see TestRenderedChunkCeiling).
         for c in chunks:
             assert c.token_est <= 320
 
@@ -258,7 +257,7 @@ class TestPackingAndSplitting:
         # should produce multiple chunks rather than emitting a single
         # over-budget chunk or losing content.
         sentence = "This is a sentence about a topic of moderate complexity. "
-        body = sentence * 200  # ~11k chars, ~2700 tokens
+        body = sentence * 200  # ~11k chars, ~2200 tokens
         chunks = chunk_message(
             message_pk="m1",
             body_text=body,
@@ -267,7 +266,7 @@ class TestPackingAndSplitting:
             overlap_tokens=30,
         )
         assert len(chunks) >= 5
-        # No chunk should be empty, and all should fit roughly under max.
+        # No chunk should be empty.
         for c in chunks:
             assert c.text.strip() != ""
 
@@ -300,9 +299,8 @@ class TestPackingAndSplitting:
         service 500 ('input length exceeds the context length'). The
         ``_split_by_tokens`` fallback handles this by slicing at
         embed-tokenizer boundaries."""
-        # ~5,000 real BPE tokens worth of Chinese with no Latin
-        # whitespace — under the old chunker this was 1 chunk; the
-        # tokenizer fallback should produce many.
+        # ~3,000 real BPE tokens of Chinese with no Latin whitespace;
+        # the tokenizer fallback must produce many chunks.
         body = "中文测试字符串，包含一些标点符号。" * 300
         chunks = chunk_message(message_pk="cjk-wall", body_text=body, max_tokens=500)
         assert len(chunks) > 1, "CJK wall must be split into multiple chunks"
@@ -383,8 +381,7 @@ class TestOffsetRoundTrip:
         for c in chunks:
             # Slicing the normalized body at the stored offsets should
             # reproduce the chunk text exactly. This is the contract that
-            # lets PR 2's "show me the source" path map a chunk back to
-            # its position in the message.
+            # lets a chunk be mapped back to its position in the message.
             assert normalized[c.char_start : c.char_end] == c.text
 
     def test_offsets_are_monotonic_across_chunks(self):
@@ -516,10 +513,10 @@ class TestModuleSurface:
 
 
 class TestTruncateToTokens:
-    """``truncate_to_tokens`` is the token-based replacement for the
-    previous char-based ``THREAD_BODY_TEXT_MAX_CHARS`` truncation. A
-    char cap under-counted CJK / URL / Base64 / dense content by 4-6×;
-    a token cap aligns with the embed model's actual context budget.
+    """``truncate_to_tokens`` caps text by BPE tokens, not characters:
+    the thread FTS body (``THREAD_BODY_TEXT_MAX_TOKENS``) and the first
+    chunk's subject prefix. A char cap under-counted CJK / URL / Base64 /
+    dense content by 4-6×.
     """
 
     def test_short_text_unchanged(self):
@@ -590,9 +587,8 @@ class TestFixtures:
             overlap_tokens=40,
         )
         # The fixture is long enough to require at least one split. The
-        # exact chunk count depends on the embed model's tokenizer (real
-        # BPE counts pack denser than the prior 4-chars/token heuristic),
-        # so this only asserts the splitting behavior — not a specific
+        # exact chunk count depends on the embed model's tokenizer, so
+        # this only asserts the splitting behavior — not a specific
         # number — to stay stable across tokenizer changes.
         assert len(chunks) >= 2
         # First and last paragraphs should each appear somewhere in the
@@ -740,7 +736,7 @@ class TestLeadingTabsAtSplits:
             assert not c.text.startswith((" ", "\t", "\n"))
 
     def test_tab_run_longer_than_a_chunk_loses_its_column(self):
-        # Documented limitation (PR #546 review round 1): a row whose
+        # Documented limitation (#546): a row whose
         # empty leading cells alone exceed max_tokens cannot keep them in
         # one chunk. The value survives, under the ceiling, without them.
         chunks = chunk_message(
@@ -805,17 +801,17 @@ MAX_TOKENS_SHAPES: dict[str, tuple[str, int, int]] = {
     "xlsx_rows_short": ("\n".join("\t" * (i % 4) + f"value{i}" for i in range(300)), 40, 60),
     "cjk_without_spaces": ("这是一个测试句子没有空格" * 400, 40, 60),
     "single_over_max_word": ("x" * 5000 + " y", 40, 60),
-    # Review round 1: `` differ`` is one token, ``differ`` two, so trimming
+    # `` differ`` is one token, ``differ`` two, so trimming
     # the paragraph's leading space takes it from 1,500 tokens to 1,501.
     "leading_space_trim_raises_count": (" differ" * 1500, 1000, 1500),
-    # Review round 1: the second paragraph is the overlap seed when a long
+    # The second paragraph is the overlap seed when a long
     # whitespace line keeps the third from fitting beside it.
     "overlap_seed_before_long_gap": (
         "alpha alpha\n\nbeta beta\n" + "\t" * 5000 + "\ngamma",
         4,
         60,
     ),
-    # Review round 2: the 97-token sub-span is the overlap seed, and only
+    # The 97-token sub-span is the overlap seed, and only
     # the rendered check finds the group over (its 2-token sibling joins
     # at 102 tokens), so the cut must not emit the seed on its own.
     "overlap_seed_cut_by_rendered_check": ("alpha\n\n" + "\u8fd9\u662fword  " * 21, 100, 100),

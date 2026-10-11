@@ -8,8 +8,9 @@ chunks kept, and the message is continued with ``queue.defer`` at the
 extract stage, atomically with the pass's results. A continuation
 resolves only the pending occurrences and always admits one dispatch.
 
-The extractor here stands in for the dispatcher and starts one real
-process per call through ``_runner.run_tool``, so the launch counts the
+The extractor here stands in for the dispatcher and starts real
+processes (one per call unless a test sets ``launches``) through
+``_runner.run_tool``, so the launch counts the
 tests assert are the processes this interpreter actually started.
 """
 
@@ -267,7 +268,7 @@ class TestBudgetAtDispatch:
 
 
 class TestChildReportedLaunches:
-    """Codex round 1 on #1355: processes an extractor child starts are
+    """#1355: processes an extractor child starts are
     reported in an ``N launches`` frame and added to the parent's count,
     on the error path too, and never reach the caller's counts."""
 
@@ -573,7 +574,7 @@ class TestContinuation:
     def test_a_lone_survivors_charge_holds_until_the_continuation_commits(
         self, tmp_path, monkeypatch
     ):
-        """Codex round 5 on #1355: a crash inside Phase 2c of a continued
+        """#1355: a crash inside Phase 2c of a continued
         lone survivor must leave it charged and marked, and the stall
         guard must still be watching it; the refund commits with the
         continuation."""
@@ -606,7 +607,7 @@ class TestContinuation:
         assert p.queue._in_flight is None
 
     def test_a_deferral_the_parse_no_longer_has_is_cleared(self, tmp_path, monkeypatch):
-        """Codex round 5 on #1355: when a parser change drops a deferred
+        """#1355: when a parser change drops a deferred
         occurrence, its mark is cleared, so it neither reads as deferred
         nor re-queues the message at every start."""
         extractor = LaunchingExtractor()
@@ -628,7 +629,7 @@ class TestContinuation:
         assert main._requeue_stale_extractions(p.db, p.queue) == 0
 
     def test_deferrals_are_cleared_when_the_parse_has_no_attachments(self, tmp_path, monkeypatch):
-        """Codex round 7 on #1355: a parser change that drops every
+        """#1355: a parser change that drops every
         attachment clears every deferral mark of the message."""
         extractor = LaunchingExtractor()
         p = Pipeline(tmp_path, monkeypatch, extractor, launches=1)
@@ -728,7 +729,7 @@ class TestContinuation:
         ["too_large", "ocr_disabled", "ocr_disabled_ocr_off", "no_extractor", "unrecorded"],
     )
     def test_a_refresh_reaches_a_queued_continuation(self, tmp_path, monkeypatch, refresh):
-        """Owner decision 2026-10-09 (round 8 rework): an occurrence of a
+        """Owner decision 2026-10-09: an occurrence of a
         refresh class on a message mid-continuation has its completeness
         cleared by the startup sweep, so the continuation re-extracts it,
         while a resolved occurrence beside it whose failed row merely
@@ -881,7 +882,7 @@ class TestContinuation:
         assert p.attachment_chunks() == set()
 
     def test_a_settled_payload_drops_chunks_of_refreshed_copies(self, tmp_path, monkeypatch):
-        """Codex round 4 on #1355: after a refresh both copies' texts
+        """#1355: after a refresh both copies' texts
         change; one resolves while the other is deferred (the old chunks
         are kept), and the pass that resolves the second rewrites the
         slice from both current texts, so no pre-refresh chunk survives."""
@@ -1098,9 +1099,9 @@ class TestWorkPerPass:
         chunked, read for its slice IDs, upserted and given its
         completeness exactly once over the whole continuation, and no
         resolved occurrence is read from the cache again, so these totals
-        are linear in the parts at any pass count. Before round 3 a
-        continuation re-served every resolved occurrence each pass, which
-        is quadratic here (48 parts in 16 passes)."""
+        are linear in the parts at any pass count. A continuation that
+        re-served every resolved occurrence each pass would be quadratic
+        here (48 parts in 16 passes)."""
         extractor = LaunchingExtractor()
         p = Pipeline(tmp_path, monkeypatch, extractor, launches=launches)
         work = WorkCounter(monkeypatch)
@@ -1262,7 +1263,7 @@ class TestVisibility:
     def test_recovery_is_logged_when_the_deferral_ends_between_heartbeats(
         self, tmp_path, monkeypatch, caplog
     ):
-        """Codex round 1 on #1355: a message deferred and finished between
+        """#1355: a message deferred and finished between
         two heartbeats still gets its recovery line."""
         caplog.set_level(logging.INFO)
         extractor = LaunchingExtractor()
@@ -1288,7 +1289,7 @@ class TestVisibility:
 
 class TestDatabase:
     def test_refresh_clearing_commits_in_batches_and_resumes(self, tmp_path, monkeypatch):
-        """Codex round 11 on #1355: the sweep clears as it finds, never
+        """#1355: the sweep clears as it finds, never
         holding more than one batch of IDs; a failed batch rolls back
         alone and a restart finishes the rest."""
         from src import database

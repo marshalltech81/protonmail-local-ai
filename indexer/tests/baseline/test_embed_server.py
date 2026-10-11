@@ -34,7 +34,7 @@ def _post(base_url: str, body: object, path: str = "/embeddings") -> tuple[int, 
             return exc.code, json.loads(exc.read())
 
 
-def test_raw_response_is_byte_identical_to_the_hash_embedder():
+def test_raw_response_returns_the_hash_embedder_vectors_exactly():
     with serve() as base_url:
         status, payload = _post(base_url, {"model": MODEL, "input": _TEXTS})
     assert status == 200

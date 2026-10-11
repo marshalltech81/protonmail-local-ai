@@ -227,8 +227,8 @@ class TestStartup:
         assert "lawfirm" not in caplog.text
 
 
-class TestReviewRound2:
-    """Codex round 2 on #459."""
+class TestEntityBudgetCountsDistinctAddresses:
+    """#459."""
 
     def test_repeated_addresses_do_not_spend_the_entity_budget(self, db):
         from src.database import MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
@@ -272,16 +272,17 @@ class _CountingDict(dict):
         return super().__contains__(key)
 
 
-class TestReviewRound1:
-    """Codex round 1 on #459."""
+class TestAuthorityBoundsAndFailClosedRules:
+    """#459: bounded domain classification and entity writes, and a
+    fail-closed rules file."""
 
     def _counting_rules(self) -> AuthorityRules:
         _CountingDict.lookups = 0
         return AuthorityRules(domains=_CountingDict({"lawfirm.example": "counsel"}))
 
     def test_many_label_domain_does_bounded_work(self):
-        # 500 one-character labels: the old walk joined every suffix
-        # (quadratic). Past the DNS length cap it is unclassified with
+        # 500 one-character labels: joining every suffix would be
+        # quadratic. Past the DNS length cap it is unclassified with
         # no lookups at all.
         rules = self._counting_rules()
         domain = "a." * 500 + "lawfirm.example"

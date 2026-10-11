@@ -91,7 +91,7 @@ def test_ocr_binaries_are_installed_in_ci():
 
 
 def test_ocr_binaries_cover_the_executables_the_ocr_path_starts():
-    """Review round 2 on #908 (AGENTS.md: a list that must cover every
+    """#908 (AGENTS.md: a list that must cover every
     item is checked against the code, not against itself): the preflight
     list equals the commands the OCR libraries start. pytesseract names
     its command in ``tesseract_cmd``; pdf2image names each Poppler
@@ -159,7 +159,7 @@ def test_ocr_fixtures_carry_no_metadata():
 
 
 def test_generator_reads_the_corpus_text_from_its_source():
-    """Review round 1 on #908: the generator must run before the images
+    """#908: the generator must run before the images
     exist, so it reads the corpus's constants from the source instead of
     importing the corpus, which reads the images at import."""
     tree = ast.parse(Path(generate.__file__).read_text(encoding="utf-8"))
@@ -583,7 +583,7 @@ class TestBuild:
             check_capped_attachments(out / "mail.db")
 
     def test_ooxml_attachments_are_platform_independent(self, monkeypatch):
-        """#909 review round 1: ``zipfile.ZipInfo`` records the creating
+        """#909: ``zipfile.ZipInfo`` records the creating
         system from ``sys.platform`` (0 on Windows, 3 elsewhere), and the
         claimant IDs and ``index_sha256`` hash the message bytes, so the
         DOCX and XLSX threads must serialize identically on Windows."""
@@ -599,8 +599,8 @@ class TestBuild:
     @pytest.mark.parametrize("binary", OCR_BINARIES)
     def test_build_fails_naming_a_missing_ocr_binary(self, tmp_path, monkeypatch, binary):
         """#908: without Tesseract or Poppler the build stops up front
-        with fixed text naming the binary, instead of indexing t90 and
-        t91 as failed extractions."""
+        with fixed text naming the binary, instead of indexing t90-t92
+        as failed extractions."""
         monkeypatch.setattr(
             shutil, "which", lambda name, *a, **k: None if name == binary else f"/usr/bin/{name}"
         )

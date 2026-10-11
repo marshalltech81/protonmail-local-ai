@@ -122,7 +122,7 @@ class TestIdentification:
             ((), "ole2-other"),
             (("WordDocument", "Workbook"), "ambiguous"),
             (("PowerPoint Document", "Book"), "ambiguous"),
-            # Codex round 3: an encrypted package beside a legacy stream is
+            # An encrypted package beside a legacy stream is
             # two kinds, never the decoy legacy one.
             (("WordDocument", "EncryptionInfo", "EncryptedPackage"), "ambiguous"),
             (("Workbook", "EncryptionInfo", "EncryptedPackage"), "ambiguous"),
@@ -143,7 +143,7 @@ class TestIdentification:
         ],
     )
     def test_only_streams_name_a_format(self, streams, storages, token):
-        """Codex round 1: a root storage named like a format's stream
+        """A root storage named like a format's stream
         names nothing; only stream entries decide."""
         payload = make_ole2(*streams, storages=storages)
         assert container_child.extract_text(payload) == (token, [])
@@ -186,7 +186,7 @@ class TestIdentification:
         "lead", [b"", b"PK\x07\x08", b"PK00"], ids=["local-header", "spanned", "spanning-temp"]
     )
     def test_every_zip_lead_signature_is_a_container(self, stubbed_extractors, lead):
-        """Codex round 1: a ZIP may start with the split / spanned marker
+        """A ZIP may start with the split / spanned marker
         (``PK\\x07\\x08``) or the temporary spanning marker (``PK00``)
         before its first local header; zipfile reads it, so it is
         identified like one that starts with the header, under any label."""
@@ -198,7 +198,7 @@ class TestIdentification:
         assert stubbed_extractors == ["docx"]
 
     def test_an_empty_zip64_archive_is_a_container(self, stubbed_extractors):
-        """Review round 8 on #1444: an empty ZIP64 archive starts with its
+        """#1444: an empty ZIP64 archive starts with its
         ZIP64 end-of-central-directory record (``PK\\x06\\x06``), which
         zipfile reads; it is identified like any ZIP, under any label,
         never decoded as text."""
@@ -602,8 +602,8 @@ class TestDispatch:
         assert stubbed_extractors == []
 
     def test_other_payloads_keep_the_labels_dispatch(self, stubbed_extractors):
-        """A payload with neither signature is dispatched by its label as
-        before, and certified ``none@``; a ``too_large`` one is not dispatched."""
+        """A payload with neither signature is dispatched by its label,
+        and certified ``none@``; a ``too_large`` one is not dispatched."""
         result = extract(content_type="text/plain", filename="a.txt", payload=b"plain words")
         assert (result.status, result.extractor, result.identifier) == (
             STATUS_SUCCESS,
@@ -781,7 +781,7 @@ def test_the_signature_set_is_pinned_to_its_version():
     (and this pin), so every row certified against the old set is checked
     again; removing a signature also changes what identification does, so
     it bumps ``CONTAINER_IDENTIFICATION_VERSION`` as well."""
-    # 2: the empty ZIP64 archive's lead record (review round 8 on #1444).
+    # 2: the empty ZIP64 archive's lead record (#1444).
     assert (CONTAINER_SIGNATURE_VERSION, extractors._CONTAINER_SIGNATURES) == (
         2,
         (

@@ -1,5 +1,5 @@
 """OOXML identification by the package's own metadata (owner decision
-on #1416, 2026-10-10, PR #1444 review round 7).
+on #1416, 2026-10-10, PR #1444).
 
 The identification child reads ``[Content_Types].xml`` and
 ``_rels/.rels`` and names the OOXML extractors that would read the
@@ -606,10 +606,10 @@ def test_expat_out_of_memory_is_a_limit_not_malformed_metadata(monkeypatch):
         container_child.extract_text(SHAPES["docx"])
 
 
-def test_a_metadata_bomb_is_failed_by_the_real_child():
-    """Through the real child process under its limits: a deflate bomb in
-    the content types fails identification by type name, in bounded
-    time."""
+def test_a_metadata_bomb_fails_identification_by_type():
+    """Through the identification path (the child run in this process,
+    tests/conftest.py): a deflate bomb in the content types fails
+    identification by type name, in bounded time."""
     from src.extractors import container
     from src.extractors._runner import ChildError
 

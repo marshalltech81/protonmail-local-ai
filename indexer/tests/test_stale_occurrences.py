@@ -248,7 +248,7 @@ class TestUniquePayload:
 
         # The body and the other attachments keep the thread's chunks:
         # no subject fallback, so the reparse sent nothing to the
-        # embedder (Codex round 4 on #1385).
+        # embedder (#1385).
         assert [call.args for call in p.embedder.embed_batch.call_args_list] == embedded_before
         assert len(p.rows()) == 2
         assert dropped_hash not in {r[1] for r in p.rows()}
@@ -475,7 +475,7 @@ class TestExtractionOff:
 class TestThreadAttachmentFlag:
     def test_dropping_the_last_attachment_clears_the_thread_flag(self, tmp_path, monkeypatch):
         """``upsert_thread`` only ever sets ``has_attachments``; the drop
-        recomputes it from the thread's messages (Codex round 1 on #1385)."""
+        recomputes it from the thread's messages (#1385)."""
         p = StalePipeline(tmp_path, monkeypatch)
         drop = {"on": False}
 
@@ -684,7 +684,7 @@ class TestSharedSliceAcrossModules:
         """Two occurrences of one payload ran different extractors, so the
         slice holds both modules' chunks. A continuation pass where the
         parse drops the second keeps the first as complete; the slice is
-        rebuilt from the surviving module only (Codex round 1 on #1385)."""
+        rebuilt from the surviving module only (#1385)."""
         p = StalePipeline(tmp_path, monkeypatch)
         payload = b"module-payload"
         parts = [
@@ -742,7 +742,7 @@ class TestPartialModuleRowsAndPeerFlag:
     def test_only_the_unused_module_row_of_a_shared_payload_is_purged(self, tmp_path, monkeypatch):
         """A parsed occurrence keeps its (payload, module) cache row; the
         stale occurrence's row of another module for the same payload
-        goes (Codex round 2 on #1385)."""
+        goes (#1385)."""
         p = StalePipeline(tmp_path, monkeypatch)
         payload = b"two-module-payload"
         drop = {"on": False}
@@ -779,9 +779,10 @@ class TestPartialModuleRowsAndPeerFlag:
         ]
 
     def test_a_peers_unfinished_attachments_keep_the_thread_flag(self, tmp_path, monkeypatch):
-        """Two messages of one thread drop their attachments in one
-        batch; after the first commit the thread flag stays true because
-        the second's occurrence row is still stored (Codex round 2 on #1385)."""
+        """The state between the two commits of a batch in which two
+        messages of one thread drop their attachments: deleting the first
+        message's occurrence leaves the thread flag true because the
+        second's occurrence row is still stored (#1385)."""
         p = StalePipeline(tmp_path, monkeypatch)
         drop = {"on": False}
 

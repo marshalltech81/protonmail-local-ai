@@ -867,7 +867,7 @@ class TestParkedTrashedReparse:
     def test_a_re_parked_trashed_row_does_not_repeat_the_completion_line(
         self, tmp_path, caplog, clock
     ):
-        """Codex review round 1 on #1334: a parked row that comes due
+        """#1334: a parked row that comes due
         while its file is still trashed is claimed and parked again; that
         claim must not re-arm the completion line."""
         caplog.set_level(logging.INFO)
@@ -942,8 +942,9 @@ class TestReparseCommand:
         assert "nothing to reparse" in capsys.readouterr().err
 
 
-class TestReviewRound1:
-    """Codex review round 1 on #1143."""
+class TestReparseCompletionAndRenames:
+    """Completion lines when a reparse drains between heartbeats, and a
+    reparse job whose file was renamed or removed (#1143)."""
 
     def test_a_reparse_drained_between_heartbeats_still_logs_completion(
         self, tmp_path, caplog, clock

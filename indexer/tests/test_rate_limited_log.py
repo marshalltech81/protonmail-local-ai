@@ -4,9 +4,8 @@
 ``_WARNINGS_PER_WINDOW`` lines per ``_WARNING_WINDOW_SECS``. A withheld
 attachment line is counted in the attachments aggregate's
 ``warnings_suppressed``; any other withheld line in the queue
-heartbeat's ``suppressed_lines``. The tests in ``TestWarnRateLimited``
-were written against main before the limiter moved into
-``src.rate_limited_log``, to pin its behaviour across the move.
+heartbeat's ``suppressed_lines``. ``TestWarnRateLimited`` pins the
+limiter's behaviour through the ``extractors`` entry points.
 """
 
 from __future__ import annotations
@@ -141,9 +140,9 @@ class TestLineBudget:
 
 class TestPdfOcrFallbackLine:
     def test_ocr_failures_share_the_limit(self, monkeypatch, caplog):
-        """#889: the OCR fallback line logged once per scanned PDF whose
-        OCR raised (Tesseract timing out on every page, for example),
-        bypassing the limit. It is an attachment line now."""
+        """#889: the OCR fallback line, logged once per scanned PDF whose
+        OCR raised (Tesseract timing out on every page, for example), is
+        an attachment line and shares the limit."""
         from src.extractors import extract, pdf_child
 
         caplog.set_level(logging.DEBUG)
@@ -160,7 +159,7 @@ class TestPdfOcrFallbackLine:
         for i in range(limit + 4):
             result = extract(content_type="application/pdf", filename="x.pdf", payload=b"%d" % i)
             assert result.extractor.startswith("pdf-digital")
-        # Since #1293 each PDF logs two lines, the child's degradation (its
+        # Each PDF logs two lines (#1293), the child's degradation (its
         # text loss) and the fallback, both sharing the limit.
         records = [r for r in caplog.records if "PDF OCR fallback failed" in r.getMessage()]
         degraded = [r for r in caplog.records if "degraded in the child" in r.getMessage()]

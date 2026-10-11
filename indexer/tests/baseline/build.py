@@ -71,9 +71,9 @@ from tests.baseline.hash_embedder import HashEmbedder
 # The binaries the OCR shapes run: pytesseract starts ``tesseract``, and
 # pdf2image starts Poppler's ``pdfinfo`` (the page count, before every
 # render) and ``pdftoppm`` (the render). A partial Poppler install can
-# have one without the other (review round 1), so both are checked.
+# have one without the other, so both are checked.
 # ``test_ocr_binaries_cover_the_executables_the_ocr_path_starts`` checks
-# this list against the commands those libraries name (review round 2).
+# this list against the commands those libraries name.
 OCR_BINARIES = ("tesseract", "pdftoppm", "pdfinfo")
 
 
@@ -223,7 +223,7 @@ def build(
             patch.object(
                 main, "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS", CAPPED_ATTACHMENT_MAX_CHARS
             ),
-            # OCR on whatever the environment says, and t91's scan one
+            # OCR on, whatever the environment says, and t91's scan one
             # page past the cap (#908) and t92's TIFF one frame past it
             # (#1113).
             patch.object(main, "INDEXER_OCR_ENABLED", True),

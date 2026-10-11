@@ -249,7 +249,8 @@ class TestUnderstatedMember:
         assert seen["run_tool_calls"] == 1
         # The work happened: the child held the 512 MiB ...
         assert seen["children_peak"] > 512 * MiB
-        # ... and the indexer did not (on main it peaked over 1 GiB).
+        # ... and the indexer did not (in process, before #1040, it
+        # peaked over 1 GiB).
         assert seen["self_peak"] < 384 * MiB
 
     @real_child

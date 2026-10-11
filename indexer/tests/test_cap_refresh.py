@@ -401,7 +401,7 @@ def test_the_sweep_sql_and_the_lookup_select_the_same_rows(catalogue_db, setting
     }
     assert raised == expect_raised
     assert bootstrap == expect_bootstrap
-    # The catalogue exercises every arm under this setting set as a whole.
+    # The two arms never select the same row.
     assert not raised & bootstrap
     attachment = _attachment(b"x")
     for row in rows:

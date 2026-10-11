@@ -230,12 +230,13 @@ _LOG_METHODS = frozenset(
 # parser's header decoders and part-filename helpers.
 _HEADER_COUNTED = (
     "the eml child passes ``degraded``, so each fallback is counted into "
-    "eml_headers_degraded, which crosses as an N frame (TestReviewRound1 in "
+    "eml_headers_degraded, which crosses as an N frame "
+    "(TestNestedEmailDecodeLossAndHeaderFallbacks in "
     "test_eml_extractor); the line is for the in-process parser's callers"
 )
 _FILENAME_COUNTED = (
     "the eml child's body walk passes ``degraded``, so each fallback is counted "
-    "into eml_filenames_degraded, which crosses as an N frame (TestReviewRound2 "
+    "into eml_filenames_degraded, which crosses as an N frame (TestBodyPartDecodeLoss "
     "in test_eml_extractor): inside a leaf .eml no other walk logs it; the line "
     "is for the in-process parser's callers"
 )

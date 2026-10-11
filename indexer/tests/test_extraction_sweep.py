@@ -1,10 +1,11 @@
 """#1289: the startup extraction sweep (``main._requeue_stale_extractions``)
-reads its three per-occurrence queries in batches of ``SWEEP_FETCH_ROWS``
+reads its per-occurrence queries (no extractor, fitting ``too_large``,
+container identification, OCR disabled) in batches of ``SWEEP_FETCH_ROWS``
 under the database lock and keeps only qualifying filepaths, so one
 message carrying thousands of attachment occurrences with sender-chosen
 labels and sizes costs the sweep one filepath, not thousands of rows.
-Enqueue counts, the pending and dead-letter exclusions and the log line
-are unchanged."""
+The tests also pin the enqueue counts, the pending and dead-letter
+exclusions and the log line."""
 
 import logging
 import sqlite3
