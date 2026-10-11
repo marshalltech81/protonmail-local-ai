@@ -20,7 +20,7 @@ help:
 	@echo "  build        Build all Docker images"
 	@echo "  build-nocache Rebuild all Docker images from scratch (skips BuildKit cache)"
 	@echo "  ppt-checksums Rewrite indexer/java/checksums/checksums.sha256 after an indexer/java/pom.xml change (downloads from Maven Central)"
-	@echo "  up           Start the full stack (mbsync reaches the Bridge app on the host)"
+	@echo "  up           Create missing secret files and run validate-env, then start the full stack (mbsync reaches the Bridge app on the host)"
 	@echo "  down         Stop the full stack"
 	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml or config/identity.toml)"
 	@echo "  logs         Tail logs from all containers"
@@ -57,8 +57,9 @@ help:
 # Create placeholder secret files required by Docker Compose.
 # Run this once during initial setup before make up.
 # Each layer (inference / embed / rerank) has one secret file. Each
-# file must exist with mode 600 so the docker-compose ``secrets:``
-# reference resolves cleanly. The file must be NON-EMPTY when its
+# file must exist, since Compose cannot create a container whose
+# ``secrets:`` file is missing, and have mode 600, which validate-env
+# requires of every secret file. The file must be NON-EMPTY when its
 # matching layer is enabled (EMBED_MODE is always enabled;
 # INFERENCE_MODE != none; RERANK_MODE == cohere). For unauthenticated
 # host-side servers (LM Studio, vLLM, mlx_lm.server) write any

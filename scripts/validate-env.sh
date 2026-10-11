@@ -961,8 +961,9 @@ require_private_optional_file "$IDENTITY_FILE"
 # - ``RERANK_MODE=cohere``: requires a non-empty rerank key.
 #
 # Disabled inference / rerank layers (``*_MODE=none``) can leave the
-# file empty; the file must still exist with mode 600 so the
-# docker-compose ``secrets:`` reference resolves cleanly.
+# file empty; the file must still exist, since Compose cannot create a
+# container whose ``secrets:`` file is missing, and have mode 600 (checked
+# above for every secret file).
 if [[ "$INFERENCE_MODE" != "none" ]]; then
     require_nonempty_file "$INFERENCE_KEY_FILE" "Inference API key"
 fi

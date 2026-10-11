@@ -24,12 +24,14 @@
 #     endpoint, including every ``default``, will fail under this
 #     overlay, which is the point.
 #
-# Usage:
+# Usage (make validate-env runs the checks make up runs first, which a
+# plain docker compose command skips):
+#   make validate-env
 #   docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
 #
 # To revert:
-#   docker compose down
-#   docker compose up -d   # base config, internet access restored
+#   make down
+#   make up   # base config, internet access restored
 # =============================================================================
 
 networks:

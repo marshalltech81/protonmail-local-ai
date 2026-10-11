@@ -376,10 +376,11 @@ warn_if_pin_rotation_enabled() {
     # Bridge cert rotation. It is part of the container's environment, so
     # it stays true through every restart of this container (manual or by
     # the restart policy) until the container is recreated with it false;
-    # until then every new cert is accepted without comparison. Surface
-    # that on every boot so the operator notices if they forgot.
+    # until then a new cert that matches BRIDGE_CERT_FINGERPRINT replaces
+    # the pin without comparison to it. Surface that on every boot so the
+    # operator notices if they forgot.
     if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
-        echo ">>> WARNING: BRIDGE_CERT_PIN_ROTATE=true — any Bridge cert fingerprint change this boot will be accepted without comparison." >&2
+        echo ">>> WARNING: BRIDGE_CERT_PIN_ROTATE=true — a Bridge cert fingerprint change this boot will be accepted without comparison to the pin (the cert must still match BRIDGE_CERT_FINGERPRINT)." >&2
         echo ">>> This is intended only for one boot after a deliberate Bridge cert rotation (e.g. Bridge upgrade); a restart keeps it enabled." >&2
         echo ">>> Once the rotation succeeds, recreate mbsync with BRIDGE_CERT_PIN_ROTATE=false to re-enable pin enforcement (see docs/troubleshooting.md)." >&2
     fi
@@ -1012,7 +1013,7 @@ while true; do
     ((consecutive_sync_failures += 1))
     echo ">>> Sync failed (${consecutive_sync_failures}/${MAX_CONSECUTIVE_SYNC_FAILURES} consecutive failures)." >&2
     if ((consecutive_sync_failures >= MAX_CONSECUTIVE_SYNC_FAILURES)); then
-        echo ">>> ERROR: mbsync exceeded ${MAX_CONSECUTIVE_SYNC_FAILURES} consecutive failures — exiting for container restart." >&2
+        echo ">>> ERROR: mbsync failed ${MAX_CONSECUTIVE_SYNC_FAILURES} syncs in a row — exiting for container restart." >&2
         exit 1
     fi
 
