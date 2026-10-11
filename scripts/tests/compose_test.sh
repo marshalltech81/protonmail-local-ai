@@ -737,7 +737,7 @@ expect_make_commit() {
     }
 }
 
-# The Makefile in a scratch repository (Codex review round 2 on #893):
+# The Makefile in a scratch repository (#893):
 # the short HEAD hash when clean, -dirty for a modified tracked file or
 # a new untracked one, but not for a git-ignored file such as .env, and
 # empty outside a checkout.
@@ -752,7 +752,7 @@ make_build_passes_the_source_commit() {
     scratch_git "$repo" commit -q -m synthetic
     head="$(scratch_git "$repo" rev-parse --short HEAD)"
     expect_make_commit "$repo" "$head" || return 1
-    # Codex review round 6 on #893: a GIT_COMMIT left in the shell or CI
+    # #893: a GIT_COMMIT left in the shell or CI
     # does not replace the checkout's commit; GIT_COMMIT_OVERRIDE does.
     expect_make_commit "$repo" "$head" GIT_COMMIT=stale || return 1
     expect_make_commit "$repo" synthetic-override GIT_COMMIT=stale \

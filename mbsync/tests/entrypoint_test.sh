@@ -1,11 +1,14 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-# Tests for mbsync/entrypoint.sh functions that must fail closed, and for
-# the liveness check in mbsync/healthcheck.sh.
+# Tests for mbsync/entrypoint.sh (its functions, rendered config, startup
+# order and provider section), for the Proton settings as the entrypoint
+# and scripts/validate-env.sh apply them, and for the liveness check in
+# mbsync/healthcheck.sh.
 #
-# Both callers run these functions as `if` conditions, where Bash disables
-# errexit for the whole call: a failed command inside them is ignored
+# The entrypoint runs several of these functions as `if` conditions,
+# where Bash disables errexit for the whole call: a failed command
+# inside them is ignored
 # unless the function checks it. Each case loads the real function
 # definitions from the entrypoint, replaces external commands with shell
 # functions, and runs in a subshell against a temporary directory. No
@@ -215,9 +218,10 @@ malformed_pin_is_refused_and_kept() {
     [[ "$(cat "$PIN_FILE")" == "${FP_OLD:0:32}" ]] || return 1
 }
 
-unreadable_pin_is_refused() {
+directory_pin_is_refused() {
     pin_setup unreadable
-    # A directory in the pin's place cannot be read, even as root.
+    # A directory in the pin's place is refused as not a regular file,
+    # before it is read.
     mkdir -p "$PIN_FILE"
     refuses_the_new_fingerprint
     [[ -d "$PIN_FILE" ]] || return 1
@@ -241,8 +245,8 @@ rotation_replaces_an_invalid_pin() {
     [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]] || return 1
 }
 
-# Rotation must be able to repair a pin it cannot read (#342 review round
-# 1): the documented recovery is one run with BRIDGE_CERT_PIN_ROTATE=true.
+# Rotation must be able to repair a pin it cannot read (#342):
+# the documented recovery is one run with BRIDGE_CERT_PIN_ROTATE=true.
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 rotation_replaces_a_dangling_pin_link() {
@@ -280,7 +284,7 @@ rotation_refuses_a_directory_in_the_pins_place() {
 }
 
 # A pin path that exists but is not a regular file is refused before it is
-# opened (#342 review round 2): reading a FIFO blocks forever, so the
+# opened (#342): reading a FIFO blocks forever, so the
 # container would neither report the damage nor exit.
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -510,8 +514,8 @@ readonly FAR_BOX_LINE
 FAR_BOX_LINE_144="Error: channel protonmail: far side box ${FAR_BOX_MARKER} cannot be opened."
 readonly FAR_BOX_LINE_144
 
-# A mock mbsync: writes stdout line $1 (if any), each stderr line in
-# MOCK_STDERR (newline-separated), then returns MOCK_RC.
+# A mock mbsync: writes the stdout line MOCK_STDOUT (if any), each stderr
+# line in MOCK_STDERR (newline-separated), then returns MOCK_RC.
 mock_mbsync_output() {
     if [[ -n "${MOCK_STDOUT:-}" ]]; then
         printf '%s\n' "$MOCK_STDOUT"
@@ -1404,7 +1408,7 @@ an_uninspectable_maildir_is_refused() {
 }
 
 # find names a directory it cannot read on stderr, and that path holds a
-# folder name, so its diagnostics stay out of the log (review round 1).
+# folder name, so its diagnostics stay out of the log.
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 unreadable_folders_are_refused_without_naming_them() {
     local rc=0
@@ -1517,7 +1521,7 @@ stale_heartbeat_without_mbsync_is_unhealthy() {
 
 # The permission repair after a sync walks the whole Maildir with no
 # mbsync running; on a large Maildir it can outlast the heartbeat limit
-# (#515 review round 1).
+# (#515).
 # shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
 repair_walk_in_progress_is_healthy() {
     health_setup repair
@@ -1865,10 +1869,10 @@ a_different_cert_at_the_host_is_refused() {
     [[ "$(cat "$PIN_FILE")" == "$pinned" ]] || return 1
 }
 
-# Review round 1: the app's loopback port can be held by another local account while the app is down, so
-# the first certificate is not trusted on first use: it must match the
-# fingerprint the operator took from the app, and nothing is pinned or
-# sent before it does.
+# The app's loopback port can be held by another local account while
+# the app is down, so the first certificate is not trusted on first
+# use: it must match the fingerprint the operator took from the app,
+# and nothing is pinned or sent before it does.
 
 # shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
 first_boot_without_expected_fingerprint_is_refused_unpinned() {
@@ -1919,7 +1923,7 @@ expected_fingerprint_in_openssl_form_is_accepted_and_pinned() {
 # Rotation does not lift the expected fingerprint: a rotation accepts
 # only the certificate the operator configured.
 # shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
-rotation_with_a_cert_host_still_needs_the_expected_fingerprint() {
+rotation_still_needs_the_expected_fingerprint() {
     local pinned
     extract_setup rotate-expected
     BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-a.pem")"
@@ -2099,7 +2103,7 @@ check "a first boot with another expected fingerprint is refused, unpinned" \
 check "an expected fingerprint in openssl's form is accepted and pinned" \
     expected_fingerprint_in_openssl_form_is_accepted_and_pinned
 check "rotation still needs the expected fingerprint" \
-    rotation_with_a_cert_host_still_needs_the_expected_fingerprint
+    rotation_still_needs_the_expected_fingerprint
 check "a malformed expected fingerprint is refused at startup" \
     malformed_expected_fingerprint_is_refused_at_startup
 check "a missing expected fingerprint is refused at startup" \
@@ -2116,7 +2120,7 @@ check "a failed rotation fails closed and keeps the old pin" \
     failed_rotation_fails_closed_and_keeps_the_old_pin
 check "an existing empty pin is refused and kept" empty_pin_is_refused_and_kept
 check "a malformed pin is refused and kept" malformed_pin_is_refused_and_kept
-check "an unreadable pin is refused" unreadable_pin_is_refused
+check "a directory in the pin's place is refused" directory_pin_is_refused
 check "a dangling pin link is refused and kept" dangling_pin_link_is_refused_and_kept
 check "rotation replaces an invalid pin" rotation_replaces_an_invalid_pin
 check "rotation replaces a dangling pin link" rotation_replaces_a_dangling_pin_link
@@ -2223,11 +2227,13 @@ check "the deadline defaults agree" deadline_defaults_agree
 # rendered mbsyncrc or to the order of the startup checks.
 #
 # The entrypoint renders one shape only: Host BRIDGE_CERT_HOST and a
-# Tunnel to BRIDGE_HOST:BRIDGE_IMAP_PORT. Those three values and
-# BRIDGE_USER are all that reach the file, comments included.
+# Tunnel to BRIDGE_HOST:BRIDGE_IMAP_PORT. Those three values,
+# BRIDGE_USER, isync's account, store and channel names (PROTON_*_NAME)
+# and the two Patterns exclusion sets are all that reach the file; the
+# endpoint and user values also reach the header comment.
 # mbsyncrc.golden is the file rendered with Compose's endpoint
-# (host.docker.internal, port 1143, certificate name 127.0.0.1) and a
-# synthetic user, compared byte for byte.
+# (host.docker.internal, port 1143, certificate name 127.0.0.1), the
+# default isync names and a synthetic user, compared byte for byte.
 
 GOLDEN="$(dirname "$ENTRYPOINT")/tests/mbsyncrc.golden"
 readonly GOLDEN
@@ -2417,7 +2423,8 @@ check "the exclusion sets ignore the environment" exclusions_ignore_the_environm
 
 # The startup order, from the whole entrypoint run on the host: a copy
 # whose fixed paths (/tmp/mbsync, the template, /run/secrets, /state,
-# /maildir) point into $WORK, with nc, openssl s_client, envsubst, mbsync
+# /maildir, /usr/local/lib/proton-settings.sh) point into $WORK, with
+# nc, openssl s_client, envsubst, mbsync
 # and the sleep between syncs replaced by mocks that append an EVENT line
 # to the log the entrypoint writes to. The log then shows each check and
 # external step in the order it ran. mbsync is where the Bridge password
@@ -2875,8 +2882,10 @@ check "the Proton settings: each value is accepted or refused alike at both site
 # --- startup identity line (#887) -------------------------------------------
 #
 # One line names the image's source commit, a random boot ID and a hash of
-# the non-secret settings. The Bridge user, password and fingerprint stand
-# in as secrets: they must neither reach the line nor change the hash.
+# the non-secret settings. The Bridge user and password stand in as
+# secrets: they must neither reach the line nor change the hash. The
+# expected fingerprint is not secret: it changes the hash but is never
+# printed.
 
 IDENTITY_RE='^>>> Startup identity: service=mbsync commit=([^ ]+) boot=([0-9a-f]{12}) config=([0-9a-f]{12})$'
 readonly IDENTITY_RE
@@ -2956,7 +2965,7 @@ secrets_do_not_change_the_hash_or_reach_the_line() {
     [[ "${changed##* }" != "${before##* }" ]] || return 1
 }
 
-# Codex review round 2 on #893: the expected fingerprint (not secret, it
+# #893: the expected fingerprint (not secret, it
 # is in .env) and the pin-rotation flag change what mbsync trusts, so
 # they are inputs, the fingerprint in the form the check compares.
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -3001,7 +3010,7 @@ isync_names_change_the_hash() {
     done
 }
 
-# Codex review round 4 on #893: the line is logged before validation, so a
+# #893: the line is logged before validation, so a
 # refused setting still leaves it in the log.
 the_identity_line_precedes_validation() {
     local identity_line validate_line
@@ -3035,7 +3044,7 @@ check "secrets do not change the hash or reach the identity line" \
 check "isync's account, store and channel names change the hash" isync_names_change_the_hash
 check "the fingerprint and pin rotation change the hash" \
     fingerprint_and_pin_rotation_change_the_hash
-# Codex review round 5 on #893: every variable the entrypoint reads from its
+# #893: every variable the entrypoint reads from its
 # environment (each ${NAME:- expansion) is hashed by log_startup_identity
 # (a NAME=%s in its format) or excluded here with a reason. Prints each
 # problem in the given entrypoint, nothing when there is none.
@@ -3082,7 +3091,7 @@ a_new_setting_left_out_of_the_hash_is_reported() {
     [[ "$(identity_coverage_problems "$copy")" == "neither hashed nor excluded: SYNTHETIC_NEW_SETTING" ]] || return 1
 }
 
-# Codex review round 6 on #893: the line runs before validation, so a host
+# #893: the line runs before validation, so a host
 # setting could still carry userinfo; it is hashed as a marker, so the hash
 # cannot be used to test guesses at a password.
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
