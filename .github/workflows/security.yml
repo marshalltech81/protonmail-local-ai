@@ -38,7 +38,7 @@ on:
       - ".semgrepignore"
       - ".github/workflows/security.yml"
   pull_request:
-    branches: [main]
+    branches: [main, gate-test-1559-base]
   schedule:
     - cron: "0 8 * * 0"
   workflow_dispatch:

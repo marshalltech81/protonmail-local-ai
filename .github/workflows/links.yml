@@ -17,7 +17,7 @@ on:
       - "docs/**/*.json"
       - "lychee.toml"
   pull_request:
-    branches: [main]
+    branches: [main, gate-test-1559-base]
   schedule:
     - cron: "0 9 * * 1"
   workflow_dispatch:
