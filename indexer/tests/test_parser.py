@@ -4567,8 +4567,7 @@ def test_cap_shape_parse_result_is_pinned(tmp_path, monkeypatch, shape):
 def test_cap_that_drops_content_logs_one_warning(tmp_path, monkeypatch, caplog, shape):
     """#872: a message a work cap cut is logged once with its Maildir
     path and the caps that fired, by fixed name and count; no header
-    value, filename or text. WARNING, since content is lost (review
-    round 1)."""
+    value, filename or text. WARNING, since content is lost."""
     caplog.set_level("DEBUG")
     _, path = _parse_cap_shape(tmp_path, monkeypatch, shape)
     lines = [r for r in caplog.records if "parser work caps" in r.getMessage()]

@@ -4030,8 +4030,7 @@ class TestCffFontPdf:
         ``success``; with fontTools it returns the sentence itself. Only
         the text is under the xfail: the module version is pinned in
         ``test_extracts_as_success_from_the_digital_path`` so that the
-        bump fontTools brings cannot keep this test failing (review
-        round 1 on #1114)."""
+        bump fontTools brings cannot keep this test failing (#1114)."""
         from src.extractors import pdf_child
 
         monkeypatch.setattr(
