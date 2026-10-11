@@ -1214,8 +1214,9 @@ class AskRetrieval(_Output):
 class AskMailboxOutput(_Output):
     answer: str = Field(description="The model's answer, with inline labels such as [E1].")
     retrieval: AskRetrieval = Field(
-        description="Always set: the ranked sample the answer was drawn from. The answer is "
-        "never a statement about the whole mailbox."
+        description="Always set: the ranked sample the answer was drawn from. The model is "
+        "told its excerpts are a sample, but that is an instruction, not a check: read this "
+        "field, not the answer's wording, for what was searched."
     )
     coverage_note: str | None = Field(
         default=None,

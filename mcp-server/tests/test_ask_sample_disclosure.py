@@ -16,7 +16,7 @@ import re
 
 import pytest
 from src.tools.intelligence import ASK_SYSTEM
-from src.tools.outputs import AskRetrieval
+from src.tools.outputs import AskMailboxOutput, AskRetrieval
 
 from tests.conftest import FakeInferenceClient
 from tests.test_prompt_budget import _SMALL, _chunk, _long_threads, _StubDb, _thread, _tools
@@ -194,6 +194,17 @@ class TestSamplePrompt:
         prompt = " ".join(ASK_SYSTEM.split())
         assert "ranked sample of the mailbox, not all of it" in prompt
         assert "absence from them says nothing about the rest of the mailbox" in prompt
+        # Review round 2: the ban is on mailbox-wide completeness only.
+        assert "that a list or count covers all of it" in prompt
+        assert "within one message or attachment, a list or count can be complete" in prompt
+        assert "a list or count is complete." not in prompt
+
+    def test_schema_does_not_promise_what_the_prompt_only_asks(self):
+        # Review round 2: the citation check does not detect a mailbox-wide
+        # claim, so the schema points at the disclosure, not the answer.
+        description = AskMailboxOutput.model_fields["retrieval"].description or ""
+        assert "never a statement about the whole mailbox" not in description
+        assert "an instruction, not a check" in description
 
     def test_initial_and_repair_prompts_carry_the_sample_instruction(self):
         llm = FakeInferenceClient(complete_responses=["no labels here", "answer [E1]"])

@@ -1170,7 +1170,8 @@ Quotes must copy words exactly from the cited passage, in double quotes.
 
 The excerpts are a ranked sample of the mailbox, not all of it: absence
 from them says nothing about the rest of the mailbox. Never say that
-something is absent from the mailbox or that a list or count is complete.
+something is absent from the mailbox or that a list or count covers all
+of it; within one message or attachment, a list or count can be complete.
 If the excerpts do not answer the question, respond in one sentence beginning
 "{_NOT_FOUND_PREFIX}" and then stop, with no citations or related claims.
 The server reports prompt-budget omissions separately; do not add

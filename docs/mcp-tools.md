@@ -2133,7 +2133,11 @@ complete. Three places say so:
 - The answer prompt tells the model that the excerpts are a ranked
   sample of the mailbox, not all of it, that their silence says nothing
   about the rest, and never to say that something is absent from the
-  mailbox or that a list or count is complete.
+  mailbox or that a list or count covers all of it. A list or count
+  within one message or attachment can still be complete. Like the
+  other answer instructions, this one is not checked: the citation check
+  does not detect a mailbox-wide claim, so the `retrieval` field, not
+  the answer's wording, says what was searched.
 - Every result, the empty ones included, carries the structured
   `retrieval` disclosure (table below) and one fixed sentence in text
   `content`: `Retrieval note: this answer comes from a ranked sample of
