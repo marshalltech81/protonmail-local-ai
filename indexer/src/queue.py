@@ -320,9 +320,10 @@ class IndexingQueue:
         ``last_stage = 'interrupted'``, so a process that dies mid-step
         leaves the row counted and marked. ``end_attempt`` or any outcome
         method refunds it and clears the mark. A marked row whose
-        attempts are exhausted was interrupted on its last attempt (earlier
-        ones may be ordinary failures), so it is dead-lettered here rather
-        than run again; an unmarked row over
+        attempts are exhausted was interrupted (a charged step, or
+        batch-wide work, which charges nothing) with no attempt left;
+        earlier attempts may be ordinary failures. It is dead-lettered
+        here rather than run again; an unmarked row over
         the limit (``INDEXER_MAX_ATTEMPTS`` lowered) still runs, and
         ``mark_failed`` decides.
         """
@@ -336,7 +337,7 @@ class IndexingQueue:
         ):
             warn_rate_limited(
                 log,
-                "dead-letter: %s attempts exhausted; the last one was interrupted mid-processing",
+                "dead-letter: %s interrupted mid-processing with its attempts exhausted",
                 filepath,
                 level=logging.ERROR,
                 attachment=False,

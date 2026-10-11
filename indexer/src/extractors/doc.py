@@ -3,8 +3,8 @@
 A legacy ``.doc`` is an OLE2 compound file, which python-docx cannot
 read. An OLE2 or ZIP payload, whatever its label, runs the extractor
 its directory names (``container.identify``, #1416): this one for an
-OLE2 file with a ``WordDocument`` stream. A payload that is neither
-under a ``.doc`` label is recorded ``unsupported`` ("not an OLE2 or
+OLE2 file with a ``WordDocument`` stream. A payload under a ``.doc``
+label whose bytes are neither OLE2 nor ZIP is recorded ``unsupported`` ("not an OLE2 or
 OOXML container", #1227).
 
 The text comes from ``catdoc`` (Debian's ``catdoc`` package), run by

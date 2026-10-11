@@ -4,7 +4,8 @@ A legacy ``.xls`` is an OLE2 compound file holding a BIFF workbook,
 which openpyxl cannot read. An OLE2 or ZIP payload, whatever its
 label, runs the extractor its directory names (``container.identify``,
 #1416): this one for an OLE2 file with a workbook stream. A payload
-that is neither under a ``.xls`` label is recorded ``unsupported``
+under a ``.xls`` label whose bytes are neither OLE2 nor ZIP is recorded
+``unsupported``
 ("not an OLE2 or OOXML container", #1227).
 
 The workbook is read by xlrd in the extractor child

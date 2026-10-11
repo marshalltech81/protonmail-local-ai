@@ -3,8 +3,9 @@
 A legacy ``.ppt`` is an OLE2 compound file. An OLE2 or ZIP payload,
 whatever its label, runs the extractor its directory names
 (``container.identify``, #1416): this one for an OLE2 file with a
-``PowerPoint Document`` stream. A payload that is neither under a
-``.ppt`` label is recorded ``unsupported`` before it gets here
+``PowerPoint Document`` stream. A payload under a ``.ppt`` label
+whose bytes are neither OLE2 nor ZIP is recorded ``unsupported`` before
+it gets here
 (``NON_OLE2_PPT_ERROR``).
 
 The text comes from Apache POI's HSLF reader (``SlideShowExtractor``,

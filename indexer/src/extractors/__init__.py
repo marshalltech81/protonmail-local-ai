@@ -25,10 +25,11 @@ tiny — they exist so each MIME type's library can be lazy-imported
 (see ``_safe_import``). A missing optional dependency for a rare
 format does not break the indexer; it surfaces as
 ``status="unsupported"`` with an extractor-specific error message
-operators can act on. That holds for modules that import their library
-in the indexer (``docx``, ``pptx``, ``xlsx``, ``html``); a library missing
-from the extractor child (``pdf``, ``image``, ``xls``) is recorded
-``failed`` by type name.
+operators can act on. That holds for modules imported only on dispatch that
+import their library in the indexer (``docx``, ``pptx``, ``xlsx``). A
+library missing from the extractor child (``pdf``, ``image``, ``xls``) is
+recorded ``failed`` by type name, and ``html`` is imported by the parser
+at load, so a missing ``html2text`` stops the indexer.
 """
 
 from __future__ import annotations
@@ -557,7 +558,9 @@ class ExtractionResult:
       type only, since its message can quote the document. The cached
       row is honoured for 7 days (``_FAILED_CACHE_MAX_AGE``), then
       re-run when the same bytes are processed again; an
-      ``EXTRACTOR_VERSIONS`` bump re-runs it at startup.
+      ``EXTRACTOR_VERSIONS`` bump re-runs it at startup while
+      extraction is enabled (a dead-lettered message waits for
+      ``make requeue-dead``).
 
     ``ocr_pages_skipped`` is the scanned pages the PDF OCR page cap left
     unread (#891): set on a ``success`` or ``empty`` PDF result (0 when
