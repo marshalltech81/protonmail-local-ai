@@ -1,5 +1,11 @@
 name: Links
 
+# On main the push trigger filters by the files lychee reads. A pull
+# request always starts the workflow, so the job reports a check
+# (#1559): the `changes` job compares the PR's merge commit with its
+# base and lychee runs only when a file matching the same paths
+# changed, and is skipped otherwise (a skipped job passes a required
+# check). Keep the push filter and the changes job's list the same.
 on:
   push:
     branches: [main]
@@ -12,13 +18,6 @@ on:
       - "lychee.toml"
   pull_request:
     branches: [main]
-    paths:
-      - "*.md"
-      - ".github/**/*.md"
-      - ".github/**/*.yml"
-      - "docs/**/*.md"
-      - "docs/**/*.json"
-      - "lychee.toml"
   schedule:
     - cron: "0 9 * * 1"
   workflow_dispatch:
@@ -35,8 +34,48 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decides whether lychee runs; it works as security.yml's changes job
+  # does. A failure here runs it rather than skipping it.
+  changes:
+    name: links inputs changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Compare the pull request with its base
+        id: diff
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            printf 'run=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git rev-parse --verify --quiet HEAD^2 > /dev/null
+          changed="$(git diff --name-only HEAD^1 HEAD -- \
+            ':(glob)*.md' \
+            ':(glob).github/**/*.md' \
+            ':(glob).github/**/*.yml' \
+            ':(glob)docs/**/*.md' \
+            ':(glob)docs/**/*.json' \
+            ':(glob)lychee.toml')"
+          if [[ -n "$changed" ]]; then
+            printf 'Checked files changed:\n%s\n' "$changed"
+            printf 'run=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'No checked file changed; lychee is skipped.\n'
+            printf 'run=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
   lychee:
     name: lychee
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
