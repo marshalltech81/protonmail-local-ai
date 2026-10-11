@@ -2569,10 +2569,12 @@ mail a population run will read; the steps are not sent to clients:
      text, but it ranks, stops at 50 results and has no cursor, so it
      can suggest candidates, not enumerate them.
    - For a body-backed population (RSVPs, say), use
-     [`query_messages`](#query_messages) with `sender`, `subject` or
-     `text`, the same bounds, and `folder="Trash"` in a separate query
-     for messages in Trash; a broad one needs several lanes (its
-     multi-lane recipe).
+     [`query_messages`](#query_messages) with `sender` or `text`, the
+     same bounds, and `folder="Trash"` in a separate query for messages
+     in Trash; a broad one needs several lanes (its multi-lane recipe).
+     A population defined by `subject` cannot be reconciled in step 4:
+     the model sees the thread's subject outside every citable
+     passage, so no record can cite it.
 
    The list is complete for its filters only when `indeterminate` is
    0; otherwise report both counts. For attachments, that covers only
@@ -2599,6 +2601,9 @@ mail a population run will read; the steps are not sent to clients:
    output lists the threads it searched: check that some call
    searched every enumerated thread, and replace a window whose call
    left one out with narrower windows, discarding its call's records.
+   Before running the replacements, tell the user the added calls and
+   the updated total of calls and threads (50 per call), the discarded
+   call included, since its threads were already sent.
    Other threads that rank for `query` take slots too,
    and a thread falls in every window its span overlaps, so narrowing
    can fail: when a window at the smallest interval the bounds can
@@ -2641,7 +2646,8 @@ mail a population run will read; the steps are not sent to clients:
    that places it in the population (here the line's product code)
    cites only `in_scope` passages (each citation's `scope`) of
    enumerated items, and every other field cites only `in_scope`
-   passages; mark the enumerated items it cites covered. Set aside any
+   passages; mark covered only the enumerated items its population
+   fields cite. Set aside any
    other record for review. Each call marks a thread's messages in or out of its
    own scope (its window, folders and `participant`) and tells the
    model to extract only from in-scope messages, so calls that search
