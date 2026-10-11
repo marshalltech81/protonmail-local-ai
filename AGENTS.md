@@ -255,8 +255,9 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not store raw attachment payload bytes in SQLite. The current schema
   keeps bytes only in the `.eml` on disk. ``attachment_extractions`` caches
   the extracted *text* per content hash and extractor module (#928) so
-  OCR / parse cost runs at most once per unique payload and extractor,
-  not the bytes themselves.
+  OCR / parse cost is paid once per unique payload and cache key (the
+  module the occurrence's label selects, #1416) until the row is
+  refreshed, not the bytes themselves.
 - When a change makes an attachment extractor return different text for
   the same bytes, bump that module's entry in
   `indexer/src/extractors/__init__.py` `EXTRACTOR_VERSIONS`. The
@@ -269,8 +270,8 @@ Do not make any of the following changes unless the repository owner explicitly 
   Dead-lettered messages are skipped and keep their stale chunks until
   an operator runs `make requeue-dead`. A bump also re-runs that
   module on every cached payload the startup sweep considers (the
-  sweep does nothing while `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` is
-  off, and keeps `image-ocr` / `pdf-ocr` rows while OCR is off), so
+  sweep re-runs nothing while `INDEXER_ATTACHMENT_EXTRACTION_ENABLED`
+  is off, though it still clears stale `text_complete`, and keeps `image-ocr` / `pdf-ocr` rows while OCR is off), so
   before bumping a module whose post-open walk is not yet budgeted,
   read the issue or PR that last chose not to bump it (#1036 declined a `docx` bump
   while #1031 was open; #1068 bumped it anyway and #1075 reverted it).

@@ -25,7 +25,10 @@ tiny — they exist so each MIME type's library can be lazy-imported
 (see ``_safe_import``). A missing optional dependency for a rare
 format does not break the indexer; it surfaces as
 ``status="unsupported"`` with an extractor-specific error message
-operators can act on.
+operators can act on. That holds for modules that import their library
+in the indexer (``docx``, ``pptx``, ``xlsx``, ``html``); a library missing
+from the extractor child (``pdf``, ``image``, ``xls``) is recorded
+``failed`` by type name.
 """
 
 from __future__ import annotations
@@ -551,10 +554,10 @@ class ExtractionResult:
       (``PERMANENT_FAILURE_ERRORS``, #931).
     * ``"too_large"`` — payload exceeded ``max_bytes``.
     * ``"failed"`` — extractor raised; ``error`` records the exception
-      type only, since its message can quote the document. Indexer
-      treats this as terminal for the attachment (won't keep
-      retrying), but a future re-extraction sweep can re-run after a
-      library upgrade.
+      type only, since its message can quote the document. The cached
+      row is honoured for 7 days (``_FAILED_CACHE_MAX_AGE``), then
+      re-run when the same bytes are processed again; an
+      ``EXTRACTOR_VERSIONS`` bump re-runs it at startup.
 
     ``ocr_pages_skipped`` is the scanned pages the PDF OCR page cap left
     unread (#891): set on a ``success`` or ``empty`` PDF result (0 when

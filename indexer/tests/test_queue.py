@@ -577,6 +577,26 @@ class TestInFlightAttempts:
         assert "stopped while processing" in row["last_error"]
         assert _in_flight(restarted) is None
 
+    def test_exhausted_after_ordinary_failures_names_only_the_last_interruption(
+        self, tmp_path, caplog
+    ):
+        """Only the last attempt need have been interrupted: earlier ones
+        can be ordinary ``mark_failed`` failures, so the dead-letter line
+        must not claim the message was interrupted on every attempt."""
+        caplog.set_level(logging.DEBUG)
+        db = Database(tmp_path / "q.db")
+        q = _queue(db, max_attempts=2)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        q.mark_failed("/m/a", stage="parse", error="ValueError")
+        assert _queue(db, max_attempts=2).begin_attempt("/m/a")  # process dies here
+
+        assert not _queue(db, max_attempts=2).begin_attempt("/m/a")
+
+        assert _row(db, "/m/a")["status"] == STATUS_DEAD
+        assert [r.getMessage() for r in _lines(caplog, "dead-letter: ")] == [
+            "dead-letter: /m/a attempts exhausted; the last one was interrupted mid-processing"
+        ]
+
     def test_only_the_running_message_is_charged(self, tmp_path):
         """Charging the whole claimed batch would let an ordinary restart
         dead-letter healthy batchmates."""

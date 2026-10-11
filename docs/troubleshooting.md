@@ -1390,7 +1390,10 @@ Queue and maintenance (all INFO unless noted):
   `oldest_due_age` means due jobs are not being drained (an embedder
   outage pauses draining; see above), except during a reparse, whose
   jobs wait behind newer mail while `reparse: remaining=` falls (see
-  [Reparse or rebuild after an upgrade](#reparse-or-rebuild-after-an-upgrade)).
+  [Reparse or rebuild after an upgrade](#reparse-or-rebuild-after-an-upgrade)),
+  and during the initial index, whose backlog is queued due at each
+  message's own date, so the age is that of the oldest unindexed
+  message rather than a wait.
   The deferral counts are `defer`
   calls since the previous heartbeat, by stage. `suppressed_lines` is
   how many embed retry and recovery, health-file, ingestion-state and
@@ -1699,8 +1702,7 @@ logs these outcomes with counts, extractor names and exception types
 only, never filenames or text (`make logs`):
 
 - `extractor <module> failed (dispatch_via=<mime|extension|...>):
-  <ExceptionType>` (WARNING), per extraction that fails: an encrypted
-  PDF that needs a password, a Tesseract error or timeout, a DOCX,
+  <ExceptionType>` (WARNING), per extraction that fails: a Tesseract error or timeout, a DOCX,
   XLSX or PPTX the parser rejects (`PptxRelationshipChainError` is a
   deck whose parts are chained too deep to open, and
   `DocxRelationshipChainError` the same for a `.docx` or `.dotx`), or
@@ -1750,8 +1752,9 @@ only, never filenames or text (`make logs`):
   A DOCX, XLSX or PPTX is extracted in a child process with 1 GiB of
   address space, 30 s of CPU and a 45 s timeout (#1040): a file that
   needs more is `MemoryError` (or `XMLSyntaxError`, lxml's name for a
-  failed allocation), `ToolCrashError` or `ToolTimeoutError`. For a
-  `.xls`, `.docx`, `.xlsx`, `.pptx`, a PDF or an image, `ChildOutputError` means the
+  failed allocation), `ToolCrashError` or `ToolTimeoutError`. For an
+  extraction in the extractor child (`.xls`, OOXML, a PDF, an image, HTML
+  or an attached email), `ChildOutputError` means the
   extractor child's output broke its protocol or passed its byte cap
   (#1291). The limits and what they were measured on are in
   `docs/architecture.md` ("OOXML extraction runs in a child process").
@@ -1868,6 +1871,9 @@ only, never filenames or text (`make logs`):
   - `xls_sheets`, `xls_expanded_cells`, `xls_text_chars`: the same walk
     over a legacy `.xls` stopped at 1,024 sheets or at the cell or text
     budget above (#935).
+  - `html_text_chars`: an HTML attachment's converted text, stripped,
+    passed 10,000,000 characters in its child process; the text is cut
+    there (#1294).
   - `image_text_chars`: an image's OCR text, stripped of leading and
     trailing whitespace, passed 10,000,000 characters; the text is cut
     there and no later TIFF frame is read (#1292).
@@ -1942,7 +1948,7 @@ only, never filenames or text (`make logs`):
 
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
-  zip, image-pixel (the image child's ceiling: `unsupported`) and XLSX whole-part caps, the OCR timeout, the
+  zip cap, the image-pixel and XLSX whole-part caps (both `unsupported`), the OCR timeout, the
   legacy-Office tool timeouts and the `.xls` child's and the `.ppt`
   reader's memory and CPU limits); the OCR
   page caps have their own lines above. Like the OCR cap, a cap is reported

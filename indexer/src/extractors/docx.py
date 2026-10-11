@@ -35,10 +35,10 @@ WARNING naming it and is counted in the attachments aggregate's
 
 Legacy ``.doc`` (binary Word, an OLE2 compound file, not OOXML) cannot
 be parsed by ``python-docx``. The dispatcher never hands this module an
-OLE2 payload: one labelled ``.doc`` goes to the ``doc`` extractor
-(#935), and any other is recorded ``unsupported`` (#694). A
-``.doc``-labelled payload reaches it only when it is not OLE2 (an OOXML
-file mislabelled as ``.doc``).
+OLE2 payload: an OLE2 or ZIP payload, whatever its label, runs the
+extractor its directory names (``container.identify``, #1416), so an
+OLE2 Word file goes to the ``doc`` extractor (#935) and a Word package
+comes here.
 
 Word templates (``.dotx``) are read the same way (#937). A template is
 a ``.docx`` whose main part declares the template content type, and

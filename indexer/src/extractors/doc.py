@@ -1,9 +1,11 @@
 """Legacy Word ``.doc`` extractor (#935).
 
 A legacy ``.doc`` is an OLE2 compound file, which python-docx cannot
-read. The dispatcher routes an OLE2 payload labelled ``.doc`` /
-``application/msword`` here; a ``.doc``-labelled payload that is not
-OLE2 (an OOXML file mislabelled as ``.doc``) still goes to ``docx``.
+read. An OLE2 or ZIP payload, whatever its label, runs the extractor
+its directory names (``container.identify``, #1416): this one for an
+OLE2 file with a ``WordDocument`` stream. A payload that is neither
+under a ``.doc`` label is recorded ``unsupported`` ("not an OLE2 or
+OOXML container", #1227).
 
 The text comes from ``catdoc`` (Debian's ``catdoc`` package), run by
 ``_runner.run_tool``: no shell, address-space and CPU limits set before

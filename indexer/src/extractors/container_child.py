@@ -42,7 +42,7 @@ costs:
   bytes; for ZIP, the central directory, which the payload cap bounds;
 * decompression: only the two metadata members, at most
   ``_MAX_METADATA_BYTES`` compressed (their declared compressed sizes,
-  charged before either is opened) and ``_MAX_METADATA_BYTES``
+  each charged just before it is read) and ``_MAX_METADATA_BYTES``
   decompressed together, counted as each chunk comes out of zipfile, so
   a member that understates its size is bounded too;
 * XML: at most ``_MAX_METADATA_ELEMENTS`` elements across both members,

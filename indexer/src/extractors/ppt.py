@@ -1,9 +1,11 @@
 """Legacy PowerPoint ``.ppt`` extractor (#957).
 
-A legacy ``.ppt`` is an OLE2 compound file. The dispatcher routes an
-OLE2 payload labelled ``.ppt`` / ``application/vnd.ms-powerpoint`` here;
-a ``.ppt``-labelled payload that is not OLE2 is recorded ``unsupported``
-before it gets here (``NON_OLE2_PPT_ERROR``).
+A legacy ``.ppt`` is an OLE2 compound file. An OLE2 or ZIP payload,
+whatever its label, runs the extractor its directory names
+(``container.identify``, #1416): this one for an OLE2 file with a
+``PowerPoint Document`` stream. A payload that is neither under a
+``.ppt`` label is recorded ``unsupported`` before it gets here
+(``NON_OLE2_PPT_ERROR``).
 
 The text comes from Apache POI's HSLF reader (``SlideShowExtractor``,
 slides and speaker notes) in a Java process: ``indexer/java/PptText.java``

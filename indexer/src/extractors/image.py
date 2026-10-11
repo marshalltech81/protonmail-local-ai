@@ -17,10 +17,12 @@ so the heartbeat keeps firing through a long multipage TIFF (#485); a
 ``C`` frame per cap that cut the text, logged and counted here; and the
 text. The frame cap that cut records ``INDEXER_OCR_MAX_PAGES`` on the
 result (#1418); the text budget, a hardcoded limit, records nothing. An
-error in the child (a decompression bomb, a Tesseract timeout
-or failure, the child's own ``MemoryError`` or ``RecursionError`` at
-its limit) is reported by type name and recorded ``failed`` by the
-dispatcher, as is a limit hit, a timeout or output that breaks the
+image over the child's pixel ceiling that half scale cannot fit (a
+decompression bomb included) raises ``ImagePixelCeilingError``,
+recorded ``unsupported`` for good (#1401). Any other error in the child
+(a Tesseract timeout or failure, the child's own ``MemoryError`` or
+``RecursionError`` at its limit) is reported by type name and recorded
+``failed`` by the dispatcher, as is a limit hit, a timeout or output that breaks the
 protocol.
 """
 
