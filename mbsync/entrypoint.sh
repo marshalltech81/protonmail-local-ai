@@ -13,6 +13,18 @@ readonly BRIDGE_CERT_FINGERPRINT="${BRIDGE_CERT_FINGERPRINT:-}"
 readonly SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
 readonly RUNTIME_DIR="/tmp/mbsync"
 readonly TEMPLATE_FILE="/etc/mbsyncrc.template"
+# The channel's Patterns exclusions, two sets with two owners (PLAN.md
+# decision 45), each substituted into its own placeholder on the
+# template's Patterns line by render_mbsync_config. Neither is
+# configuration. The Channel comment in mbsyncrc.template explains both.
+# Proton provider policy: Bridge's virtual folders All Mail, Labels/* and
+# the top-level Starred, which list each message again (never synced,
+# AGENTS.md).
+readonly PROTON_FOLDER_EXCLUSIONS='!"All Mail" !"Labels/*" !"Starred"'
+# isync transport: a child folder named after a file isync keeps in its
+# parent's directory (SubFolders Legacy, SyncState *), and everything
+# below it.
+readonly ISYNC_LAYOUT_EXCLUSIONS='!"*/uidvalidity" !"*/uidvalidity/*" !"*/isyncuidmap.db" !"*/isyncuidmap.db/*" !"*/mbsyncstate" !"*/mbsyncstate/*" !"*/mbsyncstate.journal" !"*/mbsyncstate.journal/*" !"*/mbsyncstate.new" !"*/mbsyncstate.new/*" !"*/mbsyncstate.lock" !"*/mbsyncstate.lock/*"'
 readonly CONFIG_FILE="${RUNTIME_DIR}/mbsyncrc"
 readonly CERT_FILE="${RUNTIME_DIR}/bridge-cert.pem"
 # Liveness heartbeat for healthcheck.sh, touched around every sync attempt
@@ -243,10 +255,14 @@ render_mbsync_config() {
     local imap_connect="Tunnel \"exec socat - TCP:${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}\""
 
     # Only the named variables are substituted. BRIDGE_PASS is never one:
-    # mbsyncrc's PassCmd reads it from the Docker secret.
+    # mbsyncrc's PassCmd reads it from the Docker secret. The two Patterns
+    # exclusion sets come from their constants above, whatever the
+    # environment holds under the substituted names.
     # shellcheck disable=SC2016 # the list names variables for envsubst
     MBSYNC_IMAP_HOST="$imap_host" MBSYNC_IMAP_CONNECT="$imap_connect" \
-        envsubst '${MBSYNC_IMAP_HOST} ${MBSYNC_IMAP_CONNECT} ${BRIDGE_USER}' \
+        MBSYNC_PROVIDER_EXCLUSIONS="$PROTON_FOLDER_EXCLUSIONS" \
+        MBSYNC_LAYOUT_EXCLUSIONS="$ISYNC_LAYOUT_EXCLUSIONS" \
+        envsubst '${MBSYNC_IMAP_HOST} ${MBSYNC_IMAP_CONNECT} ${BRIDGE_USER} ${MBSYNC_PROVIDER_EXCLUSIONS} ${MBSYNC_LAYOUT_EXCLUSIONS}' \
         <"$TEMPLATE_FILE" >"$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" # protect the file because it contains credentials
 }
@@ -801,7 +817,8 @@ record_successful_sync() {
 # =============================================================================
 # Generate mbsync config from template (render_mbsync_config): the Bridge
 # app's endpoint from BRIDGE_HOST, BRIDGE_IMAP_PORT and BRIDGE_CERT_HOST, and
-# BRIDGE_USER, all set in docker-compose.yml / .env.
+# BRIDGE_USER, all set in docker-compose.yml / .env, plus the two Patterns
+# exclusion sets (PROTON_FOLDER_EXCLUSIONS, ISYNC_LAYOUT_EXCLUSIONS).
 # BRIDGE_PASS is NOT passed as an env var — mbsyncrc uses PassCmd to read
 # it directly from the Docker secret at /run/secrets/bridge_pass.
 # =============================================================================

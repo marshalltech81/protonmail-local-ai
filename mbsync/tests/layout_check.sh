@@ -6,7 +6,8 @@ set -Eeuo pipefail
 # stores; no IMAP server is contacted.
 #
 # The near side is mbsyncrc.template's own MaildirStore and Channel,
-# unchanged. Only the far side is replaced: the template's IMAP store
+# unchanged, with the Patterns exclusions the entrypoint substitutes
+# (#1481). Only the far side is replaced: the template's IMAP store
 # becomes a Maildir store at /far with SubFolders Legacy, which can hold
 # every folder name used here as its own directory, standing in for
 # Bridge. Each layout case (1-4) delivers synthetic messages, syncs,
@@ -79,11 +80,35 @@ fail() {
     FAILURES=$((FAILURES + 1))
 }
 
+# One of the entrypoint's `readonly NAME='...'` constants, printed.
+entrypoint_constant() {
+    local line
+    line="$(grep -E "^readonly ${1}='[^']*'\$" "$MBSYNC_DIR/entrypoint.sh")" || true
+    if [[ -z "$line" ]]; then
+        printf 'cannot find readonly %s in %s\n' "$1" "$MBSYNC_DIR/entrypoint.sh" >&2
+        exit 1
+    fi
+    line="${line#*=\'}"
+    printf '%s' "${line%\'}"
+}
+
 # The template with its IMAP account dropped and its far store replaced
 # by a Maildir store. Everything else, the near store and the Channel
-# included, is copied as it is.
+# included, is copied as it is, with the two Patterns exclusion sets
+# substituted from the entrypoint's constants as render_mbsync_config
+# does.
 render_config() {
-    awk '
+    local provider layout
+    provider="$(entrypoint_constant PROTON_FOLDER_EXCLUSIONS)"
+    layout="$(entrypoint_constant ISYNC_LAYOUT_EXCLUSIONS)"
+    PROVIDER="$provider" LAYOUT="$layout" awk '
+        function put(placeholder, value,    i) {
+            while ((i = index($0, placeholder)) > 0) {
+                $0 = substr($0, 1, i - 1) value substr($0, i + length(placeholder))
+            }
+        }
+        { put("${MBSYNC_PROVIDER_EXCLUSIONS}", ENVIRON["PROVIDER"]) }
+        { put("${MBSYNC_LAYOUT_EXCLUSIONS}", ENVIRON["LAYOUT"]) }
         /^IMAPAccount / { skip = 1 }
         /^IMAPStore protonmail-remote$/ {
             print "MaildirStore protonmail-remote"
@@ -97,6 +122,11 @@ render_config() {
         !skip { print }
     ' "$MBSYNC_DIR/mbsyncrc.template" >"$WORK/mbsyncrc"
     chmod 644 "$WORK/mbsyncrc"
+    # The same Patterns line the entrypoint renders (mbsyncrc.golden).
+    if [[ "$(grep '^Patterns ' "$WORK/mbsyncrc")" != "$(grep '^Patterns ' "$MBSYNC_DIR/tests/mbsyncrc.golden")" ]]; then
+        printf 'the rendered Patterns line differs from mbsync/tests/mbsyncrc.golden\n' >&2
+        exit 1
+    fi
 }
 
 # legacy_path NAME: a folder's directory in a SubFolders Legacy store,

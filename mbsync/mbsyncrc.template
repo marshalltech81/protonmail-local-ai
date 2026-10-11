@@ -88,7 +88,7 @@ SubFolders Legacy
 Channel protonmail
 Far :protonmail-remote:
 Near :protonmail-local:
-Patterns * !"All Mail" !"Labels/*" !"Starred" !"*/uidvalidity" !"*/uidvalidity/*" !"*/isyncuidmap.db" !"*/isyncuidmap.db/*" !"*/mbsyncstate" !"*/mbsyncstate/*" !"*/mbsyncstate.journal" !"*/mbsyncstate.journal/*" !"*/mbsyncstate.new" !"*/mbsyncstate.new/*" !"*/mbsyncstate.lock" !"*/mbsyncstate.lock/*"
+Patterns * ${MBSYNC_PROVIDER_EXCLUSIONS} ${MBSYNC_LAYOUT_EXCLUSIONS}
 Create Near
 SyncState *
 Sync Pull

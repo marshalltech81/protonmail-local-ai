@@ -41,6 +41,20 @@ load() {
     load_from "$ENTRYPOINT" "$@"
 }
 
+# Define the named constants as the entrypoint writes them, each on one
+# `readonly NAME='...'` line, without readonly so a case can redefine one.
+load_constants() {
+    local name line
+    for name in "$@"; do
+        line="$(grep -E "^readonly ${name}='[^']*'\$" "$ENTRYPOINT")" || true
+        if [[ -z "$line" ]]; then
+            printf 'cannot find readonly %s in %s\n' "$name" "$ENTRYPOINT" >&2
+            exit 1
+        fi
+        eval "${line#readonly }"
+    done
+}
+
 # Runs each case in a subshell outside any condition, so errexit stays on
 # inside it. Bash 3.2 (macOS /bin/bash) does not apply errexit to a failed
 # [[ ]] or (( )), so every such assertion ends in `|| return 1`; otherwise
@@ -1571,6 +1585,7 @@ endpoint_setup() {
     BRIDGE_CERT_HOST="127.0.0.1"
     BRIDGE_CERT_FINGERPRINT="$FP_OLD"
     export BRIDGE_USER="synthetic@example.com"
+    load_constants PROTON_FOLDER_EXCLUSIONS ISYNC_LAYOUT_EXCLUSIONS
     load expected_fingerprint validate_bridge_endpoint render_mbsync_config
 }
 
@@ -2139,7 +2154,7 @@ one_line_template_changes_fail_the_golden() {
         fi
     done <<'EOF'
 s/^Expunge None$/Expunge Both/
-s/ !"Starred"//
+s/ \${MBSYNC_PROVIDER_EXCLUSIONS}//
 s/^CopyArrivalDate yes$/CopyArrivalDate no/
 s/^Sync Pull$/Sync Pull /
 s/^# Remote store/#  Remote store/
@@ -2182,6 +2197,90 @@ check "one-line template changes fail the golden comparison" \
     one_line_template_changes_fail_the_golden
 check "the rendered config varies only in the substituted values" \
     rendered_config_varies_only_in_the_substituted_values
+
+# --- each Patterns exclusion set has its own source (#1481) ----------------
+#
+# PLAN.md decision 45: Proton's virtual folders are provider policy, the
+# child names isync keeps for its own files are transport. Each set is a
+# named constant in the entrypoint, substituted into its own placeholder
+# on the template's Patterns line; the golden case above pins the result.
+
+# shellcheck disable=SC2016 # the template's placeholders, not expansions
+PATTERNS_TEMPLATE_LINE='Patterns * ${MBSYNC_PROVIDER_EXCLUSIONS} ${MBSYNC_LAYOUT_EXCLUSIONS}'
+readonly PATTERNS_TEMPLATE_LINE
+
+# The template's only Patterns line is the two placeholders, and no other
+# setting holds an exclusion of its own.
+template_patterns_line_is_the_two_placeholders() {
+    [[ "$(grep -c '^Patterns' "$TEMPLATE")" == 1 ]] || return 1
+    grep -qxF "$PATTERNS_TEMPLATE_LINE" "$TEMPLATE" || return 1
+    if grep -v '^#' "$TEMPLATE" | grep -qF '!"'; then
+        echo "the template holds an exclusion outside the two constants"
+        return 1
+    fi
+}
+
+# Proton's set is exactly the three virtual folders (AGENTS.md); the
+# transport set names only isync's own files, each with everything
+# below it, in the order the golden file holds.
+each_exclusion_set_holds_only_its_owners_patterns() {
+    local name expected=""
+    load_constants PROTON_FOLDER_EXCLUSIONS ISYNC_LAYOUT_EXCLUSIONS
+    [[ "$PROTON_FOLDER_EXCLUSIONS" == '!"All Mail" !"Labels/*" !"Starred"' ]] || return 1
+    for name in uidvalidity isyncuidmap.db mbsyncstate mbsyncstate.journal mbsyncstate.new \
+        mbsyncstate.lock; do
+        expected+="${expected:+ }!\"*/${name}\" !\"*/${name}/*\""
+    done
+    [[ "$ISYNC_LAYOUT_EXCLUSIONS" == "$expected" ]] || return 1
+}
+
+# Changing one constant changes only its part of the Patterns line, and
+# dropping Starred from Proton's set fails the golden comparison.
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+each_exclusion_set_reaches_patterns_from_its_own_constant() {
+    local proton layout expected
+    endpoint_setup sources-proton
+    layout="$ISYNC_LAYOUT_EXCLUSIONS"
+    PROTON_FOLDER_EXCLUSIONS='!"synthetic-provider-marker"'
+    render_mbsync_config
+    expected="$(grep -v '^Patterns ' "$GOLDEN")"
+    [[ "$(grep -v '^Patterns ' "$CONFIG_FILE")" == "$expected" ]] || return 1
+    grep -qxF "Patterns * !\"synthetic-provider-marker\" $layout" "$CONFIG_FILE" || return 1
+
+    endpoint_setup sources-layout
+    proton="$PROTON_FOLDER_EXCLUSIONS"
+    ISYNC_LAYOUT_EXCLUSIONS='!"*/synthetic-transport-marker"'
+    render_mbsync_config
+    [[ "$(grep -v '^Patterns ' "$CONFIG_FILE")" == "$expected" ]] || return 1
+    grep -qxF "Patterns * $proton !\"*/synthetic-transport-marker\"" "$CONFIG_FILE" || return 1
+
+    endpoint_setup sources-starred
+    PROTON_FOLDER_EXCLUSIONS='!"All Mail" !"Labels/*"'
+    render_mbsync_config
+    if cmp -s "$CONFIG_FILE" "$GOLDEN"; then
+        echo "dropping Starred from Proton's set did not change the config"
+        return 1
+    fi
+}
+
+# Neither set is configuration: the substituted names in the environment
+# change nothing.
+exclusions_ignore_the_environment() {
+    export MBSYNC_PROVIDER_EXCLUSIONS='!"synthetic-env-marker"'
+    export MBSYNC_LAYOUT_EXCLUSIONS='!"synthetic-env-marker"'
+    if ! renders_the_golden "$TEMPLATE" environment; then
+        diff "$GOLDEN" "$CONFIG_FILE" || true
+        return 1
+    fi
+}
+
+check "the template's Patterns line is the two exclusion placeholders" \
+    template_patterns_line_is_the_two_placeholders
+check "each exclusion set holds only its owner's patterns" \
+    each_exclusion_set_holds_only_its_owners_patterns
+check "each exclusion set reaches Patterns from its own constant" \
+    each_exclusion_set_reaches_patterns_from_its_own_constant
+check "the exclusion sets ignore the environment" exclusions_ignore_the_environment
 
 # The startup order, from the whole entrypoint run on the host: a copy
 # whose fixed paths (/tmp/mbsync, the template, /run/secrets, /state,
