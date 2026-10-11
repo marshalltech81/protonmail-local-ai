@@ -1,12 +1,11 @@
 """Tests for src/main.py.
 
-Covers the watchdog-facing behaviors that cannot be verified by
-``database`` or ``threader`` tests alone: that ``on_moved`` indexes the
-destination of a Maildir rename (standard delivery path), that
-``initial_index`` refreshes the health file periodically so long scans
-do not exceed ``HEALTH_MAX_AGE_SECONDS``, and that the startup probe
-validates the running embedding model's output dimension against the
-schema-reserved vector dimension.
+Covers the indexer's orchestration: the watchdog handler (``on_moved``
+and Maildir renames), the startup scan and batched queue drain, the
+health file, embed-failure attribution, the startup checks
+(configuration, embedder width and identity), extraction re-queue
+sweeps, deletion reconciliation wiring, and keeping mail text out of
+logs and ``last_error``.
 
 ``main`` orchestrates watchdog, the embedding service, and filesystem I/O; these tests
 exercise it with stub collaborators rather than booting a live indexer.
@@ -200,9 +199,10 @@ def _write_eml_with_text_attachment(
 class TestReadEmbedApiKey:
     """Coverage for ``main._read_embed_api_key``.
 
-    The Docker secret path takes precedence over the env var; when the
-    secret file is unreadable the function falls back to env rather
-    than crashing the indexer at import time.
+    The Docker secret path takes precedence over the env var, which is
+    read only when the secret file is absent; a secret file that exists
+    but cannot be read raises, so the indexer fails closed instead of
+    falling back to env.
     """
 
     def test_returns_secret_file_contents_stripped(self, tmp_path, monkeypatch):
@@ -525,9 +525,8 @@ class TestOnMovedIndexesDestination:
     def test_flag_rename_moves_filepath_without_reindexing(self, tmp_path):
         """Maildir flag changes land as on_moved(src=old_name, dest=new_name)
         where both live in the same ``cur/`` directory and the source path
-        is already indexed. The prior on_moved fix re-indexed the new path
-        because ``is_indexed(dest)`` was False (indexed_files still held
-        the old name). Now we must detect the rename, skip the re-embed,
+        is already indexed. Because ``is_indexed(dest)`` is False for the
+        new name, the handler must detect the rename, skip the re-embed,
         and move the stored filepath forward."""
         db_path = tmp_path / "db" / "mail.db"
         db = Database(db_path)
@@ -947,7 +946,7 @@ class TestDrainQueueRetryAndDeadLetter:
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_permission_deferral_is_told_apart_from_a_permission_retry(self, tmp_path, monkeypatch):
-        """Codex round 2 on #904: a deferral and a retry of the same
+        """#904: a deferral and a retry of the same
         unreadable file both fail at the parse stage on a
         ``PermissionError``. The deferral writes the fixed deferral text,
         so the heartbeat counts only it as ``deferred_permission``; the
@@ -1102,11 +1101,12 @@ class TestDrainQueueRetryAndDeadLetter:
         # Models the mbsync flag-rename race: file existed at enqueue
         # time, then mbsync renamed it (added an IMAP flag suffix)
         # before the worker could read it. The original path is gone
-        # forever; retrying it 5 times wastes ~30 minutes of backoff
-        # before dead-lettering, and the renamed file enters the queue
-        # under its new name via a fresh IN_MOVED_TO event anyway.
-        # ``_index_one`` must distinguish this from EACCES so the
-        # worker can drop the row instead of consuming retry budget.
+        # forever; retrying it 5 times wastes ~7.5 minutes of backoff
+        # (30+60+120+240 s at the defaults) before dead-lettering, and
+        # the renamed file enters the queue under its new name via a
+        # fresh IN_MOVED_TO event anyway. The worker must tell this
+        # apart from EACCES and drop the row (``mark_skipped``) instead
+        # of consuming retry budget.
         dest = tmp_path / "INBOX" / "cur" / "definitely-not-here.eml"
 
         db = Database(tmp_path / "mail.db")
@@ -1271,10 +1271,9 @@ class TestDrainQueueRetryAndDeadLetter:
     def test_unreadable_file_routes_to_retry_not_terminal_success(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the watchdog enqueues a
         # newly-delivered file before mbsync's post-sync chmod hook makes
-        # it readable. ``_index_one`` must surface that as a parse
-        # failure so the queue retries on backoff. The previous behavior
-        # (parse_email caught EACCES, returned None, worker treated None
-        # as terminal success) silently dropped the message.
+        # it readable. The worker must keep the job, deferring it without
+        # spending an attempt (``PERMISSION_DEFERRED_ERROR``), rather than
+        # treat the unreadable file as indexed.
         import os
 
         dest = tmp_path / "INBOX" / "new" / "msg.eml"
@@ -1302,11 +1301,9 @@ class TestValidateEmbedConfig:
     and ``EMBED_API_KEY`` must be non-empty, and ``EMBED_BASE_URL`` must
     name the endpoint: a URL, or ``default`` for the SDK default (#750).
 
-    Pre-tightening, ``EMBED_API_KEY`` could be empty and the indexer
-    would happily start, only failing at the first embed call against
-    a remote provider with a 401. Now empty keys fail closed at startup
-    so a missing secret surfaces in the same place as a missing
-    ``EMBED_MODEL``.
+    An empty ``EMBED_API_KEY`` fails closed at startup, so a missing
+    secret surfaces in the same place as a missing ``EMBED_MODEL``
+    instead of as a 401 at the first embed call.
     """
 
     def test_complete_config_passes_silently(self, monkeypatch):
@@ -1336,7 +1333,7 @@ class TestValidateEmbedConfig:
     @pytest.mark.parametrize("value", ["default", " Default ", "DEFAULT"])
     def test_default_selects_the_official_endpoint(self, monkeypatch, value):
         # ``default`` is pinned to OpenAI's own URL, so the SDK's
-        # ``OPENAI_BASE_URL`` cannot redirect it (Codex round 1 on #773).
+        # ``OPENAI_BASE_URL`` cannot redirect it (#773).
         monkeypatch.setenv("OPENAI_BASE_URL", "https://ambient.example/v1")
         monkeypatch.setattr(main, "EMBED_BASE_URL", value)
         monkeypatch.setattr(main, "EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
@@ -1360,7 +1357,7 @@ class TestValidateEmbedConfig:
             main._validate_embed_config()
 
     def test_whitespace_only_model_raises(self, monkeypatch):
-        """Codex round 2 on #773: the contract is non-empty after
+        """#773: the contract is non-empty after
         trimming, so blank space is as missing as an empty value."""
         monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
         monkeypatch.setattr(main, "EMBED_MODEL", "   ")
@@ -1565,9 +1562,9 @@ class TestStartupWidthCheck:
 
 
 class TestIndexOneFileChunking:
-    """End-to-end of the schema-v9 chunker integration through the
-    real ``_index_one`` path — chunker is invoked for each new
-    message, every new chunk gets an embed call, chunks land in the
+    """End-to-end of the chunker through the batched pipeline (via the
+    ``_index_one`` helper) — chunker is invoked for each new
+    message, every new chunk is embedded, chunks land in the
     three chunk tables, and the thread vector is the mean of those
     chunk vectors rather than a single embed of the merged body.
     """
@@ -1579,10 +1576,10 @@ class TestIndexOneFileChunking:
         threader = Threader(db)
 
         # A multi-paragraph body so the chunker emits at least one
-        # chunk; defaults are tuned to ~350 token target so a short
-        # body fits in one chunk, exercising the "single chunk per
-        # message" path that nonetheless writes through the chunk
-        # tables and drives the mean-vector computation.
+        # chunk; the default target (``INDEXER_CHUNK_TARGET_TOKENS``,
+        # 1000) fits a short body in one chunk, exercising the "single
+        # chunk per message" path that nonetheless writes through the
+        # chunk tables and drives the mean-vector computation.
         body = "Paragraph one with some content.\n\nParagraph two follows.\n"
         dest = tmp_path / "INBOX" / "cur" / "msg.eml"
         dest.parent.mkdir(parents=True)
@@ -1831,7 +1828,7 @@ class TestInterruptedMessagesDeadLetter:
         assert _chunk_ids(db, "healthy@example.com")
 
     def test_crash_from_batch_memory_retries_the_row_alone(self, tmp_path, monkeypatch):
-        """Review round 1: an out-of-memory kill at row N can come from
+        """An out-of-memory kill at row N can come from
         the whole batch's footprint, and a restart replays the same batch
         in the same order. The interrupted row runs alone next, so a
         message that is fine on its own is indexed, not dead-lettered."""
@@ -1897,7 +1894,7 @@ class TestInterruptedMessagesDeadLetter:
 
 
 class TestInterruptedEmbedPhase:
-    """Review round 2: a kill during the bulk embed or the vector commit
+    """A kill during the bulk embed or the vector commit
     (Phase 2b / 2c) happened after every per-message charge was refunded,
     so the restart rebuilt the same batch and could crash forever."""
 
@@ -1953,7 +1950,7 @@ class TestInterruptedEmbedPhase:
 
 
 class TestStallGuardProgress:
-    """Review round 2: the limit bounded a whole message, so several
+    """The limit bounded a whole message, so several
     legitimately slow scanned PDFs in one message exceeded it on every
     restart. Each attachment now counts as progress."""
 
@@ -1974,7 +1971,7 @@ class TestStallGuardProgress:
         return progress
 
     def test_each_embed_sub_batch_counts_as_progress(self, tmp_path, monkeypatch):
-        """Review round 3: a lone survivor stays charged, and so watched,
+        """A lone survivor stays charged, and so watched,
         through the bulk embed. A large message's many individually
         bounded embed requests must each restart the clock, or a healthy
         message on a slow embedder is killed after the limit."""
@@ -2090,7 +2087,7 @@ class TestStallGuardProgress:
 
 
 class TestHostPressureEscapesPhase2a:
-    """#707 review round 1: the PDF extractor and the dispatcher re-raise
+    """#707: the PDF extractor and the dispatcher re-raise
     ``MemoryError`` / ``RecursionError``, but Phase 2a's ``except
     Exception`` turned them into a ``chunk`` failure, spending the
     message's attempt as an ordinary error. They must escape the step
@@ -2335,7 +2332,8 @@ class TestReprocessKeepsFirstDate:
         threader = Threader(db)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         _set_parser_clock(monkeypatch, self._FIRST)
-        # One file at a time: the Maildir walk order is filesystem order.
+        # One file at a time, so the root is indexed before the reply
+        # whatever order the initial scan would queue them in.
         self._index(db, threader, root)
         self._index(db, threader, reply)
         assert db.find_thread_by_message_id("reply@example.com") == "root@example.com"
@@ -2442,14 +2440,12 @@ class TestBatchedInitialIndex:
     def _run(self, db, embedder, threader, queue, monkeypatch, maildir):
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
-        # Pin the initial-scan arrival order to filename order. Production
-        # iterates in raw ``rglob`` order, which is filesystem-dependent
-        # (creation order on APFS, hash order on ext4). Several tests in
-        # this class assert in-batch threading behavior that only holds
-        # when a root message is enqueued before its reply, so an
-        # unsorted walk makes them pass locally and fail on CI. Sorting
-        # here keeps those tests deterministic without pretending
-        # production guarantees an order it does not.
+        # Pin the walk to path order. Production's initial scan queues
+        # oldest first by message time and breaks ties by path
+        # (``_enqueue_unindexed_messages``); several tests in this class
+        # assert in-batch threading that holds only when a root is
+        # enqueued before its reply, so the sorted walk keeps those
+        # same-date fixtures in a fixed order.
         monkeypatch.setattr(
             main,
             "_iter_maildir_messages",
@@ -2515,12 +2511,15 @@ class TestBatchedInitialIndex:
         assert _chunk_ids(db, "ok1@example.com")
         assert _chunk_ids(db, "ok2@example.com")
 
-    def test_phase2_embed_failure_leaves_phase1_state_and_requeues(self, tmp_path, monkeypatch):
-        # When the bulk embed call fails, every message in the batch
-        # has Phase 1 commits (thread + map + indexed_files with a
-        # placeholder zero-vector) but no chunks/vectors. The queue
-        # rows go back to 'queued' (via mark_failed) so the next pass
-        # retries Phase 2.
+    def test_phase2_embed_failure_leaves_phase1_state_and_charges_attempts(
+        self, tmp_path, monkeypatch
+    ):
+        # When the bulk embed call fails while the health probe still
+        # passes (only ``embed_batch`` raises; ``embed`` answers), every
+        # message in the batch keeps its Phase 1 commits (thread + map +
+        # indexed_files with a placeholder zero-vector) but no
+        # chunks/vectors, and is charged an attempt (``mark_failed``) so
+        # a later pass retries Phase 2.
         maildir, inbox, db, threader = self._setup(tmp_path)
         for i in range(3):
             _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
@@ -2536,9 +2535,9 @@ class TestBatchedInitialIndex:
         # Phase 2 never wrote chunks, so search-by-chunks misses these.
         for i in range(3):
             assert not _chunk_ids(db, f"m{i}@example.com")
-        # Queue rows are marked failed (advancing attempts), eligible for
-        # retry on the next pass. With max_attempts=3 and the embed
-        # always failing, they end up dead-lettered after retries.
+        # Each pass charges an attempt because the probe passes (an
+        # outage, where the probe fails too, defers without charging).
+        # With max_attempts=3 they end up dead-lettered.
         stats = queue.stats()
         # All 3 messages exhausted retries (3 attempts each) → dead.
         assert stats["dead"] == 3
@@ -3748,7 +3747,7 @@ class TestInotifyOverflow:
     def test_held_stamp_follows_arrival_order_across_a_clock_rollback(
         self, tmp_path, db, monkeypatch
     ):
-        """Codex round 2 on #1199: watchdog dispatches stamps in sync
+        """#1199: watchdog dispatches stamps in sync
         order, so the last one handled is the newest sync even when the
         clock rolled back between two syncs and its time sorts earlier."""
         maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
@@ -3790,7 +3789,7 @@ class TestInotifyOverflow:
     def test_an_ordinary_periodic_rescan_leaves_the_overflow_owed(
         self, tmp_path, db, monkeypatch, caplog
     ):
-        """Codex round 3 on #1199: only the overflow recovery, which
+        """#1199: only the overflow recovery, which
         forces a watch re-schedule before its walk, clears the debt; the
         ordinary rescan re-schedules nothing."""
         caplog.set_level(logging.INFO)
@@ -3815,7 +3814,7 @@ class TestInotifyOverflow:
         )
 
     def test_initial_walk_leaves_an_earlier_overflow_owed(self, tmp_path, db, monkeypatch, caplog):
-        """Codex round 3 on #1199: the watcher starts before the initial
+        """#1199: the watcher starts before the initial
         walk, so an overflow can land first. The walk queues the files on
         disk but re-schedules no watch, so the recovery stays owed until
         the main loop's forced re-schedule and walk."""
@@ -4248,7 +4247,7 @@ class TestRequeueStaleExtractions:
         assert main._requeue_stale_extractions(db, queue) == 0
 
     def test_ocr_rows_are_not_requeued_while_ocr_is_off(self, tmp_path, monkeypatch):
-        # Review round 1 on #262: the refresh would hit the OCR-disabled
+        # #262: the refresh would hit the OCR-disabled
         # gate and replace the indexed OCR text with nothing, and every
         # restart would re-queue the same messages.
         maildir = tmp_path / "maildir"
@@ -4522,7 +4521,7 @@ class TestRequeueOcrDisabledExtractions:
         """#871: during the initial index (``summary_every``), each timing
         summary is followed by the attachments line. Attachments skipped
         while OCR is off are missing from search, so the line is a
-        WARNING (review round 1). Counts only: no filename."""
+        WARNING. Counts only: no filename."""
         from src import attachment_indexing
 
         caplog.set_level("INFO")
@@ -4548,7 +4547,7 @@ class TestRequeueOcrDisabledExtractions:
     def test_steady_state_drain_leaves_the_summary_to_its_caller(
         self, tmp_path, monkeypatch, caplog
     ):
-        """Review round 1: without ``summary_every`` (the steady-state
+        """Without ``summary_every`` (the steady-state
         loop) the drain itself logs no summary; the loop flushes it
         (``_steady_state_summary_due``)."""
         from src import attachment_indexing
@@ -4598,7 +4597,7 @@ class TestRequeueOcrDisabledExtractions:
 
 
 class TestRequeueNewlyDispatchedExtensions:
-    """#691 review round 1: an attachment whose only routing hint is its
+    """#691: an attachment whose only routing hint is its
     filename extension (a ``.heic`` sent as ``application/octet-stream``)
     was cached ``unsupported`` with no extractor before that extension
     dispatched. The row carries no extractor version, so the ``image``
@@ -5377,7 +5376,7 @@ class TestEnqueueUnindexedMessages:
     def test_mail_delivered_during_the_scan_is_queued_after_the_backlog(
         self, tmp_path, monkeypatch
     ):
-        """Codex round 1 on #754: the watcher runs during the initial
+        """#754: the watcher runs during the initial
         scan, so mail delivered while it reads headers is queued at once.
         The backlog is due at each message's own time, so it is still
         handed out first."""
@@ -5423,7 +5422,7 @@ class TestEnqueueUnindexedMessages:
         assert self._claim_order(db, queue) == ["old", "mid"]
 
     def test_rows_queued_before_this_order_existed_are_redated(self, tmp_path, monkeypatch):
-        """Codex round 2 on #754: an upgrade can leave initial-scan rows
+        """#754: an upgrade can leave initial-scan rows
         queued by the old walk order, due at their enqueue time. The
         oldest-first walk re-dates every untried queued row to its
         message time, so an old parent queued that way still goes
@@ -6013,7 +6012,7 @@ class TestLateFolderWatches:
         reason="the EACCES gap is inotify-specific, and root can enter a 000 directory",
     )
     def test_folder_deleted_and_recreated_is_watched_again(self, tmp_path, db, monkeypatch):
-        """Review round 2, against the real inotify observer: removing a
+        """Against the real inotify observer: removing a
         watched folder drops its watch, and mbsync recreates it 0700, so
         watchdog cannot watch the replacement, whose inode number may be
         the old one's."""
@@ -6460,7 +6459,7 @@ class TestMainStartupAndLoop:
         assert row["sync_completed_at"] == STAMP.completed_at
 
     def test_periodic_rescan_runs_the_rename_sweep_before_its_walk(self, tmp_path, monkeypatch):
-        """Codex round 3 on #1134: in archive mode only the startup and
+        """#1134: in archive mode only the startup and
         folder-recovery sweeps remapped a message whose file went to a
         byte-identical copy (#1102); the periodic rescan walked without
         one, and its walk skips the copy, which is marked indexed."""
@@ -6498,7 +6497,7 @@ class TestMainStartupAndLoop:
         assert "recovered from 1 inotify queue overflow(s)" in caplog.text
 
     def test_overflow_recovery_forces_a_watch_reschedule(self, tmp_path, monkeypatch):
-        """Codex round 2 on #1199: an overflow can drop a directory's
+        """#1199: an overflow can drop a directory's
         delete and create events, and a recreated directory can reuse its
         inode, so the refresh's own walk cannot see it. The recovery
         forces the re-schedule, as a directory-create event does."""
@@ -6518,7 +6517,7 @@ class TestMainStartupAndLoop:
         assert forced == [True]
 
     def test_overflow_recovery_refreshes_the_watch_before_its_walk(self, tmp_path, monkeypatch):
-        """Codex round 1 on #1199: an overflow can drop a directory's
+        """#1199: an overflow can drop a directory's
         create event, and watchdog then never watches it. The watch
         refresh finds the directory; it runs before the walk, so the
         walk that lowers the fence covers the re-schedule gap too."""
@@ -6532,7 +6531,7 @@ class TestMainStartupAndLoop:
         assert len(refreshes) == 1 and refreshes[0] < walk
 
     def test_failed_watch_refresh_leaves_the_overflow_owed(self, tmp_path, monkeypatch, caplog):
-        """Codex round 3 on #1199: the walk clears the debt only after a
+        """#1199: the walk clears the debt only after a
         successful forced re-schedule; a refresh that fails is retried
         with the walk after the interval."""
 
@@ -6552,7 +6551,7 @@ class TestMainStartupAndLoop:
         assert "Maildir watch refresh failed: OSError" in caplog.text
 
     def test_a_new_overflow_after_a_recovery_is_walked_at_once(self, tmp_path, monkeypatch):
-        """Codex round 1 on #1199: the retry interval limits retries
+        """#1199: the retry interval limits retries
         within one recovery, not the first walk of the next one."""
         monkeypatch.setattr(main, "OVERFLOW_RESCAN_RETRY_SECS", 3600)
         beats: list[int] = []
@@ -6720,7 +6719,7 @@ class TestMainStartupAndLoop:
         assert "observer_dead" not in events
 
     def test_main_publishes_the_observer_to_the_heartbeat(self, tmp_path, monkeypatch):
-        """Review round 1: the check lives in ``touch_health_file`` so the
+        """The check lives in ``touch_health_file`` so the
         initial drain is covered too; ``main`` must hand it the observer."""
         observers: list[_FakeObserver] = []
 
@@ -6737,7 +6736,7 @@ class TestMainStartupAndLoop:
         assert "refresh:True" in self._run_main(tmp_path, monkeypatch, sweep_due=False, synced=True)
 
     def test_recovery_sweep_also_rewatches_folders(self, tmp_path, monkeypatch):
-        """Review round 1: a failed sync attempt still opens the folders
+        """A failed sync attempt still opens the folders
         it created but writes no stamp, and a failed re-schedule leaves
         no watch until the next refresh. The sweep cadence bounds both."""
         monkeypatch.setenv("INDEXER_DELETION_ENABLED", "true")
@@ -6792,7 +6791,7 @@ class TestMainStartupAndLoop:
 
 
 class TestWatcherDeathHeartbeat:
-    """Review round 1 of #870: the watcher can die during the initial
+    """#870: the watcher can die during the initial
     drain, hours before the main loop starts, while ``initial_index``
     keeps the health file fresh after every message. The check rides on
     every heartbeat, so the guarantee holds from ``observer.start()``
@@ -7241,7 +7240,7 @@ class TestEmbedFailureHandling:
     def test_batch_with_nothing_to_embed_does_not_close_the_breaker(
         self, tmp_path, monkeypatch, caplog
     ):
-        """Codex round 2 on #904: a due batch of already-indexed,
+        """#904: a due batch of already-indexed,
         unchanged messages sends no embed request, so it proves nothing
         about the provider. It must neither log the recovery line nor
         reset the breaker; only a successful embed request does."""
@@ -7424,9 +7423,7 @@ class TestEmbedFailureHandling:
         assert _chunk_ids(db, "a@example.com")
         assert _chunk_ids(db, "b@example.com")
 
-    def test_rejected_batch_still_splits_after_the_rate_limit_change(
-        self, tmp_path, monkeypatch, caplog
-    ):
+    def test_rejected_batch_still_splits(self, tmp_path, monkeypatch, caplog):
         """A 400-class rejection can be one input's fault: the batch is
         still split to isolate it."""
         caplog.set_level(logging.INFO)
@@ -8110,8 +8107,8 @@ class TestMessageRecordsEndToEnd:
         ("raw_utf8_domain", "To: <user@exämple.com>", {("to", "user@exämple.com", None)}),
         ("no_recipients", "", set()),
         # Strict parsing rejects this CVE-2023-27043-style ambiguous input,
-        # and no lenient parser second-guesses it: nothing is recorded, as
-        # on base. The message itself still indexes.
+        # and no lenient parser second-guesses it: nothing is recorded.
+        # The message itself still indexes.
         ("crafted_ambiguous", "To: alice@example.org)<bob@example.org>", set()),
         (
             "blank_elements_in_group",
@@ -8147,9 +8144,9 @@ class TestMessageRecordsEndToEnd:
             "To: =?utf-8?q?Zo=C3=AB?= =?utf-8?q?_Ng?= <zoe@example.com>",
             {("to", "zoe@example.com", "Zoë Ng")},
         ),
-        # Strict parsing rejects deeply nested unmatched comments; the
-        # lenient fallback recurses past Python's limit on them. That must
-        # cost only the (unparseable) recipients, never the message.
+        # Deeply nested unmatched comments can make ``parseaddr`` raise
+        # ``RecursionError``. That must cost only the (unparseable)
+        # recipients, never the message.
         (
             "unmatched_parens_to",
             "To: bob@example.com " + "\r\n ".join(["(" * 60] * 20),
@@ -8292,7 +8289,7 @@ class TestMessageRecordsEndToEnd:
         assert not any("(" in addr for _role, addr, _name in participants)
 
     @pytest.mark.serial
-    def test_group_syntax_inside_encoded_words_parses_in_linear_time(self, tmp_path):
+    def test_group_syntax_inside_encoded_words_parses_within_the_time_bound(self, tmp_path):
         """Group syntax carried inside encoded-words drove the standard
         library's group parser quadratic via the From header (3.1 s at
         200 KB)."""
@@ -8319,7 +8316,7 @@ class TestMessageRecordsEndToEnd:
         assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
 
     @pytest.mark.serial
-    def test_rejected_huge_group_header_parses_in_linear_time(self, tmp_path):
+    def test_rejected_huge_group_header_parses_within_the_time_bound(self, tmp_path):
         """A header strict parsing rejects must not fall through to work that
         grows quadratically with its size: a 600 KB ``)Group: ...;`` header
         took ~2 s through a lenient re-parse (the worker is synchronous)."""
@@ -8347,7 +8344,7 @@ class TestMessageRecordsEndToEnd:
         assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
 
     @pytest.mark.serial
-    def test_malformed_encoded_prefixes_parse_in_linear_time(self, tmp_path):
+    def test_malformed_encoded_prefixes_parse_within_the_time_bound(self, tmp_path):
         """Thousands of unfinished ``=?utf-8?q?`` prefixes in one name must
         not trigger a quadratic re-scan (the worker is synchronous, so a
         slow parse stalls every queued message behind it)."""
@@ -8506,7 +8503,7 @@ class TestMessageRecordsEndToEnd:
         assert marker not in caplog.text
 
     def test_archive_mode_mass_restore_logs_are_rate_limited(self, tmp_path, monkeypatch, caplog):
-        """Review round 1 on #860: an operator restoring a whole folder of
+        """#860: an operator restoring a whole folder of
         messages that still carry mirror-mode tombstones fires one rename
         event each. The recovery line shares the indexer's per-window
         line budget, so a mass restore logs at most the budget and the
@@ -8726,7 +8723,7 @@ class TestBatchSharesExtraction:
 
     @pytest.mark.parametrize("order", [("a.txt", "a.html"), ("a.html", "a.txt")])
     def test_one_payload_under_two_extractors_keeps_both_texts(self, tmp_path, monkeypatch, order):
-        """#928 review round 1: the same bytes under labels that run
+        """#928: the same bytes under labels that run
         different extractors (text and HTML) give two texts, which share
         the message's chunk slice for the payload. Both stay searchable,
         whatever the attachment order, and a re-index embeds nothing new."""
@@ -8814,7 +8811,7 @@ class TestBatchSharesExtraction:
         assert len(self._attachment_chunks(db)) == 1
 
     def test_no_text_copy_does_not_clear_a_filled_copy(self, tmp_path, monkeypatch):
-        """Review round 2: re-indexing a message whose ``.bin`` copy still
+        """Re-indexing a message whose ``.bin`` copy still
         reads its cached ``unsupported`` row while its ``.txt`` copy of the
         same bytes re-extracts (its own row is made a stale ``unsupported``
         one here; rows are per module since #928). The ``.bin`` plan cleared the shared chunk
@@ -8879,7 +8876,7 @@ class TestTrashedFilesWithReconciliation:
         assert not queue.has_pending_row(str(path))
 
     def test_a_tombstoned_message_keeps_its_job_until_restored(self, tmp_path, monkeypatch):
-        """Review round 1: dropping the job of an indexed message lost its
+        """Dropping the job of an indexed message lost its
         only retry. If mbsync clears the T flag before the reap, nothing
         re-queues a message whose thread already has chunks. The job is
         parked instead, moves with the rename back, and then runs."""
@@ -8935,7 +8932,7 @@ class TestTrashedFilesWithReconciliation:
         assert db.is_indexed(str(live))
 
     def test_a_parked_job_moved_without_a_tombstone_runs_at_once(self, tmp_path, monkeypatch):
-        """Review round 3: at startup ``sweep_paths`` can move a job onto a
+        """At startup ``sweep_paths`` can move a job onto a
         T path and the drain park it before any tombstone exists, so a
         restore has no tombstone to clear. Moving a parked job off the
         path makes it due whatever the tombstone state."""
@@ -9009,7 +9006,7 @@ class TestTrashedFilesWithReconciliation:
 class TestReplySubjectSearchable:
     """#303: a reply whose subject differs from the thread's (after
     Re:/Fwd: normalization) must be findable by keyword and semantic
-    search. Review round 1: stored chunks stay body-only (they are the
+    search. Stored chunks stay body-only (they are the
     authoritative body store), and the keyword path must survive a
     thread body already at its token cap."""
 
@@ -9239,7 +9236,7 @@ class TestReplySubjectSearchable:
         assert self._thread_fts_hits(db, self.TOKEN) == {"root@example.com"}
 
     def test_embed_input_stays_within_the_chunk_ceiling(self, tmp_path):
-        """Review round 2: the subject prefix must not push a chunk's
+        """The subject prefix must not push a chunk's
         embedding input past ``CHUNK_MAX_TOKENS``. A 50,000-character
         subject is cut to fit; the stored chunk stays body-only."""
         from src.chunker import estimate_tokens
@@ -9503,8 +9500,8 @@ class TestReapLeavesNoContent:
         queue = _make_queue(db)
         main.initial_index(db, embedder, threader, queue)
         if with_reply:
-            # Indexed after the root, so the walk order (filesystem
-            # dependent) cannot thread the reply on its own.
+            # Indexed in a second scan, after the root, so the reply's
+            # threading does not depend on scan order.
             _write_eml(
                 inbox / "1700000001.M2.host:2,S",
                 "survivor@example.com",
@@ -9745,7 +9742,7 @@ class TestWalMaintenance:
 
 
 class TestAttachmentSummaryCadence:
-    """Review round 1 (#871): in steady state the attachments aggregate
+    """#871: in steady state the attachments aggregate
     was flushed only every ``TIMING_LOG_EVERY`` drained messages, so a
     burst of 8 messages could sit unlogged until unrelated mail arrived.
     It is now also flushed when a drain empties the queue and after
@@ -9796,7 +9793,7 @@ class TestAttachmentSummaryCadence:
 
 
 class TestAttachmentSummaryDebounce:
-    """Review round 4 on #884 (security): the steady-state loop flushes
+    """#884: the steady-state loop flushes
     the attachments line at the end of every short drain, so mail spaced
     to arrive one message per drain produced one line per message. At
     most one line is logged per ``OUTCOMES_LOG_MIN_INTERVAL_SECS``;

@@ -285,7 +285,7 @@ class TestParseEmail:
             assert msg.date is None
 
     def test_date_overflowing_utc_is_invalid(self, tmp_path):
-        """Review round 2: a Date header whose UTC conversion passes year
+        """A Date header whose UTC conversion passes year
         9999 is treated as unparseable (an unknown send date) instead of
         failing the parse and dead-lettering the message."""
         path = tmp_path / "INBOX" / "cur" / "overflow.eml"
@@ -389,8 +389,8 @@ class TestParseEmail:
         # after the syscall), the bounded ``f.read(cap + 1)`` must still
         # raise ``OversizedMessageError`` rather than slurping an unbounded
         # file into memory. We simulate by monkey-patching ``os.fstat`` to
-        # report ``None`` (the stat-failure branch) on a file that exceeds
-        # the cap.
+        # raise ``OSError`` (the stat-failure branch) on a file that
+        # exceeds the cap.
         import os as _os
 
         import pytest
@@ -1188,7 +1188,7 @@ class TestOccurredAt:
         ids=["max-offset", "one-hour"],
     )
     def test_date_overflowing_utc_is_none(self, tmp_path, tail):
-        """Review round 2: a date that parses but whose UTC conversion
+        """A date that parses but whose UTC conversion
         passes year 9999 degrades to None instead of failing the parse."""
         path = _received_eml(tmp_path, b"Received: by mx.example.org;" + tail + b"\r\n")
         msg = parse_email(path)
@@ -1433,7 +1433,7 @@ class TestParseAddrs:
 
 
 # ---------------------------------------------------------------------------
-# _decode_header
+# MIME classification hardening
 # ---------------------------------------------------------------------------
 
 
@@ -1712,7 +1712,7 @@ class TestAttachmentBoundaries:
 
     @pytest.mark.parametrize("cte", [None, "base64"])
     def test_attached_email_past_the_cap_is_never_serialized(self, tmp_path, monkeypatch, cte):
-        """Review rounds 1, 7 and 8: past the depth cap the attached email
+        """Past the depth cap the attached email
         keeps the empty payload without its tree ever being serialized —
         including a transfer-encoded one, whose transport body the parser
         still reads as MIME. The serialization count is the enforcing
@@ -1739,7 +1739,7 @@ class TestAttachmentBoundaries:
 
     @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
     def test_transfer_encoded_attached_email_is_hashed_decoded(self, tmp_path, encoding):
-        """Review round 1: a base64 / quoted-printable message/rfc822 part
+        """A base64 / quoted-printable message/rfc822 part
         (not allowed by RFC 2046, but sent) was hashed in its transport
         form, so the same email got a different ID and size per encoding."""
         import base64
@@ -1775,7 +1775,7 @@ class TestAttachmentBoundaries:
 
     @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
     def test_attachments_inside_an_encoded_attached_email_are_found(self, tmp_path, encoding):
-        """Review round 4: traversal walked the parser's tree, where an
+        """Traversal walked the parser's tree, where an
         encoded attached email is transport text, so the PDF it carries
         was recorded under 7bit but not base64 / quoted-printable."""
         import base64
@@ -1829,7 +1829,7 @@ class TestAttachmentBoundaries:
         assert msg.attachments[0].payload == b""
 
     def test_eight_bit_disposition_does_not_abort_parsing(self, tmp_path):
-        """Review round 1: an unencoded 8-bit Content-Disposition comes back
+        """An unencoded 8-bit Content-Disposition comes back
         from the compat32 parser as a Header, which has no ``lower()``."""
         folder = tmp_path / "INBOX" / "cur"
         folder.mkdir(parents=True)
@@ -1859,7 +1859,7 @@ class TestAttachmentBoundaries:
     )
 
     def test_attached_email_as_the_root_is_an_attachment(self, tmp_path):
-        """Review round 2: compat32 reports message/rfc822 as multipart, so
+        """``compat32`` reports message/rfc822 as multipart, so
         a root attached email skipped classification and its body was
         taken as the outer message's."""
         msg = self._parse_raw(
@@ -1874,7 +1874,7 @@ class TestAttachmentBoundaries:
         assert b"INNER_MARKER" in msg.attachments[0].payload
 
     def test_multipart_root_presented_as_an_attachment_is_one(self, tmp_path):
-        """Review round 5: a multipart root with an attachment disposition
+        """A multipart root with an attachment disposition
         was exempt from classification, so the bundle went unrecorded and
         its text became the body. It is classified like a single-part
         root; the PDF inside is still found."""
@@ -1893,7 +1893,7 @@ class TestAttachmentBoundaries:
         assert b"BUNDLE_TEXT" in by_name["bundle.mime"].payload
 
     def test_attachments_inside_attachments_are_still_found(self, tmp_path):
-        """Review round 2: the old walk found a PDF inside an attached
+        """The old walk found a PDF inside an attached
         bundle or email; stopping at the boundary lost it. Text inside an
         attachment is still never the parent's body."""
         msg = self._parse_raw(
@@ -1915,7 +1915,7 @@ class TestAttachmentBoundaries:
         assert b"BUNDLE_TEXT" in by_name["bundle.mime"].payload
 
     def test_every_delivery_status_block_is_kept(self, tmp_path):
-        """Review round 2: message/delivery-status parses into one block
+        """``message/delivery-status`` parses into one block
         per recipient; only the first was serialized."""
         msg = self._parse_raw(
             tmp_path,
@@ -1936,7 +1936,7 @@ class TestAttachmentBoundaries:
     def test_container_with_too_many_fields_is_never_serialized(
         self, tmp_path, monkeypatch, fields, serialized
     ):
-        """Review round 9: the generator costs several times the parser
+        """The generator costs several times the parser
         per header field, and a delivery report is one field per line, so
         a report past MAX_ATTACHED_MESSAGE_FIELDS keeps the empty payload
         without ever being serialized."""
@@ -1959,7 +1959,7 @@ class TestAttachmentBoundaries:
         assert (calls != []) is serialized
 
     def test_headerless_blocks_count_against_the_budget(self, tmp_path, monkeypatch):
-        """Review round 10: a delivery report of blank blocks parses into
+        """A delivery report of blank blocks parses into
         parts with no header fields, so a fields-only budget never
         advanced while every part was still serialized. Parts count too."""
         from src.parser import MAX_ATTACHED_MESSAGE_FIELDS
@@ -1979,7 +1979,7 @@ class TestAttachmentBoundaries:
         assert calls == []
 
     def test_header_bytes_count_against_the_budget(self, tmp_path, monkeypatch):
-        """Review round 11: one 5 MB header field counted as one unit but
+        """One 5 MB header field counted as one unit but
         cost the generator seconds to refold. Header bytes count too."""
         raw = (
             self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
@@ -1994,7 +1994,7 @@ class TestAttachmentBoundaries:
         assert calls == []
 
     def test_the_budget_spans_every_container_in_a_message(self, tmp_path, monkeypatch):
-        """Review round 10: fifty sibling reports each under the budget
+        """Fifty sibling reports each under the budget
         cost fifty serializations. One budget covers the whole message,
         so once it is spent no later container is serialized. Each
         report is worth about 70% of the budget (its fields plus their
@@ -2021,7 +2021,7 @@ class TestAttachmentBoundaries:
         assert all(a.payload == b"" for a in msg.attachments[1:])
         assert len(calls) == 1
 
-    # Review round 12: an attached email must hash the same whatever its
+    # An attached email must hash the same whatever its
     # transfer encoding. Every shape here matched 7bit as base64 all along;
     # quoted-printable diverged on six (a multipart body, and any header
     # line of 76+ characters, which quoted-printable soft-breaks) until the
@@ -2102,7 +2102,7 @@ class TestAttachmentBoundaries:
         assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
 
     def test_header_the_generator_refuses_keeps_an_empty_payload(self, tmp_path):
-        """Review round 13 (P1): a header compat32 accepts but the
+        """A header compat32 accepts but the
         generator refuses raised HeaderWriteError, whose text quotes the
         header, out of parse_email and into the job's recorded error."""
         msg = self._parse_raw(
@@ -2116,7 +2116,7 @@ class TestAttachmentBoundaries:
         assert msg.attachments[0].payload == b""
 
     def test_eight_bit_bytes_in_a_transport_form_keep_an_empty_payload(self, tmp_path):
-        """Review round 13: raw 8-bit bytes inside a quoted-printable
+        """Raw 8-bit bytes inside a quoted-printable
         transport form (malformed) raised UnicodeEncodeError out of the
         reconstruction and failed the whole message."""
         msg = self._parse_raw(
@@ -2131,7 +2131,7 @@ class TestAttachmentBoundaries:
         assert msg.attachments[0].payload == b""
 
     def test_quoted_printable_delivery_status_hashes_like_7bit(self, tmp_path):
-        """Review round 13: the rebuilt report ended with a blank line the
+        """The rebuilt report ended with a blank line the
         text did not have, so the same report hashed differently."""
         import quopri
 
@@ -2165,7 +2165,7 @@ class TestAttachmentBoundaries:
 
     @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
     def test_attachments_inside_a_nested_encoded_attached_email_are_found(self, tmp_path, encoding):
-        """Review round 13: a nested container's payload is not kept, and
+        """A nested container's payload is not kept, and
         that skipped decoding it too, so the tree walked was the transport
         form and a PDF two forwards deep was lost."""
         import base64
@@ -2203,7 +2203,7 @@ class TestAttachmentBoundaries:
 
     @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
     def test_encoded_delivery_status_keeps_block_semantics(self, tmp_path, encoding):
-        """Review round 14: the decoded report was parsed as a plain
+        """The decoded report was parsed as a plain
         message, so only its first block counted as headers and a long
         header in a later block folded differently from the 7bit path.
         The decoded text is now parsed as the part's own content type."""
@@ -2243,7 +2243,7 @@ class TestAttachmentBoundaries:
         assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
 
     def test_nested_encoded_attached_emails_stop_decoding_at_the_caps(self, tmp_path, monkeypatch):
-        """Review round 14: inside an attachment the decoded tree was
+        """Inside an attachment the decoded tree was
         walked without the depth check, so a chain of transfer-encoded
         attached emails decoded its large descendant at every level (40
         decodes, 165 MB for a 10.8 MB fixture). Decoding now stops at the
@@ -2290,7 +2290,7 @@ class TestAttachmentBoundaries:
         assert len(msg.attachments) == len(decoded_sizes) + 2
 
     def test_quoted_printable_delivery_status_keeps_every_block(self, tmp_path):
-        """Review round 9: the transfer-encoded path serialized only the
+        """The transfer-encoded path serialized only the
         container's first child before decoding. An attached email has
         one child, but a delivery report has one per block, so a
         quoted-printable report lost every recipient's status."""
@@ -2558,7 +2558,8 @@ class TestDecodeHeader:
     # is decoded with replacement characters and logs one rate-limited
     # WARNING with fixed text. A genuinely unknown label keeps the #942
     # line. Each shape: raw header lines, the expected parsed fields, and
-    # the expected (replacement, unknown-label) WARNING counts. The
+    # the expected (replacement, unknown-label, kept-encoded) WARNING
+    # counts. The
     # decoded output of every shape is what ``main`` produced before
     # #1147; only the log lines changed.
     RAW_8BIT_MARKER = "RAWMARKER1147"
@@ -2581,10 +2582,9 @@ class TestDecodeHeader:
         ),
         # compat32 returns a raw 8-bit header as one ``unknown-8bit``
         # chunk, so an encoded-word next to raw bytes stays as sent
-        # (pre-existing on ``main``, pinned here, #1186). Review round 1:
-        # that partial decode logs its own line in Subject and the From
-        # fallback; an address display name decodes the word later, so
-        # it logs nothing.
+        # (pinned here, #1186). That partial decode logs its own line in
+        # Subject and the From fallback; an address display name decodes
+        # the word later, so it logs nothing.
         "subject-raw-utf8-and-encoded-word": (
             b"Subject: RAWMARKER1147 caf\xc3\xa9 =?utf-8?q?na=C3=AFve?=\r\n",
             {"subject": "RAWMARKER1147 café =?utf-8?q?na=C3=AFve?="},
@@ -2734,8 +2734,8 @@ class TestDecodeHeader:
         assert extractors.drain_suppressed_lines() == 0
         assert self.RAW_8BIT_MARKER not in caplog.text
 
-    def test_raw_8bit_encoded_word_search_is_linear(self, tmp_path, caplog):
-        """Review round 1: the search for a kept encoded-word runs over
+    def test_raw_8bit_encoded_word_search_finishes_quickly(self, tmp_path, caplog):
+        """The search for a kept encoded-word runs over
         the whole decoded Subject before the cap. Near-miss prefixes
         (``=?a=?a...``) each fail after a constant number of steps."""
         prefixes = 300_000
@@ -2806,7 +2806,7 @@ class TestDecodeHeader:
         assert _decode_header("=?utf-8?q?H=C3=A9?= =?utf-8?q?llo?=") == "Héllo"
 
     def test_whitespace_kept_next_to_a_malformed_encoded_word(self):
-        """Review round 1: whitespace is dropped only between two valid
+        """Whitespace is dropped only between two valid
         encoded-words. Collapsing it before validating both sides fused
         ``ok`` onto the raw malformed fragment."""
         from src.parser import _decode_display_name
@@ -2815,7 +2815,7 @@ class TestDecodeHeader:
         assert _decode_header(value) == "ok =?utf-8?x?bad?="
         assert _decode_display_name(value) == "ok =?utf-8?x?bad?="
 
-    def test_malformed_encoded_word_prefixes_decode_in_linear_time(self):
+    def test_malformed_encoded_word_prefixes_decode_quickly(self):
         """Regression (#218): ``email.header.decode_header`` rescans the
         rest of the header at every malformed ``=?`` prefix, so a 48 KB
         Subject of them took ~0.4 s and a multi-MB one stalled the
@@ -2958,7 +2958,7 @@ class TestCleanId:
 
 
 # ---------------------------------------------------------------------------
-# _normalize_subject (imported from threader via parser module context)
+# _normalize_subject (src.threader)
 # ---------------------------------------------------------------------------
 
 
@@ -3262,7 +3262,7 @@ _BODY_SHAPES = {
         "P1",
     ),
     # A multipart/related contributes only its root, the first child;
-    # later parts are resources it references (review round 2 on #444).
+    # later parts are resources it references (#444).
     "related-html-root-html-resource": (
         _multi("related", _html("H1"), _html("RESOURCE")),
         "H1",
@@ -3663,7 +3663,7 @@ _FILENAME_SHAPES = {
         b'Content-Disposition: attachment; filename="=?utf-8?q?rep?=\r\n =?utf-8?q?ort.pdf?="',
         "report.pdf",
     ),
-    # #688 review round 1: only syntactic folds are removed. A line break
+    # #688: only syntactic folds are removed. A line break
     # an RFC 2231 value percent-encodes is filename content and survives.
     "rfc2231-percent-encoded-lf-space": (
         b"Content-Type: application/pdf\r\n"
@@ -4092,8 +4092,8 @@ _CAP_HEAD = (
     b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
 )
 _CAP_FILENAME = b'Content-Disposition: attachment; filename="SYNTHETIC_FILENAME_MARKER.eml"\r\n'
-# A container named ``.txt`` is extracted as text, so an empty payload
-# loses that text; one named ``.eml`` selects no extractor (review round 1).
+# Containers named ``.txt`` (text extractor) and ``.eml`` (``eml``
+# extractor, #922) are both read, so an emptied payload loses text.
 _TXT_FILENAME = b'Content-Disposition: attachment; filename="SYNTHETIC_FILENAME_MARKER.txt"\r\n'
 
 
@@ -4190,11 +4190,6 @@ def _chain_stops_at_the_depth_cap(msg) -> bool:
     )
 
 
-# Each shape fires one cap. ``small_decode_budget`` lowers the decoded-byte
-# budget (64 MB by default) so a small fixture can exhaust it; a dict
-# instead sets those parser limits for the shape (the #1144 address
-# budget, so a few short headers can exhaust it). ``pinned`` is the
-# parse result before the caps were logged.
 def _nested_rfc822_with_note(levels: int) -> bytes:
     """``levels`` identity-encoded attached emails around a message that
     carries a ``note.txt`` attachment."""
@@ -4207,6 +4202,11 @@ def _nested_rfc822_with_note(levels: int) -> bytes:
     return b"Content-Type: message/rfc822\r\n\r\n" * (levels - 1) + leaf
 
 
+# Each shape fires one cap. ``small_decode_budget`` lowers the decoded-byte
+# budget (64 MB by default) so a small fixture can exhaust it; a dict
+# instead sets those parser limits for the shape (the #1144 address
+# budget, so a few short headers can exhaust it). ``pinned`` checks the
+# parse result the cap produces.
 _CAP_SHAPES = {
     "attached_depth": (
         _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822(21), _TXT_FILENAME),
@@ -4256,7 +4256,7 @@ _CAP_SHAPES = {
         "transport_decode=1",
         _only_attachment_is_empty,
     ),
-    # Review round 4 on #1311: an attached email in a transfer encoding
+    # #1311: an attached email in a transfer encoding
     # the parser does not decode (uuencode, its aliases, anything else)
     # keeps no payload, so its transport text is never extracted.
     "transport_decode_uuencode": (
@@ -4268,7 +4268,7 @@ _CAP_SHAPES = {
         "transport_decode=1",
         _only_attachment_is_empty,
     ),
-    # Review round 7 on #1311: an attached email whose transport decoded
+    # #1311: an attached email whose transport decoded
     # with bytes lost (base64 with an invalid-character defect), or may
     # have (quoted-printable with an ``=`` that is no escape, #1288), keeps
     # the lenient decode, marked incomplete, and is counted so the loss is
@@ -4288,7 +4288,7 @@ _CAP_SHAPES = {
         "transport_lossy=1",
         _only_attachment_is_kept,
     ),
-    # Review round 13 on #1311: an email carried as a leaf for the eml
+    # #1311: an email carried as a leaf for the eml
     # extractor (round 8) is never walked for attachments, so its lossy
     # transport loses text only, not attachments: a separate name.
     "leaf_transport_lossy": (
@@ -4407,7 +4407,7 @@ _CAP_SHAPES = {
         "mime_parts=1",
         lambda msg: msg.body_text == "S0" and msg.attachments == [],
     ),
-    # Review round 6 on #1444: the delivery-status re-read enumerates at
+    # #1444: the delivery-status re-read enumerates at
     # most MAX_WALKED_PARTS parts of a tree. Each OLE2 leaf under
     # message/rfc822 is one part of the walk but two of the tree (its
     # parsed child), so the tree is over the cap while the walk is not:
@@ -4557,8 +4557,8 @@ def _parse_cap_shape(tmp_path, monkeypatch, shape: str):
 
 @pytest.mark.parametrize("shape", sorted(_CAP_SHAPES))
 def test_cap_shape_parse_result_is_pinned(tmp_path, monkeypatch, shape):
-    """The parse result each cap produces, pinned before the caps were
-    logged: counting them must not change it."""
+    """The parse result each cap produces is pinned: counting the cap
+    must not change it."""
     msg, _ = _parse_cap_shape(tmp_path, monkeypatch, shape)
     assert _CAP_SHAPES[shape][3](msg)
 
@@ -4594,7 +4594,7 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     "transport_decode_8bit": _MANIFEST,
     "transport_decode_uuencode": _MANIFEST,
     # The attachments inside a lossy attached email may be lost with
-    # their boundaries (review round 13 on #1311); a leaf is never walked
+    # their boundaries (#1311); a leaf is never walked
     # for attachments, so only its own text is partial.
     "transport_lossy_base64": _MANIFEST,
     "transport_lossy_quoted_printable": _MANIFEST,
@@ -4816,12 +4816,8 @@ def test_message_within_every_cap_logs_no_cap_line(tmp_path, caplog):
     assert "parser work caps" not in caplog.text
 
 
-# Review round 1: caps that empty a container's payload lose nothing
-# when no extractor would read that payload. Since #922 every attached
-# email's payload is read (``eml``), so those shapes moved to
-# ``_CAP_SHAPES``. Each shape's parse result is pinned (unchanged from
-# before the caps were logged) and no cap line is logged. #902: a header
-# value at its cap is kept whole, so it is not counted either.
+# #902: a header value at its cap is kept whole, so it loses nothing:
+# each shape's parse result is pinned and no cap line is logged.
 _NO_LOSS_SHAPES = {
     "subject_at_the_cap": (
         _headers(b"Subject: " + _LONG_SUBJECT[:SUBJECT_MAX_CHARS] + b"\r\n"),
@@ -4851,11 +4847,11 @@ def test_cap_that_loses_nothing_logs_no_cap_line(tmp_path, caplog, shape):
     assert "parser work caps" not in caplog.text
 
 
-# Review round 4 on #884: ``body_parts`` counts a capped text part only
+# #884: ``body_parts`` counts a capped text part only
 # when it could have contributed to the assembled body, by the same
 # selection ``_assemble_body`` makes (an alternative after the selected
-# one is not a loss). Each shape: (parts before the tail, the tail, the
-# body before the caps were logged, the expected body_parts count).
+# one is not a loss). Each shape: (the raw parts, the assembled body,
+# the expected body_parts count).
 def _parts(count: int, start: int = 0) -> bytes:
     return b"".join(
         b"--b\r\nContent-Type: text/plain\r\n\r\nS%d\r\n" % i for i in range(start, start + count)
@@ -4942,7 +4938,7 @@ def test_body_parts_counts_only_parts_that_could_contribute(tmp_path, caplog, sh
 
 
 def test_parser_cap_lines_are_rate_limited_and_counted(tmp_path, monkeypatch, caplog):
-    """Review round 5 on #884 (security): every capped message logged its
+    """#884: every capped message logged its
     own WARNING, so a stream of crafted messages could flood the log. The
     line shares the extractor warning budget; every capped message is
     counted as ``parser_caps_messages`` for the attachments aggregate,
@@ -5191,7 +5187,7 @@ class _CountingParts(list):
 
 
 def test_attached_container_children_are_queued_lazily(monkeypatch, caplog):
-    """Review round 1 on #1020 (Codex): a container marked as an
+    """#1020: a container marked as an
     attachment went through the serialization preflight
     (``_nesting_exceeds``), which queued every child of a part at once,
     so 200,000 children were all queued before any cap applied. Both
@@ -5231,7 +5227,7 @@ def test_attached_container_children_are_queued_lazily(monkeypatch, caplog):
 
 
 def test_walk_cap_keeps_the_first_parts_in_document_order(tmp_path, caplog):
-    """Review round 1 on #1020 (Codex): the cap was charged for every
+    """#1020: the cap was charged for every
     child as its parent was popped, so a root with thousands of
     container children spent the budget at once and the text inside
     the first child, the third part in document order, was dropped
@@ -5574,14 +5570,14 @@ class TestRepeatedAddressHeaders:
         assert counts["parser_sender_ambiguous_messages"] == 3
         assert counts["parser_recipients_merged_messages"] == 2
         assert counts["parser_caps_messages"] == 0
-        # Review round 3: these lines lose no attachment text, so what
+        # These lines lose no attachment text, so what
         # the limit withholds is counted on the heartbeat
         # (``suppressed_lines``), not as ``warnings_suppressed``.
         assert counts["warnings_suppressed"] == 0
         assert extractors.drain_suppressed_lines() == 3
 
     def test_merged_only_traffic_keeps_the_attachments_line_at_info(self, monkeypatch):
-        """Review round 3: suppressed merge notices made the attachments
+        """Suppressed merge notices made the attachments
         summary a WARNING through ``warnings_suppressed``."""
         from src import attachment_indexing, extractors
 
@@ -5795,7 +5791,7 @@ def test_an_attachment_with_its_payload_is_complete(tmp_path):
 
 
 def test_a_nested_container_left_unserialized_is_incomplete(tmp_path):
-    """Review round 1 on #1286: a container inside an attachment keeps
+    """#1286: a container inside an attachment keeps
     the empty payload by design (only the outermost is serialized), with
     no cap counted. Under an extractable label (``.txt``) its empty bytes
     would read as a complete empty text, so it is marked incomplete; the
@@ -5836,7 +5832,7 @@ def test_a_nested_container_left_unserialized_is_incomplete(tmp_path):
     ids=["no_base64", "invalid_chars", "bad_length", "padding_only", "valid_empty"],
 )
 def test_a_base64_decode_defect_marks_the_payload_incomplete(tmp_path, body, payload, complete):
-    """Review round 2 on #1286: the stdlib decodes malformed base64
+    """#1286: the stdlib decodes malformed base64
     leniently and records a defect on the part; a payload decoded with an
     invalid-character or invalid-length defect is not the attachment's
     bytes, so it is marked incomplete. A padding defect alone loses
@@ -5872,7 +5868,7 @@ def test_a_defect_on_a_serialized_container_does_not_matter(tmp_path):
 
 
 class TestContainerTransportDecodeLoss:
-    """Review round 4 on #1286: a base64 attached email decoded leniently
+    """#1286: a base64 attached email decoded leniently
     (``_decode_transport_form`` keeps today's decoder and bytes) is checked
     once more through the stdlib leaf decoder, as a diagnostic only; an
     invalid-character or invalid-length defect marks the container's
@@ -5925,7 +5921,7 @@ class TestContainerTransportDecodeLoss:
     def test_a_transport_line_the_parse_dropped_makes_it_incomplete(
         self, tmp_path, monkeypatch, prefix
     ):
-        """Review round 8 on #1311: a transport line the standard library
+        """#1311: a transport line the standard library
         read as a header continuation with nothing before it, or as the
         ``From `` envelope line, is dropped from the pseudo message, so
         the rebuilt transport decodes cleanly without it."""
@@ -5992,7 +5988,7 @@ class TestContainerTransportDecodeLoss:
 
 
 class TestContainerTransportEncodings:
-    """Review round 4 on #1311 (owner decision): an attached email's
+    """#1311 (owner decision): an attached email's
     declared Content-Transfer-Encoding decides whether its payload can be
     certified. Identity and base64 (whose loss is detected) are unchanged;
     quoted-printable keeps its lenient decode and is complete unless a
@@ -6071,7 +6067,7 @@ class TestContainerTransportEncodings:
     ids=["eml", "extracted_text", "no_extractor"],
 )
 def test_a_lossy_base64_leaf_an_extractor_reads_is_counted(tmp_path, caplog, headers, counted):
-    """Review round 14 on #1311: a leaf whose base64 decode lost bytes was
+    """#1311: a leaf whose base64 decode lost bytes was
     marked incomplete but not counted, so nothing logged it. Counted when
     an extractor would read the payload; the attachment list is whole."""
     caplog.set_level("DEBUG")
@@ -6124,7 +6120,7 @@ def test_a_lossy_container_leaf_under_any_label_is_counted(tmp_path, caplog):
 
 
 def test_a_nul_in_a_body_charset_does_not_fail_the_parse(tmp_path):
-    """Review round 14 on #1311: ``bytes.decode`` raises ``ValueError``
+    """#1311: ``bytes.decode`` raises ``ValueError``
     on a codec name holding a NUL, which failed the whole message; it
     falls back to UTF-8 like an unknown label."""
     path = tmp_path / "m.eml"
@@ -6137,7 +6133,7 @@ def test_a_nul_in_a_body_charset_does_not_fail_the_parse(tmp_path):
 
 
 def test_a_lossy_attached_email_clears_the_attachment_manifest(tmp_path):
-    """Review round 13 on #1311: a base64 quantum replaced where a nested
+    """#1311: a base64 quantum replaced where a nested
     attachment's boundary sits loses that attachment from the decoded
     tree, so the message's attachment list is not complete."""
     inner = (
@@ -6159,12 +6155,13 @@ def test_a_lossy_attached_email_clears_the_attachment_manifest(tmp_path):
 
 
 class TestLeafEmlTransportEncodings:
-    """Review round 8 on #1311: an email carried as a leaf part the
+    """#1311: an email carried as a leaf part the
     ``eml`` extractor reads (``application/eml``, or any type named
-    ``.eml``) follows the round-4 rule for ``message/*``: identity and
-    base64, quoted-printable and uuencode (whose loss is detected, #1288)
+    ``.eml``) is complete only when its transfer encoding lets a loss be
+    detected: identity, base64, quoted-printable and uuencode (#1288)
     are complete unless the decode lost bytes; any other encoding keeps
-    its decode but is never complete. A loss is counted as
+    its decode but is never complete (a ``message/*`` part keeps no
+    payload instead). A loss is counted as
     ``leaf_transport_lossy``."""
 
     _QP_MALFORMED = b"From: a@example.test\r\n\r\nvisible =\rtail SYNTHETIC_TEXT_MARKER"
@@ -6456,7 +6453,7 @@ class TestTransferDecodeLossDetection:
 
     @pytest.mark.parametrize("charset", ["utf-16le", "utf-16", "utf-8", "latin-1", "bogus"])
     def test_a_declared_charset_does_not_hide_the_equals_sign(self, charset):
-        """Review round 1 on #1398: ``get_payload()`` decodes 8-bit bytes
+        """#1398: ``get_payload()`` decodes 8-bit bytes
         with the declared charset, and a multibyte one merges the bytes
         around an ``=``. The scan reads the raw transport text."""
         part = email.message_from_bytes(
@@ -6517,7 +6514,7 @@ class TestTransferDecodeLossDetection:
 
     @pytest.mark.parametrize("walk", [False, True], ids=["attachment_leaf", "walk_body_part"])
     def test_a_uuencoded_part_is_decoded_once(self, tmp_path, monkeypatch, walk):
-        """Review round 1 on #1398: the fallback check reuses the decode
+        """#1398: the fallback check reuses the decode
         the parser already made. A uuencoded payload expands 31:1, so a
         second decode doubled the memory and time of a crafted one."""
         import email.message as stdlib_message
