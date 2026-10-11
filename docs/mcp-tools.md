@@ -2123,8 +2123,9 @@ reported by the server in text `content` and the additive structured
 
 **A ranked sample, not the mailbox
 ([#1233](https://github.com/marshalltech81/protonmail-local-ai/issues/1233)).**
-The answer comes from at most `max_threads` ranked threads, and fewer
-when the prompt budget leaves some out or shows them with headers only.
+The answer comes from at most `max_threads` ranked threads. Fewer reach
+the model when the prompt budget leaves a thread out or has no room for
+its passages, or when a thread has no indexed text to show.
 It is never a search of every matching message, so an answer cannot
 establish that something is absent from the mailbox or that a list is
 complete. Three places say so:
@@ -2139,20 +2140,25 @@ complete. Three places say so:
   N retrieved thread(s) (max_threads=M), K with evidence in the prompt,
   not an exhaustive search; whether other mail matches is unknown.`
   When retrieval did not run, the sentence says so instead.
-- The `ask_mailbox` and `search_emails` descriptions send which, all,
-  every, none, how many and how often questions to
-  [`query_messages`](#query_messages), which enumerates every message
-  its filters match, and to [`aggregate_messages`](#aggregate_messages)
-  for counts by sender, domain, folder or date.
+- The `ask_mailbox` and `search_emails` descriptions send mailbox-wide
+  which, all, every, none, how many and how often questions about
+  messages to [`query_messages`](#query_messages), which enumerates
+  every message its filters match, and to
+  [`aggregate_messages`](#aggregate_messages) for counts by sender,
+  domain, folder or date. A question about what a message or attachment
+  says stays with `ask_mailbox`: `query_messages` does not search
+  attachment text and `aggregate_messages` only counts.
 
-Neither empty return claims anything about the mailbox. Both open with
-`No relevant emails were retrieved` and make no model call. An
-unmatched `from_name` returns before any search, and its answer says
-retrieval did not run (`retrieval_ran: false`). A search that returned
-no thread says the search ran and ranked no threads for the question
-and its filters (`retrieval_ran: true`, `threads_retrieved: 0`).
-`coverage_note` stays the prompt-budget notice only. It is null when
-nothing was left out, sample or not.
+Neither empty return claims anything about the mailbox, and neither
+calls the inference model. Both open with
+`No relevant emails were retrieved`. An unmatched `from_name` returns
+before any search (and before the question is embedded), and its answer
+says retrieval did not run (`retrieval_ran: false`). A search that
+returned no thread has already sent the question to the embedding
+provider; its answer says the search ran and ranked no threads for the
+question and its filters (`retrieval_ran: true`,
+`threads_retrieved: 0`). `coverage_note` stays the prompt-budget notice
+only. It is null when nothing was left out, sample or not.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -2418,7 +2424,7 @@ Structured output:
 | Field | Description |
 |---|---|
 | `answer` | The model's answer with its inline labels |
-| `retrieval` | Always set: `retrieval_ran` (`false` only when an unmatched `from_name` returned before any search), `threads_retrieved` (threads the ranked search returned, at most `max_threads`), `threads_supplied` (distinct threads with at least one passage in the prompt, counted from the passages rendered; lower than `threads_retrieved` when the prompt budget left a thread out or showed it with headers only), `max_threads` (the effective value after clamping), `exhaustive` (always `false`) and `remainder` (always `"unknown"`: whether other mail matches is not known) |
+| `retrieval` | Always set: `retrieval_ran` (`false` only when an unmatched `from_name` returned before any search), `threads_retrieved` (threads the ranked search returned, at most `max_threads`), `threads_supplied` (distinct threads with at least one passage in the prompt, counted from the passages rendered; lower than `threads_retrieved` when the prompt budget left a thread out or had no room for its passages, which `coverage_note` reports, or when a thread has no indexed text to show, which it does not), `max_threads` (the effective value after clamping), `exhaustive` (always `false`) and `remainder` (always `"unknown"`: whether other mail matches is not known) |
 | `coverage_note` | Server-written notice of prompt-budget omissions/truncation and possible incompleteness; `null` when nothing was left out or cut to fit. This is separate from model prose and citation validation |
 | `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sender_ambiguous` ([Sender attribution](#sender-attribution); null for `thread`), `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model), `scope` (`in_scope` or `context`, [Evidence scope](#evidence-scope-in-scope-or-context)), `extraction_deferred` (the passage is retained indexed text of an attachment whose re-extraction is pending, #1236; its prompt header and prose citation end with `retained indexed text; extraction refresh pending`, and the timing line counts such passages shown as `evidence_extraction_deferred`) |
 | `statements` | The answer cut into statements: `text`, `labels` (the supplied passages it cites) and `status` (`cited`, `unsupported`, `uncertain`, `uncited`, `invalid` for only unknown labels, or `not_checked`) |

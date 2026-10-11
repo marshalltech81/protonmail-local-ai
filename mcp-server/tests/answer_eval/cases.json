@@ -527,7 +527,7 @@
       "category": "prompt_budget",
       "tool": "ask_mailbox",
       "arguments": {"question": "How much will the tandem kayak rentals cost for the whole group on kayak day?"},
-      "settings": {"prompt_tokens": 1200},
+      "settings": {"prompt_tokens": 1275},
       "held_out": true,
       "answerable": true,
       "expected_handling": "disclose_missing",

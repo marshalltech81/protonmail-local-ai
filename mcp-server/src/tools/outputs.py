@@ -1195,8 +1195,9 @@ class AskRetrieval(_Output):
     )
     threads_supplied: int = Field(
         description="Distinct threads with at least one passage in the prompt the model "
-        "answered from. Lower than threads_retrieved when the prompt budget left a "
-        "thread out or showed it with headers only."
+        "answered from. Lower than threads_retrieved when the prompt budget left a thread "
+        "out or had no room for its passages (coverage_note then says so), or when a thread "
+        "has no indexed text to show (no coverage_note for that)."
     )
     max_threads: int = Field(description="The effective max_threads, after clamping to [1, 10].")
     exhaustive: Literal[False] = Field(
@@ -1205,8 +1206,8 @@ class AskRetrieval(_Output):
     )
     remainder: Literal["unknown"] = Field(
         description="Always unknown: whether mail outside the sample matches the question is "
-        "not known. Use query_messages or aggregate_messages for which / all / every / none "
-        "/ how-many questions."
+        "not known. Use query_messages or aggregate_messages for mailbox-wide which / all / "
+        "every / none / how-many questions about messages."
     )
 
 

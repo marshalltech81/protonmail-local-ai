@@ -3069,15 +3069,20 @@ def register_intelligence_tools(
         quote PDF?").
 
         This tool answers from a ranked sample: at most ``max_threads``
-        threads (default 5, at most 10), fewer when the prompt budget
-        leaves some out, never every matching message. So it cannot
-        answer which, all, every, none, how many or how often questions,
-        or show that something is absent from the mailbox: for those,
-        use query_messages (it enumerates every message its filters
-        match, with a count) or aggregate_messages (counts by sender,
-        domain, folder or date). The structured ``retrieval`` field
-        gives the threads retrieved, the threads whose evidence reached
-        the model, the effective ``max_threads`` and ``exhaustive: false``.
+        threads (default 5, at most 10), never every matching message,
+        and fewer reach the model when the prompt budget leaves some out
+        or a thread has no indexed text to show. So it cannot answer
+        mailbox-wide which, all, every, none, how many or how often
+        questions about messages ("which senders wrote about X?", "every
+        invoice from Y", "how many arrived in March?"), or show that
+        something is absent from the mailbox: for those, use
+        query_messages (it enumerates every message its filters match,
+        with a count) or aggregate_messages (counts by sender, domain,
+        folder or date). A question about what a message or attachment
+        says ("which amount does the attached invoice state?") stays
+        with this tool. The structured ``retrieval`` field gives the
+        threads retrieved, the threads whose evidence reached the model,
+        the effective ``max_threads`` and ``exhaustive: false``.
 
         Use search_emails (not this) when the user wants a *list* of
         threads matching a query rather than a synthesized answer or

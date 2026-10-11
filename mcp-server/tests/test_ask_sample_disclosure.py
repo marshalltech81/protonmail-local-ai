@@ -16,6 +16,7 @@ import re
 
 import pytest
 from src.tools.intelligence import ASK_SYSTEM
+from src.tools.outputs import AskRetrieval
 
 from tests.conftest import FakeInferenceClient
 from tests.test_prompt_budget import _SMALL, _chunk, _long_threads, _StubDb, _thread, _tools
@@ -99,12 +100,20 @@ class TestRetrievalDisclosure:
     def test_threads_shown_with_headers_only_are_not_counted_as_supplied(self):
         # A thread with no chunks, no indexed text and no snippet renders no
         # passage: it was retrieved, but no evidence of it reached the model.
+        # The prompt budget cut nothing, so there is no coverage note.
         threads = [*_threads(2), _thread("bare", [])]
         out, llm = _call(_LimitDb(threads))
         d = _disclosure(out)
         assert d["threads_retrieved"] == 3
         assert d["threads_supplied"] == 2
         assert _supplied_in_prompt(llm.complete_calls[0][1]) == 2
+        assert out.structured_content["coverage_note"] is None
+
+    def test_schema_names_both_causes_of_a_lower_supplied_count(self):
+        # Review round 1: a thread with no indexed text is not a budget cut.
+        description = AskRetrieval.model_fields["threads_supplied"].description or ""
+        assert "prompt budget" in description
+        assert "no indexed text to show (no coverage_note for that)" in description
 
     def test_budget_dropped_threads_are_counted_from_the_rendered_evidence(self):
         threads = _long_threads(n=5, chunks=1, size=300)
