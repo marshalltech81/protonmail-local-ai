@@ -1260,13 +1260,13 @@ No row describes an actual Bridge binary.
 | # | Supported claim | Test |
 |---|---|---|
 | T1 | Parsed with the same source metadata, a message with identity headers differs from one without only in its size and content hash (so its claimant ID); every other compared `Message` field is equal, and `Message` has no provider-identity field. | `test_provider_identity_evidence.py` `TestParserIgnoresIdentityHeaders` |
-| T2 | Two different files with equal, forged, duplicated, conflicting or absent identity headers, with the same or different Message-IDs, in either order, are two claimants with their own message, thread-map, participant and chunk rows; reaping one leaves the other's rows unchanged; no identity value is logged or stored. | `TestClaimantsStayIndependent` there; `test_main.py` `TestMessageIdClaimants` (#217) |
+| T2 | Two different files with equal, forged, duplicated, conflicting or absent identity headers, with the same or different Message-IDs, in either order, are two claimants, each with its own rows in every table keyed by claimant ID (read from the schema); reaping one removes all of its rows and leaves every row of the other unchanged; no identity value is logged or stored. | `TestClaimantsStayIndependent` there; `test_main.py` `TestMessageIdClaimants` (#217) |
 | T3 | Two byte versions of one message (S3: same text and identity headers, new boundary) have disjoint chunk IDs; reaping the older removes only its chunks and records it as reaped. | `TestByteVersionsOfOneLogicalMessage` |
 | T4 | A reaped version's claimant ID reports the reap, never the surviving version; a bare Message-ID naming several live claimants lists them rather than choosing. | `mcp-server/tests/test_retrieval.py` `test_reaped_version_is_not_answered_by_a_surviving_version`, `test_bare_message_id_with_several_claimants_lists_them` |
 | T5 | A file without a Message-ID (as recovery can hold, S7) is dead-lettered with fixed text whatever identity headers it carries. Today's behaviour, apart from the #1082 decision. | `TestIdLessRecoveryStyleInput` |
 | T6 | Byte-identical copies share one claimant and one row; removing one copy keeps the message (#1102). | `test_synthetic_source.py` `TestByteIdenticalCopiesAcrossFolders`, `test_reconciler.py` `TestByteIdenticalCopies` |
-| T7 | A source with no Proton headers and non-Proton folder names indexes normally; missing metadata stays unknown. | `test_synthetic_source.py` (#1483) |
-| T8 | A claimant ID survives flag renames, folder moves and reparses, so rebuilding the index over the retained Maildir reproduces it. | `test_parser.py` `TestClaimantId` |
+| T7 | A source with no Proton headers and non-Proton folder names parses normally and is indexed through the queue and writer into its folder; a missing send date stays unknown. | `test_synthetic_source.py` (#1483); `TestGenericSourceIndexes` |
+| T8 | A claimant ID depends only on the file's bytes: flag renames and folder moves keep it. | `test_parser.py` `TestClaimantId` |
 
 **Observations an identity policy must reject.** These follow from
 the rows above; they bind #1313's policy, which does not exist yet.

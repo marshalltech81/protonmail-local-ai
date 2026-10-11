@@ -2,15 +2,16 @@
 
 The Proton Mail Bridge writes ``X-Pm-Internal-Id`` (Proton's message
 ID) into the messages it builds, and Gluon writes ``X-Pm-Gluon-Id``
-(its own internal ID). Either header can also arrive forged, duplicated
-or missing: a sender can write it, and Gluon keeps a failed APPEND's
-literal unchanged in ``Recovered Messages`` (see the "Proton identity
-evidence" section of ``docs/architecture.md`` for the upstream source
-review). These tests pin what the index does with such files today,
+(its own internal ID). A file can also carry them forged, duplicated
+or not at all: Gluon keeps a failed APPEND's literal unchanged in
+``Recovered Messages``, and Bridge keeps existing ``X-Pm-Internal-Id``
+fields below one that matches (see the "Proton identity evidence"
+section of ``docs/architecture.md`` for the upstream source review). These tests pin what the index does with such files today,
 before any proposed use of the headers (#1313):
 
 - The headers are ordinary bytes. Two files that differ in anything
-  get two claimant IDs (#217), each with its own per-message rows, and
+  get two claimant IDs (#217), each with its own rows in every table
+  keyed by claimant ID, and
   neither header ever merges, overwrites or deletes another claimant's
   rows, in either arrival order.
 - Two byte versions of one logical message (a rebuild with a new MIME
@@ -21,6 +22,8 @@ before any proposed use of the headers (#1313):
   text whatever identity headers it carries (the #1082 decision may
   change this; this test records today's behaviour only).
 - No identity value reaches the log, ``last_error`` or any table.
+- A source with no Proton headers, in a folder outside Proton's layout,
+  is indexed like any other message.
 
 Every message here is written by the test, with ``.example`` domains
 and synthetic identity values; nothing is derived from real mail.
@@ -59,12 +62,14 @@ def _eml(
     boundary: str = "b1316one",
     subject: str = "Identity evidence",
 ) -> bytes:
-    """A small multipart message. ``identity`` is a list of extra
-    ``(name, value)`` header fields, written in order (so a name can
-    repeat); ``boundary`` changes only the MIME representation."""
+    """A small multipart message: a text body and a text attachment,
+    with display names on the addresses so every claimant-keyed table
+    gets rows. ``identity`` is a list of extra ``(name, value)`` header
+    fields, written in order (so a name can repeat); ``boundary``
+    changes only the MIME representation."""
     headers = [
-        "From: sender@mail.example",
-        "To: recipient@mail.example",
+        "From: Sender One <sender@mail.example>",
+        "To: Recipient Two <recipient@mail.example>",
         f"Subject: {subject}",
         "Date: Mon, 01 Jan 2024 12:00:00 +0000",
     ]
@@ -77,6 +82,10 @@ def _eml(
         + f"\r\n\r\n--{boundary}\r\n"
         + "Content-Type: text/plain; charset=utf-8\r\n\r\n"
         + f"{body}\r\n"
+        + f"--{boundary}\r\n"
+        + "Content-Type: text/plain; name=note.txt\r\n"
+        + "Content-Disposition: attachment; filename=note.txt\r\n\r\n"
+        + "attachment text epsilonword\r\n"
         + f"--{boundary}--\r\n"
     ).encode()
 
@@ -136,19 +145,45 @@ class _Index:
         reconciler.sweep()
         reconciler.reap()
 
+    def claimant_tables(self) -> list[str]:
+        """Every regular table with a ``claimant_id`` column, read from
+        the schema so a new per-message table is covered without editing
+        this test. ``reaped_messages`` is the reap record, checked on its
+        own."""
+        tables = [
+            r[0]
+            for r in self.db._conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL%'"
+            )
+        ]
+        return sorted(
+            t
+            for t in tables
+            if t != "reaped_messages"
+            and "claimant_id" in {c[1] for c in self.db._conn.execute(f'PRAGMA table_info("{t}")')}
+        )
+
     def rows_of(self, claimant: str) -> dict[str, list[tuple]]:
-        """Every per-message row keyed by ``claimant``."""
-        queries = {
-            "messages": "SELECT claimant_id, message_id, filepath, content_hash FROM messages",
-            "map": "SELECT claimant_id, message_id, filepath FROM message_thread_map",
-            "participants": "SELECT claimant_id, role, address FROM message_participants",
-            "chunks": "SELECT claimant_id, chunk_id, text FROM message_chunks",
-        }
+        """Every row, all columns, keyed by ``claimant``, per table."""
         return {
             table: sorted(
-                tuple(r) for r in self.db._conn.execute(sql) if r["claimant_id"] == claimant
+                tuple(r)
+                for r in self.db._conn.execute(
+                    f'SELECT * FROM "{table}" WHERE claimant_id = ?',  # nosec B608
+                    (claimant,),
+                )
             )
-            for table, sql in queries.items()
+            for table in self.claimant_tables()
+        }
+
+    def chunks_of(self, claimant: str) -> dict[str, str]:
+        """``chunk_id`` to text for ``claimant``'s chunks."""
+        return {
+            r["chunk_id"]: r["text"]
+            for r in self.db._conn.execute(
+                "SELECT chunk_id, text FROM message_chunks WHERE claimant_id = ?", (claimant,)
+            )
         }
 
     def tables_holding(self, needles: tuple[str, ...]) -> set[str]:
@@ -222,9 +257,10 @@ class TestClaimantsStayIndependent:
     ):
         """Two different files, whatever identity headers they carry
         (equal, forged, duplicated, conflicting, absent) and whatever
-        their Message-IDs, are two claimants with their own message,
-        thread-map, participant and chunk rows. Reaping the first leaves
-        the second's rows exactly as they were."""
+        their Message-IDs, are two claimants, each with its own rows in
+        every table keyed by claimant ID. Reaping the first removes all
+        of its rows and leaves every row of the second exactly as it
+        was."""
         caplog.set_level(logging.DEBUG)
         idx = _Index(tmp_path, monkeypatch)
         first = idx.write(
@@ -250,20 +286,33 @@ class TestClaimantsStayIndependent:
         a, b = _claimant(first), _claimant(second)
         assert a != b
         rows_a, rows_b = idx.rows_of(a), idx.rows_of(b)
-        for table in ("messages", "map", "participants", "chunks"):
+        # Every per-message table AGENTS.md lists has rows for both.
+        populated = {
+            "messages",
+            "message_thread_map",
+            "message_participants",
+            "message_participant_names",
+            "message_chunks",
+            "attachments",
+        }
+        assert populated <= set(idx.claimant_tables())
+        for table in populated:
             assert rows_a[table] and rows_b[table], table
-        assert rows_a["messages"][0][2] == str(first)
-        assert rows_b["messages"][0][2] == str(second)
-        text_a = " ".join(r[2] for r in rows_a["chunks"])
-        text_b = " ".join(r[2] for r in rows_b["chunks"])
+        paths = {
+            r["claimant_id"]: r["filepath"]
+            for r in idx.db._conn.execute("SELECT claimant_id, filepath FROM messages")
+        }
+        assert paths == {a: str(first), b: str(second)}
+        text_a = " ".join(idx.chunks_of(a).values())
+        text_b = " ".join(idx.chunks_of(b).values())
         assert "alphaword" in text_a and "betaword" not in text_a
         assert "betaword" in text_b and "alphaword" not in text_b
 
         idx.reap(first)
 
         assert not any(idx.rows_of(a).values())
-        # The survivor's message, thread-map, participant and chunk rows
-        # are exactly as they were.
+        # Every row of the survivor, in every claimant-keyed table, is
+        # exactly as it was.
         assert idx.rows_of(b) == rows_b
         assert idx.db.is_indexed(str(second))
         reaped = idx.db._conn.execute("SELECT claimant_id FROM reaped_messages").fetchall()
@@ -297,8 +346,8 @@ class TestByteVersionsOfOneLogicalMessage:
 
         a, b = _claimant(older), _claimant(newer)
         assert a != b
-        chunks_a = {r[1]: r[2] for r in idx.rows_of(a)["chunks"]}
-        chunks_b = {r[1]: r[2] for r in idx.rows_of(b)["chunks"]}
+        chunks_a = idx.chunks_of(a)
+        chunks_b = idx.chunks_of(b)
         assert chunks_a and chunks_b
         assert not set(chunks_a) & set(chunks_b)
         assert sorted(chunks_a.values()) == sorted(chunks_b.values())
@@ -358,3 +407,37 @@ class TestIdLessRecoveryStyleInput:
         assert all(marker not in caplog.text for marker in _ID_MARKERS)
         assert "deltaword" not in caplog.text
         assert idx.tables_holding((*_ID_MARKERS, "deltaword")) == set()
+
+
+class TestGenericSourceIndexes:
+    @pytest.mark.parametrize(
+        ("fixture", "sent_at_status"),
+        [("ordinary-imap-received.eml", "parsed"), ("ordinary-imap-no-optional.eml", "missing")],
+    )
+    def test_source_without_proton_headers_is_indexed(
+        self, tmp_path, monkeypatch, fixture, sent_at_status
+    ):
+        """#1483's ordinary-IMAP fixtures (no ``X-Pm-*`` header), filed in
+        a folder outside Proton's layout, go through the queue and writer
+        like any message: one ``messages`` row in that folder, its
+        participants and its body chunks; a missing send date stays
+        unknown."""
+        idx = _Index(tmp_path, monkeypatch)
+        raw = (Path(__file__).parent / "fixtures" / "source" / fixture).read_bytes()
+        assert b"X-Pm-" not in raw
+        path = idx.maildir / "Sent Items" / "cur" / "1700000000.M1.host:2,S"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(raw)
+
+        idx.index(path)
+
+        claimant = _claimant(path)
+        (row,) = idx.db._conn.execute(
+            "SELECT claimant_id, folder, sent_at, sent_at_status FROM messages"
+        ).fetchall()
+        assert (row["claimant_id"], row["folder"]) == (claimant, "Sent Items")
+        assert row["sent_at_status"] == sent_at_status
+        assert (row["sent_at"] is None) == (sent_at_status == "missing")
+        assert idx.rows_of(claimant)["message_participants"]
+        assert "SRCFIXTURE-1483" in " ".join(idx.chunks_of(claimant).values())
+        assert idx.db.is_indexed(str(path))
