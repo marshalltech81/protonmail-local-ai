@@ -26,6 +26,8 @@ Every message here is written by the test, with ``.example`` domains
 and synthetic identity values; nothing is derived from real mail.
 """
 
+import dataclasses
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -178,29 +180,35 @@ def _claimant(path: Path) -> str:
 
 class TestParserIgnoresIdentityHeaders:
     @pytest.mark.parametrize("shape", sorted(_SECOND_IDENTITY))
-    def test_identity_headers_only_change_the_bytes(self, tmp_path, shape, caplog):
-        """Adding identity headers to a message changes its bytes, so
-        its claimant ID, and nothing else the parser produces; the
-        ``Message`` has no provider-identity field."""
+    def test_identity_headers_only_change_the_bytes(self, shape, caplog):
+        """Parsed from the same source metadata, a message with identity
+        headers and one without differ only in the fields taken from the
+        bytes themselves (``size`` and ``content_hash``, so the claimant
+        ID); every other compared ``Message`` field is equal (only
+        ``first_indexed_at``, the clock at parse time, is not compared),
+        and ``Message`` has no provider-identity field."""
         caplog.set_level(logging.DEBUG)
         plain_raw = _eml("evidence@mail.example", "Same body.")
         tagged_raw = _eml("evidence@mail.example", "Same body.", identity=_SECOND_IDENTITY[shape])
-        plain_path = tmp_path / "INBOX" / "cur" / "1:2,S"
-        tagged_path = tmp_path / "INBOX" / "cur" / "2:2,S"
-        plain_path.parent.mkdir(parents=True)
-        plain_path.write_bytes(plain_raw)
-        tagged_path.write_bytes(tagged_raw)
+        source = parser.SourceMetadata(
+            folder="INBOX", flags=frozenset("S"), size=0, mtime_ns=None, path="synthetic://1"
+        )
 
-        plain = parser.parse_email(plain_path, maildir_root=tmp_path)
-        tagged = parser.parse_email(tagged_path, maildir_root=tmp_path)
+        plain = parser.parse_email_bytes(plain_raw, source)
+        tagged = parser.parse_email_bytes(tagged_raw, source)
 
         assert plain is not None and tagged is not None
+        assert (tagged.size, tagged.content_hash) == (
+            len(tagged_raw),
+            hashlib.sha256(tagged_raw).hexdigest(),
+        )
+        assert (
+            dataclasses.replace(tagged, size=plain.size, content_hash=plain.content_hash) == plain
+        )
         if shape == "absent":
             assert tagged.claimant_id == plain.claimant_id
         else:
             assert tagged.claimant_id != plain.claimant_id
-        assert tagged.message_id == plain.message_id
-        assert (tagged.subject, tagged.body_text) == (plain.subject, plain.body_text)
         assert all(marker not in repr(tagged) for marker in _ID_MARKERS)
         assert all(marker not in caplog.text for marker in _ID_MARKERS)
 
@@ -214,8 +222,9 @@ class TestClaimantsStayIndependent:
     ):
         """Two different files, whatever identity headers they carry
         (equal, forged, duplicated, conflicting, absent) and whatever
-        their Message-IDs, are two claimants with their own rows. Reaping
-        the first leaves the second's rows exactly as they were."""
+        their Message-IDs, are two claimants with their own message,
+        thread-map, participant and chunk rows. Reaping the first leaves
+        the second's rows exactly as they were."""
         caplog.set_level(logging.DEBUG)
         idx = _Index(tmp_path, monkeypatch)
         first = idx.write(
@@ -253,7 +262,8 @@ class TestClaimantsStayIndependent:
         idx.reap(first)
 
         assert not any(idx.rows_of(a).values())
-        # The survivor's rows are unchanged except its own locator.
+        # The survivor's message, thread-map, participant and chunk rows
+        # are exactly as they were.
         assert idx.rows_of(b) == rows_b
         assert idx.db.is_indexed(str(second))
         reaped = idx.db._conn.execute("SELECT claimant_id FROM reaped_messages").fetchall()
