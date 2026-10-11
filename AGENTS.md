@@ -940,7 +940,7 @@ set -Eeuo pipefail
 - always wrap multi-step database writes in an explicit transaction; roll back on any error rather than committing partial state
 - never log API keys, passwords, or credential values in error messages or tracebacks; redact or omit before propagating to logs
 - always set an explicit per-request timeout on outbound async HTTP calls; do not rely solely on client-level defaults for per-call deadlines
-- do not hardcode LLM model names; use an environment variable with a pinned default string so the model can be updated without a code change
+- do not hardcode model names: every enabled layer reads `{LAYER}_MODEL` from the environment, with no in-code default, under the required-vars contract in the Architecture Summary. The one default is Compose's `INFERENCE_MODEL` (`claude-sonnet-5-5`), which `scripts/validate-env.sh` lets an empty value take only when `INFERENCE_MODE=anthropic`
 
 ## Service Responsibilities
 
