@@ -10,8 +10,8 @@ next pass:
     make requeue-dead CLASS=retryable # only exhausted retries
 
 Classes are recorded in ``indexing_jobs.last_error_class`` (see
-``queue.ERROR_CLASSES``). Rows dead-lettered before that column existed
-have no class and are requeued only without ``--class``.
+``queue.ERROR_CLASSES``). ``operator_action_required`` jobs are deferred,
+never dead, so that class selects no row.
 """
 
 from __future__ import annotations

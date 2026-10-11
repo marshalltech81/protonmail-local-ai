@@ -29,7 +29,8 @@ Proton Mail Bridge app (on the host, outside Compose)
         │  IMAP over implicit TLS via host.docker.internal (socat tunnel)
         ▼
 mbsync container
-  - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop;
+  - Polls Bridge IMAP SYNC_INTERVAL seconds after each sync ends, in a
+    bounded retry loop;
     each mbsync run has a deadline (SYNC_DEADLINE_SECONDS, default a
     day) past which it is stopped and counted as a failed sync (#282)
   - Writes Maildir format to maildir-volume
@@ -403,7 +404,8 @@ dropped), `EMBED_MODEL`, the vector dimensions, and a **calibration
 vector** — the embedding of a fixed synthetic text — with that text's
 SHA-256. The columns for revision, tokenizer, context window, chunk
 configuration hash and label stay NULL: the OpenAI-compatible API
-exposes none of them. This is the first slice of the `vector_generations`
+exposes none of the first three, and the chunk configuration hash and
+label are not recorded yet. This is the first slice of the `vector_generations`
 registry in PLAN.md Phase 2; there is no generation lifecycle yet, so
 the table holds exactly one row.
 
@@ -626,6 +628,11 @@ discovery, with **per-message chunks** as the precise unit of retrieval.
    last message. One shared address is not enough: the mailbox owner
    is a recipient of nearly every message and the sender of every
    outgoing one, so two vendors' "Invoice" mails would otherwise merge.
+   The sender and the recipient must each appear in a message of the
+   thread whose sender is assessed unambiguous, and a message with an
+   ambiguous sender never joins by subject (see *Source authority*).
+   The 10 most recently active same-subject threads in the folder are
+   tried, newest first.
    Subjects are compared as stored, cut to `SUBJECT_MAX_CHARS` (2,000)
    characters (#541): two subjects that agree on their first 2,000
    characters match, and a `Re:` reply to a longer subject does not.
@@ -634,7 +641,8 @@ discovery, with **per-message chunks** as the precise unit of retrieval.
    (`indexer/src/chunker.py`); each chunk is FTS-indexed and gets its
    own vector embedding stored in `message_chunks_vec`
 4. The thread's vector in `threads_vec` is the **L2-normalized mean**
-   of its chunk vectors — coarse and precise retrieval derive from
+   of all its chunk vectors, body and attachment chunks alike (attachment
+   weighting: #288) — coarse and precise retrieval derive from
    the same source, and storing a unit-norm vector lets cosine
    similarity downstream collapse to a dot product
 5. New messages joining a thread emit new chunks (idempotent diff
@@ -655,8 +663,9 @@ cache rows, attachment chunks, and the final normalized thread vector
 in one per-message transaction. The two phases are separate
 transactions so a crash between them leaves a thread row + message map
 + indexed-file marker with the seed vector but no chunks or attachment
-rows yet — the queue retries Phase 2c on the next pass and the
-seed-vector chain converges. Within each phase, chunk and attachment
+rows yet — the queue re-runs the message (Phase 1 again,
+idempotently, then Phase 2) on the next pass and the seed-vector chain
+converges. Within each phase, chunk and attachment
 rows have foreign-key parents in `threads` / `message_thread_map`, and
 SQLite foreign-key enforcement is enabled on the indexer connection,
 so partial sidecar rows fail closed instead of becoming orphan
@@ -685,8 +694,9 @@ order the writes come in (`indexer/src/vector_sums.py`).
 - **Updates.** Every write of chunk vectors applies `S += new − old` and
   the count change in its own transaction: `replace_message_chunks`
   (a slice's inserted and deleted chunks; a deleted chunk counts
-  against its own row's thread) and `_delete_chunks_for_message` (a
-  reap's removed messages). Deleting a whole thread drops its row. A
+  against its own row's thread) and `_delete_chunks_in_batches`, which
+  every other chunk deletion uses (a reap's removed messages, a dropped
+  attachment occurrence's slice). Deleting a whole thread drops its row. A
   new thread starts with an empty sum. Moving a message to another
   thread in `message_thread_map` does not move its chunk rows, so it
   changes no sum. A write that changes no chunk reads no vector.
@@ -805,7 +815,8 @@ thread's after `Re:`/`Fwd:` normalization, is kept searchable (#303):
 A message with no body text (for example attachment-only) has no body
 chunk to carry the prefix, so its subject is keyword-searchable only,
 with no semantic representation unless the thread has no chunks at all
-and falls back to a subject-only vector.
+and falls back to a vector of the thread's stored subject (its oldest
+message's, `display_subject`).
 
 **Message body assembly (#295, #298):** a message's body text is every
 non-blank inline `text/plain` and `text/html` part outside attachments
@@ -848,7 +859,8 @@ looks for its text values in the cited passages (see
 
 ### Chunk write idempotency
 
-Chunk IDs are `sha256(message_pk || index || chunk_text)` — the same
+Chunk IDs are `sha256(message_pk || index || chunk_text)`, the parts
+NUL-separated and the index in decimal (`chunker._chunk_id`) — the same
 body always produces the same ID set. The indexer's per-message chunk
 write diffs the new chunk IDs against stored IDs, embeds only the new
 ones, and deletes any that are no longer present. Re-running on
@@ -874,7 +886,9 @@ file's size and mtime, and its path, which only names the message in
 log lines and the `filepath` record. Everything below the parser
 (threading, chunking, extraction, the database writer) sees the
 `Message`, so another source (an mbox import, say) would plug in at
-`parse_email_bytes` with its own adapter.
+`parse_email_bytes` with its own adapter. Read state is the exception:
+the writer still takes it from the Maildir flags in `filepath`
+(`maildir.message_state`), and `SourceMetadata.flags` is not read yet.
 
 **Claimant IDs.** A Message-ID is set by the sender, so two different
 files can claim the same one, by accident or to overwrite another
@@ -936,8 +950,8 @@ result (see `docs/mcp-tools.md`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.
-The row's `name` is the first display name the message gave that
-address in that role. When the message writes the address under more
+The row's `name` is the display name of the address's first
+occurrence in that role (NULL when that occurrence has none). When the message writes the address under more
 than one name (twice in one header, or again under a later role), every
 distinct decoded name is kept in `message_participant_names`, one row
 per (message, role, address, name), original casing kept and exact
@@ -1083,8 +1097,8 @@ dead-lettered messages too) and logs the count; only a later commit of
 the occurrence's chunks sets it again. The 7-day retry of a `failed`
 row is unchanged. No filter reads the flag yet.
 
-The MCP leaves read these flags (`docs/mcp-tools.md`, "Filter
-predicates"): a stored match decides a leaf; finding nothing decides it
+The MCP leaves read the per-message `messages` flags above
+(`docs/mcp-tools.md`, "Filter predicates"): a stored match decides a leaf; finding nothing decides it
 false only under `1`, and `query_messages` counts the message as
 `indeterminate` otherwise.
 Address headers are unfolded (RFC 5322 §2.2.3: a line break followed by
@@ -1107,9 +1121,9 @@ exception type (#942). Header bytes sent raw, without an encoded-word
 with no log line when they are valid UTF-8; otherwise with replacement
 characters and one rate-limited WARNING per chunk (#1147). An
 encoded-word beside raw bytes in Subject or the From fallback is kept
-as sent, with its own rate-limited WARNING (#1186). A value whose encoded-words still do not
+as sent, with its own rate-limited WARNING (#1186). A filename whose encoded-words still do not
 decode is kept as sent, with
-one rate-limited WARNING naming the exception type, and a value that
+one rate-limited WARNING naming the exception type, and one that
 decodes to nothing is kept as sent too, so the part stays an
 attachment. Filenames stored before this are corrected only when their
 message is re-indexed.
@@ -1180,7 +1194,7 @@ reason and the file's path, never the header text.
 
 **`occurred_at`** is the delivery time: the date of the topmost
 `Received:` header, which the last receiving server adds (expected to
-be Proton's; to be checked against real mail at go-live). The parser takes the text after that header's last
+be Proton's; not recorded as checked against real mail). The parser takes the text after that header's last
 `;` (RFC 5321 puts the date there), parses it with
 `parsedate_to_datetime`, and stores it in UTC like `sent_at`
 (`indexer/src/parser.py` `_parse_received_date`). It is NULL when the
@@ -1494,7 +1508,9 @@ the tables from SQLite and gets no `/config` mount.
 ## Attachment Indexing
 
 Email attachments flow through the same chunker and embedder pipeline
-as message bodies. Two extra tables sit alongside `message_chunks`:
+as message bodies. Three extra tables sit alongside `message_chunks`: `attachments_fts`
+(contentless FTS5 over filename and MIME type, joined by
+`attachments.fts_rowid`) and the two below:
 
 | Table | Keyed by | Purpose |
 |---|---|---|
@@ -2920,13 +2936,14 @@ DELETE FROM attachment_extractions WHERE NOT EXISTS (
 
 ## Schema versions
 
-The indexer stamps the schema version in `schema_version` (and
-`PRAGMA application_id`). A fresh install creates the current schema
+The indexer stamps the schema version in `schema_version`, and a fixed
+`PRAGMA application_id` (`SCHEMA_APPLICATION_ID`) that marks the
+schema after the v0 renumbering. A fresh install creates the current schema
 directly; an existing index runs the forward migrations in
 `indexer/src/migrations/` at startup, each in its own transaction, so a
 failure leaves the last applied version stamped and the next start
-retries it. A version above the code's, or a missing migration file,
-stops startup (`docs/troubleshooting.md`).
+retries it. A version above the code's, a missing migration file, or a
+database without that application ID stops startup (`docs/troubleshooting.md`).
 
 Before deploying a release that adds a migration, take a snapshot with
 `make backup-index BACKUP_DIR=<directory outside the checkout>`: a
@@ -2948,7 +2965,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | 9 | `0009_attachment_extraction_deferral.sql` | `attachments.extraction_deferred_at` (#1236; see *Per-message extraction budget*): when the budget deferred the occurrence's extraction to a later pass, NULL otherwise, with the partial index `idx_attachments_deferred` on `(claimant_id, attachment_id)` over the deferred rows (the MCP server's per-chunk flag reads it). No message was deferred before it, so every row starts NULL and no reparse is queued. |
 | 8 | `0008_unknown_sent_dates.sql` | Unknown send dates (#1080; see *Message time*): `messages` is rebuilt with a nullable `sent_at`, `sent_at_status` (`parsed` / `missing` / `invalid`, NULL until assessed) and `first_indexed_at`, and `effective_at` becomes `COALESCE(occurred_at, sent_at, first_indexed_at)`. Every existing value is kept, the participant rows are copied aside and back in the same transaction, and the migration queues a reparse, which stores an unknown date as NULL and moves the old fallback to `first_indexed_at` without embedding calls. Until the reparse reaches a message without a delivery date, a date bound counts it as indeterminate. |
 | 7 | `0007_operator_identity.sql` | `operator_addresses` and `operator_identity` (#824; see *Operator identity*), seeded `unconfigured` with no addresses until the indexer's next start loads `config/identity.toml`. No per-message column, so no reparse is queued. |
-| 6 | `0006_attachment_text_complete.sql` | Attachment text completeness (#1242): `attachments.text_complete` (0 / 1, NULL until assessed, no default) and `attachments.text_extractor`, and `attachment_extractions.text_complete` (NULL when unknown). Every existing row starts NULL and the migration queues a reparse (see *Reparse in place*), which re-extracts each cached `success` or `empty` result once, since none has a record yet (#1285). |
+| 6 | `0006_attachment_text_complete.sql` | Attachment text completeness (#1242): `attachments.text_complete` (0 / 1, NULL until assessed, no default) and `attachments.text_extractor`, and `attachment_extractions.text_complete` (NULL when unknown). Every existing row starts NULL and the migration queues a reparse (see *Reparse in place*), which re-extracts each cached `success` or `empty` result once, since none has a record yet, except an `-ocr` row while OCR is off, refreshed once OCR is on (#1285). |
 | 5 | `0005_message_completeness.sql` | Per-message completeness on `messages` (#1086): `subject_complete`, `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete`, `attachments_manifest_complete`, `body_complete` (0 / 1, NULL until assessed, no default) and `caps_json`. Every existing row starts NULL and the migration queues a reparse, which fills them without embedding calls; a dead-lettered job keeps its message NULL until `make requeue-dead`. Until the reparse reaches a message, a subject, text, attachment, address or authority filter that does not match it counts it as indeterminate. |
 | 4 | `0004_participant_names.sql` | `message_participant_names` and `messages.participant_names_complete` (#1140), seeded with each participant's first name; the migration queues a reparse (see *Reparse in place*). |
 | 3 | `0003_extraction_ocr_pages_skipped.sql` | `attachment_extractions.ocr_pages_skipped` (#891): the scanned pages the PDF OCR cap left unread, NULL when unknown, no default. Every existing row starts NULL and counts as nothing; the column is the extractor's, not the parser's, so no reparse is queued, nothing is re-extracted and no `EXTRACTOR_VERSIONS` entry is bumped. |
@@ -2969,8 +2986,11 @@ by default (mirror mode: upstream deletions leave the local index);
 append-only and keeps deleted mail). An unrecognized value fails indexer
 startup rather than picking a mode.
 
-1. **Tombstone** — a startup sweep plus a live `on_moved` watchdog handler
-   record every `T`-flagged file in a `pending_deletions` table. No primary
+1. **Tombstone** — a sweep at startup and every
+   `INDEXER_DELETION_SWEEP_INTERVAL_SECS` (default 1 h), plus a live
+   `on_moved` watchdog handler, record each `T`-flagged indexed file in a
+   `pending_deletions` table, unless a live byte-identical copy remains
+   (see *Byte-identical copies*). No primary
    data is mutated at tombstone time, so the soft-delete is fully reversible
    if mbsync un-flags the file on a later pull. A tombstone is recorded
    only for the path `message_thread_map` currently holds for the
@@ -3154,7 +3174,11 @@ connection:
 
 - the watchdog observer thread, via `MaildirHandler.on_created` /
   `on_moved` callbacks
-- the main loop, via periodic `Reconciler.sweep()` / `reap()` passes
+- the main loop, which runs the queue drain (every pipeline write) and
+  the periodic reconciler, WAL and recovery passes
+
+`make reparse` and `make requeue-dead` write from a separate process on
+their own connection, serialized by SQLite's file lock.
 
 `sqlite3.connect(check_same_thread=False)` lets both threads share the
 connection, but the Python-level `BEGIN IMMEDIATE` / execute / commit
@@ -3178,7 +3202,9 @@ contentless configuration two things are true that matter here:
 each row's rowid is stored in `threads.fts_rowid`. Writes delete by rowid
 before re-inserting; the MCP keyword search joins on
 `threads_fts.rowid = threads.fts_rowid`. This avoids both the stale-token
-problem and the always-null join.
+problem and the always-null join. `message_chunks_fts` and
+`attachments_fts` follow the same pattern, through
+`message_chunks.fts_rowid` and `attachments.fts_rowid`.
 
 ## Durable Indexing Queue
 
@@ -3322,13 +3348,15 @@ Failure isolation is preserved across phases:
   succeed.
 
 The queue's `claim_batch(N)` fetches a snapshot of N distinct due rows
-in one query so the gather phase cannot re-claim the same row
+in two SELECTs under one lock (fresh mail first, one slot kept for a
+reparse row) so the gather phase cannot re-claim the same row
 repeatedly while Phase 2c is deferred.
 
 ### Recovery sweep for chunkless zero-vector threads
 
-A recovery sweep (`_recover_zero_vector_threads`) runs at the head
-of every `initial_index` call AND periodically from the main loop
+A recovery sweep (`_recover_zero_vector_threads`) runs in every
+`initial_index` call, after the Maildir walk and before the drain, AND
+periodically from the main loop
 on `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (default 30 min). It
 catches the failure modes the queue retry path can't fix on its own
 without breaking the durable queue's bounded-retry contract:
@@ -3355,7 +3383,8 @@ without breaking the durable queue's bounded-retry contract:
     also the genuine crash-mid-batch case: a process killed
     between Phase 1 and `mark_failed`/`mark_succeeded` leaves the
     row at `queued`, charged one attempt only if it was the message
-    being parsed or extracted when the process died (see below).
+    being parsed or extracted, or a lone survivor in the bulk embed or
+    its commit, when the process died (see below).
   - **`dead` row** (deterministic Phase 2 failure exhausted
     `max_attempts`): skipped — left alone as an operator-visible
     terminal state. Auto-resurrecting would burn embedder load
@@ -3366,8 +3395,9 @@ without breaking the durable queue's bounded-retry contract:
     (optionally `CLASS=...`), which resets dead rows to `queued`
     with a fresh attempt budget.
 
-Healthy chunkless threads (e.g., subject-fallback threads from
-blank-body messages) are not touched — the DB query filters out
+With deletion reconciliation on, `T`-flagged files are skipped: the
+reaper owns them. Healthy chunkless threads (e.g., subject-fallback
+threads from blank-body messages) are not touched — the DB query filters out
 non-zero `threads_vec` rows.
 
 Each job carries `attempts`, `last_stage`, `last_error`, `last_error_class`
@@ -3690,11 +3720,12 @@ attempt that opens no new directory costs only the folder walk. The
 same check also runs with the periodic rescan, for a marker that
 could not be written and to retry a re-schedule that failed.
 
-When deletion reconciliation is enabled, every enqueue path — the
-startup scan, the periodic rescan, the zero-vector recovery sweep, and
-the watchdog's `on_created` / new-delivery `on_moved` branches — skips
-`T`-flagged files, and the drain never indexes a claimed job whose file
-has been `T`-flagged since it was queued (the reaper owns that message):
+When deletion reconciliation is enabled, the Maildir walks (startup
+scan, periodic rescan), the zero-vector recovery sweep and the
+watchdog's `on_created` / new-delivery `on_moved` branches skip
+`T`-flagged files, and for every enqueue path (a reparse, a
+re-extraction and `make requeue-dead` included) the drain never
+indexes a claimed job whose file is `T`-flagged (the reaper owns that message):
 a message still in the index keeps its job parked, which the reap
 deletes or, if mbsync clears the flag first, the rename moves back to the
 live path and makes due at once; a trashed file never indexed has its job dropped. A reaped message's `.eml` stays on disk (the indexer never deletes
@@ -3747,7 +3778,7 @@ Two stage outcomes short-circuit the retry path entirely:
 Three environment variables shape the queue: `INDEXER_MAX_ATTEMPTS`,
 `INDEXER_RETRY_BASE_SECONDS`, and `INDEXER_MESSAGE_TIMEOUT_SECONDS`.
 None is required — the defaults are
-suitable for typical mailboxes, and both are documented in
+suitable for typical mailboxes, and all three are documented in
 `docs/troubleshooting.md` for operators who need to tune retry aggressiveness
 against an unreliable embed service or a flaky mailbox.
 
@@ -3811,8 +3842,10 @@ pending is already indexed, so the rename is not re-enqueued, and a job
 left on the old path would be dropped as missing.
 
 `content_hash` is read by one lookup, `find_identical_copies`: when a
-message's mapped file is gone, the reconciler sweep and the startup
-rename sweep look for another indexed path with the same bytes and
+message's mapped file is gone (or, for the reconciler sweep,
+`T`-flagged), the reconciler sweep and the rename sweep (`sweep_paths`:
+at startup, before each periodic rescan and on folder-watch recovery)
+look for another indexed path with the same bytes and
 remap the message to it, and the reaper unmarks every such path of a
 message it removes (see *Byte-identical copies* under *Deletion
 Reconciliation*, #1102). `indexed_files` has no `content_hash` index,

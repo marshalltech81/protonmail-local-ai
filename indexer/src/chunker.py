@@ -48,7 +48,7 @@ from tokenizers import Tokenizer
 # 4-chars-per-token heuristic that under-counted CJK / URL / Base64 /
 # code text by 4-6× and produced chunks past the embed model's
 # practical context window. Tokenizer is matched to Qwen3-Embedding-8B
-# (the schema-default embedding model); the file is vendored from the
+# (the model the 4096-dim schema was sized for), whatever EMBED_MODEL is; the file is vendored from the
 # model's HuggingFace repo so the indexer never performs a runtime
 # download.
 _TOKENIZER_PATH = Path(__file__).parent / "data" / "qwen3-embedding" / "tokenizer.json"
@@ -204,8 +204,9 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
     index that might split a multi-byte codepoint or a token mid-way).
     Returns the input unchanged when it already fits.
 
-    Used for thread-level body caps (``THREAD_BODY_TEXT_MAX_TOKENS``)
-    so the cap aligns with the embed model's actual context budget.
+    Used for the thread FTS body cap (``THREAD_BODY_TEXT_MAX_TOKENS``;
+    the thread body is keyword-indexed, not embedded) and the first
+    chunk's subject prefix.
     A char-based cap under-counted CJK / URL / Base64 / dense code
     text by 4-6× and forced unnecessarily aggressive truncation in
     ASCII-heavy threads.
@@ -620,7 +621,8 @@ def _leading_trim(source: str, start: int, end: int) -> int:
     (#433). Tabs that do not open a line (a split mid-row) are dropped:
     the column of the value after them is unknown there. Nor can a chunk
     keep a run of tabs too long to fit in it (about 16 tabs per token, so
-    over ~7,800 empty leading cells at the default 500-token ceiling):
+    over ~7,800 empty leading cells per 500 tokens of ``max_tokens``,
+    about three times that at the indexer's default 1500):
     ``_split_by_tokens`` drops the tab-only slices and the value's slice
     starts mid-run, so that value still loses its column. One linear scan
     over the leading whitespace, then one back over the tabs it ends with.

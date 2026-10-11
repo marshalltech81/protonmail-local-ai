@@ -2781,8 +2781,8 @@ def _recover_zero_vector_threads(
       cleaned up out-of-band) — re-enqueue with a fresh budget.
     * **Crash mid-batch** (process killed between Phase 1 and
       ``mark_failed``/``mark_succeeded``) — the row stays at
-      ``status='queued'`` with the same attempts count as when the
-      worker claimed it, and the next ``_drain_queue_batched`` will
+      ``status='queued'``, charged one attempt if it was the message
+      running a charged step (``IndexingQueue.begin_attempt``), and the next ``_drain_queue_batched`` will
       pick it up. ``has_pending_row`` returns True so this branch
       is skipped here, and that's correct — the queue itself owns
       the recovery.
@@ -3297,7 +3297,7 @@ def initial_index(
     # Dead-lettered files are not resurrected on routine startup:
     # without that skip, every container restart re-ran the same
     # 5-attempt × 30s backoff cascade against the same poison-pill
-    # payloads — observed to add up to ~30 minutes of wasted embedding
+    # payloads — observed to add up to wasted embedding
     # service load per dead file per restart.
     stamp = ingestion_state.read_stamp() if ingestion_state is not None else None
     _enqueue_unindexed_messages(
@@ -3841,8 +3841,10 @@ def main():
     # promoting from ``new/`` to ``cur/``. Events that land while the
     # indexer is offline would otherwise leave stale filepaths in
     # ``indexed_files``, which makes later lookups on the renamed file
-    # miss. sweep_paths() only updates filepath rows; it does not
-    # tombstone missing files, so running it unconditionally preserves
+    # miss. sweep_paths() updates stored paths (and the state that
+    # moves with them), clears tombstones a restoring rename made stale
+    # and remaps gone files to identical copies; it never tombstones
+    # missing files, so running it unconditionally preserves
     # archive mode (INDEXER_DELETION_ENABLED=false). It runs before the
     # initial walk so a renamed file's new path is already recorded as
     # indexed: otherwise the walk reprocesses every file renamed while

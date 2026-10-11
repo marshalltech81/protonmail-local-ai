@@ -9,8 +9,9 @@ flag. Without reconciliation the local index keeps the message forever.
 The reconciler provides a two-phase path. It runs by default (mirror
 mode); ``INDEXER_DELETION_ENABLED=false`` opts out (archive mode):
 
-1. **Tombstone**: a startup sweep plus live ``on_moved`` detection record every
-   ``T``-flagged file into the ``pending_deletions`` table. No primary data is
+1. **Tombstone**: a sweep (at startup and on the reconcile interval) plus live
+   ``on_moved`` detection record each ``T``-flagged indexed file, unless a
+   live byte-identical copy remains, into the ``pending_deletions`` table. No primary data is
    mutated — if mbsync un-flags the file on a later pull, the tombstone is
    cleared without data loss.
 

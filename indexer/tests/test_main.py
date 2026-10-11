@@ -759,7 +759,7 @@ class TestInitialIndexHeartbeat:
         batch before Phase 2b's pre-embed touch. With
         ``INITIAL_INDEX_BATCH_SIZE=50`` and an attachment-heavy mailbox
         the cumulative Phase 2a work can exceed
-        ``HEALTH_MAX_AGE_SECONDS`` (90 s in the healthcheck script).
+        ``HEALTH_MAX_AGE_SECONDS`` (600 s in the healthcheck script).
         The drainer must touch the heartbeat after every Phase 2a
         entry; this test pins that contract by making each entry
         observably slow and asserting the touch count grows

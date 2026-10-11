@@ -466,7 +466,8 @@ class IndexingQueue:
     def mark_failed(self, filepath: str, *, stage: str, error: str) -> None:
         """Record a failed attempt and schedule the next retry or dead-letter.
 
-        ``stage`` is one of ``"parse" | "thread" | "embed" | "db_write"``
+        ``stage`` is one of ``"parse" | "thread" | "thread_commit" |
+        "chunk" | "embed" | "db_write"``
         — useful for operators to see which pipeline step broke. The
         value is stored verbatim so new stages can be introduced without
         migrating existing rows.
@@ -608,7 +609,7 @@ class IndexingQueue:
         Without this skip, a container restart re-enqueues every
         previously-failed file, resets its retry counter to zero, and
         starts the 5-attempt backoff cascade over again — wasting
-        ~30 minutes of embedding service load per file with no change in
+        embedding service load per file with no change in
         upstream behavior. The watchdog rename / on-created events
         keep going through ``enqueue`` (and DO reset dead state)
         because those signal real change in the underlying file.

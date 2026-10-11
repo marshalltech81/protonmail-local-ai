@@ -1372,8 +1372,10 @@ Queue and maintenance (all INFO unless noted):
   oldest_due_age=<s>s; deferrals since last
   heartbeat: parse=<n> embed=<n> trashed=<n>; suppressed_lines=<n>`,
   every 5 minutes, during the initial index too. `pending` jobs have
-  never failed; `retrying` jobs failed or were deferred by an embedder
-  outage; `deferred_permission` jobs could not be read yet (mbsync
+  never failed; `retrying` jobs failed, were deferred by an embedder
+  outage or for a rename, or were requeued from `dead` (they keep their
+  last error; `get_mailbox_status` counts those as `pending` and rename
+  deferrals as `deferred`); `deferred_permission` jobs could not be read yet (mbsync
   opens new files to the indexer only after its sync; deferred for up
   to 24 h, after which a still-unreadable file takes the normal retry
   path and counts as `retrying` until it is dead);
