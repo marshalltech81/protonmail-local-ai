@@ -3786,7 +3786,7 @@ def main():
         StallGuard(queue, limit_seconds=INDEXER_MESSAGE_TIMEOUT_SECONDS).start()
         log.info(
             "Stall guard: exits after %ds on one unit of work (a parse, an attachment, "
-            "an embed request)",
+            "or an embed request while one message is charged)",
             INDEXER_MESSAGE_TIMEOUT_SECONDS,
         )
     else:
