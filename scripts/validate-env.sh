@@ -452,8 +452,9 @@ env_value() {
 }
 
 # env_value with surrounding whitespace removed, for the values the
-# Python services read with ``.strip()``: every number, boolean and mode
-# below, and EMBED_MODEL and RERANK_MODEL. SYNC_INTERVAL and
+# Python services read with ``.strip()``: every number and boolean
+# below, and EMBED_MODEL and RERANK_MODEL (modes are read with env_value
+# and trimmed by normalize_mode). SYNC_INTERVAL and
 # SYNC_DEADLINE_SECONDS (mbsync's shell), MCP_PORT (also Compose's port
 # mapping) and URLs are passed on unstripped, so they are read with
 # env_value (resolve_base_url trims a URL itself); INFERENCE_MODEL is
@@ -791,6 +792,8 @@ fi
 if [[ -n "$INDEXER_RETRY_BASE_SECONDS" ]]; then
     require_integer_min "INDEXER_RETRY_BASE_SECONDS" "$INDEXER_RETRY_BASE_SECONDS" 1
 fi
+# The stall guard's per-message timeout (main._int_env, minimum 0; 0
+# disables it), not a queue setting.
 if [[ -n "$INDEXER_MESSAGE_TIMEOUT_SECONDS" ]]; then
     require_integer_min "INDEXER_MESSAGE_TIMEOUT_SECONDS" "$INDEXER_MESSAGE_TIMEOUT_SECONDS" 0
 fi

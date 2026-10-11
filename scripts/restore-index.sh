@@ -12,13 +12,14 @@ set -Eeuo pipefail
 # matter). That container writes it next to the index,
 # refuses it unless PRAGMA integrity_check is ok, the application ID is
 # this project's and its schema version is not above the code's, then
-# checkpoints the old index's WAL into it, removes its -wal and -shm
-# files and renames the copy over the index. Removing the WAL first
-# matters: an old WAL left beside the restored file would be replayed
-# into it. The indexer is started and its startup lines (schema version,
-# embedder identity) are printed; mcp-server starts once the indexer has
-# verified the restored index. A refused file leaves the index unchanged
-# and both services are started again.
+# checkpoints the current index's WAL into that index's own file,
+# removes the index's -wal and -shm files and renames the copy over
+# the index. Removing the WAL first matters: an old WAL left beside the
+# restored file would be replayed into it. The indexer is started and
+# its startup lines (schema version, embedder identity) are printed;
+# mcp-server starts once the indexer has verified the restored index.
+# A refused file leaves the index unchanged and both services are
+# started again.
 
 # Runs inside a one-off indexer container: python -c CODE, copy on stdin.
 RESTORE_PY='

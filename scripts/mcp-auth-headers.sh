@@ -2,10 +2,11 @@
 set -Eeuo pipefail
 
 # Print the MCP server's Authorization header as a JSON object, for
-# Claude Code's ``headersHelper`` (see docs/setup.md, "Connect an MCP
-# client"). The token is read with a redirection and written with the
-# printf builtin, so it never appears in any process's arguments, where
-# other local accounts could read it from the process list.
+# Claude Code's ``headersHelper`` and Codex's ``http_headers_helper``
+# (see docs/setup.md, "Connect an MCP client"). The token is read with
+# a redirection and written with the printf builtin, so it never
+# appears in any process's arguments, where other local accounts could
+# read it from the process list.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TOKEN_FILE="${ROOT_DIR}/.secrets/mcp_auth_token.txt"
