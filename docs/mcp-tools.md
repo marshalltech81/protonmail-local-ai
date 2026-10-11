@@ -2577,8 +2577,12 @@ mail a population run will read; the steps are not sent to clients:
      passage, so no record can cite it.
 
    The list is complete for its filters only when `indeterminate` is
-   0; otherwise report both counts. For attachments, that covers only
-   the stored occurrences: an attachment the parser left out of an
+   0; otherwise report both counts. Both counts cover only the mail
+   indexed now: call [`get_mailbox_status`](#get_mailbox_status) and
+   report `current` and the `queue` counts with them, since a message
+   pending, retrying, deferred or `dead` can be missing from both, and
+   `dead` does not make `current` false. For attachments, the counts
+   cover only the stored occurrences: an attachment the parser left out of an
    incomplete manifest has no row and is in neither count
    ([#1282](https://github.com/marshalltech81/protonmail-local-ai/issues/1282)).
    In `query_attachments`, `status_counts` counts the occurrences with
@@ -2598,9 +2602,11 @@ mail a population run will read; the steps are not sent to clients:
    scope the enumeration used, with `folders` to match
    (`folders=["Trash"]` for the Trash query: without it, threads filed
    only in Trash are left out). A call's `threads`
-   output lists the threads it searched: check that some call
-   searched every enumerated thread, and replace a window whose call
-   left one out with narrower windows, discarding its call's records.
+   output lists the threads it searched: check that each enumerated
+   item's thread is in the output of the call for that item's own
+   window and folder scope (another call shows the item only as
+   context), and replace a window whose call left one out with
+   narrower windows, discarding its call's records.
    Before running the replacements, tell the user the added calls and
    the updated total of calls and threads (50 per call), the discarded
    call included, since its threads were already sent.
@@ -2645,7 +2651,10 @@ mail a population run will read; the steps are not sent to clients:
    (the server reports a problem but keeps the record), every field
    that places it in the population (here the line's product code)
    cites only `in_scope` passages (each citation's `scope`) of
-   enumerated items, and every other field cites only `in_scope`
+   enumerated items and, for a string value, has `value_check`
+   `verified` in `fields` (`unmatched` and `not_checked` raise no
+   problem, so a value the model made up would otherwise pass), and
+   every other field cites only `in_scope`
    passages; mark covered only the enumerated items its population
    fields cite. Set aside any
    other record for review. Each call marks a thread's messages in or out of its
