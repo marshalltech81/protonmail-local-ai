@@ -1013,7 +1013,7 @@ while true; do
     ((consecutive_sync_failures += 1))
     echo ">>> Sync failed (${consecutive_sync_failures}/${MAX_CONSECUTIVE_SYNC_FAILURES} consecutive failures)." >&2
     if ((consecutive_sync_failures >= MAX_CONSECUTIVE_SYNC_FAILURES)); then
-        echo ">>> ERROR: mbsync exceeded ${MAX_CONSECUTIVE_SYNC_FAILURES} consecutive failures — exiting for container restart." >&2
+        echo ">>> ERROR: mbsync failed ${MAX_CONSECUTIVE_SYNC_FAILURES} syncs in a row — exiting for container restart." >&2
         exit 1
     fi
 

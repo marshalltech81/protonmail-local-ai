@@ -38,7 +38,8 @@ provider, including a host-side server you install yourself.
   [platform support](docs/setup.md#platform-support))
 - **[Proton Mail Bridge](https://proton.me/mail/bridge)** app installed
   on the same machine and signed in
-- **Claude Desktop** with MCP support
+- **An MCP client** on the same machine, such as Claude Desktop, Claude
+  Code or Codex (see [Connect an MCP client](#6-connect-an-mcp-client))
 - **Proton Mail paid account** (required for Bridge access)
 - **Full-disk encryption** on the host (FileVault on macOS). The stack
   keeps your decrypted mail and its search index unencrypted on disk;
@@ -132,14 +133,15 @@ make up
 make logs  # verify everything is running
 ```
 
-`make up` first runs `make validate-env`, which checks `.env` (including
-`BRIDGE_CERT_FINGERPRINT`) and the secret files: every one must exist
-with mode `600`; the Bridge password, the embed key, the MCP bearer
-token and any enabled layer's key must be non-empty; and an API key or
-`MCP_AUTH_TOKEN` in `.env` is refused. It changes nothing itself: fix
-what it names and run `make up` again (full list in
-[`docs/setup.md`](docs/setup.md#6-start-the-full-stack), step 6). A
-plain `docker compose up` skips it.
+`make up` first creates any missing secret file (`make init-secrets`),
+then runs `make validate-env`, which checks `.env` (including
+`BRIDGE_CERT_FINGERPRINT`) and the secret files: every one must have
+mode `600`; the Bridge password, the embed key, the MCP bearer token and
+any enabled layer's key must be non-empty; and an API key or
+`MCP_AUTH_TOKEN` in `.env` is refused. The check reports a wrong mode
+or value but does not change it: fix what it names and run `make up`
+again ([step 6 of the setup guide](docs/setup.md#6-start-the-full-stack)
+lists every check). A plain `docker compose up` skips both steps.
 If a service doesn't come up, see
 [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
@@ -185,8 +187,7 @@ have a non-ASCII character or `&` move to a new directory name, and
 would be downloaded and indexed a second time. Check and migrate them
 first, by renaming, never deleting: a folder already gone from Proton
 exists only in the Maildir. See
-[the upgrade note](docs/setup.md) ("Upgrading to the isync 1.5.1 mbsync
-image").
+[the upgrade note](docs/setup.md#upgrading-to-the-isync-151-mbsync-image-debian-trixie).
 
 **Upgrading from a release that served `/sse`:** the legacy SSE
 transport was removed. Change client URLs from `/sse` to `/mcp`, and

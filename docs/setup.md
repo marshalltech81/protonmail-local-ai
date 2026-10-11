@@ -6,7 +6,8 @@
 - The official [Proton Mail Bridge](https://proton.me/mail/bridge) app,
   installed on the same Mac and signed in (Bridge requires a paid
   Proton plan)
-- Claude Desktop installed
+- An MCP client on the same Mac, such as Claude Desktop, Claude Code or
+  Codex (see [step 7](#7-connect-an-mcp-client))
 - Git configured with SSH key for GitHub
 - Full-disk encryption on the Mac (FileVault, in System Settings >
   Privacy & Security). The stack stores your decrypted mail, its search
@@ -357,7 +358,8 @@ When disabled, hybrid search returns RRF-only ranking.
 make up
 ```
 
-`make up` validates `.env` and the secret files first. It checks the
+`make up` first creates any missing secret file (`make init-secrets`),
+then validates `.env` and the secret files. It checks the
 values Compose will use: a variable exported in your shell overrides `.env`,
 and a key left empty or out takes its `docker-compose.yml` default, so
 `SYNC_INTERVAL`, `MCP_PORT` and (in `anthropic` mode)
@@ -666,15 +668,6 @@ The embedder has no enable/disable toggle equivalent to
 the indexer needs an embedder — falling back to "no embedder" would
 mean a schema rollback plus a full reindex from Maildir.
 
-## Updating Bridge
-
-The Bridge app updates itself; nothing in this repository pins or
-builds it. If an update (or a reinstall) gives the app a new TLS
-certificate, mbsync refuses to sync until you set
-`BRIDGE_CERT_FINGERPRINT` to the new fingerprint and accept it once:
-see "mbsync refuses to sync — Bridge cert pin mismatch" in
-[`troubleshooting.md`](troubleshooting.md).
-
 ### 7. Connect an MCP client
 
 The server speaks one MCP transport, Streamable HTTP, at
@@ -891,9 +884,37 @@ restart Claude Desktop.
 `make up`, then add the header to each client as above. Until a client
 sends the token, its requests get `401`.
 
-**Upgrading to the isync 1.5.1 mbsync image (Debian trixie).** isync
-1.5 writes a folder whose name has a non-ASCII character or `&` under
-its decoded UTF-8 name, where isync 1.4.4 kept the modified UTF-7
+**Upgrading from a release that served `/sse` (breaking change).** The
+legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and
+the `MCP_TRANSPORT` values `sse` and `dual` were removed. Remove
+`MCP_TRANSPORT` from `.env`, and run `unset MCP_TRANSPORT` in any shell
+that exports it, since an exported value wins over `.env` (or set it to
+`streamable-http`): `sse` or
+`dual` now fails `make validate-env` and mcp-server startup with these
+steps. Change each client from `http://localhost:3000/sse` to
+`http://127.0.0.1:3000/mcp`, and for a client that picks its transport,
+choose Streamable HTTP (`http`), not SSE.
+
+A Streamable HTTP session that sees no request for
+`MCP_SESSION_IDLE_TIMEOUT_SECS` seconds (default 1800) is ended, so a
+session a client abandons without closing it does not hold server
+resources until a restart. A client that comes back after that gets
+`404` for the old session ID and starts a new session; raise the value
+in `.env` if a client of yours does not reconnect on its own.
+
+## Updating Bridge
+
+The Bridge app updates itself; nothing in this repository pins or
+builds it. If an update (or a reinstall) gives the app a new TLS
+certificate, mbsync refuses to sync until you set
+`BRIDGE_CERT_FINGERPRINT` to the new fingerprint and accept it once:
+see "mbsync refuses to sync — Bridge cert pin mismatch" in
+[`troubleshooting.md`](troubleshooting.md).
+
+## Upgrading to the isync 1.5.1 mbsync image (Debian trixie)
+
+isync 1.5 writes a folder whose name has a non-ASCII character or `&`
+under its decoded UTF-8 name, where isync 1.4.4 kept the modified UTF-7
 spelling (`Folders/.Caf&AOk-` becomes `Folders/.Café`; see
 `docs/architecture.md`, Maildir layout). An existing directory under
 the old spelling is not renamed: the first 1.5.1 sync downloads that
@@ -1040,24 +1061,6 @@ until the first sync and the rebuilt index look complete, then remove
 it (`docker volume rm "$backup"`). That also removes the
 script's "already applied" marker, so do not run the script again
 afterwards.
-
-**Upgrading from a release that served `/sse` (breaking change).** The
-legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and
-the `MCP_TRANSPORT` values `sse` and `dual` were removed. Remove
-`MCP_TRANSPORT` from `.env`, and run `unset MCP_TRANSPORT` in any shell
-that exports it, since an exported value wins over `.env` (or set it to
-`streamable-http`): `sse` or
-`dual` now fails `make validate-env` and mcp-server startup with these
-steps. Change each client from `http://localhost:3000/sse` to
-`http://127.0.0.1:3000/mcp`, and for a client that picks its transport,
-choose Streamable HTTP (`http`), not SSE.
-
-A Streamable HTTP session that sees no request for
-`MCP_SESSION_IDLE_TIMEOUT_SECS` seconds (default 1800) is ended, so a
-session a client abandons without closing it does not hold server
-resources until a restart. A client that comes back after that gets
-`404` for the old session ID and starts a new session; raise the value
-in `.env` if a client of yours does not reconnect on its own.
 
 ## Switching to another Bridge installation
 
