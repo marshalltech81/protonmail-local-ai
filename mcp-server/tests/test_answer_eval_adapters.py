@@ -872,7 +872,7 @@ class TestViews:
         the abstention flag instead), so a summary or answer that merely
         opens with the same words is an answer."""
         assert is_abstention("Not found in the provided emails: nothing answers this.")
-        assert is_abstention("No relevant emails found for this question.")
+        assert is_abstention("No relevant emails were retrieved: retrieval did not run.")
         assert not is_abstention("No records extracted from the thread were disputed [E1].")
         assert not is_abstention(NO_RECORDS) and not is_abstention(EXTRACTION_INCOMPLETE)
 

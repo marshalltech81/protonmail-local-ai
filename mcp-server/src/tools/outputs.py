@@ -1182,8 +1182,40 @@ class QuoteCheck(_Output):
     )
 
 
+class AskRetrieval(_Output):
+    """What ask_mailbox's answer was drawn from (#1233): a ranked sample
+    of threads, never the whole mailbox."""
+
+    retrieval_ran: bool = Field(
+        description="False when no search ran (from_name matched no contact); true when the "
+        "ranked search ran, whether or not it returned threads."
+    )
+    threads_retrieved: int = Field(
+        description="Threads the ranked search returned, at most max_threads."
+    )
+    threads_supplied: int = Field(
+        description="Distinct threads with at least one passage in the prompt the model "
+        "answered from. Lower than threads_retrieved when the prompt budget left a "
+        "thread out or showed it with headers only."
+    )
+    max_threads: int = Field(description="The effective max_threads, after clamping to [1, 10].")
+    exhaustive: Literal[False] = Field(
+        description="Always false: the answer comes from a ranked sample, not from every "
+        "matching message."
+    )
+    remainder: Literal["unknown"] = Field(
+        description="Always unknown: whether mail outside the sample matches the question is "
+        "not known. Use query_messages or aggregate_messages for which / all / every / none "
+        "/ how-many questions."
+    )
+
+
 class AskMailboxOutput(_Output):
     answer: str = Field(description="The model's answer, with inline labels such as [E1].")
+    retrieval: AskRetrieval = Field(
+        description="Always set: the ranked sample the answer was drawn from. The answer is "
+        "never a statement about the whole mailbox."
+    )
     coverage_note: str | None = Field(
         default=None,
         description="Server-written prompt-budget omission/truncation notice, separate from "

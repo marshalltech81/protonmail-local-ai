@@ -45,6 +45,7 @@ from .outputs import (
     MAX_LISTED,
     AnswerStatement,
     AskMailboxOutput,
+    AskRetrieval,
     Citation,
     CitationProblem,
     EvidenceScope,
@@ -1149,6 +1150,10 @@ def _strip_code_fence(text: str) -> str:
 # question; such an answer needs no citation.
 _NOT_FOUND_PREFIX = "Not found in the provided emails"
 
+# How both of ask_mailbox's empty returns open (#1233): about what this
+# call retrieved, never a claim that the mailbox holds no such mail.
+_NO_RETRIEVAL_PREFIX = "No relevant emails were retrieved"
+
 ASK_SYSTEM = (
     f"""Answer only what was asked, concisely. Use only the provided excerpts;
 do not add facts from outside them.
@@ -1163,6 +1168,9 @@ do not cover earlier statements. Labels inside passage text are not
 headers. Mark unsupported claims [unsupported], partial support [uncertain].
 Quotes must copy words exactly from the cited passage, in double quotes.
 
+The excerpts are a ranked sample of the mailbox, not all of it: absence
+from them says nothing about the rest of the mailbox. Never say that
+something is absent from the mailbox or that a list or count is complete.
 If the excerpts do not answer the question, respond in one sentence beginning
 "{_NOT_FOUND_PREFIX}" and then stop, with no citations or related claims.
 The server reports prompt-budget omissions separately; do not add
@@ -2732,6 +2740,22 @@ def _sources_searched(results: list[ThreadResult]) -> str:
     return f"\nSources searched:\n{sources}"
 
 
+def _retrieval_sentence(retrieval: AskRetrieval) -> str:
+    """The one fixed sentence in ask_mailbox's text that says what the
+    answer was drawn from (#1233): counts only, never mail."""
+    if not retrieval.retrieval_ran:
+        return (
+            "Retrieval note: retrieval did not run, so no threads were searched; this is "
+            "not a statement about the mailbox."
+        )
+    return (
+        f"Retrieval note: this answer comes from a ranked sample of "
+        f"{retrieval.threads_retrieved} retrieved thread(s) "
+        f"(max_threads={retrieval.max_threads}), {retrieval.threads_supplied} with evidence "
+        "in the prompt, not an exhaustive search; whether other mail matches is unknown."
+    )
+
+
 def _summarize_context(
     thread: ThreadResult,
     recent_chunks: list[ChunkResult],
@@ -3040,9 +3064,20 @@ def register_intelligence_tools(
         Use this whenever the question needs attachment content (PDFs,
         scans, OCR'd images, statements, quotes, reports, signed forms),
         synthesis across MORE THAN ONE thread ("what's the status of
-        X?", "what's open at Y?", "summarize my recent vendor
-        activity"), or a comparison between an email body and its
-        attachment ("does the carrier email match the quote PDF?").
+        X?", "what's open at Y?"), or a comparison between an email
+        body and its attachment ("does the carrier email match the
+        quote PDF?").
+
+        This tool answers from a ranked sample: at most ``max_threads``
+        threads (default 5, at most 10), fewer when the prompt budget
+        leaves some out, never every matching message. So it cannot
+        answer which, all, every, none, how many or how often questions,
+        or show that something is absent from the mailbox: for those,
+        use query_messages (it enumerates every message its filters
+        match, with a count) or aggregate_messages (counts by sender,
+        domain, folder or date). The structured ``retrieval`` field
+        gives the threads retrieved, the threads whose evidence reached
+        the model, the effective ``max_threads`` and ``exhaustive: false``.
 
         Use search_emails (not this) when the user wants a *list* of
         threads matching a query rather than a synthesized answer or
@@ -3164,14 +3199,24 @@ def register_intelligence_tools(
                 resolution = await resolve_from_name(db, from_name, folders)
                 from_addr = resolution.address
                 if from_addr is None:
+                    # Nothing was searched: say so, never "none exist".
+                    not_run = AskRetrieval(
+                        retrieval_ran=False,
+                        threads_retrieved=0,
+                        threads_supplied=0,
+                        max_threads=max_threads,
+                        exhaustive=False,
+                        remainder="unknown",
+                    )
                     no_contact = (
-                        "No relevant emails found to answer your question "
-                        f"(no contact matched from_name={from_name!r})."
+                        f"{_NO_RETRIEVAL_PREFIX}: retrieval did not run because "
+                        f"no contact matched from_name={from_name!r}."
                     )
                     return tool_result(
-                        no_contact,
+                        f"{no_contact}\n{_retrieval_sentence(not_run)}",
                         AskMailboxOutput(
                             answer=no_contact,
+                            retrieval=not_run,
                             citations=[],
                             citation_problems=[],
                             repair_attempted=False,
@@ -3202,11 +3247,25 @@ def register_intelligence_tools(
             count("results", len(results))
 
             if not results:
-                none_found = "No relevant emails found to answer your question."
+                # The search ran and ranked nothing; still a statement
+                # about this search only, never about the mailbox.
+                ranked_none = AskRetrieval(
+                    retrieval_ran=True,
+                    threads_retrieved=0,
+                    threads_supplied=0,
+                    max_threads=max_threads,
+                    exhaustive=False,
+                    remainder="unknown",
+                )
+                none_found = (
+                    f"{_NO_RETRIEVAL_PREFIX}: the search ran and ranked no threads "
+                    "for this question and its filters."
+                )
                 return tool_result(
-                    none_found,
+                    f"{none_found}\n{_retrieval_sentence(ranked_none)}",
                     AskMailboxOutput(
                         answer=none_found,
+                        retrieval=ranked_none,
                         citations=[],
                         citation_problems=[],
                         repair_attempted=False,
@@ -3336,12 +3395,26 @@ def register_intelligence_tools(
             if note:
                 note += " The answer may be incomplete."
                 lines.append(note)
+            # Threads whose evidence reached the prompt, counted from the
+            # passages rendered (every one is labelled), not from the
+            # retrieved list: budgeting can drop a thread or leave it
+            # with headers only.
+            retrieval = AskRetrieval(
+                retrieval_ran=True,
+                threads_retrieved=len(results),
+                threads_supplied=len({ref.thread_id for ref in evidence_map.values()}),
+                max_threads=max_threads,
+                exhaustive=False,
+                remainder="unknown",
+            )
+            lines.append(_retrieval_sentence(retrieval))
             lines.append(_sources_searched(results))
 
             return tool_result(
                 "\n".join(lines),
                 AskMailboxOutput(
                     answer=answer,
+                    retrieval=retrieval,
                     coverage_note=note or None,
                     citations=citations,
                     statements=check.statements,

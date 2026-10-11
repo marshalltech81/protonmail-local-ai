@@ -253,15 +253,16 @@ def register_search_tools(
         senders, dates, attachments, or anything else stored in the
         local mailbox index. This is the default tool for any mailbox
         question that names a topic, keyword, sender, or date range.
-        For broad cross-thread synthesis questions (e.g. "what's open?",
-        "summarize my recent vendor activity"), reach for ask_mailbox
-        instead — it bundles retrieval and synthesis in one call.
-        Results are ranked and capped at ``limit`` threads, so this tool
-        cannot answer "all" or "how many" questions ("every email from
-        Jane in 2024", "how many invoices arrived in March") — use
-        query_messages for those; it enumerates every message its
-        filters match, with a count and the number of messages it could
-        not decide (indeterminate). For the latest or N most recent
+        For cross-thread synthesis questions (e.g. "what's open?"),
+        reach for ask_mailbox instead — it bundles retrieval and
+        synthesis in one call, and answers from a ranked sample of a few
+        threads. Results are ranked and capped at ``limit`` threads, so
+        neither tool can answer which, all, every, none, how many or how
+        often questions ("every email from Jane in 2024", "how many
+        invoices arrived in March") — use query_messages for those; it
+        enumerates every message its filters match, with a count and the
+        number of messages it could not decide (indeterminate). For
+        counts by sender, domain, folder or date, use aggregate_messages. For the latest or N most recent
         messages from a person, use query_messages(sender=..., limit=N):
         it returns the
         newest first, where this tool ranks by relevance. A page holds at

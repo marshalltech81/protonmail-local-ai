@@ -2121,6 +2121,39 @@ and one-repair limit remain unchanged. Prompt-budget omissions are
 reported by the server in text `content` and the additive structured
 `coverage_note` field, outside `answer` and its checked statements.
 
+**A ranked sample, not the mailbox
+([#1233](https://github.com/marshalltech81/protonmail-local-ai/issues/1233)).**
+The answer comes from at most `max_threads` ranked threads, and fewer
+when the prompt budget leaves some out or shows them with headers only.
+It is never a search of every matching message, so an answer cannot
+establish that something is absent from the mailbox or that a list is
+complete. Three places say so:
+
+- The answer prompt tells the model that the excerpts are a ranked
+  sample of the mailbox, not all of it, that their silence says nothing
+  about the rest, and never to say that something is absent from the
+  mailbox or that a list or count is complete.
+- Every result, the empty ones included, carries the structured
+  `retrieval` disclosure (table below) and one fixed sentence in text
+  `content`: `Retrieval note: this answer comes from a ranked sample of
+  N retrieved thread(s) (max_threads=M), K with evidence in the prompt,
+  not an exhaustive search; whether other mail matches is unknown.`
+  When retrieval did not run, the sentence says so instead.
+- The `ask_mailbox` and `search_emails` descriptions send which, all,
+  every, none, how many and how often questions to
+  [`query_messages`](#query_messages), which enumerates every message
+  its filters match, and to [`aggregate_messages`](#aggregate_messages)
+  for counts by sender, domain, folder or date.
+
+Neither empty return claims anything about the mailbox. Both open with
+`No relevant emails were retrieved` and make no model call. An
+unmatched `from_name` returns before any search, and its answer says
+retrieval did not run (`retrieval_ran: false`). A search that returned
+no thread says the search ran and ranked no threads for the question
+and its filters (`retrieval_ran: true`, `threads_retrieved: 0`).
+`coverage_note` stays the prompt-budget notice only. It is null when
+nothing was left out, sample or not.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `question` | string | required | Your question in plain English |
@@ -2149,8 +2182,8 @@ included, so with `folders` set its top address can have no thread in
 scope; the description tells the model to try the next matching contact
 or pass the name itself as `participant`, which then matches within the
 folder scope. `from_name` is sender-only, like `from_addr`. An unmatched
-`from_name` returns an empty answer naming it, with no model call,
-rather than searching without the filter. A blank `participant` or
+`from_name` returns an empty answer naming it, saying retrieval did not
+run, with no model call, rather than searching without the filter. A blank `participant` or
 `from_name` (`""` or whitespace, as some clients send unset optionals)
 is treated as absent, and a padded one is stripped, here and in
 `search_emails`, `extract_from_emails` and `get_evidence`.
@@ -2385,6 +2418,7 @@ Structured output:
 | Field | Description |
 |---|---|
 | `answer` | The model's answer with its inline labels |
+| `retrieval` | Always set: `retrieval_ran` (`false` only when an unmatched `from_name` returned before any search), `threads_retrieved` (threads the ranked search returned, at most `max_threads`), `threads_supplied` (distinct threads with at least one passage in the prompt, counted from the passages rendered; lower than `threads_retrieved` when the prompt budget left a thread out or showed it with headers only), `max_threads` (the effective value after clamping), `exhaustive` (always `false`) and `remainder` (always `"unknown"`: whether other mail matches is not known) |
 | `coverage_note` | Server-written notice of prompt-budget omissions/truncation and possible incompleteness; `null` when nothing was left out or cut to fit. This is separate from model prose and citation validation |
 | `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sender_ambiguous` ([Sender attribution](#sender-attribution); null for `thread`), `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model), `scope` (`in_scope` or `context`, [Evidence scope](#evidence-scope-in-scope-or-context)), `extraction_deferred` (the passage is retained indexed text of an attachment whose re-extraction is pending, #1236; its prompt header and prose citation end with `retained indexed text; extraction refresh pending`, and the timing line counts such passages shown as `evidence_extraction_deferred`) |
 | `statements` | The answer cut into statements: `text`, `labels` (the supplied passages it cites) and `status` (`cited`, `unsupported`, `uncertain`, `uncited`, `invalid` for only unknown labels, or `not_checked`) |
@@ -2397,8 +2431,9 @@ Structured output:
 The prose in `content` is the answer, a `Citations:` list, any
 citation-check lines (fixed text with counts and labels, never the
 model's words), a `Quote check:` count when the answer quotes, any
-server-written `coverage_note`, and
-the `Sources searched:` list. To audit a
+server-written `coverage_note`, the `Retrieval note:` sentence, and
+the `Sources searched:` list (every retrieved thread, including any the
+prompt budget left out). To audit a
 citation, call `get_evidence` with the same question and the
 citation's `thread_id`: the cited `chunk_id` is among the first six
 returned chunks, attachment-matched passages included. To audit the

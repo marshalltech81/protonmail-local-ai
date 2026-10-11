@@ -152,6 +152,28 @@ def test_verification_recipe_is_in_the_client_visible_description(tool, guidance
     assert guidance in client_visible
 
 
+@pytest.mark.parametrize(
+    ("tool", "guidance"),
+    [
+        ("ask_mailbox", "answers from a ranked sample"),
+        ("ask_mailbox", "which, all, every, none, how many or how often"),
+        ("ask_mailbox", "use query_messages"),
+        ("ask_mailbox", "aggregate_messages"),
+        ("ask_mailbox", "``exhaustive: false``"),
+        ("search_emails", "which, all, every, none, how many or how often"),
+        ("search_emails", "aggregate_messages"),
+        ("search_emails", "answers from a ranked sample"),
+    ],
+)
+def test_corpus_questions_are_routed_in_the_client_visible_description(tool, guidance) -> None:
+    # #1233: corpus and completeness questions go to the enumeration
+    # tools; FastMCP sends only the docstring before ``Args:`` (#1011).
+    doc = inspect.getdoc(_registered_tools()[tool]) or ""
+    client_visible = " ".join(doc.split("\nArgs:", 1)[0].split())
+    assert guidance in client_visible
+    assert "vendor activity" not in client_visible
+
+
 def test_every_scenario_has_one_reference_trace() -> None:
     traced = [t["scenario"] for t in TRACES]
     assert sorted(traced) == sorted(SCENARIOS)
