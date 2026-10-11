@@ -940,7 +940,9 @@ superseded entries keep their number and one line.
     connection or address coverage are distinct; sources, mailbox
     occurrences and scoped collection observations are distinct. Unknown
     metadata stays unknown, a failed or incomplete scan cannot establish
-    absence, and equal bytes do not establish one logical message. The
+    absence, and equal bytes do not establish one logical message.
+    Retained companion metadata restores dated label observations; a
+    Maildir-only rebuild needs a refresh (owner, 2026-10-11, #1313). The
     Proton path is extracted unchanged: rendered configuration,
     environment variables, channel and store names, public interfaces,
     every control and the pin-rotation semantics. New configuration or
@@ -958,8 +960,9 @@ superseded entries keep their number and one line.
     allow it, never the value. The Bridge stays on this Mac: the host
     is an allowlist of container aliases tested to forward to the
     host's `127.0.0.1`, the certificate name a loopback identity; off-Mac
-    Bridge is #1499. Syncing `Labels/*`, `All Mail` or top-level
-    `Starred` stays refused until #1313 delivers multi-view identity.
+    Bridge is #1499. #1313 enables metadata-only labels; the payload
+    exclusions of `Labels/*`, `All Mail` and top-level `Starred` remain
+    required (owner, 2026-10-11).
     Channel and store names follow log redaction (#1498). Replacing the
     Compose literals with this validation is an owner decision under
     decision 43, which stands unchanged.

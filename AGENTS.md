@@ -193,6 +193,7 @@ Do not make any of the following changes unless the repository owner explicitly 
 - `mbsyncrc.template` must remain pull-only.
 - Do not remove `Expunge None`.
 - Do not add `All Mail`, `Labels/*` or the top-level `Starred` to mbsync Patterns.
+  Labels come from metadata (#1313), never from syncing these folders.
 - Do not weaken or bypass TLS verification casually.
 
 ### TLS and connection security constraints
