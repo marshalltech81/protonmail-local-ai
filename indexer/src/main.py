@@ -209,7 +209,7 @@ _IDENTITY_SETTINGS = (
 
 # Every other variable ``src/`` reads, with why it is not hashed.
 # ``tests/test_startup_identity.py`` checks that each variable read is in
-# one of the two lists (Codex review round 5 on #893).
+# one of the two lists (#893).
 _IDENTITY_EXCLUDED = {
     "EMBED_API_KEY": "a secret: the embedder credential",  # pragma: allowlist secret
     "GIT_COMMIT": "not configuration: logged as the line's own commit field",
@@ -226,7 +226,7 @@ def _git_commit() -> str:
 
 def _hashable_url(value: str) -> str:
     """``value`` unless it carries userinfo, so the hash cannot be used to
-    test guesses at a password offline (Codex round 6 on #893). Never
+    test guesses at a password offline (#893). Never
     raises: a value ``urlsplit`` rejects is a fixed marker too."""
     try:
         parts = urllib.parse.urlsplit(value)
@@ -265,7 +265,7 @@ def _read_stored_schema_version(path: Path) -> str:
     """
     try:
         # ``stat`` rather than ``exists()``, which reports a file it may
-        # not stat as missing (Codex round 6 on #893).
+        # not stat as missing (#893).
         try:
             path.stat()
         except FileNotFoundError:
@@ -362,7 +362,8 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL", "").strip()
 
 
 # Endpoint hosts that keep a provider call on this machine: the host's
-# loopback, or OrbStack's route from a container to it.
+# loopback, or the route Docker Desktop and OrbStack give a container to
+# it (``host.docker.internal``).
 _HOST_LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "host.docker.internal"})
 
 
@@ -389,7 +390,7 @@ def _warn_if_remote_endpoint(mode_setting: str, mode: str, url: str, sends: str)
 # endpoint, compared trimmed and case-insensitively, and the URL it
 # resolves to. The URL is passed to the SDK explicitly: left out, the
 # SDK would read ``OPENAI_BASE_URL`` first, which could send mail
-# somewhere the operator did not choose (Codex round 1 on #773).
+# somewhere the operator did not choose (#773).
 _SDK_DEFAULT_BASE_URL = "default"
 _OPENAI_DEFAULT_URL = "https://api.openai.com/v1"
 
@@ -528,8 +529,8 @@ EMBED_CONCURRENCY = _int_env("EMBED_CONCURRENCY", 1)
 
 
 # Chunker token budgets — see ``chunker.chunk_message`` for semantics.
-# Defaults are sized for the MLX-served Qwen3-Embedding-8B context
-# window. Qwen3-Embedding handles long context cleanly, so the
+# Defaults are sized for a long-context embedder such as
+# Qwen3-Embedding-8B. Qwen3-Embedding handles long context cleanly, so the
 # default ``max`` is 1500 — fewer, larger chunks reduce embed call
 # count and produce better mean-of-chunks thread vectors.
 CHUNK_TARGET_TOKENS = _int_env("INDEXER_CHUNK_TARGET_TOKENS", 1000)
@@ -589,7 +590,8 @@ WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 
 
 # How often (seconds) the main loop runs ``_recover_zero_vector_threads``.
 # The periodic sweep recovers retryable shapes — chunkless zero-vector
-# threads whose queue row is still 'queued' or has been cleaned up —
+# threads whose file has no queue row (a row still 'queued' is left to
+# the queue) —
 # but does NOT auto-resurrect dead-lettered rows. Dead = operator-
 # visible terminal state; clearing it requires explicit intervention
 # (``make requeue-dead``).
@@ -666,9 +668,10 @@ INDEXER_OCR_MAX_PAGES = _int_env("INDEXER_OCR_MAX_PAGES", 20, minimum=1)
 # (``extractors.image.child_cpu_seconds``, ``extractors.pdf
 # .child_cpu_seconds``) that 0 does not lift (#1292, #1293).
 INDEXER_OCR_TIMEOUT_SECONDS = _int_env("INDEXER_OCR_TIMEOUT_SECONDS", 60, minimum=0)
-# Longest one unit of work — a message's parse, or one attachment's
-# extraction — may run before the stall guard exits the process for
-# Compose to restart (``stall_guard``). Each attachment restarts the
+# Longest one unit of work — a message's parse, one attachment's
+# extraction, or one embed request while a lone message is charged — may
+# run before the stall guard exits the process for Compose to restart
+# (``stall_guard``). Each attachment and embed request restarts the
 # clock, so a message with many slow attachments is fine; one PDF may
 # legitimately run up to its child's wall clock
 # (``extractors.pdf.child_timeout_seconds``, 2,550 s at the defaults), so
@@ -1032,7 +1035,7 @@ class MaildirHandler(FileSystemEventHandler):
 
     The callback path only enqueues — the actual parse / embed / upsert
     pipeline runs in the main loop via ``_drain_queue_batched``. Enqueue is a
-    single SQLite write, so the watchdog's internal thread no longer
+    single SQLite write, so the watchdog's internal thread never
     blocks on a slow embed round-trip and a Watchdog event storm
     cannot overflow whatever buffer ``watchdog`` uses internally while
     an embed is in flight.
@@ -1193,12 +1196,12 @@ TIMING_LOG_EVERY = 25
 # In steady state the summaries are also logged when a drain empties the
 # queue, and at least this often while counts are pending, so a small
 # burst's attachment outcomes are not held back until unrelated mail
-# arrives (review round 1 on #884).
+# arrives (#884).
 SUMMARY_MAX_INTERVAL_SECS = 300.0
 
-# At most one attachments line per this many seconds (review round 4 on
-# #884): a drain ending every message would otherwise log one line per
-# message. Counts held back carry over to the next line.
+# At most one attachments line per this many seconds (#884): a drain ending
+# every message would otherwise log one line per message. Counts held back
+# carry over to the next line.
 OUTCOMES_LOG_MIN_INTERVAL_SECS = 60.0
 _last_outcomes_log: float | None = None
 _monotonic = time.monotonic
@@ -1254,7 +1257,7 @@ _reparse_progress = _ReparseProgress()
 # (#1236) since the last recovery line: set when a deferral commits and
 # when a heartbeat sees one queued, so the heartbeat that first sees none
 # logs one recovery line even when the deferral and its last
-# continuation fall between two heartbeats (Codex round 1 on #1355).
+# continuation fall between two heartbeats (#1355).
 _extraction_deferrals_seen = False
 
 
@@ -1484,12 +1487,13 @@ class _BatchedMsg:
     attach_offsets: list[list[int]] = field(default_factory=list)
     # Offset of this message's subject-fallback text in the batch's flat
     # ``all_texts`` list, or ``None`` when no fallback is needed. The
-    # fallback is added in Phase 2a only when the message contributes
-    # zero new chunks AND its parent thread has no existing chunks —
-    # i.e. exactly the case where the Phase 1 seed is the placeholder
-    # zero. Without this fallback the thread vector would be
-    # permanently stuck at zero (search quality regression). Mirrors
-    # the old ``_seed_thread_embedding`` subject fallback.
+    # fallback is added in Phase 2a when the message contributes no new
+    # chunks and either the thread has no committed chunks or this pass
+    # clears a previously committed slice of the message
+    # (``clears_chunks``; Phase 2c still prefers a remaining chunk mean),
+    # except on a reparse that kept the thread's stored vector. Without this
+    # fallback the thread vector would be permanently stuck at zero
+    # (search quality regression).
     subject_fallback_offset: int | None = None
     # Phase 1 kept the thread's stored non-zero vector as its seed (the
     # thread has no chunks). A reparse then reuses it instead of
@@ -1603,10 +1607,10 @@ def _phase1_commit_thread(
         return None
     except OversizedMessageError as e:
         # File exceeds INDEXER_PARSE_MAX_BYTES. Terminal under current
-        # config — retrying will find the same oversized file and burn
-        # embed budget. Dead-letter so the durable row survives restarts
-        # (the file is still on disk, so deleting the row would let
-        # ``initial_index`` re-enqueue it on every container start). The
+        # config — retrying will find the same oversized file and fail
+        # the same way. Dead-letter so the durable row survives restarts
+        # (the file is still on disk, so deleting the row would let every
+        # Maildir walk, at startup and the periodic rescan, re-enqueue it). The
         # ``is_dead`` gate then skips the file thereafter, and operators
         # see the entry in ``queue.stats()['dead']``.
         queue.mark_dead_terminal(filepath, stage="parse", error=f"oversized: {e}")
@@ -1735,7 +1739,8 @@ def _phase2a_collect_chunks(
     back. ``batch_extractions`` carries the batch's uncommitted
     extraction results, so identical bytes are extracted once per batch
     and extractor module (#237, #928). Returns ``(True, None)`` on success or ``(False, error)`` on
-    a chunk/extract failure (rare — usually only attachment OCR errors)
+    a chunk/extract failure (rare: a database or chunking error;
+    extractor failures are recorded as extraction results, not raised)
     so the caller can mark the queue row failed without aborting the
     rest of the batch.
 
@@ -1918,10 +1923,10 @@ def _phase2a_collect_chunks(
             # A payload settles in the pass where a copy of it resolves and
             # none is deferred: its slice is then rewritten from every
             # copy's current text, so chunks an earlier pass kept for a
-            # since-refreshed copy do not outlive it (Codex round 4 on
-            # #1355). Each copy resolved earlier is read once per module,
-            # from its cached row as it stands, and only adds its chunks;
-            # a payload settles once, so this work stays linear.
+            # since-refreshed copy do not outlive it (#1355). Each copy
+            # resolved earlier is read once per module, from its cached row
+            # as it stands, and only adds its chunks; a payload settles
+            # once, so this work stays linear.
             state.stale_occurrences = sorted(set(occurrence_states) - parsed_occurrences)
             deferred_now = {plan.attachment.content_hash for plan in attach_plans if plan.deferred}
             resolved_now = {
@@ -1970,7 +1975,7 @@ def _phase2a_collect_chunks(
         elif INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
             # The parse has no attachments (a parser change may have
             # dropped them all): every stored occurrence is stale
-            # (Codex round 7 on #1355, #1375).
+            # (#1355, #1375).
             state.stale_occurrences = sorted(db.get_attachment_occurrence_states(msg.claimant_id))
         # Phase 2c deletes the message's chunk slice of each stale
         # payload no parsed attachment carries (#1375). Only when no
@@ -2017,11 +2022,11 @@ def _phase2a_collect_chunks(
             else:
                 clears_chunks = clears_chunks or bool(stored_attach_ids)
         # Subject-fallback path: when this message contributes zero new
-        # chunks AND the parent thread has no committed chunks, embed
-        # the subject (or a sentinel string) so the thread vector is
-        # not permanently stuck at the Phase 1 placeholder zero.
-        # Mirrors the old ``_seed_thread_embedding`` per-message
-        # behavior. The fallback text rides through Phase 2b inside the
+        # chunks AND the parent thread has no committed chunks (or this
+        # pass clears a previously committed slice of the message; not on
+        # a reparse that keeps the stored vector), embed the subject (or a sentinel string)
+        # so the thread vector is not permanently stuck at the Phase 1
+        # placeholder zero. The fallback text rides through Phase 2b inside the
         # same batched embed call as everyone else's chunks.
         #
         # The check is on COMMITTED chunks only (``thread_has_chunks``),
@@ -2039,11 +2044,11 @@ def _phase2a_collect_chunks(
         # it reads no chunk vector on chatty threads where this gate
         # fires for every chunkless arrival.
         has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
-        # A reparse changes no chunk text or embedding input (that would
-        # be a rebuild; docs/architecture.md, "Reparse in place"), so a
-        # chunkless thread's stored subject-fallback vector is still the
-        # one this fallback would embed: keep it and make no call
-        # (#1078). A vector still at the zero placeholder is repaired.
+        # A reparse does not change the subject-fallback input (the thread's
+        # stored ``display_subject``), so a chunkless thread's stored
+        # subject-fallback vector is still the one this fallback would
+        # embed: keep it and make no call (#1078). A vector still at the
+        # zero placeholder is repaired.
         keeps_vector = (
             state.row["reason"] == REASON_REPARSE and state.kept_prior_vector and not clears_chunks
         )
@@ -2085,7 +2090,8 @@ def _phase2a_collect_chunks(
         # Phase 2a is "extract + chunk" only — no DB writes. A failure
         # here marks this message failed but leaves Phase 1's thread
         # commit in place (keyword-searchable but vectorless until
-        # retry succeeds or the operator dead-letters this row).
+        # a retry succeeds or the row dead-letters after
+        # ``INDEXER_MAX_ATTEMPTS``).
         return False, _stage_error(e)
 
     state.body_chunks = body_chunks
@@ -2161,8 +2167,7 @@ def _phase2c_commit_vectors(
             dropped, dropped_slices = db.delete_attachment_occurrences(
                 msg.claimant_id, state.stale_occurrences, purged_extractions
             )
-            # Replace the Phase 1 seed thread vector. Three cases
-            # mirror the old ``_seed_thread_embedding`` logic:
+            # Replace the Phase 1 seed thread vector. Three cases:
             #   1. Thread now has chunks (this message contributed
             #      some, or earlier messages already had them) → use
             #      the mean of those chunk vectors, derived from the
@@ -2173,9 +2178,10 @@ def _phase2c_commit_vectors(
             #      (blank-body, no-attachment-chunks message — would
             #      otherwise be permanently stuck at zero) → use the
             #      subject-embedded vector.
-            #   3. Neither — leave the placeholder zero in place.
-            #      Should not occur in practice; if it does, the next
-            #      message on the thread will overwrite via case 1.
+            #   3. Neither — leave the Phase 1 seed in place: the kept
+            #      subject-fallback vector on a reparse of a chunkless
+            #      thread (``keeps_vector``), otherwise the zero
+            #      placeholder until a later message brings chunks.
             chunk_mean = db.thread_chunk_mean(thread.thread_id)
             if chunk_mean is not None:
                 db.replace_thread_vector(thread.thread_id, chunk_mean)
@@ -2184,7 +2190,7 @@ def _phase2c_commit_vectors(
             if continues:
                 # The refund of a lone survivor's charge is part of this
                 # transaction, and the charge stays watched until it
-                # commits (Codex round 5 on #1355).
+                # commits (#1355).
                 queue.defer(
                     filepath,
                     stage=STAGE_EXTRACT,
@@ -2198,7 +2204,7 @@ def _phase2c_commit_vectors(
     if continues:
         queue.release(filepath)
     # Counted once committed, so a message prepared again after an
-    # embedder outage is counted once (review round 1 on #884).
+    # embedder outage is counted once (#884).
     record_committed_outcomes(state.attach_plans)
     attachment_outcomes.record_dropped(dropped, dropped_slices)
     if continues:
@@ -2491,9 +2497,9 @@ def _drain_queue_batched(
     zero.
     Phase 2a chunks the body + attachment text without embedding.
     Phase 2b issues a single ``embed_batch`` covering every new chunk
-    across the whole batch — this is the optimization: ~25k single-
-    HTTP-call messages becomes ~500 multi-message HTTP calls against a
-    cloud embedder.
+    across the whole batch — this is the optimization: ~25k per-message
+    embed calls become ~500 batch calls (each split into requests of up
+    to ``EMBED_BATCH_SIZE`` texts) against a cloud embedder.
     Phase 2c commits the chunk + vector writes per message and
     overwrites the Phase 1 seed thread vector with the real
     mean-of-chunks vector.
@@ -2578,9 +2584,9 @@ def _drain_queue_batched(
                     )
                 continue
             # A reparse the heartbeat never saw queued (drained between two
-            # heartbeats) still gets its completion line (Codex round 1 on
-            # #1143). Set past the trash check: a trashed row parked again
-            # must not re-arm it (#1331).
+            # heartbeats) still gets its completion line (#1143). Set past
+            # the trash check: a trashed row parked again must not re-arm it
+            # (#1331).
             if row["reason"] == REASON_REPARSE:
                 _reparse_progress.active = True
             # Parse and extraction are the steps hostile input can crash
@@ -2697,7 +2703,7 @@ def _drain_queue_batched(
             )
         # A batch with nothing to embed sent no request, so it proves
         # nothing about the provider: it neither closes the breaker nor
-        # logs its recovery (Codex round 2 on #904).
+        # logs its recovery (#904).
         if breaker is not None and not paused and all_texts:
             breaker.record_success()
         embed_ms = (time.perf_counter() - t_embed_start) * 1000
@@ -2767,12 +2773,12 @@ def _recover_zero_vector_threads(
 
     Policy: dead-lettered rows are an operator-visible terminal state
     and are NOT auto-resurrected. The recovery sweep only rescues
-    files in queued / no-row state — those represent in-flight or
-    cleaned-up work the indexer can safely retry. A row at
+    files with no queue row — cleaned-up work the indexer can safely
+    retry; a queued row is the queue's own to retry. A row at
     ``status='dead'`` stayed in ``indexing_jobs`` precisely so the
-    operator could see that ``max_attempts`` was exhausted; clearing
-    that state without operator intent would burn embedder quota
-    against the same payload on every container restart and undo
+    operator could see it gave up (attempts exhausted or a terminal
+    failure); clearing that state without operator intent would burn
+    embedder quota against the same payload on every sweep and undo
     ``initial_index``'s deliberate ``is_dead`` skip.
 
     What the sweep handles:
@@ -2834,10 +2840,8 @@ def _recover_zero_vector_threads(
     if re_enqueued or skipped_pending or skipped_dead:
         # Log shape: split the "what happened" facts from the
         # "what's next" implication so the implication only applies
-        # to the rows that will actually move. The previous wording
-        # ("Their next drain pass should complete the indexing")
-        # incorrectly suggested skipped-dead rows would also drain;
-        # they will not until an operator intervenes.
+        # to the rows that will actually move: dead-lettered rows do
+        # not drain until an operator intervenes.
         log.warning(
             "recovery sweep: re-enqueued %d zero-vector chunkless "
             "message(s); skipped %d already in active retry; skipped %d "
@@ -2855,9 +2859,8 @@ def _recover_zero_vector_threads(
         if skipped_dead and not resurrect_dead:
             log.warning(
                 "recovery sweep: %d dead-lettered file(s) remain parked. "
-                "They will NOT be drained automatically — see "
-                "_recover_zero_vector_threads docstring for the operator "
-                "rescue paths.",
+                "They will NOT be drained automatically; run "
+                "make requeue-dead once the cause is fixed.",
                 skipped_dead,
             )
     return re_enqueued
@@ -3290,15 +3293,13 @@ def initial_index(
     Routing the initial scan through the queue — rather than indexing
     files inline — means a crash or embedding service outage mid-scan leaves the
     untouched work durably queued instead of dropped. The next restart
-    resumes from ``indexing_jobs`` rather than rescanning the whole
-    Maildir and relying on ``is_indexed`` to filter.
+    drains the jobs left in ``indexing_jobs``; its Maildir walk only
+    adds files that are neither indexed nor already queued.
     """
     log.info("Running initial index scan...")
-    # Dead-lettered files are not resurrected on routine startup:
-    # without that skip, every container restart re-ran the same
-    # 5-attempt × 30s backoff cascade against the same poison-pill
-    # payloads — observed to add up to wasted embedding
-    # service load per dead file per restart.
+    # Dead-lettered files are not re-queued on startup (the walk's
+    # ``is_dead`` skip): re-queuing them would rerun the full retry
+    # cascade against the same failing payloads on every restart.
     stamp = ingestion_state.read_stamp() if ingestion_state is not None else None
     _enqueue_unindexed_messages(
         db,
@@ -3321,8 +3322,8 @@ def initial_index(
         ingestion_state.acknowledge(stamp)
 
     # Recovery sweep — re-enqueue messages stuck on chunkless zero-vector
-    # threads from a prior crash mid-batch (queued row that mark_failed /
-    # mark_succeeded never reached). The standard walk above misses these
+    # threads whose file has no queue row; a row a crash left queued is
+    # the queue's to retry. The standard walk above misses these
     # because ``is_indexed=True``. Dead-lettered rows are intentionally
     # NOT touched here — that policy is uniform across startup and
     # periodic, matching ``initial_index``'s ``is_dead`` skip and the
@@ -3331,8 +3332,9 @@ def initial_index(
     # ``resurrect_dead=True`` opt-in path. Run BEFORE the drain so
     # recovery rows ride the same batched-index pass as fresh enqueues.
     _recover_zero_vector_threads(db, queue, skip_trashed=skip_trashed)
-    # Messages whose attachments an extractor fix would now read
-    # differently; re-queued once per version bump.
+    # Messages whose cached attachment results are due a refresh (an
+    # extractor version bump, OCR now on, a raised cap, and the other
+    # arms of ``_requeue_stale_extractions``).
     _requeue_stale_extractions(db, queue)
 
     timing_aggregator = TimingAggregator(window=200)
@@ -3783,7 +3785,11 @@ def main():
     )
     if INDEXER_MESSAGE_TIMEOUT_SECONDS:
         StallGuard(queue, limit_seconds=INDEXER_MESSAGE_TIMEOUT_SECONDS).start()
-        log.info("Stall guard: exits after %ds on one message", INDEXER_MESSAGE_TIMEOUT_SECONDS)
+        log.info(
+            "Stall guard: exits after %ds on one unit of work (a parse, an attachment, "
+            "or an embed request while one message is charged)",
+            INDEXER_MESSAGE_TIMEOUT_SECONDS,
+        )
     else:
         log.info("Stall guard: disabled (INDEXER_MESSAGE_TIMEOUT_SECONDS=0)")
     queue_depth = queue.stats()
@@ -3959,9 +3965,8 @@ def main():
                 last_reconcile = now
 
             # Recovery sweep: re-enqueue messages on chunkless
-            # zero-vector threads that are STILL retryable. A
-            # transient embedder bug that left a row queued-but-stuck
-            # heals on its own once the underlying cause clears.
+            # zero-vector threads that have no queue row; a queued row
+            # is left to the queue's own retries.
             # Dead-lettered rows are left alone (default policy,
             # uniform with the startup path) — see
             # ``_recover_zero_vector_threads`` for why.
