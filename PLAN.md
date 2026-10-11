@@ -930,6 +930,21 @@ superseded entries keep their number and one line.
     channels or stores, any path around a Proton control (a synthetic
     source included) and additional sources each need their own
     decision; open parts stay in #1083, #1313, #1316 and #1317.
+46. **Proton provider settings (2026-10-11, #1497):** `SOURCE_MODE`
+    (only `proton-bridge`, the default) selects the provider and is read
+    once at startup; no control is conditional on it. Every Proton value
+    is an operator setting that defaults to today's value and is
+    validated by one shared helper at `scripts/validate-env.sh` and the
+    mbsync entrypoint before rendering or any network use; a forbidden
+    value is refused with fixed text naming the decision that would
+    allow it, never the value. The Bridge stays on this Mac: the host
+    is an allowlist of container aliases tested to forward to the
+    host's `127.0.0.1`, the certificate name a loopback identity; off-Mac
+    Bridge is #1499. Syncing `Labels/*`, `All Mail` or top-level
+    `Starred` stays refused until #1313 delivers multi-view identity.
+    Channel and store names follow log redaction (#1498). Replacing the
+    Compose literals with this validation is an owner decision under
+    decision 43, which stands unchanged.
 
 ## Notes for Agents
 
