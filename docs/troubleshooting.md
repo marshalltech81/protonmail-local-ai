@@ -84,8 +84,9 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
   and mcp-server, `_IDENTITY_SETTINGS` in `src/main.py`, with everything
   else the service reads listed with its reason in
   `_IDENTITY_EXCLUDED`; a test fails when a new setting is in neither),
-  or `BRIDGE_HOST` (trimmed, in lower case), `BRIDGE_IMAP_PORT`,
-  `BRIDGE_CERT_HOST`, `PROTON_IMAP_ACCOUNT_NAME`,
+  or `SOURCE_MODE` and `BRIDGE_HOST` (each trimmed, in lower case),
+  `BRIDGE_IMAP_PORT`, `BRIDGE_CERT_HOST`, `PROTON_FOLDER_EXCLUSIONS`,
+  `PROTON_IMAP_ACCOUNT_NAME`,
   `PROTON_REMOTE_STORE_NAME`, `PROTON_LOCAL_STORE_NAME`,
   `PROTON_CHANNEL_NAME`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
   `BRIDGE_CERT_FINGERPRINT` (normalized, and not secret) and
@@ -269,9 +270,12 @@ and the connection.
   checks the certificate against the expected fingerprint and the pin,
   not its name, so this error comes after `Bridge cert extracted
   successfully` and before any login.
-- **`BRIDGE_HOST must be one of ...`, `BRIDGE_CERT_HOST must be ...`,
-  or `PROTON_..._NAME must be ...`** (from `make validate-env` or at
-  mbsync's startup, before it renders its config or connects). These
+- **`SOURCE_MODE must be proton-bridge`, `BRIDGE_HOST must be one of
+  ...`, `BRIDGE_IMAP_PORT must be ...`, `BRIDGE_CERT_HOST must be ...`,
+  `BRIDGE_CERT_PIN_ROTATE must be true or false`,
+  `PROTON_FOLDER_EXCLUSIONS must ...` or `PROTON_..._NAME must be ...`**
+  (from `make validate-env` or at mbsync's startup, before it renders
+  its config or connects). These
   settings are checked by `mbsync/proton-settings.sh` at both places
   (PLAN.md decision 46); the message names the setting, never the value.
   `BRIDGE_HOST` takes only names that forward to this Mac's
@@ -285,6 +289,16 @@ and the connection.
   `127.x.y.z` written without leading zeros, or `::1`, exactly as
   written. The four isync names take 1 to 64 of `A-Z a-z 0-9 _ -`,
   starting with a letter or digit, and the two store names must differ.
+  `SOURCE_MODE` accepts only `proton-bridge`, in any case and without
+  surrounding spaces. `BRIDGE_IMAP_PORT` is a port from 1 to 65535
+  without leading zeros or spaces. `BRIDGE_CERT_PIN_ROTATE` is exactly
+  `true` or `false`, in lower case: `TRUE`, `yes` or `1` is refused
+  rather than read as false. `PROTON_FOLDER_EXCLUSIONS` is folder
+  patterns separated by `|`, none empty or with a space at either end,
+  written with `A-Z a-z 0-9`, spaces and `. / _ * % & + , ( ) @ -`; it
+  must keep `All Mail`, `Labels/*` and `Starred`, which mbsync never
+  syncs (labels come from message metadata, #1313): add folders after
+  them, for example `All Mail|Labels/*|Starred|Folders/Old*`.
   Unset a setting, or leave it empty, for its default.
   These names are not resolved to check them: DNS cannot show that a
   name is local, so the container engine and its resolver are trusted

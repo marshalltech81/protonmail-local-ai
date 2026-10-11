@@ -46,6 +46,9 @@ set -Eeuo pipefail
 #      6, which switch to stores of their own.
 #   9. Renaming the channel and both stores (#1498) between runs carries
 #      on from the sync state: nothing is downloaded twice. Runs before 8.
+#  10. Exclusions added to PROTON_FOLDER_EXCLUSIONS (PLAN.md decision 46)
+#      leave their folders out alongside All Mail, Labels/* and Starred;
+#      other folders still sync. Runs after 9, before 8.
 #   8. The far side's arrival time (#1081) reaches the near file's mtime:
 #      with CopyArrivalDate the far store's date for a message (the file
 #      mtime of a Maildir far side, INTERNALDATE of an IMAP one) is the
@@ -100,13 +103,15 @@ entrypoint_constant() {
 # The template with its IMAP account dropped and its far store replaced
 # by a Maildir store. Everything else, the near store and the Channel
 # included, is copied as it is, with the two Patterns exclusion sets
-# substituted from the entrypoint's constants and the account, store and
-# channel names (#1498) as render_mbsync_config does: the defaults in
-# mbsync/proton-settings.sh, or $1 (channel), $2 (far store) and $3 (near
-# store).
+# substituted and the account, store and channel names (#1498) as
+# render_mbsync_config does: Proton's folder exclusions rendered by
+# mbsync/proton-settings.sh, the layout set from the entrypoint's
+# constant, and the defaults in mbsync/proton-settings.sh, or $1
+# (channel), $2 (far store), $3 (near store) and $4
+# (PROTON_FOLDER_EXCLUSIONS).
 render_config() {
     local provider layout
-    provider="$(entrypoint_constant PROTON_FOLDER_EXCLUSIONS)"
+    provider="$(proton_folder_exclusion_patterns "${4:-$PROTON_DEFAULT_FOLDER_EXCLUSIONS}")"
     layout="$(entrypoint_constant ISYNC_LAYOUT_EXCLUSIONS)"
     PROVIDER="$provider" LAYOUT="$layout" ACCOUNT="$PROTON_DEFAULT_IMAP_ACCOUNT_NAME" \
         CHANNEL="${1:-$PROTON_DEFAULT_CHANNEL_NAME}" REMOTE="${2:-$PROTON_DEFAULT_REMOTE_STORE_NAME}" \
@@ -135,8 +140,10 @@ render_config() {
         !skip { print }
     ' "$MBSYNC_DIR/mbsyncrc.template" >"$WORK/mbsyncrc"
     chmod 644 "$WORK/mbsyncrc"
-    # The same Patterns line the entrypoint renders (mbsyncrc.golden).
-    if [[ "$(grep '^Patterns ' "$WORK/mbsyncrc")" != "$(grep '^Patterns ' "$MBSYNC_DIR/tests/mbsyncrc.golden")" ]]; then
+    # With the default exclusions, the same Patterns line the entrypoint
+    # renders (mbsyncrc.golden).
+    if [[ -z "${4:-}" ]] \
+        && [[ "$(grep '^Patterns ' "$WORK/mbsyncrc")" != "$(grep '^Patterns ' "$MBSYNC_DIR/tests/mbsyncrc.golden")" ]]; then
         printf 'the rendered Patterns line differs from mbsync/tests/mbsyncrc.golden\n' >&2
         exit 1
     fi
@@ -382,6 +389,38 @@ if ((ok)); then
     pass "renaming the channel and stores carries on from the sync state: nothing is downloaded twice"
 else
     fail "renaming the channel and stores carries on from the sync state: nothing is downloaded twice"
+fi
+
+# 10. PLAN.md decision 46: exclusions an operator adds to
+# PROTON_FOLDER_EXCLUSIONS (a name with a space, a trailing wildcard)
+# leave those folders out next to the three that always stay out, and the
+# rest still syncs. The defaults come back for the checks that follow.
+render_config "" "" "" "All Mail|Labels/*|Starred|Folders/Skip me|Folders/Old*"
+TAGS=()
+for name in "Folders/Skip me" "Folders/Old2020" "All Mail" "Labels/Synthetic" "Folders/Kept10"; do
+    deliver "$name"
+done
+ok=1
+for run in first second; do
+    if ! sync_once "added-exclusions-${run}"; then
+        ok=0
+        sed 's/^/     /' "$WORK/sync-added-exclusions-${run}.log"
+    fi
+done
+for entry in "${TAGS[@]}"; do
+    name="${entry%%|*}"
+    expected=0
+    [[ "$name" != "Folders/Kept10" ]] || expected=1
+    if [[ "$(copies "${entry#*|}")" != "$expected" ]]; then
+        ok=0
+        printf '     %s: %s copies of %s\n' "$name" "$(copies "${entry#*|}")" "${entry#*|}"
+    fi
+done
+render_config
+if ((ok)) && located "Folders/Kept10" "${TAGS[4]#*|}"; then
+    pass "added exclusions leave their folders out with the three protected ones; the rest syncs"
+else
+    fail "added exclusions leave their folders out with the three protected ones; the rest syncs"
 fi
 
 # 8. #1081: the far side's arrival time is copied onto the near file's

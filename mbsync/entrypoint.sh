@@ -11,9 +11,11 @@ readonly RUNTIME_DIR="/tmp/mbsync"
 readonly TEMPLATE_FILE="/etc/mbsyncrc.template"
 # The channel's Patterns exclusions, two sets with two owners (PLAN.md
 # decision 45), each substituted into its own placeholder on the
-# template's Patterns line by render_mbsync_config. Neither is
-# configuration. The Channel comment in mbsyncrc.template explains both.
-# Proton's set, PROTON_FOLDER_EXCLUSIONS, is in the provider section below.
+# template's Patterns line by render_mbsync_config, the layout set last.
+# The Channel comment in mbsyncrc.template explains both. Proton's set,
+# the PROTON_FOLDER_EXCLUSIONS setting (always keeping All Mail, Labels/*
+# and Starred), is in the provider section below; the transport's set is
+# not configuration.
 # isync transport: a child folder named after a file isync keeps in its
 # parent's directory (SubFolders Legacy, SyncState *), and everything
 # below it.
@@ -76,10 +78,11 @@ mkdir -p "$RUNTIME_DIR"
 # persistent pin with its rotation, and Proton's folder exclusions. The
 # transport below calls only validate_bridge_endpoint,
 # expected_fingerprint, bridge_imap_host, bridge_imap_connect,
-# warn_if_pin_rotation_enabled, extract_bridge_cert and
-# validate_proton_settings, and reads constants defined below: the
-# endpoint, the isync names, the folder exclusions, the password file
-# and, for the startup identity line, the certificate settings.
+# warn_if_pin_rotation_enabled, extract_bridge_cert,
+# validate_proton_settings and provider_exclusion_patterns, and reads
+# constants defined below: the endpoint, the isync names, the folder
+# exclusions, the password file and, for the startup identity line, the
+# source selector and the certificate settings.
 
 # The defaults and validators of the Proton settings, one implementation
 # shared with scripts/validate-env.sh (PLAN.md decision 46): copied from
@@ -88,12 +91,19 @@ readonly PROTON_SETTINGS_FILE="/usr/local/lib/proton-settings.sh"
 # shellcheck source=mbsync/proton-settings.sh disable=SC1091 # linted on its own
 source "$PROTON_SETTINGS_FILE"
 
+# The source selector (PLAN.md decision 46): proton-bridge, the only
+# source, is accepted; validate_proton_settings refuses anything else
+# before rendering or any network use. Read here once, trimmed and in
+# lower case like every *_MODE setting; nothing after that check reads
+# it, and no control depends on it.
+SOURCE_MODE="$(proton_normalize_source_mode "${SOURCE_MODE:-$PROTON_DEFAULT_SOURCE_MODE}")"
+readonly SOURCE_MODE
 # The Bridge app runs on this Mac; mbsync connects to it here, through a
 # name that forwards to the host's 127.0.0.1 (validate_proton_settings).
 # Compared and used without surrounding whitespace, in lower case.
 BRIDGE_HOST="$(proton_normalize_bridge_host "${BRIDGE_HOST:-$PROTON_DEFAULT_BRIDGE_HOST}")"
 readonly BRIDGE_HOST
-readonly BRIDGE_IMAP_PORT="${BRIDGE_IMAP_PORT:-1143}"
+readonly BRIDGE_IMAP_PORT="${BRIDGE_IMAP_PORT:-$PROTON_DEFAULT_BRIDGE_IMAP_PORT}"
 # The name the app's certificate is checked against (its CN). See
 # bridge_imap_host.
 readonly BRIDGE_CERT_HOST="${BRIDGE_CERT_HOST:-$PROTON_DEFAULT_BRIDGE_CERT_HOST}"
@@ -107,12 +117,15 @@ readonly PROTON_CHANNEL_NAME="${PROTON_CHANNEL_NAME:-$PROTON_DEFAULT_CHANNEL_NAM
 # Required: the SHA-256 fingerprint the operator took from the Bridge
 # app; see verify_expected_fingerprint.
 readonly BRIDGE_CERT_FINGERPRINT="${BRIDGE_CERT_FINGERPRINT:-}"
-readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-false}"
-# Proton provider policy: Bridge's virtual All Mail and top-level Starred,
-# and Labels/* (excluded by project policy), which list each message again
-# (never synced, AGENTS.md; see the template's Channel comment).
-# Substituted by render_mbsync_config; not configuration.
-readonly PROTON_FOLDER_EXCLUSIONS='!"All Mail" !"Labels/*" !"Starred"'
+# Literally true or false (validate_proton_settings).
+readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-$PROTON_DEFAULT_BRIDGE_CERT_PIN_ROTATE}"
+# Proton provider policy: folder patterns separated by |, rendered as the
+# Patterns exclusions by render_mbsync_config
+# (proton_folder_exclusion_patterns). They always include Bridge's
+# virtual All Mail and top-level Starred and Labels/*, which list each
+# message again (never synced, AGENTS.md; see the template's Channel
+# comment); an operator may add more.
+readonly PROTON_FOLDER_EXCLUSIONS="${PROTON_FOLDER_EXCLUSIONS:-$PROTON_DEFAULT_FOLDER_EXCLUSIONS}"
 readonly BRIDGE_PASS_FILE="/run/secrets/bridge_pass"
 readonly CERT_FILE="${RUNTIME_DIR}/bridge-cert.pem"
 # State directory persists the pinned Bridge cert fingerprint across
@@ -125,16 +138,25 @@ readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 
 validate_proton_settings() {
     # The shared validators (proton-settings.sh), the ones
-    # scripts/validate-env.sh runs: the Bridge host and certificate name
-    # must be this Mac's, and the isync names a safe set of characters.
-    # Fixed text: a refused value is never printed.
+    # scripts/validate-env.sh runs: SOURCE_MODE first, then the Bridge
+    # host and certificate name must be this Mac's, the port a port, pin
+    # rotation literally true or false, the folder exclusions well formed
+    # and keeping the three protected ones, and the isync names a safe
+    # set of characters. Fixed text: a refused value is never printed.
     local problem
-    if ! problem="$(proton_settings_problem "$BRIDGE_HOST" "$BRIDGE_CERT_HOST" \
+    if ! problem="$(proton_settings_problem "$SOURCE_MODE" "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" \
+        "$BRIDGE_CERT_HOST" "$BRIDGE_CERT_PIN_ROTATE" "$PROTON_FOLDER_EXCLUSIONS" \
         "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" "$PROTON_LOCAL_STORE_NAME" \
         "$PROTON_CHANNEL_NAME")"; then
         printf '>>> ERROR: %s\n' "$problem" >&2
         return 1
     fi
+}
+
+provider_exclusion_patterns() {
+    # Proton's folder exclusions as isync Patterns tokens (!"…", in the
+    # order configured), from the value validate_proton_settings accepted.
+    proton_folder_exclusion_patterns "$PROTON_FOLDER_EXCLUSIONS"
 }
 
 validate_bridge_endpoint() {
@@ -422,7 +444,8 @@ log_startup_identity() {
     # One line naming what is running (#887): the source commit baked into
     # the image (GIT_COMMIT; anything but a plain token is "unknown"), a
     # random ID for this start, and the first 12 hex digits of a SHA-256
-    # over the non-secret settings named below: the endpoint, isync's
+    # over the non-secret settings named below: the source selector, the
+    # endpoint, Proton's folder exclusions, isync's
     # account, store and channel names, the sync timing, the expected certificate fingerprint (not secret; in the
     # form verify_expected_fingerprint compares) and whether pin rotation
     # is on. BRIDGE_USER and the password are not inputs. It runs before
@@ -442,8 +465,9 @@ log_startup_identity() {
     [[ "$port" != *@* ]] || port="<value-with-credentials>"
     [[ "$cert_host" != *@* ]] || cert_host="<value-with-credentials>"
     boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
-    config="$(printf 'BRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nPROTON_IMAP_ACCOUNT_NAME=%s\nPROTON_REMOTE_STORE_NAME=%s\nPROTON_LOCAL_STORE_NAME=%s\nPROTON_CHANNEL_NAME=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nBRIDGE_CERT_PIN_ROTATE=%s\n' \
-        "$host" "$port" "$cert_host" "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" \
+    config="$(printf 'SOURCE_MODE=%s\nBRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nPROTON_FOLDER_EXCLUSIONS=%s\nPROTON_IMAP_ACCOUNT_NAME=%s\nPROTON_REMOTE_STORE_NAME=%s\nPROTON_LOCAL_STORE_NAME=%s\nPROTON_CHANNEL_NAME=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nBRIDGE_CERT_PIN_ROTATE=%s\n' \
+        "$SOURCE_MODE" "$host" "$port" "$cert_host" "$PROTON_FOLDER_EXCLUSIONS" \
+        "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" \
         "$PROTON_LOCAL_STORE_NAME" "$PROTON_CHANNEL_NAME" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
         "$(expected_fingerprint)" "$rotate" | sha256sum)"
     printf '>>> Startup identity: service=mbsync commit=%s boot=%s config=%s\n' \
@@ -489,13 +513,16 @@ render_mbsync_config() {
     # Host and the connection are the provider's (bridge_imap_host,
     # bridge_imap_connect), from settings require_prerequisites has
     # validated.
-    local imap_host imap_connect
+    local imap_host imap_connect provider_exclusions
     imap_host="$(bridge_imap_host)"
     imap_connect="$(bridge_imap_connect)"
+    provider_exclusions="$(provider_exclusion_patterns)"
 
     # Only the named variables are substituted. BRIDGE_PASS is never one:
     # mbsyncrc's PassCmd reads it from the Docker secret. The two Patterns
-    # exclusion sets come from their constants, and isync's account,
+    # exclusion sets come from the provider's (provider_exclusion_patterns)
+    # and the ISYNC_LAYOUT_EXCLUSIONS constant, in that order, so the
+    # layout exclusions come last; isync's account,
     # store and channel names (MBSYNC_IMAP_ACCOUNT, MBSYNC_REMOTE_STORE,
     # MBSYNC_LOCAL_STORE, MBSYNC_CHANNEL) from the PROTON_*_NAME settings
     # filter_mbsync_output matches, whatever the environment holds under
@@ -505,7 +532,7 @@ render_mbsync_config() {
         MBSYNC_IMAP_ACCOUNT="$PROTON_IMAP_ACCOUNT_NAME" \
         MBSYNC_REMOTE_STORE="$PROTON_REMOTE_STORE_NAME" \
         MBSYNC_LOCAL_STORE="$PROTON_LOCAL_STORE_NAME" MBSYNC_CHANNEL="$PROTON_CHANNEL_NAME" \
-        MBSYNC_PROVIDER_EXCLUSIONS="$PROTON_FOLDER_EXCLUSIONS" \
+        MBSYNC_PROVIDER_EXCLUSIONS="$provider_exclusions" \
         MBSYNC_LAYOUT_EXCLUSIONS="$ISYNC_LAYOUT_EXCLUSIONS" \
         envsubst '${MBSYNC_IMAP_HOST} ${MBSYNC_IMAP_CONNECT} ${BRIDGE_USER} ${MBSYNC_IMAP_ACCOUNT} ${MBSYNC_REMOTE_STORE} ${MBSYNC_LOCAL_STORE} ${MBSYNC_CHANNEL} ${MBSYNC_PROVIDER_EXCLUSIONS} ${MBSYNC_LAYOUT_EXCLUSIONS}' \
         <"$TEMPLATE_FILE" >"$CONFIG_FILE"

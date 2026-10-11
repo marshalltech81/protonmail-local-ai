@@ -170,7 +170,7 @@ is back. Freshness is reported by `make status` as usual.
    Do not put the Bridge password in `.env` — it is passed to the mbsync
    container exclusively via Docker Compose secrets, mounted at
    `/run/secrets/bridge_pass`. If the app's IMAP port is not 1143, set
-   `BRIDGE_IMAP_PORT` in `.env`.
+   `BRIDGE_IMAP_PORT` in `.env` (1 to 65535, without leading zeros).
 3. Take the app's certificate fingerprint and put it in `.env`
    (required). With the app running and signed in (so it, and nothing
    else, holds its port) and its IMAP mode set to SSL (sub-step 1), run
@@ -205,14 +205,20 @@ is back. Freshness is reported by `make status` as usual.
    else.
 
    Optional settings in the same `.env` block (PLAN.md decision 46;
-   `.env.example` lists them): `BRIDGE_HOST`, the container's name for
-   this Mac (`host.docker.internal` by default; OrbStack's
-   `host.orb.internal` or `host.internal` also work), and isync's
-   account, store and channel names (`PROTON_IMAP_ACCOUNT_NAME`,
-   `PROTON_REMOTE_STORE_NAME`, `PROTON_LOCAL_STORE_NAME`,
-   `PROTON_CHANNEL_NAME`). Leave them unset unless you need them.
-   `make validate-env` and mbsync both refuse any other value; the
-   Bridge must run on this Mac, and a Bridge elsewhere waits on
+   `.env.example` lists them): `SOURCE_MODE`, the mail source
+   (`proton-bridge`, the default and the only value accepted);
+   `BRIDGE_HOST`, the container's name for this Mac
+   (`host.docker.internal` by default; OrbStack's `host.orb.internal`
+   or `host.internal` also work); `BRIDGE_CERT_PIN_ROTATE` (`false`;
+   exactly `true` or `false`); `PROTON_FOLDER_EXCLUSIONS`, folders
+   mbsync never syncs (`All Mail|Labels/*|Starred`, which must stay in
+   the list; you may add more after them, separated by `|`); and
+   isync's account, store and channel names
+   (`PROTON_IMAP_ACCOUNT_NAME`, `PROTON_REMOTE_STORE_NAME`,
+   `PROTON_LOCAL_STORE_NAME`, `PROTON_CHANNEL_NAME`). Leave them unset
+   unless you need them. `make validate-env` and mbsync both refuse any
+   other value, naming the setting, never the value; the Bridge must
+   run on this Mac, and a Bridge elsewhere waits on
    [#1499](https://github.com/marshalltech81/protonmail-local-ai/issues/1499).
 
 #### How TLS is checked

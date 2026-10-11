@@ -620,11 +620,13 @@ mcp_port_follows_the_published_port() {
 
 # The Proton settings of PLAN.md decision 46 (#1497): Compose passes each
 # as set, empty when unset, without a warning; the entrypoint applies the
-# default (host.docker.internal, 127.0.0.1, today's isync names) and both
-# it and validate-env.sh refuse anything mbsync/proton-settings.sh does
-# not allow (mbsync/tests/entrypoint_test.sh walks the values).
-readonly PROTON_SETTINGS=(BRIDGE_HOST BRIDGE_CERT_HOST PROTON_IMAP_ACCOUNT_NAME
-    PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME)
+# default (proton-bridge, host.docker.internal, 127.0.0.1, All
+# Mail|Labels/*|Starred, today's isync names) and both it and
+# validate-env.sh refuse anything mbsync/proton-settings.sh does not
+# allow (mbsync/tests/entrypoint_test.sh walks the values). The port and
+# pin rotation keep their Compose defaults, 1143 and false.
+readonly PROTON_SETTINGS=(SOURCE_MODE BRIDGE_HOST BRIDGE_CERT_HOST PROTON_FOLDER_EXCLUSIONS
+    PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME)
 
 mbsync_points_at_the_host_app() {
     local name
