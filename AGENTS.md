@@ -24,14 +24,17 @@ choice, not a project concern.
 
 Core behavior:
 
-- email storage, sync, and indexing stay local
+- email storage, sync, and the index stay local
 - Bridge is the only path to Proton
 - mbsync pulls mail into Maildir
 - indexer parses and stores thread-level data in SQLite
 - MCP exposes read-only search, retrieval, intelligence, and status tools over
   Streamable HTTP at `/mcp`
-- whether retrieved email content leaves the host depends on which
-  embedder + inference endpoint the operator wires up
+- whether mail text leaves the host depends on which embed,
+  inference and rerank endpoints the operator wires up: the indexer
+  sends message subjects, body text and extracted attachment text to
+  the embedder, and the MCP server sends queries and retrieved mail to
+  the enabled layers
 
 ## Priorities
 
@@ -127,7 +130,7 @@ Important architecture facts:
   OpenAI-compatible chat-completions endpoint: `INFERENCE_BASE_URL=default`
   for OpenAI proper, or set it to a host
   endpoint (LM Studio, vLLM, `mlx_lm.server` — containers reach a
-  host-side server via OrbStack's `host.docker.internal`) or to an
+  host-side server via `host.docker.internal`) or to an
   alternative provider (DeepInfra, OpenRouter, etc.). `none` skips
   registration of the intelligence tools.
 - embeddings go through the official `openai` SDK against any
@@ -976,8 +979,10 @@ Notes:
 - review schema implications before changing embedding or storage assumptions
 - indexer and mcp-server must point at the same `EMBED_BASE_URL` +
   `EMBED_MODEL` so query vectors are comparable to indexed vectors —
-  swapping the embedder requires a full reindex if the new model
-  produces vectors of a different shape or distribution
+  on an existing index, an embedder that differs from the recorded
+  one fails both services at startup until the old embedder is
+  restored or the index is rebuilt (`docs/architecture.md`, "Embedder
+  identity record", lists what is compared)
 - embed has no disabled mode; see the Architecture Summary for the
   provider contract
 

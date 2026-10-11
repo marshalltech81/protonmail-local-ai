@@ -606,7 +606,7 @@ servers, so the diagnostic depends on where you pointed it:
 - Host-side server: confirm it is listening on the configured port
   (`lsof -iTCP:<port> -sTCP:LISTEN`) and bound to `127.0.0.1`.
   Containers reach `127.0.0.1` on the host as
-  `host.docker.internal:<port>` via OrbStack.
+  `host.docker.internal:<port>` (OrbStack and Docker Desktop).
 - Remote provider: verify outbound networking from a container:
 
   ```bash
@@ -1096,7 +1096,7 @@ persists, check `docker compose logs indexer` for an embedder error.
 request to the embedder failed; the message carries the error type and
 status. The service exits and Docker restarts it, so a brief outage
 clears by itself; a 401, 403 or 404 is a credential or model setting to
-fix (see "Embedder or inference endpoint unreachable from containers").
+fix (the next paragraph says which).
 
 "embedder at ... rejected the warmup request (APIStatusError:
 status=402)" from the indexer means the embedder refused its first

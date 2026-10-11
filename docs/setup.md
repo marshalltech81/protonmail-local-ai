@@ -411,9 +411,9 @@ You should see:
 Operator-supplied inference / embed / rerank endpoints are not in
 this list — they run wherever you choose (a remote provider, or a
 host-side OpenAI-compatible server such as LM Studio, vLLM,
-`mlx_lm.server`, or TEI). Verify reachability from your host with
-a small `curl` against `$EMBED_BASE_URL`, `$INFERENCE_BASE_URL`, or
-`$RERANK_BASE_URL` if a layer's container is failing to start.
+`mlx_lm.server`, or TEI). If a layer's container fails to start with a
+connection error, see "Embedder or inference endpoint unreachable from
+containers" in `docs/troubleshooting.md`.
 
 The initial index scan may take several minutes depending on mailbox size.
 It indexes the oldest mail first across every folder, so each message
@@ -599,7 +599,7 @@ a single env change away. Examples:
 
 ```bash
 # Host-side server (mlx_lm.server, LM Studio, vLLM, TEI, etc.) —
-# the privacy-preserving option; mail content never leaves the host.
+# the privacy-preserving option; embedding requests stay on the host.
 # (EMBED_BASE_URL=default selects OpenAI proper; empty fails startup.)
 EMBED_BASE_URL=http://host.docker.internal:8001/v1
 EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
@@ -638,23 +638,21 @@ After changing provider:
    any placeholder string (e.g. `unauthenticated`); compat servers
    ignore the bearer header.
 3. **Indexer and mcp-server must point at the same provider + model**
-   so query vectors are comparable to indexed vectors. A
-   dimension mismatch (e.g. pointing mcp-server at a 3072-dim
-   model against a 4096-dim index) surfaces at query time as a
-   `Search error: Embedding dimension mismatch` naming
-   `EMBED_BASE_URL` and `EMBED_MODEL`. A same-dim model with a
-   different vector distribution still degrades hybrid search
-   silently — there's no way to detect that without a full
-   reindex.
+   so query vectors are comparable to indexed vectors.
 4. The schema reserves a fixed 4096-dim vector. `EMBED_MODEL`
    must keep producing 4096-dim vectors (Qwen3-Embedding-8B variants)
    or a schema migration is required.
-5. Switching to a model with a different vector distribution requires
-   a full reindex (the existing 4096-dim index isn't comparable to the
-   new model's 4096-dim space).
+5. On an existing index, an embedder that differs from the one the
+   index recorded stops both services at startup with "The configured
+   embedder is not the one that built this index" (what is compared,
+   and the calibration tolerance, is in docs/architecture.md,
+   "Embedder identity record"). Rebuild
+   the index with the new embedder, or put the old settings back; see
+   "Embedder identity mismatch" in `docs/troubleshooting.md`.
 
-Privacy note: remote embedders ship every email body chunk to the
-provider at index time and every search query at retrieval time.
+Privacy note: remote embedders receive message subjects, body text
+and extracted attachment text at index time and every search
+query at retrieval time.
 Pointing at a host-side server keeps that traffic on your machine.
 Choose accordingly.
 

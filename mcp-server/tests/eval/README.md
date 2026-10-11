@@ -821,8 +821,9 @@ cap below, count launches, not model requests.
 - **Judge** (`JUDGE_MODE` = `anthropic|openai|claude-cli|codex-cli|none`, `JUDGE_BASE_URL`,
   `JUDGE_MODEL`, key in `.secrets/judge_api_key.txt`, mode 600, or
   `JUDGE_API_KEY` for local development only). Same contract as the
-  server's layers: an enabled judge needs a model and a non-empty key (a
-  placeholder for an unauthenticated host-side server), and a base URL:
+  server's layers: an enabled API judge (`anthropic`, `openai`) needs a
+  model and a non-empty key (a placeholder for an unauthenticated
+  host-side server), and a base URL:
   the endpoint, or `default` for the SDK default (a remote provider);
   an empty one is refused (#750). It never reads the
   answerer's variables or key. Bounds: `JUDGE_TIMEOUT_SECS` (120),

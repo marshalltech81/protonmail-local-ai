@@ -210,9 +210,9 @@ class _Backend(Protocol):
     backends and test fakes can stay duck-typed without depending on
     any specific SDK.
 
-    ``base_url`` is the wire endpoint after the SDK resolved its
-    fallback chain (so the empty-string operator input becomes the
-    SDK default literal, not ``""``). ``InferenceClient`` re-exposes
+    ``base_url`` is the wire endpoint, read back from the SDK client
+    (for an empty ``base_url`` argument, the URL the SDK chose).
+    ``InferenceClient`` re-exposes
     it so ``main.py`` can log the resolved URL alongside the embed
     and rerank lines — important in a privacy-sensitive deployment
     where the operator needs the startup log to name exactly where
@@ -260,11 +260,13 @@ class _OpenAIBackend:
         # the SDK's documented fallback chain fires
         # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``
         # literal). Symmetric with the ``_AnthropicBackend`` empty-URL
-        # path and with ``EmbedClient``. Passing an empty string through
-        # would defeat the fallback because the SDK only treats
-        # ``None`` as "missing." ``main.py`` passes an empty value only
-        # for an explicit ``INFERENCE_BASE_URL=default``; an empty
-        # ``INFERENCE_BASE_URL`` fails startup (#750).
+        # path. Passing an empty string through would defeat the
+        # fallback because the SDK only treats ``None`` as "missing."
+        # ``main.py`` never passes an empty value: it resolves
+        # ``INFERENCE_BASE_URL=default`` to the official URL and an
+        # empty ``INFERENCE_BASE_URL`` fails startup (#750). Only the
+        # answer evaluation passes one, for ``default``, after refusing
+        # a set ``OPENAI_BASE_URL`` (``tests/answer_eval/config.py``).
         #
         # ``max_retries=0`` disables SDK-internal retries so one
         # ``complete()`` call makes one request and ``timeout_secs`` is
@@ -394,11 +396,12 @@ class _AnthropicBackend:
                 "'default' to use the SDK default)."
             )
 
-        # Pass ``base_url`` only when explicitly set so the SDK's real
-        # default URL is used when the operator set
-        # ``INFERENCE_BASE_URL=default`` (``main.py`` resolves it to "").
-        # Passing an empty string would override the SDK default with a
-        # malformed URL. ``max_retries=0`` for the same reason as
+        # Pass ``base_url`` only when it is non-empty: an empty string
+        # would override the SDK default with a malformed URL. ``main.py``
+        # always passes one (``default`` resolves to
+        # ``https://api.anthropic.com``); only the answer evaluation
+        # passes an empty value, for ``default``, after refusing a set
+        # ``ANTHROPIC_BASE_URL``. ``max_retries=0`` for the same reason as
         # ``_OpenAIBackend``: retries must not multiply ``timeout_secs``,
         # which is a per-operation HTTP timeout, not a total-call
         # deadline.
@@ -513,10 +516,7 @@ class InferenceClient:
         self.mode = mode
         # Re-expose the backend's resolved wire endpoint so the startup
         # log line in ``main.py`` can name the exact URL retrieved email
-        # excerpts are sent to. Mirrors ``EmbedClient.base_url`` — the
-        # empty-string operator input is replaced with the SDK's
-        # resolved default ("https://api.anthropic.com" /
-        # "https://api.openai.com/v1") rather than logged as "SDK default."
+        # excerpts are sent to. Mirrors ``EmbedClient.base_url``.
         self.base_url = backend.base_url
         # Whether a ``json_schema`` passed to ``complete`` is sent as a
         # structured-output format: anthropic mode with

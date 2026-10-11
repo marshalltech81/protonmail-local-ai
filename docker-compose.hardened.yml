@@ -20,9 +20,9 @@
 #   - Containerized OpenAI-compatible / rerank service on app-net —
 #     reachable as expected.
 #   - Any remote provider (Anthropic, DeepInfra, OpenRouter, Cohere,
-#     etc.) — blocked by design. INFERENCE_MODE=anthropic, any
-#     cloud-pointed EMBED_BASE_URL, and RERANK_MODE=cohere will fail
-#     under this overlay, which is the point.
+#     etc.) — blocked by design. Any *_BASE_URL that names a remote
+#     endpoint, including every ``default``, will fail under this
+#     overlay, which is the point.
 #
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
