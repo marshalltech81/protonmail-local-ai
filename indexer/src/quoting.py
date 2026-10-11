@@ -83,7 +83,7 @@ _REPLY_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(rf"^On\b.*{_EMAIL_RE_FRAGMENT}.*\bwrote:\s*$"),
     # German: "Am <date> schrieb Alice <alice@example.com>:" — verb
     # comes BEFORE the address. Without ``<email>:`` at end-of-line
-    # this matched any German sentence beginning with ``Am`` and
+    # this would match any German sentence beginning with ``Am`` and
     # ending with ``schrieb ... :``.
     re.compile(rf"^Am\b.*\bschrieb\b.*{_EMAIL_RE_FRAGMENT}\s*:\s*$"),
     # French: "Le <date>, Alice <alice@example.com> a écrit :"
@@ -121,8 +121,8 @@ _MAX_REPLY_HEADER_CHARS = 300
 # optional ``\r`` before ``\n`` — without it, ``$`` cannot anchor on
 # CRLF lines because ``[ \t]*`` does not match ``\r`` and the
 # multiline ``$`` only matches immediately before ``\n``. The
-# single-line patterns above use ``\s*$`` (which includes ``\r``) so
-# this asymmetry was previously silent.
+# single-line patterns above use ``\s*$`` (which includes ``\r``), so
+# only these wrapped patterns need the explicit ``\r?``.
 _WRAPPED_REPLY_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^On\b[^\r\n]*\r?\n[ \t]*wrote:[ \t]*\r?$", re.MULTILINE),
     re.compile(r"^Am\b[^\r\n]*\r?\n[ \t]*schrieb\b[^\r\n]*:[ \t]*\r?$", re.MULTILINE),
@@ -142,11 +142,11 @@ _WRAPPED_REPLY_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
 # Requiring ``Subject:`` is the load-bearing safeguard: a body that
 # happens to contain ``From: someone\nDate: 2024-01-01`` as agenda /
 # calendar / "From the desk of" prose has no following ``Subject:``
-# header and is correctly NOT treated as a quoted block. Earlier
-# versions matched on just ``From: + Sent|Date:`` and silently
-# truncated agenda bodies. ``To:``/``Cc:`` lines are tolerated as
-# intermediate filler so the most common four-header shape
-# (From/Sent/To/Subject) still matches.
+# header and is correctly NOT treated as a quoted block; matching on
+# just ``From: + Sent|Date:`` would truncate agenda bodies. Up to four
+# lines of any content (typically ``To:``/``Cc:``) are tolerated before
+# ``Subject:`` so the most common four-header shape (From/Sent/To/Subject)
+# still matches.
 _OUTLOOK_BLOCK_PATTERN: re.Pattern[str] = re.compile(
     r"^From:\s.*\r?\n"
     r"(?:[ \t]*\r?\n)*"
@@ -202,9 +202,8 @@ def segment_for_embedding(body_text: str) -> list[Segment]:
     if not body_text:
         return []
     text, cut = _pre_pass(body_text)
-    # The body scan stops at the first marker, as before kinds, so a
-    # message with body text costs no more than it did; only a message
-    # with none is classified to its end.
+    # The body scan stops at the first marker; only a message with no
+    # body text is classified to its end.
     stripped = _body_lines(text, cut)
     if stripped:
         return [Segment("body", stripped)]
@@ -243,9 +242,7 @@ def _body_lines(text: str, cut: int) -> str:
             break
         # Reply-header lines like "On ... wrote:" are skipped but do
         # NOT cut — the user's inline answers may live between the
-        # quoted blocks that follow. Checked before the ``>`` rule so a
-        # marker line still drops even if a client prefixes it with a
-        # quote character. Quoted-reply lines accept any amount of
+        # quoted blocks that follow. Quoted-reply lines accept any amount of
         # leading whitespace before the ``>`` (some clients indent).
         if _is_reply_header(raw_line) or _is_quoted_line(raw_line):
             continue
