@@ -2548,7 +2548,10 @@ mail a population run will read; the steps are not sent to clients:
    the inference provider, 50 per call (each extracted thread is one
    model call whose passages reach the provider; threads outside the
    population take slots too, and a thread spanning several windows is
-   sent once per window).
+   sent once per window). With reranking on (`RERANK_MODE` not
+   `none`), each call also sends the text of up to
+   `max(50, RERANK_CANDIDATES)` candidate threads to the rerank
+   provider: state that bound too.
 2. Enumerate the population, paging each query to the end with
    `next_cursor`:
    - For occurrences backed by an attachment (every invoice line for
@@ -2608,7 +2611,7 @@ mail a population run will read; the steps are not sent to clients:
    context), and replace a window whose call left one out with
    narrower windows, discarding its call's records.
    Before running the replacements, tell the user the added calls and
-   the updated total of calls and threads (50 per call), the discarded
+   the updated totals (calls, threads and any rerank bound, as in step 1), the discarded
    call included, since its threads were already sent.
    Other threads that rank for `query` take slots too,
    and a thread falls in every window its span overlaps, so narrowing
@@ -2641,23 +2644,27 @@ mail a population run will read; the steps are not sent to clients:
    record names its sources through its `_evidence` labels: look each
    label up by `label` in that call's top-level `citations` list, whose
    entries carry `thread_id`, `claimant_id`, `attachment_id`, `source`,
-   `scope`, `sent_at` and `occurred_at`. Match an attachment occurrence
-   by `claimant_id` and `attachment_id` together (`attachment_id` is
-   the payload's content hash, shared by every message carrying the
-   same bytes), and a message by `claimant_id` on a `source` `body`
-   citation (an attachment passage carries its message's `claimant_id`
-   too). Then:
-   - report each enumerated item no record cites (its stored text can
-     be read with `get_attachment` or `get_message`, following each
-     `next_offset`, after telling the user how much);
+   `scope`, `extraction_deferred`, `sent_at` and `occurred_at`. Match
+   an attachment occurrence by `claimant_id` and `attachment_id`
+   together (`attachment_id` is the payload's content hash, shared by
+   every message carrying the same bytes), and a message by
+   `claimant_id` on a `source` `body` citation (an attachment passage
+   carries its message's `claimant_id` too). Then, in this order:
    - set aside for review a record that cites no enumerated item,
-     cites a `context` passage, or has an entry in `citation_problems`
-     (the server reports a problem but keeps the record);
+     cites a `context` passage, cites a passage with
+     `extraction_deferred` true (text indexed before a pending
+     re-extraction, so not the occurrence's current text), or has an
+     entry in `citation_problems` (the server reports a problem but
+     keeps the record);
    - keep every other record from every call, identical ones included
      (one invoice can repeat a line). With windows that share no
      instant and one call per folder scope, each message is in scope
      for one call only, and the model is told to extract only from
-     in-scope messages.
+     in-scope messages;
+   - report each enumerated item no kept record cites, and which of
+     them only a set-aside record cites (their stored text can be read
+     with `get_attachment` or `get_message`, following each
+     `next_offset`, after telling the user how much).
 
    No output ties a record to the one item it came from: a field can
    cite several items, a value found in two items is found in both,
