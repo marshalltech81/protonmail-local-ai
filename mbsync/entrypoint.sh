@@ -996,7 +996,8 @@ fi
 
 # =============================================================================
 # Continuous sync loop
-# Polls Bridge IMAP every SYNC_INTERVAL seconds for new messages.
+# Waits SYNC_INTERVAL seconds after each sync ends, then polls Bridge IMAP
+# again for new messages.
 # Default interval is 60 seconds — set SYNC_INTERVAL in .env to change.
 # =============================================================================
 echo ">>> Starting sync loop (interval: ${SYNC_INTERVAL}s)..."

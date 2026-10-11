@@ -229,7 +229,7 @@ class MessageNestingError(Exception):
 _DEFAULT_PARSE_MAX_BYTES = 50_000_000
 
 
-# Longest subject stored (#541), in decoded characters. ``parse_email``
+# Longest subject stored (#541), in decoded characters. ``parse_email_bytes``
 # cuts the decoded Subject here, so ``messages.subject``,
 # ``threads.subject`` / ``display_subject`` and every reader of them
 # (the ``threads_fts`` subject scan, the rerank reply-subject scan,
@@ -500,9 +500,10 @@ class Attachment:
     ``payload_complete`` is False for a container attachment whose body
     was not serialized (``_attachment_payload`` kept the empty payload:
     a parse cap, a failure, or a container nested inside another
-    attachment), and for a leaf whose base64 decode lost bytes
-    (``_decode_lost_bytes``), so the bytes an extractor reads are not
-    the attachment's (#1242).
+    attachment), and for a leaf whose base64, quoted-printable or
+    uuencode decode lost bytes (``_decode_lost_bytes``) or an email
+    carried as a leaf in an encoding not decoded here, so the bytes an
+    extractor reads are not the attachment's (#1242, #1288).
     """
 
     filename: str
@@ -2991,7 +2992,7 @@ def _parse_date(value: str) -> datetime | None:
     sorts and compares message dates, which raises ``TypeError`` when naive
     and aware values are mixed — so every parsed date is forced to UTC here.
 
-    Unparseable headers return ``None``; ``parse_email`` then stores the
+    Unparseable headers return ``None``; ``parse_email_bytes`` then stores the
     send date as unknown (``invalid``, #1080) and logs it. The header
     value itself is attacker-controlled mail content and is never
     logged (#257).

@@ -21,7 +21,8 @@ from threading import Lock
 
 # Stages match the per-message try/except blocks across the batched
 # pipeline (``_phase1_commit_thread`` / ``_phase2a_collect_chunks`` /
-# ``_phase2b_embed_batch`` / ``_phase2c_commit_vectors``). Adding a new
+# the Phase 2b bulk embed in ``_drain_queue_batched`` /
+# ``_phase2c_commit_vectors``). Adding a new
 # stage there means adding it here too — the field set is the contract
 # that ties the timer at the call site to the aggregator.
 STAGES: tuple[str, ...] = ("parse", "thread", "chunk", "embed", "db_write")

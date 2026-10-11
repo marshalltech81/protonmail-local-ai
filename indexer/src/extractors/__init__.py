@@ -521,8 +521,8 @@ def warn_rate_limited(
     unless this window's budget is spent; then count it as suppressed:
     in ``warnings_suppressed`` for an attachment line (the default), or
     in the heartbeat's ``suppressed_lines`` for any other indexer line
-    (``attachment=False``). ``args`` must be counts, module names, type
-    names or fixed text. Returns whether the line was logged."""
+    (``attachment=False``). ``args`` must be counts, paths, module names,
+    type names or fixed text. Returns whether the line was logged."""
     bucket = _ATTACHMENT_LINES if attachment else _OTHER_LINES
     return _LINE_BUDGET.log(logger, bucket, msg, *args, level=level)
 
