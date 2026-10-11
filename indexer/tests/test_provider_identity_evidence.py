@@ -39,6 +39,7 @@ import email
 import hashlib
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -256,11 +257,20 @@ def _filler(count: int) -> tuple[tuple[str, str], ...]:
     return tuple((_INTERNAL, f"SYNTHPMID1316{i:06d}==") for i in range(count))
 
 
-def _same_apart_from_bytes(tagged: parser.Message, plain: parser.Message) -> bool:
-    """Whether ``tagged`` equals ``plain`` in every compared field but
-    the byte-derived ``size`` and ``content_hash`` (``first_indexed_at``,
-    the clock at parse time, is not compared)."""
-    return dataclasses.replace(tagged, size=plain.size, content_hash=plain.content_hash) == plain
+def _assert_only_bytes_differ(
+    tagged: parser.Message, tagged_raw: bytes, plain: parser.Message, plain_raw: bytes
+) -> None:
+    """``tagged``'s ``size`` and ``content_hash`` are those of all of
+    ``tagged_raw``, so its claimant ID differs from ``plain``'s exactly
+    when the bytes differ, and every other compared field equals
+    ``plain``'s (``first_indexed_at``, the clock at parse time, is not
+    compared)."""
+    assert (tagged.size, tagged.content_hash) == (
+        len(tagged_raw),
+        hashlib.sha256(tagged_raw).hexdigest(),
+    )
+    assert (tagged.claimant_id == plain.claimant_id) == (tagged_raw == plain_raw)
+    assert dataclasses.replace(tagged, size=plain.size, content_hash=plain.content_hash) == plain
 
 
 class TestParserIgnoresIdentityHeaders:
@@ -286,11 +296,7 @@ class TestParserIgnoresIdentityHeaders:
         tagged = parser.parse_email_bytes(tagged_raw, _SOURCE)
 
         assert plain is not None and tagged is not None
-        assert (tagged.size, tagged.content_hash) == (
-            len(tagged_raw),
-            hashlib.sha256(tagged_raw).hexdigest(),
-        )
-        assert _same_apart_from_bytes(tagged, plain)
+        _assert_only_bytes_differ(tagged, tagged_raw, plain, plain_raw)
         if shape == "absent":
             assert tagged.claimant_id == plain.claimant_id
         else:
@@ -316,7 +322,7 @@ class TestParserIgnoresIdentityHeaders:
         tagged = parser.parse_email_bytes(tagged_raw, _SOURCE)
 
         assert plain is not None and tagged is not None
-        assert _same_apart_from_bytes(tagged, plain)
+        _assert_only_bytes_differ(tagged, tagged_raw, plain, plain_raw)
 
     @pytest.mark.parametrize(
         ("layout", "addresses_kept"),
@@ -364,7 +370,7 @@ class TestParserIgnoresIdentityHeaders:
             kept
         )
         # Nothing else the parser returns changes.
-        assert _same_apart_from_bytes(
+        _assert_only_bytes_differ(
             dataclasses.replace(
                 tagged,
                 from_addr=plain.from_addr,
@@ -377,7 +383,9 @@ class TestParserIgnoresIdentityHeaders:
                 cc_addresses_complete=plain.cc_addresses_complete,
                 parse_caps=plain.parse_caps,
             ),
+            tagged_raw,
             plain,
+            plain_raw,
         )
         warnings = [
             r.getMessage()
@@ -393,35 +401,47 @@ class TestParserIgnoresIdentityHeaders:
         ids=["after-ids", "top-within-read", "top-past-read"],
     )
     def test_identity_headers_above_the_date_past_the_sort_read_hide_it(
-        self, tmp_path, identity_first, past_the_read
+        self, tmp_path, monkeypatch, identity_first, past_the_read
     ):
         """``message_sort_time``, which orders a first full index, reads
         only the first ``SORT_HEADER_MAX_BYTES`` of the header block.
         Identity headers below the ``Date`` leave it alone; identity
         headers above it that push it past that read leave the sort time
-        unknown (the file is ordered at the walk's start time)."""
-        plain_raw = _eml("evidence@mail.example", "Same body.")
+        unknown, and the oldest-first walk then queues the file due at
+        the walk's start time instead of its date."""
+        idx = _Index(tmp_path, monkeypatch)
+        plain_raw = _eml("plain@mail.example", "Same body.")
         field = len(f"{_INTERNAL}: SYNTHPMID1316000000==\r\n")
         count = (parser.SORT_HEADER_MAX_BYTES // field + 1) if past_the_read else 10
         tagged_raw = _eml(
-            "evidence@mail.example",
+            "tagged@mail.example",
             "Same body.",
             identity=_filler(count),
             identity_first=identity_first,
         )
-        path = tmp_path / "message"
-        path.write_bytes(plain_raw)
-        plain_time = parser.message_sort_time(path)
-        path.write_bytes(tagged_raw)
+        plain = idx.write("1700000000.M1.host", plain_raw)
+        tagged = idx.write("1700000001.M2.host", tagged_raw)
+        hidden = identity_first and past_the_read
+        assert (tagged_raw.index(b"\r\nDate:") > parser.SORT_HEADER_MAX_BYTES) == hidden
 
-        tagged_time = parser.message_sort_time(path)
+        before = datetime.now(UTC)
+        main._enqueue_unindexed_messages(
+            idx.db, idx.queue, idx.maildir, REASON_INITIAL_SCAN, oldest_first=True
+        )
+        after = datetime.now(UTC)
 
-        assert plain_time is not None
-        if identity_first and past_the_read:
-            assert tagged_raw.index(b"\r\nDate:") > parser.SORT_HEADER_MAX_BYTES
-            assert tagged_time is None
+        dated = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+        assert parser.message_sort_time(plain) == dated
+        assert parser.message_sort_time(tagged) == (None if hidden else dated)
+        due = {
+            r["filepath"]: datetime.fromisoformat(r["next_attempt_at"])
+            for r in idx.db._conn.execute("SELECT filepath, next_attempt_at FROM indexing_jobs")
+        }
+        assert due[str(plain)] == dated
+        if hidden:
+            assert before <= due[str(tagged)] <= after
         else:
-            assert tagged_time == plain_time
+            assert due[str(tagged)] == dated
 
 
 class TestClaimantsStayIndependent:
