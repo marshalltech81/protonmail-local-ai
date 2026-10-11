@@ -1574,6 +1574,42 @@ def test_wal_baseline_fills_every_indexer_table(bench, baseline):
         assert conn.execute("SELECT MIN(length(sum)) FROM thread_vector_sums").fetchone()[0] > 0
 
 
+def test_writer_vectors_stay_distinct_from_the_baselines(bench, baseline, tmp_path):
+    # The writer's vector stream goes on after the chunks the index
+    # already holds, so new mail (in the common-ID shape, added to the
+    # same thread) never repeats a baseline vector.
+    _corpus, base, built, _report = baseline
+    copy = tmp_path / "copy.db"
+    with closing(sqlite3.connect(base)) as src, closing(sqlite3.connect(copy)) as dst:
+        src.backup(dst)
+    stop = tmp_path / "stop"
+    timer = _stop_after_batch(copy, stop, 60 + 4)
+    shape = {"identity": "typical", "records": "mixed", "per_message": 2}
+    bench.phase_writer(str(copy), str(stop), 4, 3600.0, shape=shape)
+    timer.join()
+    with closing(sqlite3.connect(copy)) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        blobs = [r[0] for r in conn.execute("SELECT embedding FROM message_chunks_vec")]
+    assert len(blobs) == built["chunks"] + 4 * 3
+    assert len(set(blobs)) == len(blobs)
+
+
+def test_writer_goes_on_from_the_next_corpus_message(bench, tmp_path):
+    # A corpus that ends mid-thread (nine messages: 8 starts a thread)
+    # is continued at message 9, a reply in that thread, not at 12.
+    db = tmp_path / "nine.db"
+    bench.build(db, 9, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    timer = _stop_after_batch(db, stop, 9 + 1)
+    bench.phase_writer(str(db), str(stop), 1, 3600.0)
+    timer.join()
+    with closing(sqlite3.connect(db)) as conn:
+        assert conn.execute(
+            "SELECT message_id, thread_id FROM messages WHERE rowid > 9"
+        ).fetchall() == [(bench.message_id(9, "typical"), bench.message_id(8, "typical"))]
+
+
 def test_measured_statements_read_no_table_only_the_wal_baseline_has(bench, baseline, monkeypatch):
     # ``build``'s index has no table of ``_WRITER_SCHEMA``, so the read
     # figures stand only while no measured statement reads one: every

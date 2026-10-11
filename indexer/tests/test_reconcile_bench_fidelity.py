@@ -964,7 +964,7 @@ def _identical_embeddings(bench, monkeypatch, records):
     monkeypatch.setattr(
         bench,
         "_embedder",
-        lambda _pool: lambda text: struct.pack(f"{EMBEDDING_DIM}f", *vector(text)),
+        lambda _pool, _start=0: lambda text: struct.pack(f"{EMBEDDING_DIM}f", *vector(text)),
     )
     return embedder
 
@@ -1092,9 +1092,18 @@ def _compare_indexes(ours: Path, theirs: Path, root: str) -> list[str]:
 
 
 @pytest.mark.real_extractor_child
-@pytest.mark.parametrize("identity", ["typical", "ascii998common"])
+@pytest.mark.parametrize(
+    ("identity", "n"),
+    [
+        ("typical", 8),
+        ("ascii998common", 8),
+        # A corpus that ends mid-thread: the new mail goes on from the
+        # next message, the first two of it replies in that thread.
+        ("typical", 6),
+    ],
+)
 def test_wal_baseline_and_replies_are_what_the_indexer_writes(
-    bench, tmp_path, monkeypatch, identity
+    bench, tmp_path, monkeypatch, identity, n
 ):
     # The WAL baseline is the corpus indexed by the writer's own commits
     # (``build_wal_baseline``), in batches, as a first index makes them;
@@ -1105,7 +1114,7 @@ def test_wal_baseline_and_replies_are_what_the_indexer_writes(
     # identical embeddings: every commit's statements in order, every
     # row (folders included), every FTS statement with its values, the
     # vector tables' bytes and the encoded sums.
-    n, batch = 8, 4
+    batch = 4
     shape = _shape_of(identity)
     records = [bench._record(i, identity, "typical", 0, 1, 40, 2, None) for i in range(n + batch)]
     embedder = _identical_embeddings(bench, monkeypatch, records)
@@ -1143,5 +1152,5 @@ def test_wal_baseline_and_replies_are_what_the_indexer_writes(
             n + batch
         )
         sums = conn.execute("SELECT count, length(sum) FROM thread_vector_sums").fetchall()
-        assert len(sums) == (1 if identity == "ascii998common" else (n + batch) // 4)
+        assert len(sums) == (1 if identity == "ascii998common" else -(-(n + batch) // 4))
         assert all(count and size for count, size in sums)

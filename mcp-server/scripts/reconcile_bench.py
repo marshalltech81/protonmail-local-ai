@@ -2185,18 +2185,20 @@ def _writer_phase2c(
 VECTOR_POOL = 64
 
 
-def _chunk_vectors(pool: list[bytes]) -> Iterator[bytes]:
+def _chunk_vectors(pool: list[bytes], start: int = 0) -> Iterator[bytes]:
     """Distinct unit vectors for the writer's chunks, one each, as each
     chunk's own text has its own embedding (repeated vectors would make
     a thread's encoded sum shorter): every vector of ``pool`` at each
-    rotation of its components in turn, so ``len(pool) *
-    EMBEDDING_DIM`` vectors pass before any repeats. A rotation is a
+    rotation of its components in turn, from entry ``start`` (the chunks
+    the index already holds, so a writer on the WAL baseline goes on
+    after the vectors the baseline's own drain stored), so ``len(pool)
+    * EMBEDDING_DIM`` vectors pass before any repeats. A rotation is a
     16 KB copy, the work of the indexer's own packing of each vector in
     its transaction; no random vector is made after ``pool``."""
-    for shift in itertools.cycle(range(EMBEDDING_DIM)):
-        cut = 4 * shift
-        for vector in pool:
-            yield vector[cut:] + vector[:cut]
+    for j in itertools.count(start):
+        vector = pool[j % len(pool)]
+        cut = 4 * ((j // len(pool)) % EMBEDDING_DIM)
+        yield vector[cut:] + vector[:cut]
 
 
 # indexer/src/chunker.py ``_UNIT_NORM_TOLERANCE``.
@@ -2221,11 +2223,12 @@ def _thread_vector(total: list[int], count: int) -> bytes:
     return struct.pack(f"{EMBEDDING_DIM}f", *mean)
 
 
-def _embedder(pool: list[bytes]) -> Callable[[str], bytes]:
+def _embedder(pool: list[bytes], start: int = 0) -> Callable[[str], bytes]:
     """The writer's embeddings: each chunk takes the next distinct vector
-    (``_chunk_vectors``) whatever its text. The fidelity test replaces it
-    with one embedding per text that the indexer's embedder shares."""
-    vectors = _chunk_vectors(pool)
+    (``_chunk_vectors`` from ``start``) whatever its text. The fidelity
+    test replaces it with one embedding per text that the indexer's
+    embedder shares."""
+    vectors = _chunk_vectors(pool, start)
     return lambda _text: next(vectors)
 
 
@@ -2319,8 +2322,9 @@ def phase_writer(
     Each message's record and its vectors are made before the
     transactions that write them, as the indexer parses, chunks and
     embeds before it writes. The messages have ``shape`` (``build``'s
-    arguments) and continue the corpus's numbering in threads of four,
-    each stored in its own folder. indexer/tests/test_reconcile_bench_fidelity.py
+    arguments) and continue the corpus's numbering (threads of four, the
+    first of them the corpus's last when it ends mid-thread), each stored
+    in its own folder. indexer/tests/test_reconcile_bench_fidelity.py
     traces the indexer's own commits and checks this sequence, the
     tables and statements of every commit and each pass's occurrence
     states. The pace is a parameter, not the indexer's own, and the
@@ -2363,7 +2367,7 @@ def phase_writer(
     # transaction spends time on them (``_writer_phase2c``), rotated into
     # distinct ones (``_chunk_vectors``).
     rng = random.Random(7)
-    embed = _embedder([_unit_vector(rng) for _ in range(VECTOR_POOL)])
+    pool = [_unit_vector(rng) for _ in range(VECTOR_POOL)]
 
     def record(i: int) -> _Record:
         # Made where it is used and dropped after, so memory holds one
@@ -2399,8 +2403,13 @@ def phase_writer(
         if not baseline:
             conn.execute("PRAGMA wal_autocheckpoint=0")
         conn.executescript(_WRITER_SCHEMA)
-        corpus = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM messages")
-        next_i = -(-corpus.fetchone()[0] // 4) * 4
+        # New mail goes on from the corpus's next message (rows 1..N
+        # hold messages 0..N-1), joining its last thread when it ends
+        # mid-thread.
+        next_i = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM messages").fetchone()[0]
+        # Vectors go on after the chunks the index holds.
+        held = conn.execute("SELECT COUNT(*) FROM message_chunks").fetchone()[0]
+        embed = _embedder(pool, held)
         # The highest rowids visible so far: the writer only inserts.
         rows = list(
             conn.execute(
