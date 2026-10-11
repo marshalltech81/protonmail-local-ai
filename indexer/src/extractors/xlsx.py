@@ -153,20 +153,20 @@ _MAX_SHEET_NODES = 5_000_000
 _MAX_ROW_NODES = 131_072
 
 # Parts openpyxl reads whole rather than streams (#428): the manifest,
-# shared strings, workbook and the relationships it resolves, styles,
-# theme, core and custom properties, each worksheet's relationships,
-# and each chartsheet with its drawings, charts and images. A part over
+# shared strings, workbook and the relationships it resolves, styles, theme,
+# core and custom properties, each worksheet's relationships, and each
+# chartsheet with its drawings, charts and images. A part over
 # ``_MAX_EAGER_PART_BYTES``, or reads that together cross
 # ``_MAX_EAGER_BYTES`` or ``_MAX_EAGER_READS``, fail the workbook before
 # openpyxl opens it. Plainly timed, the costliest shapes (empty shared
-# strings, empty fonts in the styles) cost about 0.4 s and 20 to 35 MB
-# per MB of part, so two of them filling the aggregate take about 7 s
-# and 300 MB; a legitimate shared-string table costs about a fifth of
-# that. Each sheet costs about 0.1 ms besides its bytes, and a
-# chartsheet about six reads, so a workbook naming thousands of sheets
-# stops at the read budget in about half a second. External links,
-# which openpyxl would also read whole, are not loaded at all
-# (``keep_links=False``): their cached values are not extracted.
+# strings, empty fonts in the styles) cost about 0.4 s and 20 to 35 MB per
+# MB of part, so two of them filling the aggregate take about 7 s and 300 to
+# 550 MB (508 MB measured in the child, above); a legitimate shared-string
+# table costs about a fifth of that. Each sheet costs about 0.1 ms besides
+# its bytes, and a chartsheet about six reads, so a workbook naming
+# thousands of sheets stops at the read budget in about half a second.
+# External links, which openpyxl would also read whole, are not loaded at
+# all (``keep_links=False``): their cached values are not extracted.
 _MAX_EAGER_PART_BYTES = 8 * 1024 * 1024
 _MAX_EAGER_BYTES = 16 * 1024 * 1024
 _MAX_EAGER_READS = 4096
@@ -194,8 +194,9 @@ _EMPTY_WORKSHEET = b'<worksheet xmlns="http://schemas.openxmlformats.org/spreads
 # row between two parsed ones, which cannot be told apart from a
 # parsed row with no cells, is charged the same. The worst cases (one-
 # cell rows, rows with no cells, missing rows, rows of styled empty
-# cells) then stop in about a quarter of a second at most; a sheet
-# longer than about 75,000 rows is truncated there.
+# cells) then stop in about a quarter of a second at most; a workbook
+# of more than about 75,000 rows in all (fewer when its rows are wide:
+# each costs its cells plus ``_ROW_COST``) is truncated there.
 _MAX_EXPANDED_CELLS = 5_000_000
 _ROW_COST = 64
 
@@ -630,8 +631,7 @@ def _serialize(workbook: openpyxl.Workbook, reported: list[str]) -> str:
     # Whether the text budget cut or left unread a value (#903). A budget
     # the last value spends exactly cuts nothing, so once it is spent the
     # walk reads on, keeping nothing and charging the cell budget as
-    # before, until it meets a value (a cut) or the end (review round 1
-    # on #917).
+    # before, until it meets a value (a cut) or the end (#917).
     cut = False
     for sheet in workbook.worksheets:
         # Read-only mode trusts the dimension record and stops at it.

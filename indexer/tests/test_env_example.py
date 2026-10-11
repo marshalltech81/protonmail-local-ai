@@ -301,6 +301,26 @@ _SHELL_ONLY = {
     "BRIDGE_IMAP_PORT": ("mbsync", "mbsync/entrypoint.sh"),
     "BRIDGE_CERT_FINGERPRINT": ("mbsync", "mbsync/entrypoint.sh"),
     "BRIDGE_CERT_PIN_ROTATE": ("mbsync", "mbsync/entrypoint.sh"),
+    # PLAN.md decision 46: checked by mbsync/proton-settings.sh, which the
+    # entrypoint and scripts/validate-env.sh both source.
+    "BRIDGE_HOST": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
+    "BRIDGE_CERT_HOST": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
+    "PROTON_IMAP_ACCOUNT_NAME": (
+        "mbsync",
+        "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template",
+    ),
+    "PROTON_REMOTE_STORE_NAME": (
+        "mbsync",
+        "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template and matched by its output filter",
+    ),
+    "PROTON_LOCAL_STORE_NAME": (
+        "mbsync",
+        "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template",
+    ),
+    "PROTON_CHANNEL_NAME": (
+        "mbsync",
+        "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template and matched by its output filter",
+    ),
     "SYNC_INTERVAL": ("mbsync", "mbsync/entrypoint.sh and mbsync/healthcheck.sh"),
     "SYNC_DEADLINE_SECONDS": ("mbsync", "mbsync/entrypoint.sh and mbsync/healthcheck.sh"),
 }
@@ -482,7 +502,7 @@ def test_a_dropped_env_example_key_is_caught(repo_copy):
     assert "RERANK_CANDIDATES" in _undocumented(repo_copy)
 
 
-# --- Review round 7: names read through the identity-settings tuples ---------
+# --- Names read through the identity-settings tuples ----------------------
 
 
 def test_the_identity_settings_tuples_are_collected():
@@ -618,7 +638,7 @@ def test_a_not_read_by_python_entry_dropped_from_compose_is_stale(reverse_copy):
     assert _stale_not_read_by_python(reverse_copy) == {"indexer:HOME"}
 
 
-# --- Review round 1 ----------------------------------------------------------
+# --- Compose delivery edge cases: overlays, fixed values, validators -------
 
 
 def _replace_once(path: Path, old: str, new: str) -> None:

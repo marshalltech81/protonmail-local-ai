@@ -1,9 +1,10 @@
 """Tests for src/extractors/.
 
 Covers the dispatch (MIME → module → extension fallback → unsupported),
-the simple text + html extractors end-to-end, the PDF digital path
-against a tiny synthesized PDF, and the safety properties the
-dispatcher itself enforces (size cap, OCR gate, exception → ``failed``).
+each format extractor (text, html, docx, xlsx, pptx, pdf, image), the
+dispatcher's safety properties (size cap, OCR gate, exception →
+``failed``, permanent failures → ``unsupported``), extractor versions
+and stale rows, cap reporting, and ``text_complete``.
 
 OCR-dependent paths (Tesseract, Poppler) are tested via mocks rather
 than against a live binary so the test suite stays runnable on a
@@ -225,7 +226,7 @@ class TestFailedOutcomesAreLogged:
         extractors.drain_extractor_counts()
 
     def test_failed_warnings_are_rate_limited(self, monkeypatch, caplog):
-        """Review round 1 (security): many distinct malformed attachments
+        """Many distinct malformed attachments
         each logged a WARNING. The first ``_WARNINGS_PER_WINDOW`` per
         window are logged; the rest are counted for the aggregate. The
         extraction results are unchanged."""
@@ -432,7 +433,7 @@ class TestTextExtractorUnicode:
         assert text == self.WORDS
 
     def test_short_bomless_utf16_is_recognised(self):
-        """Review round 1: under ten code units, the "almost no NULs in the
+        """Under ten code units, the "almost no NULs in the
         other byte" allowance rounded to zero and could never pass."""
         from src.extractors.text import extract as text_extract
 
@@ -470,7 +471,7 @@ class TestTextExtractorUnicode:
 
 
 class TestStaleOcrRowsWhileOcrIsOff:
-    """Review round 1: refreshing a stale OCR row with OCR off would
+    """Refreshing a stale OCR row with OCR off would
     overwrite its text with "OCR disabled" and clear its chunks."""
 
     def test_ocr_rows_are_not_stale_while_ocr_is_off(self, monkeypatch):
@@ -938,7 +939,7 @@ class TestXlsxSharedStringBudget:
         assert "tail" not in text
         # Three full blank values and a fourth sliced to the budget's last
         # characters, where the walk stops because that value was cut
-        # (review round 1 on #917; a fifth row was parsed before): 100,000
+        # (#917): 100,000
         # characters scanned in all.
         assert rows[0] == 4
 
@@ -1041,7 +1042,7 @@ class TestXlsxSheetTitleBudget:
     )
     def test_title_at_the_budget_boundary(self, monkeypatch, title_len, kept):
         """Pins the output on both sides of the boundary: a header that
-        leaves no budget for a value drops its sheet, as before."""
+        leaves no budget for a value drops its sheet."""
         from src.extractors import xlsx
 
         first = "[Sheet: first]\nfirst"
@@ -1138,7 +1139,7 @@ class TestXlsxColumnPositions:
         assert "\t\tgamma" in joined
 
     def test_empty_cells_are_charged_to_the_text_budget(self, monkeypatch):
-        """Empty cells now emit a tab each, so they count against the
+        """Empty cells emit a tab each, so they count against the
         budget that bounds the returned length."""
         from src.extractors import xlsx
 
@@ -1577,7 +1578,7 @@ class TestXlsxRawNodeBudget:
         assert lines[2:] == expected
 
     def test_a_start_tag_past_the_tag_budget_is_cut_before_expat_builds_it(self, monkeypatch):
-        """Review round 1: expat hands a start tag's attributes over as
+        """Expat hands a start tag's attributes over as
         one dict, built before any budget is checked, so a cell with
         hundreds of thousands of attributes cost hundreds of MB. The
         scan stops feeding a tag that has run past ``_MAX_TAG_BYTES``
@@ -2309,7 +2310,8 @@ class TestXlsxEagerPartBudget:
             peak = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()
-        # On main: about 7.5 s and 330 MB. Generous for CI.
+        # Before the eager-part budget (#428): about 7.5 s and 330 MB.
+        # Generous for CI.
         assert time.monotonic() - started < 5.0
         assert peak < 64 * 1024 * 1024
         assert set(reads.bytes) == {"[Content_Types].xml"}
@@ -2627,11 +2629,9 @@ class TestPdfDigitalExtractor:
     def test_ocr_temp_dir_is_cleaned_after_success(self, monkeypatch, tmp_path):
         """``_extract_ocr`` must remove its per-call temp dir on success.
 
-        Repro for the production ``ENOSPC`` cascade: ``pdf2image``
-        writes one PPM per rendered page (~6 MB at 200 dpi), and the
-        previous implementation passed ``output_folder="/tmp"``
-        directly without cleanup, so every OCR call permanently leaked
-        files into the indexer container's bounded tmpfs.
+        ``pdf2image`` writes one PPM per rendered page (~6 MB at 200
+        dpi) into the bounded tmpfs; an output folder left behind on
+        every OCR call filled it (the production ``ENOSPC`` cascade).
         """
         import os
         import tempfile as _tempfile_mod
@@ -2657,11 +2657,11 @@ class TestPdfDigitalExtractor:
             "pytesseract.image_to_string",
             lambda image, **_: "ocr text",
         )
-        # Reroute ``dir="/tmp"`` to a host-side tmp_path so the test
-        # works on dev machines where ``/tmp`` is the host's real /tmp
-        # (and the test would otherwise leave probe files behind on
-        # failure). Capture the real constructor before patching to
-        # avoid re-entry.
+        # Reroute the per-call ``TemporaryDirectory`` (created in
+        # ``TMPDIR``) to tmp_path, so the test never writes into the
+        # developer's real temp directory (and would otherwise leave
+        # probe files behind on failure). Capture the real constructor
+        # before patching to avoid re-entry.
         real_temp_dir = _tempfile_mod.TemporaryDirectory
         monkeypatch.setattr(
             pdf_child.tempfile,
@@ -2792,10 +2792,11 @@ class TestPdfDigitalExtractor:
         assert captured == {}
 
     def test_ocr_budget_counts_rounded_pixel_sides(self, monkeypatch, tmp_path):
-        """Review round 1: Poppler rounds each side up to a whole pixel, so
+        """Poppler rounds each side up to a whole pixel, so
         a sliver page (0.14 in wide, 200,000 in tall via UserUnit) has a
-        small area but rasterizes to 6 x 40M pixels at 200 dpi. The
-        budget must hold for the rounded sides."""
+        small area but rasterizes to 28 x 40M pixels at 200 dpi, and at a
+        lowered DPI its few-pixel width is rounded up. The budget must
+        hold for the rounded sides."""
         import io as _io
         import math
 
@@ -2992,7 +2993,7 @@ class TestPdfDigitalPageErrors:
 class TestPdfPageLevelOcr:
     """#292: the 40-character floor applied to the whole document, so a
     PDF with one digital page and one scanned page never OCR'd the
-    scanned one. OCR now runs on each page whose own text layer is
+    scanned one. OCR runs on each page whose own text layer is
     under the floor, at most ``max_ocr_pages`` of them per document.
 
     Poppler and Tesseract are faked: each render call and each OCR call
@@ -3115,7 +3116,7 @@ class TestPdfPageLevelOcr:
 
     def test_page_cap_logs_a_warning_with_the_counts(self, monkeypatch, tmp_path, caplog):
         """#871: pages past the cap are never read, so the cap says so at
-        WARNING with counts only. The result is the same as before."""
+        WARNING with counts only. The extraction result is unchanged."""
         caplog.set_level("INFO")
         self._fake_ocr(monkeypatch, tmp_path)
         result = extract(
@@ -3228,7 +3229,7 @@ class TestPdfPageLevelOcr:
         extractor,
         unrecovered,
     ):
-        """Review round 4 on #884: ``pdf_pages_failed`` counts every page
+        """#884: ``pdf_pages_failed`` counts every page
         pypdf could not read, ``pdf_pages_unrecovered`` those whose text
         no OCR recovered. Only the latter makes the attachments line a
         WARNING. Extraction results are unchanged."""
@@ -3264,7 +3265,7 @@ class TestPdfPageLevelOcr:
         assert "SYNTHETIC_PYPDF_MARKER" not in caplog.text
 
     def test_page_cap_warnings_are_rate_limited_and_counted(self, monkeypatch, tmp_path, caplog):
-        """Review round 2 on #884: one message can carry many capped
+        """#884: one message can carry many capped
         PDFs, and a WARNING each could flood the log. The cap line shares
         the extractor warning limit; every capped PDF and skipped page is
         counted for the attachments aggregate, whether its line was
@@ -3397,7 +3398,7 @@ class TestPdfPageLevelOcr:
         assert work["renders"] == [(1, 1), (3, 3)]
 
     def test_ocr_time_does_not_count_against_the_render_budget(self, monkeypatch, tmp_path):
-        """Review round 1: the render deadline was wall-clock, so a slow
+        """The render deadline was wall-clock, so a slow
         Tesseract page between two fast renders spent it and the next
         render was refused. Only Poppler time counts."""
         from src.extractors import pdf_child
@@ -3469,7 +3470,7 @@ class TestPdfPageLevelOcr:
         return work
 
     def test_page_count_over_half_the_budget_is_an_ocr_timeout(self, monkeypatch, tmp_path):
-        """#867 review round 1: pdf2image repeats the page count, unbounded,
+        """#867: pdf2image repeats the page count, unbounded,
         inside the render, so a page count taking most of the budget
         would roughly double the deadline. Over half the budget, OCR stops
         as on a timeout and nothing is rendered."""
@@ -3565,8 +3566,9 @@ class TestPdfPageLevelOcr:
         result = self._extract("dsdss", on_progress=lambda: events.append("progress"))
         assert result.status == STATUS_SUCCESS
         assert work["ocr_calls"] == 3
-        # Five digital pages walked, then three pages OCR'd, each OCR
-        # followed by a heartbeat before the next page starts.
+        # All five pages walked by the digital pass, then the three
+        # scanned pages OCR'd, each OCR followed by a heartbeat before the
+        # next starts.
         assert events == ["progress"] * 5 + ["ocr", "progress"] * 3
 
     def test_progress_callback_is_optional(self, monkeypatch, tmp_path):
@@ -3825,9 +3827,9 @@ class TestPermanentFailuresAreUnsupported:
         assert stale_extractor_module("pptx@3") is None
 
     def test_a_page_level_pypdf_limit_keeps_the_other_pages(self, monkeypatch):
-        """Review round 1: a limit hit inside one page's text extraction
-        (``/ToUnicode`` size, for example) is a per-page failure, as
-        before: the page is counted in ``pdf_pages_failed`` (and OCR'd when
+        """A limit hit inside one page's text extraction
+        (``/ToUnicode`` size, for example) is a per-page failure: the
+        page is counted in ``pdf_pages_failed`` (and OCR'd when
         OCR is on) and the other pages' text is kept, rather than the
         whole document being recorded ``unsupported``."""
         from pypdf.errors import LimitReachedError
@@ -3875,9 +3877,9 @@ class TestPermanentFailuresAreUnsupported:
             # An allowlisted type from another extractor is not matched.
             ("xlsx", "pypdf.errors.FileNotDecryptedError"),
             ("pdf", "src.extractors.xlsx.XlsxEagerPartBudgetError"),
-            # The legacy extractors' subprocess errors (#935, #957): a timeout or
-            # a crash can be transient, so they stay ``failed`` for any
-            # module.
+            # The runner's subprocess errors (#935, #957), which any
+            # extractor that runs a child can raise: a timeout or a crash
+            # can be transient, so they stay ``failed`` for any module.
             *(
                 (module, f"src.extractors._runner.{name}")
                 for module in ("doc", "xls", "ppt", "pdf", "xlsx")
@@ -3923,8 +3925,8 @@ class TestPermanentFailuresAreUnsupported:
 class TestEncryptedPdf:
     """#691: pypdf needs ``cryptography`` for AES. An owner-password-only
     PDF opens with the empty user password and extracts like any other;
-    one that needs a real open password is recorded as a failure by type,
-    and no password is ever guessed."""
+    one that needs a real open password is recorded ``unsupported`` with
+    fixed text (#931), and no password is ever guessed."""
 
     # Long enough to clear the digital-text floor, so OCR never runs.
     MARKER = "SYNTHETIC_OWNER_ONLY_MARKER with enough digital text to clear the floor"
@@ -3999,7 +4001,7 @@ class TestEncryptedPdf:
 class TestCffFontPdf:
     """#691: pypdf reads the built-in encoding of an embedded CFF
     (``/FontFile3`` ``/Type1C``) font only with fontTools, which is held
-    back until py-pdf/pypdf#4156 bounds its cost. Without it the codes
+    back until decision #691 adds it. Without it the codes
     fall through to StandardEncoding and the text comes out garbled, as
     a ``success`` row no retrieval test can tell from real text. The
     fixture pins that gap: its page's only text is set in such a font,
@@ -4028,8 +4030,7 @@ class TestCffFontPdf:
         ``success``; with fontTools it returns the sentence itself. Only
         the text is under the xfail: the module version is pinned in
         ``test_extracts_as_success_from_the_digital_path`` so that the
-        bump fontTools brings cannot keep this test failing (review
-        round 1 on #1114)."""
+        bump fontTools brings cannot keep this test failing (#1114)."""
         from src.extractors import pdf_child
 
         monkeypatch.setattr(
@@ -4183,15 +4184,12 @@ class TestImageExtractor:
             image_module.extract_text(buf.getvalue(), "20", "0")
 
     def test_extract_does_not_mutate_global_max_image_pixels(self, monkeypatch):
-        """``extract()`` must not permanently change ``Image.MAX_IMAGE_PIXELS``.
+        """``extract_text()`` must not permanently change ``Image.MAX_IMAGE_PIXELS``.
 
-        Earlier versions wrapped the body in a per-call save/restore
-        because the cap was set inside ``extract()``. The cap is now
-        global (set at ``indexer.extractors.__init__`` import time),
-        so this test exists to catch regressions where someone
-        re-introduces a per-call assignment that doesn't restore
-        cleanly — that would silently bleed into pypdf's PIL usage and
-        defeat the whole point of having a uniform cap.
+        The image child sets its own ceiling (#1401) for its run and
+        restores the previous value (``_pillow_limit``). Run in this
+        process, as here, a value left behind would replace
+        ``GLOBAL_MAX_IMAGE_PIXELS`` for every later PIL consumer.
         """
         import io
 
@@ -4259,7 +4257,7 @@ class TestMultipageTiff:
         assert seen == ["PAGE_0", "PAGE_1"]
 
     def test_frames_past_the_cap_are_never_enumerated(self, monkeypatch):
-        """Review round 1: ``n_frames`` walks every image directory before
+        """``n_frames`` walks every image directory before
         a cap applies, so a compact TIFF with thousands of them stalled
         the worker. Pages are reached by ``seek()`` up to the cap."""
         from PIL import TiffImagePlugin
@@ -4279,7 +4277,7 @@ class TestMultipageTiff:
         assert seen == ["PAGE_0", "PAGE_1"]
 
     def test_a_later_page_over_the_pixel_cap_fails_before_decoding(self, monkeypatch):
-        """Review round 1: ``Image.open`` checks only the first frame's
+        """``Image.open`` checks only the first frame's
         size; a later oversized page must not be decoded."""
         import io
 
@@ -4561,10 +4559,11 @@ class TestMultipageTiffOcrCap:
 class TestGlobalImagePixelCap:
     """Process-wide PIL cap installed by ``indexer.extractors`` at import.
 
-    The cap protects every PIL consumer in the indexer process, not
-    just the standalone image extractor. pypdf renders embedded
-    document images through PIL; openpyxl decodes chart graphics
-    through PIL; both inherit the limit set here.
+    Every process that imports the package (the indexer and each
+    extractor child) gets this cap. It protects the PIL consumers other
+    than the image extractor, which sets its own ceiling (#1401): pypdf
+    renders embedded document images through PIL and openpyxl decodes
+    chart graphics through PIL; both inherit the limit set here.
     """
 
     def test_global_cap_is_set_when_extractors_package_is_imported(self):
@@ -5007,8 +5006,8 @@ def _png(size: tuple[int, int] = (64, 48), color: str = "red") -> bytes:
 class TestHeicImages:
     """#691: iPhone HEIC/HEIF photos open through pillow-heif's Pillow
     plugin and go through exactly the guards every other image does: the
-    dispatcher's byte cap, the process-wide pixel cap and decompression-bomb
-    handling, and the OCR page and time bounds."""
+    dispatcher's byte cap, the image child's pixel ceiling (#1401) and
+    decompression-bomb handling, and the OCR page and time bounds."""
 
     @pytest.mark.parametrize(
         ("content_type", "filename"),
@@ -5018,7 +5017,7 @@ class TestHeicImages:
             ("application/octet-stream", "IMG_0001.heic"),
             ("application/octet-stream", "photo.HEIF"),
             ("", "photo.heic"),
-            # Review round 1: ``.hif`` (Canon / Fujifilm cameras) is a
+            # ``.hif`` (Canon / Fujifilm cameras) is a
             # still HEIF that pillow-heif registers too.
             ("application/octet-stream", "IMG_0001.HIF"),
             ("", "photo.hif"),
@@ -5217,7 +5216,7 @@ def _docx_bytes(text: str) -> bytes:
 _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 # Legacy binary Office labels, and the OOXML extractor each falls back to
-# for a payload that is not OLE2 (#694, #935).
+# for a ZIP payload (#694, #935).
 _LEGACY_LABELS = (
     ("application/msword", "a.bin", "docx"),
     ("application/octet-stream", "a.doc", "docx"),
@@ -5251,9 +5250,10 @@ def _count_extractor_calls(monkeypatch) -> list[str]:
 class TestLegacyOfficeLabels:
     """#694, #935: ``application/msword`` / ``.doc`` and
     ``application/vnd.ms-excel`` / ``.xls`` route a genuine legacy binary
-    (an OLE2 compound file) to the ``doc`` / ``xls`` extractor, and any
-    other payload to the OOXML extractor, as a best effort for OOXML files
-    mislabelled as a legacy type."""
+    (an OLE2 compound file) to the ``doc`` / ``xls`` extractor, and a ZIP
+    payload to the OOXML extractor, as a best effort for OOXML files
+    mislabelled as a legacy type; any other payload is recorded
+    ``unsupported`` (#1227)."""
 
     def test_zip_payload_with_a_legacy_label_still_reaches_the_ooxml_extractor(self, monkeypatch):
         calls = _count_extractor_calls(monkeypatch)
@@ -6642,7 +6642,7 @@ class TestPptxExtractor:
         assert _PPTX_MARKER not in (result.error or "")
 
     def test_layout_placeholders_and_notes_placeholder_are_read(self):
-        """Review round 1: text typed into a layout's title and content
+        """Text typed into a layout's title and content
         placeholders (``SlidePlaceholder``) and the notes placeholder
         (``NotesSlidePlaceholder``), both ``Shape`` subclasses."""
         import io
@@ -6665,7 +6665,7 @@ class TestPptxExtractor:
         assert pptx_extract(buf.getvalue()) == ("TITLEFACT\n\nBODYFACT\n\nNOTESFACT", "pptx")
 
     def test_expansion_budget_fails_before_python_pptx_opens(self, monkeypatch, caplog):
-        """Review round 1: python-pptx parses every XML part whole when it
+        """``python-pptx`` parses every XML part whole when it
         opens, about 15 bytes of memory per byte of XML. A deck whose
         members expand by more than ``_MAX_EXPANSION_BYTES`` past their
         compressed size fails before python-pptx sees it."""
@@ -6698,7 +6698,7 @@ class TestPptxExtractor:
     def test_package_count_budgets_fail_before_python_pptx_opens(
         self, budget, setting, extra, monkeypatch, caplog
     ):
-        """Review round 2: python-pptx materializes every related part and
+        """``python-pptx`` materializes every related part and
         relationship before any walk budget applies. Members and the bytes
         of ``.rels`` members (the only relationship parts python-pptx
         reads, found by name) are counted from the central directory."""
@@ -8145,7 +8145,7 @@ class TestExtractorCapsAreReported:
         assert extractors.drain_extractor_counts()["extractor_caps"] == 0
 
     def test_lowered_dpi_is_not_reported_when_no_render_ran(self, monkeypatch, caplog):
-        """Review round 3: the DPI cap was counted when the DPI was chosen,
+        """The DPI cap was counted when the DPI was chosen,
         so a Poppler failure before any render still reported a
         reduced-resolution OCR. It is reported once a render at it ran."""
         from src import extractors
@@ -8203,7 +8203,7 @@ class TestExtractorCapsAreReported:
     def test_text_budget_spent_exactly_reports_only_a_real_cut(
         self, sheets, reported, monkeypatch, caplog
     ):
-        """Review round 1: a budget spent exactly by the workbook's last
+        """A budget spent exactly by the workbook's last
         value reported ``xlsx_text_chars`` although nothing was cut. The
         text returned is the same either way."""
         from src import extractors
@@ -8232,7 +8232,7 @@ class TestExtractorCapsAreReported:
     def test_pptx_budget_spent_exactly_reports_only_a_real_cut(
         self, cap, setting, slides, reported, monkeypatch, caplog
     ):
-        """As for the XLSX text budget (review round 1 on #903): a budget
+        """As for the XLSX text budget (#903): a budget
         the deck's last item spends exactly cut nothing."""
         from src import extractors
         from src.extractors import pptx

@@ -254,7 +254,7 @@ class TestGroups:
         assert by["ann@one.test"].threads == 2
 
     def test_the_display_name_comes_from_every_stored_name(self, tmp_path):
-        # Review round 2: a From address written first without a name and
+        # A From address written first without a name and
         # again with one keeps no name on its participant row; the name
         # is in message_participant_names (#1140).
         conn, path = _open_built_db_conn(tmp_path, "names.db")
@@ -335,7 +335,7 @@ class TestGroups:
 
 @pytest.fixture
 def from_db(tmp_path) -> Database:
-    """Review round 3: messages whose stored From list is or is not
+    """Messages whose stored From list is or is not
     complete, by ``from_addresses_complete`` (0 a known loss, NULL not
     reparsed yet)."""
     conn, path = _open_built_db_conn(tmp_path, "from.db")
@@ -640,7 +640,7 @@ class TestTool:
         # The whole description reaches the client (#1011).
         for phrase in ("Trash", "indeterminate", "null", "Each page"):
             assert phrase in tool.description, phrase
-        # Review round 1: paging sends addresses and names to the
+        # Paging sends addresses and names to the
         # calling model, so the description asks for disclosure first
         # and the smallest page, as query_messages' does.
         description = " ".join(tool.description.split())
@@ -737,7 +737,7 @@ class TestTool:
         assert "'total_matches': 1" in line and "'groups': 1" in line
 
     def test_a_long_group_value_is_returned_whole(self, fake_server, tmp_path):
-        # Review round 1: the value is the group's identity, used as an
+        # The value is the group's identity, used as an
         # exact address_is / folder follow-up, so it is never cut. The
         # parser stores addresses up to 998 characters.
         address = "a" * 700 + "@long.test"
@@ -752,7 +752,7 @@ class TestTool:
         conn.close()
         out = _call(_server(Database(str(path))), "aggregate_messages", group_by="sender_address")
         assert [g["value"] for g in out["groups"]] == [address]
-        # Review round 2: the flat sender filter is the follow-up for an
+        # The flat sender filter is the follow-up for an
         # address longer than where's 320-character address_is limit.
         assert Database(str(path)).query_messages(sender=address).total_matches == 1
 

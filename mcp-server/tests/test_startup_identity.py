@@ -7,7 +7,7 @@ The line is built only from inputs that cannot fail (raw environment
 strings and a read-only, never-raising schema read) and is logged when
 ``src.main`` is imported, before the module parses any setting, so a
 malformed setting, a missing token or a missing index still leaves it
-in the log (Codex review rounds 3 and 4 on #893)."""
+in the log (#893)."""
 
 import ast
 import logging
@@ -104,7 +104,7 @@ def test_config_hash_covers_only_the_named_non_secret_settings():
     assert not names & set(_SECRET_NAMES)
 
 
-# --- Completeness (Codex review round 5 on #893) -----------------------------
+# --- Completeness (#893) -----------------------------
 # Every environment variable ``src/`` reads is either a hash input or an
 # explicit exclusion with a reason, so a new setting cannot be left out of
 # the hash by accident.
@@ -154,9 +154,10 @@ def _env_names_read_by_src() -> set[str]:
     return names
 
 
-def test_the_scan_finds_reads_in_every_module():
-    # One read per module or helper, so a scan that silently stopped
-    # matching would fail here first.
+def test_the_scan_finds_each_read_form():
+    # One name per read form main.py uses (``os.environ.get`` and each env
+    # helper), so a scan that silently stopped matching a form would fail
+    # here first.
     assert {
         "EMBED_MODEL",  # os.environ.get in main.py
         "MCP_SESSION_IDLE_TIMEOUT_SECS",  # _float_env
@@ -268,7 +269,7 @@ class TestReadStoredSchemaVersion:
         assert read_stored_schema_version(str(tmp_path)) == "unreadable"
 
     def test_a_permission_error_is_unreadable_not_none(self, tmp_path, monkeypatch):
-        """Codex review round 6 on #893: ``Path.exists()`` reports a file
+        """#893: ``Path.exists()`` reports a file
         it may not stat as missing; only a missing file is ``none``."""
         path = Path(
             self._db(
@@ -291,7 +292,7 @@ class TestReadStoredSchemaVersion:
 
 
 class TestUrlCredentialsAreNotHashed:
-    """Codex review round 6 on #893: a hash over a URL carrying userinfo
+    """#893: a hash over a URL carrying userinfo
     would let anyone with the log test guesses at the password offline,
     so such a URL is hashed as a fixed marker."""
 

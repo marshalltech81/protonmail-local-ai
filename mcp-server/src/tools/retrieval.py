@@ -672,15 +672,18 @@ def register_retrieval_tools(server, db):
         attachment chunks are not in the result. For any question
         that requires the text of an attached PDF or image — "what
         does the quote PDF say?", "compare the attached statement
-        against the email body" — call ``ask_mailbox`` or
-        ``search_attachments`` instead. Iterating ``get_thread``
-        across multiple threads to find attachment content is the
-        wrong shape and will not surface it; the extracted attachment
-        text lives in a separate chunk lane that get_thread never
-        reads. Reaching for an external tool (Google Drive, web
-        search) to read a PDF that arrived as an email attachment is
-        also wrong — the local index has
-        already extracted that PDF's text.
+        against the email body" — call ``ask_mailbox``,
+        ``get_evidence`` or ``search_attachments`` instead, or list the
+        thread's attachments with ``query_attachments`` (``thread_id``,
+        plus ``folder="Trash"`` for messages in Trash) and read one
+        whole with ``get_attachment``. Iterating
+        ``get_thread`` across multiple threads to find attachment
+        content is the wrong shape and will not surface it; the
+        extracted attachment text lives in a separate chunk lane that
+        get_thread never reads. Reaching for an external tool (Google
+        Drive, web search) to read a PDF that arrived as an email
+        attachment is also wrong — when its extraction succeeded, the
+        local index already holds that PDF's text.
 
         ``thread_id`` is OPAQUE: pass only a ``Thread ID`` that a tool
         result returned. Do NOT pass a subject line, a
@@ -812,7 +815,9 @@ def register_retrieval_tools(server, db):
                 lines.append("")
                 lines.append(
                     "Attachments are present in this thread; use search_attachments "
-                    "to search their extracted text."
+                    "to search their extracted text, or query_attachments (thread_id, "
+                    'plus folder="Trash" for messages in Trash) and get_attachment to '
+                    "read one whole."
                 )
 
             next_offset = offset + len(messages)
@@ -876,8 +881,9 @@ def register_retrieval_tools(server, db):
         with each ``next_offset`` in turn returns the whole body.
         Attachment text is NOT included here; use get_evidence or
         ask_mailbox for attachment content, or list the message's
-        attachments with query_attachments (``claimant_id``) and read
-        one in full with get_attachment. When no body chunks are
+        attachments with query_attachments (``claimant_id``, plus
+        ``folder="Trash"`` for a message in Trash) and read one in
+        full with get_attachment. When no body chunks are
         indexed for the message, ``body: null`` means no indexed body;
         ``indexed_thread_text`` is conversation context, not this
         message's text (``indexed_thread_text_scope`` says context, as
@@ -1094,8 +1100,9 @@ def register_retrieval_tools(server, db):
                          (threads with a flagged / starred message in
                          the folder). Other values return a validation
                          error.
-            limit: Number of threads to return (default: 20)
-            offset: Pagination offset (default: 0)
+            limit: Number of threads to return (default 20, clamped
+                   to [1, 100])
+            offset: Pagination offset (default 0)
 
         Returns:
             Threads with at least one message in the folder, sorted by
@@ -1339,8 +1346,8 @@ def register_retrieval_tools(server, db):
             replied: True for messages answered in Proton, False for the rest.
             size_min: Inclusive lower bound in bytes (an integer from 0
                       to 2^63-1) on the message's local file size (not
-                      the server's RFC822.SIZE); messages without a
-                      stored size are left out.
+                      the server's RFC822.SIZE); a message without a
+                      stored size is indeterminate.
             size_max: Inclusive upper bound in bytes, likewise.
             where: Explicit leaves, ANDed with the other filters:
                    {"all": [{"leaf": ..., "role": ..., "value": ...,
@@ -2020,8 +2027,9 @@ def register_retrieval_tools(server, db):
         ``empty`` one returns "". Otherwise ``text`` is null and
         ``unavailable_reason`` says why (no extraction recorded yet,
         extraction failed, no extractor could read the file (unsupported
-        type, missing extractor, encrypted PDF or work cap), OCR off, or
-        the file over the size limit): report it as unread text, not as
+        type, missing extractor, encrypted PDF or work cap), OCR off, the
+        file over the size limit, or extraction deferred to a later
+        indexer pass): report it as unread text, not as
         an attachment that says nothing relevant.
 
         Args:
@@ -2142,9 +2150,12 @@ def register_retrieval_tools(server, db):
         For "emails FROM <person>" — i.e. you want messages from them,
         not the contact record itself — call ``search_emails`` directly
         with ``from_name=<the user's words>``. ``search_emails`` resolves
-        the name through this tool internally, so chaining
-        ``find_contact`` → ``search_emails(from_addr=...)`` is an extra
-        round-trip with no quality benefit.
+        the name itself, to the most active matching sender within its
+        folder scope, and reports the address it used
+        (``resolved_from_addr``) and how many senders matched
+        (``from_name_matches``). For that search, call this tool first
+        only to choose a different sender, then pass its address as
+        ``from_addr``.
 
         Each contact's authority class comes from the operator's rules
         file matched against the claimed From address, not a verified
@@ -2161,8 +2172,8 @@ def register_retrieval_tools(server, db):
             unknown names.
         """
         log_tool_call(log, "find_contact", {"query": query, "limit": limit})
-        # Same clamp ceiling as list_threads — a hallucinated
-        # ``limit=10000`` shouldn't drive a giant aggregation/sort.
+        # A hallucinated ``limit=10000`` shouldn't drive a giant
+        # aggregation/sort.
         limit = clamp_int(limit, default=10, minimum=1, maximum=50)
 
         if not query or not query.strip():
@@ -2216,17 +2227,20 @@ def register_retrieval_tools(server, db):
     @timings.timed_tool("list_folders")
     async def list_folders() -> CallToolResult:
         """
-        List all available email folders and their thread counts.
+        List the folders that hold indexed mail, with their thread counts.
 
         Use this when the user asks structural questions about the
-        mailbox — "what folders do I have?", "what mailboxes are
-        synced?", "is the Archive folder indexed?". Don't call this
-        before search_emails as a discovery step; search_emails
-        already understands folder filters when the user names them.
+        mailbox — "what folders do I have?", "is the Archive folder
+        indexed?". Don't call this before search_emails as a discovery
+        step; search_emails already understands folder filters when the
+        user names them.
 
-        Returns all folders with thread counts from the local index. A
-        folder's count is the threads with a message in it, so a
-        thread spanning folders counts in each.
+        Returns every folder holding at least one indexed message, with
+        its thread count from the local index. A folder that holds no
+        indexed message is not listed, so a missing folder does not
+        show that it is not synced. A folder's count is the threads
+        with a message in it, so a thread spanning folders counts in
+        each.
         """
         log.info("tool=list_folders")
         try:

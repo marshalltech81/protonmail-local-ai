@@ -128,7 +128,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # shells out to when rendering each PDF page to a PIL image. English
     # is the only Tesseract language pack installed, and the extractors
     # pass no language, so adding a tesseract-ocr-* pack here would not
-    # select it by itself (issue #490). catdoc supplies catdoc, which
+    # select it by itself. catdoc supplies catdoc, which
     # src/extractors/doc.py runs on legacy binary .doc attachments (#935).
     tesseract-ocr \
     poppler-utils \
@@ -178,7 +178,7 @@ COPY --chmod=755 --chown=indexer:indexer healthcheck.sh /healthcheck.sh
 # the named-volume seeding race harmless: the maildir-volume is shared with
 # the mbsync container, and whichever image's mount is hit first by docker
 # compose seeds the volume's ownership. mbsync writes; the indexer reads via
-# "other" permission bits (mbsync's entrypoint chmods go+r after each sync)
+# "other" permission bits (mbsync's entrypoint chmods go+r, go+rx on directories, after every sync attempt)
 # and mounts /maildir :ro for defense-in-depth, so indexer does not need to
 # own this directory. Keeping both images' /maildir at 1001:1001 means either
 # seeding order produces a working volume.

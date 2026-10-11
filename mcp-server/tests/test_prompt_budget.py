@@ -239,9 +239,9 @@ class TestPromptBudget:
 
 
 class TestAskMailboxBudget:
-    def test_default_window_keeps_todays_evidence_budget(self):
+    def test_default_window_keeps_the_per_thread_cap_evidence(self):
         """At the default window the 2,000-characters-per-thread cap binds,
-        even for the largest request, so the evidence is what it was."""
+        even for the largest request, so the window cuts nothing more."""
         threads = _long_threads(n=10, chunks=6)
         llm = FakeInferenceClient(response="ok [E1]")
         asyncio.run(_tools(_StubDb(threads), llm)["ask_mailbox"](question="q?", max_threads=10))
@@ -354,10 +354,10 @@ class TestAskMailboxBudget:
         }
 
     def test_crafted_long_headers_drop_lower_ranked_threads_not_the_call(self):
-        """Review round 2: senders can give threads 500-character subjects
-        and participants. At a small window those headers alone used to
-        exceed the allowance and fail the call; lower-ranked threads are
-        now left out, and the note says so."""
+        """Senders can give threads 500-character subjects
+        and participants. At a small window those headers alone can exceed
+        the allowance; lower-ranked threads are left out rather than the
+        call failing, and the note says so."""
         long_header = "h" * 600  # clipped to HEADER_CHAR_LIMIT
         threads = _long_threads(n=5, chunks=1, size=300)
         for t in threads:
@@ -418,7 +418,7 @@ class TestSummarizeBudget:
         recent = [_chunk(f"r{k}", f"{_MARKER} recent {k} " + "r" * 2000, index=k) for k in range(4)]
         return thread, recent
 
-    def test_default_window_keeps_todays_context(self):
+    def test_default_window_keeps_the_full_context(self):
         thread, recent = self._thread_and_tail()
         llm = FakeInferenceClient()
         asyncio.run(_tools(_StubDb([thread], recent), llm)["summarize_thread"](thread_id="t1"))
@@ -450,7 +450,7 @@ class TestSummarizeBudget:
         assert 1500 <= len(tail) <= 2000
 
     def test_body_takes_room_the_tail_does_not_need(self):
-        """Review round 1: with no recent chunks the body had only its
+        """With no recent chunks the body had only its
         2:1 share of a small budget and left the rest unused."""
         thread, _recent = self._thread_and_tail()
         context = _summarize_context(thread, [], 6000)
@@ -487,7 +487,7 @@ class TestExtractBudget:
         assert _prompt_chars(llm.complete_calls[0]) <= small.prompt_chars
 
     def test_window_cut_evidence_is_reported_with_no_records(self):
-        """Review round 1: a null answer from a thread whose passages the
+        """A null answer from a thread whose passages the
         window cut must not read as a genuine absence."""
         threads = [_thread("t1", [_chunk("c1", f"{_MARKER} " + "x" * 9000)])]
         small = PromptBudget(context_tokens=2200, max_output_tokens=1024)
@@ -906,8 +906,10 @@ def _long_summary_thread() -> tuple[ThreadResult, list[ChunkResult]]:
     return thread, recent
 
 
-class TestReviewRound1:
-    """Codex review round 1 on #883, and the coordinator's P3."""
+class TestLimitHitsAreCounted:
+    """#883: context cuts, empty partial answers and the structured-output
+    schema are counted, and each limit hit is marked on the call's own
+    timing line."""
 
     # Item 2: summarize_thread's context cut by the window.
     def test_summarize_context_cut_by_the_window_is_an_evidence_budget_hit(self, caplog):
@@ -1046,8 +1048,9 @@ def _summary_thread() -> ThreadResult:
     return _thread("t1", [], body=f"{_MARKER} body")
 
 
-class TestReviewRound2:
-    """Codex review round 2 on #883."""
+class TestRepairAndContextWindowStops:
+    """#883: a cut repair reply counts the repair prompt, and a stop at
+    the model's context window is its own limit."""
 
     # Item 1: a cut repair reply is counted against the repair prompt.
     @pytest.mark.parametrize("partial", [f"{_MARKER} partial [E1]", ""])
@@ -1190,7 +1193,7 @@ class TestTruncationText:
     _WRONG = {"max_tokens": "INFERENCE_CONTEXT_TOKENS", "context_window": "INFERENCE_MAX_TOKENS"}
 
     def test_context_window_text_advises_lowering_the_window(self):
-        """Review round 1 on #914: the window can already match the
+        """#914: the window can already match the
         model's and still fill, because the three-characters-per-token
         estimate undercounts dense text (CJK, digit or base64 runs). The
         fix that always applies is a lower INFERENCE_CONTEXT_TOKENS."""
@@ -1401,7 +1404,7 @@ class TestExperimentalTokenLimits:
     @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
     @pytest.mark.parametrize("structured", [True, False])
     def test_prompt_tokens_count_the_schema_sent(self, caplog, tool, args, structured):
-        """Review round 1 on #960: with structured outputs on, the
+        """#960: with structured outputs on, the
         provider also bills the schema's system prompt as input, so the
         logged prompt counts the same reserve the evidence budget kept
         for it, as extract_from_emails does."""
@@ -1421,7 +1424,7 @@ class TestExperimentalTokenLimits:
 
     @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
     def test_uncut_repair_counts_the_repair_prompt(self, caplog, tool, args):
-        """Review round 2 on #960: when the evidence was cut and the
+        """#960: when the evidence was cut and the
         repair reply was not, the repair prompt (the longer one) was still
         sent, so it is the one counted."""
         caplog.set_level(logging.INFO)
@@ -1515,7 +1518,7 @@ class TestRepairPromptCounted:
     prompt sent, as ``brief_issue`` and ``check_conclusion`` do after
     #960: the repair prompt whenever the repair call was made, cut or
     not. A cut repair reply keeps counting the repair prompt
-    (``TestReviewRound2``)."""
+    (``TestRepairAndContextWindowStops``)."""
 
     def test_ask_mailbox_uncut_repair_counts_the_repair_prompt(self, caplog):
         caplog.set_level(logging.INFO)

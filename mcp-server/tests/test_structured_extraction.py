@@ -6,9 +6,9 @@ per-thread call carries a strict JSON schema built from the caller's
 schema, and the reply is ``{"records": [...]}`` (an empty list means
 no relevant data). The conversion is one bounded pass over the
 declared fields; a schema it cannot express strictly (an object field,
-a nested shape) is sent without the format, as today, and the response
-says so in fixed text. With the setting off, or in openai mode, the
-request and the parse are today's. All data is synthetic.
+a nested shape) is sent without the format, and the response says so
+in fixed text. With the setting off, or in openai mode, the request and
+the parse are those without the format. All data is synthetic.
 """
 
 import asyncio
@@ -72,7 +72,8 @@ _CATALOGUE = [
     ({"amount": ["number", "null"]}, {"amount": _nullable("number")}),
     ({"id": ["string", "integer"]}, {"id": _nullable("string", "integer")}),
     # An array mixed with another type makes Anthropic's grammar too large
-    # (measured 2026-10-05: eight such fields refused), so it is sent as today.
+    # (measured 2026-10-05: eight such fields refused), so it is sent without
+    # the format.
     ({"tags": ["array", "string"]}, None),
     ({"tags": ["array", "null"]}, {"tags": _ARRAY}),
     ({"nothing": "null"}, {"nothing": {"anyOf": [{"type": "null"}]}}),
@@ -167,8 +168,9 @@ class TestConversion:
         assert _strict_record_schema({"properties": {"rows": deep}}) is None
 
     def test_conversion_is_linear_in_the_field_count(self):
-        """A schema far past the union limit is refused after one pass,
-        quickly, and the pass did the work: each field was converted."""
+        """With the limits off, a 20,000-field schema is converted in one
+        quick pass that did the work (each field was converted); with
+        them on, the field cap refuses it as soon as it is exceeded."""
         schema = {f"field_{i}": "string" for i in range(20_000)}
         start = time.perf_counter()
         record = _strict_record_schema(schema, limited=False)
@@ -190,7 +192,7 @@ class TestProviderLimits:
     refused; 10 scalar plus 3 array fields refused). Every mix of up to 8
     fields was accepted on Sonnet 5.5, Sonnet 4.6 and Opus 5.5, except
     type lists mixing an array with another type, so more fields, or such
-    a list, is sent without the format, as before #808. Evidence label
+    a list, is sent without the format. Evidence label
     lists are plain arrays and add no union."""
 
     def test_limits(self):
@@ -223,11 +225,12 @@ class TestProviderLimits:
             {"tags": ["array", "number"]},
         ],
     )
-    def test_over_the_limit_is_sent_as_today(self, schema):
+    def test_over_the_limit_is_sent_without_the_format(self, schema):
         assert _strict_records_schema(schema) is None
 
-    def test_union_cap_applies_without_the_field_cap(self):
-        """The union count is its own check: 9 array fields are 18 unions."""
+    def test_nine_array_fields_count_past_the_union_cap(self):
+        """Counted with both limits off, 9 array fields are 18 unions, past
+        MAX_UNION_PARAMS; within the 8-field cap a record has at most 16."""
         record = _strict_record_schema({f"f{i}": "array" for i in range(9)}, limited=False)
         assert record is not None
         assert _union_param_count(record) == 18 > MAX_UNION_PARAMS
@@ -250,7 +253,7 @@ class TestProviderLimits:
         assert _union_param_count(deep) == 50_000
         assert time.perf_counter() - start < 2.0
 
-    def test_over_the_limit_extraction_is_sent_as_today_and_says_so(self, seeded_db):
+    def test_over_the_limit_extraction_is_sent_without_the_format_and_says_so(self, seeded_db):
         llm = FakeInferenceClient(complete_responses=["null"] * 3, structured_output=True)
         out = _run(seeded_db, llm, {f"f{i}": "string" for i in range(9)})
         assert llm.json_schemas == [None] * 3
@@ -339,7 +342,7 @@ class TestStructuredExtraction:
         """Every field is required and nullable in the strict schema; a
         null in a property the caller did not require is the omitted
         field, so it is dropped before the unchanged conformance check.
-        A null in a required property still fails it, as today."""
+        A null in a required property still fails it."""
         schema = {
             "type": "object",
             "properties": {"vendor": {"type": "string"}, "amount": {"type": "number"}},
@@ -360,7 +363,7 @@ class TestStructuredExtraction:
         assert "1 of 3 threads could not be extracted" in _texts(out)
         assert "did not match the schema" in _texts(out)
 
-    def test_shorthand_nulls_are_kept_as_today(self, seeded_db):
+    def test_shorthand_nulls_are_kept(self, seeded_db):
         llm = FakeInferenceClient(
             complete_responses=[
                 '{"records": [{"f1": "Acme", "f2": null, "_evidence": {}}]}',
@@ -373,7 +376,7 @@ class TestStructuredExtraction:
         [record] = out.structured_content["records"]
         assert record["note"] is None
 
-    def test_unconvertible_schema_is_sent_as_today_and_says_so(self, seeded_db):
+    def test_unconvertible_schema_is_sent_without_the_format_and_says_so(self, seeded_db):
         llm = FakeInferenceClient(
             complete_responses=['```json\n{"address": {"street": "Main"}}\n```', "null", "null"],
             structured_output=True,
@@ -396,7 +399,7 @@ class TestStructuredExtraction:
         assert "No structured data matching the schema found in 3 threads." in text
         assert "INFERENCE_STRUCTURED_OUTPUT" in text
 
-    def test_setting_off_keeps_todays_request_and_parse(self, seeded_db):
+    def test_setting_off_keeps_the_unstructured_request_and_parse(self, seeded_db):
         llm = FakeInferenceClient(
             complete_responses=['```json\n{"vendor": "Acme"}\n```', "null", "[]"]
         )
@@ -474,7 +477,7 @@ def test_records_wrapper_shape():
 
 
 class TestGenericKeys:
-    """#809 round 2: Anthropic caches a structured-output schema for up to
+    """#809: Anthropic caches a structured-output schema for up to
     24 hours apart from the prompt, so the schema sent carries no
     caller-chosen name; the prompt maps f1, f2, ... to the caller's names
     and the reply is mapped back before every check."""
@@ -516,7 +519,7 @@ class TestGenericKeys:
 
 
 class TestSchemaTokenReserve:
-    """#809 round 2: with a schema, Anthropic adds a system prompt billed
+    """#809: with a schema, Anthropic adds a system prompt billed
     as input (measured 2026-10-05: 394 tokens for a 456-character schema,
     2,075 for 2,589), always fewer tokens than the schema has characters.
     The prompt budget reserves one token per schema character."""
@@ -554,4 +557,6 @@ class TestSchemaTokenReserve:
 
     @pytest.mark.parametrize("tool_schema", [BRIEF_JSON_SCHEMA, CHECK_JSON_SCHEMA])
     def test_fixed_schemas_reserve_is_within_the_default_window(self, tool_schema):
+        # A quarter of the anthropic default window (48,000 tokens at
+        # CHARS_PER_TOKEN=3 characters each), leaving most of it for evidence.
         assert _schema_reserve_chars(tool_schema) < 48000 * 3 // 4

@@ -1,10 +1,11 @@
 # =============================================================================
-# mbsync — real-time incremental email sync from ProtonBridge to Maildir
+# mbsync — incremental email sync from ProtonBridge to Maildir
 # =============================================================================
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 
 # socat relays the IMAP connection to the Bridge app on the host through
-# mbsync's Tunnel (BRIDGE_CERT_HOST, see entrypoint.sh).
+# mbsync's Tunnel to BRIDGE_HOST; Host names BRIDGE_CERT_HOST for the
+# certificate check (bridge_imap_connect in entrypoint.sh).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     isync \
     ca-certificates \
@@ -37,6 +38,9 @@ RUN groupadd --gid 1001 mbsync && \
 # Config and entrypoint
 # -----------------------------------------------------------------------------
 COPY mbsyncrc.template /etc/mbsyncrc.template
+# The Proton settings' defaults and validators, sourced by the entrypoint
+# (scripts/validate-env.sh sources the same file on the host).
+COPY --chmod=644 proton-settings.sh /usr/local/lib/proton-settings.sh
 COPY --chmod=755 --chown=mbsync:mbsync entrypoint.sh /entrypoint.sh
 COPY --chmod=755 --chown=mbsync:mbsync healthcheck.sh /healthcheck.sh
 

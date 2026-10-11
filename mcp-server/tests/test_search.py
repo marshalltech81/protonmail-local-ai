@@ -217,7 +217,7 @@ class TestRerankerEvidence:
         assert captured.get("with_evidence") is False
 
     def test_reranker_sees_chunk_text_not_just_snippet(self, fake_server, fake_embed, chunked_db):
-        # End-to-end: with the fix, the reranker's ``documents``
+        # End-to-end: the reranker's ``documents``
         # argument carries chunk text. ``alpha-c1`` (in the chunked_db
         # fixture) has text "invoice number 12345 due march 31"; the
         # number ``12345`` appears in NEITHER the subject ("invoice
@@ -343,9 +343,10 @@ def _drop_tables(db, *tables: str) -> None:
 
 
 class TestSemanticVectorLaneFailure:
-    """#318: both vector helpers turn SQLite errors into empty lists, so a
-    semantic search with no working vector lane answered "No results"
-    instead of reporting the broken index."""
+    """#318: both vector helpers return ``None`` when their lane fails,
+    distinct from ``[]`` for no matches, so a semantic search with no
+    working vector lane reports the broken index instead of answering
+    "No results"."""
 
     def test_no_vector_lane_is_an_error_not_empty(self, fake_server, fake_embed, seeded_db):
         _drop_tables(seeded_db, "threads_vec", "message_chunks_vec")
@@ -377,8 +378,9 @@ class TestSemanticVectorLaneFailure:
         assert "No results found" in _text(out)
 
     def test_hybrid_unchanged_when_vector_lanes_missing(self, fake_server, fake_embed, seeded_db):
-        # Hybrid degraded-lane disclosure is #333; the keyword lane still
-        # answers here, so hybrid keeps returning results.
+        # Hybrid counts each failed vector lane on the timing line
+        # (``degraded_thread_vec``, ``degraded_chunk_vec``); the keyword
+        # lane still answers here, so hybrid keeps returning results.
         _drop_tables(seeded_db, "threads_vec", "message_chunks_vec")
         handler = _handler(fake_server, fake_embed, seeded_db)
         out = asyncio.run(handler(query="invoice", mode="hybrid"))
@@ -386,13 +388,13 @@ class TestSemanticVectorLaneFailure:
 
 
 class TestWrongDimEmbedSurfaces:
-    """Wrong-dim query vectors used to silently degrade to keyword-only
-    results because sqlite-vec's MATCH error was swallowed by the broad
-    ``except (sqlite3.Error, ValueError)`` in the DB layer. With the
-    ``expected_embed_dim`` validation threaded through
-    ``register_search_tools``, semantic and hybrid modes now surface
-    the misconfiguration with an actionable error naming the embedder
-    knobs the operator can fix.
+    """A query vector of the wrong dimension is an error, not a silent
+    keyword-only result: the DB layer would treat sqlite-vec's MATCH
+    error as a failed lane, so ``embed_query`` checks the dimension
+    against ``expected_embed_dim`` (threaded through
+    ``register_search_tools``) first, and semantic and hybrid modes
+    surface an actionable error naming the embedder knobs the operator
+    can fix.
     """
 
     def _register_with_wrong_dim_client(self, fake_server, db):
@@ -403,14 +405,14 @@ class TestWrongDimEmbedSurfaces:
 
         Passes ``expected_embed_dim`` explicitly the same way
         ``main.py`` does (reading it via ``db.get_embedding_dim()`` at
-        startup). Without that, the helper skips the check and the
-        wrong vector reaches sqlite-vec — which is the pre-fix
-        behavior we're proving has been replaced.
+        startup). Without it, ``embed_query`` skips the check and the
+        wrong vector reaches sqlite-vec, where the vector lanes fail.
         """
         from tests.conftest import FakeEmbedClient
 
-        # FakeEmbedClient exposes ``.base_url`` / ``.model`` so the
-        # error message can name the misconfigured knobs.
+        # The error message names the client's ``.base_url`` / ``.model``
+        # (as the real EmbedClient has); FakeEmbedClient has neither, so
+        # set them here.
         wrong_dim_client = FakeEmbedClient(embedding=[0.1, 0.2, 0.3])
         wrong_dim_client.base_url = "http://wrong-embed/v1"
         wrong_dim_client.model = "wrong-dim-model"
@@ -435,9 +437,8 @@ class TestWrongDimEmbedSurfaces:
     def test_hybrid_search_with_wrong_dim_returns_error_not_keyword_fallback(
         self, fake_server, seeded_db
     ):
-        # The pre-fix behavior: hybrid silently fell back to keyword
-        # because the vector lane failed and the RRF still produced
-        # some results. The post-fix behavior surfaces the dim
+        # Unchecked, the vector lanes would fail and RRF would still
+        # produce keyword results; the dimension check surfaces the
         # mismatch so the operator knows the embedder is wrong.
         handler = self._register_with_wrong_dim_client(fake_server, seeded_db)
         text = _error(handler(query="invoice", mode="hybrid"))
@@ -462,8 +463,8 @@ class TestFromNameResolution:
     """
 
     def test_from_name_resolves_to_top_contact_address(self, fake_server, fake_embed, seeded_db):
-        # ``alice`` matches alice@example.com (2 threads) — the top
-        # contact in find_contact's ranking. The handler should pass
+        # ``alice`` matches alice@example.com, the only From-line contact
+        # the name finds (sender of t-alpha). The handler should pass
         # that address as ``from_addr`` to hybrid_search.
         captured: dict = {}
         original = seeded_db.hybrid_search
@@ -666,7 +667,7 @@ class TestSearchEmailsBlankPersonFilters:
 
 
 class TestGetEvidencePersonFilters:
-    """Review round 1 (#702): get_evidence reproduces a person-scoped
+    """#702: get_evidence reproduces a person-scoped
     ask_mailbox retrieval, so it resolves ``from_name`` the same way
     (the public find_contact tool cannot: it has no senders_only), and
     blank person filters are absent rather than a substring of " "."""
@@ -746,7 +747,7 @@ class TestGetEvidencePersonFilters:
             assert name in sentence
 
     def test_padded_participant_is_stripped(self, fake_server, fake_embed, seeded_db):
-        # Review round 2 (#702): a padded value broke the substring match.
+        # #702: a padded value must not break the substring match.
         captured = self._spy(seeded_db, "hybrid_search")
         tool = self._tool(fake_server, fake_embed, seeded_db)
         asyncio.run(tool(query="invoice", participant=" @example.com "))
@@ -817,7 +818,7 @@ class TestGetEvidence:
     def test_thread_scoped_treats_blank_filters_as_absent(
         self, fake_server, fake_embed, chunked_db
     ):
-        """Review round 1: clients often send unset optionals as blank
+        """Clients often send unset optionals as blank
         strings; the mailbox-wide path already ignores them."""
         handler = self._handler(fake_server, fake_embed, chunked_db)
         out = asyncio.run(
@@ -852,13 +853,13 @@ class TestGetEvidence:
         monkeypatch.setattr(chunked_db, "_connect", counted)
         message = _error(handler(query="invoice", thread_id="t-gone"))
         assert f"reaped from the index on {RECENT_REAP_DAY} (mirror retention)" in message
-        # Review round 1: the live miss and the reap record share a snapshot.
+        # The live miss and the reap record share a snapshot.
         assert len(opened) == 1
 
     def test_thread_reaped_during_the_embed_reports_reaped(
         self, fake_server, fake_embed, chunked_db, monkeypatch
     ):
-        """Review round 2: the thread is live at the first read, then the
+        """The thread is live at the first read, then the
         reaper commits before the evidence fetch, which finds no chunks.
         That reads as reaped, not as "No evidence found"."""
         fetch = chunked_db.get_query_evidence_chunks
@@ -963,7 +964,7 @@ class TestGetEvidence:
     def test_mailbox_wide_returns_the_chunks_ask_mailbox_uses(
         self, fake_server, fake_embed, chunked_db
     ):
-        """Review round 2 on #445: get_evidence is documented as the same
+        """#445: get_evidence is documented as the same
         chunks ask_mailbox feeds its model, so it must ask for the same
         per-thread cap rather than hybrid_search's default of three."""
         from datetime import UTC, datetime
@@ -1200,7 +1201,7 @@ class TestInvertedDateRange:
 
 
 class TestDateRangeRejectedBeforeWork:
-    """Review round 1 on #416: an inverted range is rejected at each tool's
+    """#416: an inverted range is rejected at each tool's
     entry, before the embed call, any retrieval, or the model. Checked
     only in the database, it still cost a (possibly remote) embedding
     request, and an embedder or vector-index failure masked the
@@ -1480,7 +1481,7 @@ def test_evidence_descriptions_warn_passages_can_stop_before_a_resolution(tool, 
     doc = _wire_descriptions(empty_db)[tool]
     asked = {"ask_mailbox": "question", "get_evidence": "query"}[tool]
     assert "late resolution in a long thread" in doc
-    # Review round 11: ``_matched_attachments`` matches query words
+    # ``_matched_attachments`` matches query words
     # against MIME types as well as filenames, so a re-ask that keeps a
     # file-type word ("PDF") keeps the same attachment first.
     assert (
@@ -1489,7 +1490,7 @@ def test_evidence_descriptions_warn_passages_can_stop_before_a_resolution(tool, 
         "attachment first, or read the thread's later messages with "
         "get_thread or get_message" in doc
     )
-    # Review round 8 (owner), and #858: the full order of
+    # The owner's choice, and #858: the full order of
     # ``get_evidence_chunks_for_threads``. The named attachment's first
     # passage and the best-ranked keyword-matched passage (#1246) lead;
     # then the rest of that attachment, the thread's other attachments,
@@ -1518,7 +1519,7 @@ def test_ask_mailbox_description_states_its_slot_count_and_fallback(empty_db):
 
 
 def test_get_evidence_description_states_its_slots_and_chunkless_threads(empty_db):
-    """Review round 8: get_evidence does not show a chunkless thread's
+    """get_evidence does not show a chunkless thread's
     indexed text (that is ask_mailbox's fallback): it lists the thread
     with an empty chunks list under max_threads and leaves it out
     otherwise. Its per-thread cap is six mailbox-wide and ``limit``
@@ -1536,9 +1537,8 @@ def test_get_evidence_description_states_its_slots_and_chunkless_threads(empty_d
 def test_extract_description_points_to_the_population_recipe(empty_db):
     """#976 option 1: extraction covers the top ``limit`` threads only,
     and the description says so in one sentence pointing to the recipe
-    in docs/mcp-tools.md. Review rounds 1-5 grew the recipe on the wire;
-    after round 6 the owner moved it to the docs only, so the
-    description must not carry its steps."""
+    in docs/mcp-tools.md. The owner moved the recipe to the docs only,
+    so the description must not carry its steps."""
     doc = _wire_descriptions(empty_db)["extract_from_emails"]
     assert (
         "Only the top ``limit`` threads are searched, not every match "
@@ -1546,7 +1546,7 @@ def test_extract_description_points_to_the_population_recipe(empty_db):
     ) in doc
     assert "search_attachments" not in doc
     assert "claimant_id" not in doc
-    # Review round 8 (owner): the pre-read disclosure is back on the wire.
+    # The owner kept the pre-read disclosure on the wire.
     assert "Before a population run, tell the user how much mail will be read." in doc
 
 
@@ -1563,8 +1563,8 @@ def test_query_messages_description_points_to_the_multi_lane_recipe(empty_db):
         "by claimant_id with the lane that found each (multi-lane recipe: "
         "docs/mcp-tools.md)."
     ) in doc
-    # Review round 7 on #1100: no thread-first reading instruction on the wire.
+    # #1100: no thread-first reading instruction on the wire.
     assert "group by thread_id" not in doc
-    # Review round 1 on #1100: the union keeps message identities.
+    # #1100: the union keeps message identities.
     assert "union by thread_id" not in doc
     assert doc.count("multi-lane recipe") == 1

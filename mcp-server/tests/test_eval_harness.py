@@ -1,8 +1,9 @@
 """Unit tests for the opt-in retrieval eval harness in ``tests/eval``.
 
 The harness itself only runs against a real index (``MCP_EVAL_DB``);
-these tests drive its summary with a stub database so the fallback
-notice is pinned in the default suite.
+these tests drive it with stub databases so its query loading, the
+summary's metrics and fallback notice, and the shared per-run results
+(#840) are pinned in the default suite.
 """
 
 from __future__ import annotations
@@ -233,8 +234,8 @@ class TestSharedHybridResults:
 
     @pytest.mark.parametrize("fails", ["embed", "search"])
     def test_a_failed_attempt_is_replayed_without_another_call(self, fails):
-        """Codex review round 1 on #866: a failed embed or search was
-        retried by the summary, a second provider call for the query."""
+        """#866: a failed embed or search is kept and raised again, so the
+        summary never makes a second provider call for the query."""
         q = eval_harness.EvalQuery(id="q1", search_query="first", evidence_groups=[["t1"]])
         calls: list[str] = []
 

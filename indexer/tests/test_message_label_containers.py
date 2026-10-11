@@ -1,4 +1,4 @@
-"""#1416 round 5 (owner decision on #1416): container identification
+"""#1416 (owner decision): container identification
 receives an attachment's preserved, transfer-decoded bytes before any
 nested-email interpretation. An OLE2 or ZIP payload labelled
 ``message/*`` is kept as sent, under every transfer encoding, and is a
@@ -9,7 +9,7 @@ The catalogue (``tests/message_label_catalogue.py``) crosses every
 ``message/*`` label the parser reads as a container with every transfer
 encoding, container and genuine contents, at the top level and inside an
 attached email. ``tests/fixtures/message_label_pin.json`` is every
-shape's parse before round 5 (``outcome`` over the whole catalogue with
+shape's parse before #1416's change (``outcome`` over the whole catalogue with
 the parser of ``bd31e37``): the genuine shapes must still match it, and
 the container shapes show what changed."""
 
@@ -75,7 +75,7 @@ _DECODED_OUTER = [e for e in catalogue.OUTER_ENCODINGS if e != "none"]
 def test_a_container_in_a_decoded_attached_email_is_kept_as_sent(
     tmp_path, label, encoding, name, outer
 ):
-    """Review round 6 on #1444: the attached email around the part is
+    """#1444: the attached email around the part is
     itself base64 or quoted-printable, so the walk reads the part from
     the decoded tree. It is kept as sent all the same, delivery report
     included, and the outer email's record is that of the same email
@@ -122,7 +122,7 @@ def test_the_catalogue_round_trips_its_transfer_encodings():
 
 
 def test_the_pin_shows_containers_were_not_kept_before():
-    """The intended diff: before round 5, no container under a
+    """The intended diff: before #1416's change, no container under a
     ``message/*`` label reached identification as sent."""
     for name, payload in catalogue.CONTAINERS.items():
         for label in catalogue.LABELS:
@@ -226,7 +226,7 @@ def test_parses_that_do_not_correspond_give_no_bytes():
 
 
 def test_the_re_read_takes_at_most_the_walk_cap_of_a_tree():
-    """Review round 6 on #1444: enumerating a tree for the re-read stops
+    """#1444: enumerating a tree for the re-read stops
     after ``limit`` parts, without taking a container's children all at
     once."""
     import email.message
@@ -249,7 +249,7 @@ def test_the_re_read_takes_at_most_the_walk_cap_of_a_tree():
 
 
 def test_a_tree_over_the_walk_cap_is_not_re_read(tmp_path, monkeypatch, caplog):
-    """Review round 6 on #1444: a message of more than ``MAX_WALKED_PARTS``
+    """#1444: a message of more than ``MAX_WALKED_PARTS``
     parts whose delivery report holds a container is not parsed a second
     time; the lost recovery is counted and logged by name, and the walk
     still ends in bounded time."""
@@ -297,7 +297,7 @@ def test_a_tree_over_the_walk_cap_is_not_re_read(tmp_path, monkeypatch, caplog):
 
 
 def test_the_reparse_replaces_the_old_occurrence_and_embeds_the_new_text(tmp_path, monkeypatch):
-    """An occurrence indexed before round 5 (its payload the serialized
+    """An occurrence indexed before #1416's change (its payload the serialized
     email) has another attachment ID after the reparse: its row, FTS
     row, chunks and vectors go, and the container's text is extracted and
     embedded once (#1375, #1416)."""
@@ -332,7 +332,7 @@ def test_the_reparse_replaces_the_old_occurrence_and_embeds_the_new_text(tmp_pat
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(catalogue.message_bytes("message/rfc822", "7bit", payload))
 
-    # Before round 5: the parser serialized the container as an email.
+    # Before #1416's change: the parser serialized the container as an email.
     with monkeypatch.context() as before:
         before.setattr(parser, "_identity_container_bytes", lambda *_a: None)
         p.queue.enqueue(str(path), "initial_scan")

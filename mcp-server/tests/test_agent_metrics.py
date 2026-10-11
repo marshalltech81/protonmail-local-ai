@@ -412,7 +412,8 @@ class TestMessageCitations:
         ("source", "recall"), [("attachment", 1.0), ("body", 0.0)], ids=["attachment", "body"]
     )
     def test_an_attachment_passage_credits_a_citation(self, source: str, recall: float) -> None:
-        # No tool returns a whole attachment (#796), so its passage is the read.
+        # A get_evidence attachment passage is the credited read; a
+        # get_attachment read of the whole text is not credited yet (#1527).
         trace = _trace([_attachment_passage("a.2@x.example", source)], cited=["c-a.2@x.example"])
         assert score_trace(self._correction(), trace).message_citation_recall == recall
 
@@ -1207,7 +1208,7 @@ def _attachment_passage(message_id: str, source: str = "attachment") -> dict:
 
 
 class TestOutstandingReads:
-    """Review round 1: evidence counts as read only when a result returned
+    """Evidence counts as read only when a result returned
     its content, never because a listing named the message."""
 
     def test_a_listing_alone_is_not_a_read(self) -> None:
@@ -1513,7 +1514,7 @@ class TestOutstandingItems:
 
 
 class TestOutstandingCitationSets:
-    """Review round 2: the top-level ``cited`` and the conclusions' own
+    """The top-level ``cited`` and the conclusions' own
     ``cited`` lists must be one set, and every citation metric reads it."""
 
     def test_matching_lists_are_consistent(self) -> None:

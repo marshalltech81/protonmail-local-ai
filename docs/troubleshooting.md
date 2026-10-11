@@ -84,8 +84,10 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
   and mcp-server, `_IDENTITY_SETTINGS` in `src/main.py`, with everything
   else the service reads listed with its reason in
   `_IDENTITY_EXCLUDED`; a test fails when a new setting is in neither),
-  or `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
-  `BRIDGE_CERT_HOST`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
+  or `BRIDGE_HOST` (trimmed, in lower case), `BRIDGE_IMAP_PORT`,
+  `BRIDGE_CERT_HOST`, `PROTON_IMAP_ACCOUNT_NAME`,
+  `PROTON_REMOTE_STORE_NAME`, `PROTON_LOCAL_STORE_NAME`,
+  `PROTON_CHANNEL_NAME`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
   `BRIDGE_CERT_FINGERPRINT` (normalized, and not secret) and
   `BRIDGE_CERT_PIN_ROTATE` (mbsync). It changes when one of those
   settings changes and is otherwise stable across restarts. API keys,
@@ -158,18 +160,18 @@ the permission repair after a sync fails, mbsync logs
 `find/chmod reported <n> error line(s)` with a `docker exec` command that
 lists the entries still unreadable; the errors themselves are not logged,
 because their paths name folders. If startup
-fails, `mbsync` now logs a specific cause such as:
+fails, `mbsync` logs a specific cause such as:
 
 - missing `BRIDGE_USER`
 - missing or empty `/run/secrets/bridge_pass`
-- cert extraction timeout
+- `cert extraction failed`, also when the extraction times out (20 s)
 - `openssl s_client` handshake errors. mbsync connects with implicit
   TLS only (#638), so the app's IMAP connection mode must be SSL; see
   [mbsync cannot reach or verify the Bridge app](#mbsync-cannot-reach-or-verify-the-bridge-app)
 - Bridge TLS cert fingerprint does not match the pinned value (see the
   "Bridge cert pin mismatch" section below)
 
-Repeated sync failures now count toward an exit threshold so the container
+Repeated sync failures count toward an exit threshold so the container
 restarts instead of looping forever in a broken state. A Proton folder
 that was renamed or deleted is not such a failure; see
 [A Proton folder was renamed or deleted](#a-proton-folder-was-renamed-or-deleted).
@@ -177,23 +179,18 @@ that was renamed or deleted is not such a failure; see
 **2. Did any mail land in the Maildir volume?**
 
 ```bash
-docker run --rm \
-    -v protonmail-local-ai_maildir-volume:/maildir:ro \
-    debian:bookworm-slim \
-    find /maildir -name "*.eml" -o -name "*:2,*" | wc -l
+docker exec mbsync find /maildir -type f \( -path '*/cur/*' -o -path '*/new/*' \) | wc -l
 ```
 
-A non-zero count means mbsync is writing files. Zero means it connected but
-downloaded nothing — either the mailbox is empty or `Patterns` is filtering
-everything out.
+This counts the message files in every folder's `cur` and `new`, the
+files the indexer reads. A non-zero count means mbsync is writing
+files. Zero means it connected but downloaded nothing — either the
+mailbox is empty or `Patterns` is filtering everything out.
 
 **3. Check the folder structure was created**
 
 ```bash
-docker run --rm \
-    -v protonmail-local-ai_maildir-volume:/maildir:ro \
-    debian:bookworm-slim \
-    find /maildir -maxdepth 2 -type d
+docker exec mbsync find /maildir -maxdepth 2 -type d
 ```
 
 You should see `INBOX`, `Sent`, `Drafts`, etc. If only `/maildir` appears with
@@ -212,7 +209,7 @@ mismatches.
 ## mbsync fails to connect
 
 Bridge takes a few seconds to start listening. mbsync waits automatically, but it
-now gives up after a bounded wait and lets Docker restart it rather than
+gives up after a bounded wait and lets Docker restart it rather than
 appearing healthy forever. If it keeps failing, check that the Bridge app
 is running and signed in (see the next section), and:
 
@@ -261,14 +258,39 @@ and the connection.
   certificate changed on purpose (reinstall, reset), update
   `BRIDGE_CERT_FINGERPRINT` and rotate the pin as in
   [Switching to another Bridge installation](setup.md#switching-to-another-bridge-installation).
-- **`certificate owner does not match hostname host.docker.internal`.**
-  mbsync runs with `BRIDGE_CERT_HOST` changed from `127.0.0.1` (a
-  modified `docker-compose.yml` or an overlay). Restore it and
-  `make up`.
-- **`certificate owner does not match hostname 127.0.0.1`.** The app
-  presents a certificate not issued for `127.0.0.1`, such as one
-  imported into Bridge by hand. Use a certificate for `127.0.0.1`; there
-  is no option to skip the check.
+- **`certificate owner does not match hostname <name>`.** The app
+  presents a certificate not issued for `BRIDGE_CERT_HOST` (`<name>`).
+  With the default, `127.0.0.1`, the app holds a certificate imported by
+  hand for another name. With `localhost`, another `127.x.y.z` or `::1`,
+  the app still presents its own certificate, which names only
+  `127.0.0.1`: import a certificate issued for that name into the app,
+  or unset `BRIDGE_CERT_HOST`. There is no option to skip the check.
+  The check is isync's, on each sync: certificate extraction at startup
+  checks the certificate against the expected fingerprint and the pin,
+  not its name, so this error comes after `Bridge cert extracted
+  successfully` and before any login.
+- **`BRIDGE_HOST must be one of ...`, `BRIDGE_CERT_HOST must be ...`,
+  or `PROTON_..._NAME must be ...`** (from `make validate-env` or at
+  mbsync's startup, before it renders its config or connects). These
+  settings are checked by `mbsync/proton-settings.sh` at both places
+  (PLAN.md decision 46); the message names the setting, never the value.
+  `BRIDGE_HOST` takes only names that forward to this Mac's
+  `127.0.0.1`: `host.docker.internal` (the default), or OrbStack's
+  `host.orb.internal` or `host.internal`, in any case and without
+  surrounding spaces. `gateway.docker.internal`, an IP address, a LAN
+  or `.local` name, or a name with a trailing dot is refused: a Bridge on
+  another machine waits on
+  [#1499](https://github.com/marshalltech81/protonmail-local-ai/issues/1499).
+  `BRIDGE_CERT_HOST` takes `127.0.0.1`, `localhost`, another
+  `127.x.y.z` written without leading zeros, or `::1`, exactly as
+  written. The four isync names take 1 to 64 of `A-Z a-z 0-9 _ -`,
+  starting with a letter or digit, and the two store names must differ.
+  Unset a setting, or leave it empty, for its default.
+  These names are not resolved to check them: DNS cannot show that a
+  name is local, so the container engine and its resolver are trusted
+  to send `BRIDGE_HOST` to this Mac's loopback. To see where a name
+  goes from the container:
+  `docker exec mbsync getent hosts host.docker.internal`.
 - **`Bridge cert fingerprint does not match pinned value` after
   reinstalling the app or resetting it.** Expected once: the app
   presents a different certificate. Verify it and rotate the pin as in
@@ -302,7 +324,8 @@ error in the same run, exits with any status other than 1, or cannot open
 `INBOX` (which cannot be renamed or deleted, so Bridge refusing it means
 Bridge is refusing folders, not that one went away). The match is the exact
 line isync 1.5.1 prints, `Error: channel protonmail: far side box <name>
-cannot be opened anymore.`, or the one isync 1.4.4 printed, without
+cannot be opened anymore.` (with `PROTON_CHANNEL_NAME` in place of
+`protonmail` when it is set), or the one isync 1.4.4 printed, without
 `anymore`; a different isync version that words it differently falls back
 to counting the run as a failure.
 
@@ -336,7 +359,15 @@ message kept:
 - text Bridge itself returns, which may name a folder too, is withheld
   after the fixed part, for example
   `Error from IMAP server: (server text withheld)` or
-  `IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: (server text withheld)`.
+  `IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: (server text withheld)`;
+- a message about the channel that the filter does not recognise (a
+  wording another isync version uses, or a channel or store name other
+  than the configured `PROTON_CHANNEL_NAME` and
+  `PROTON_REMOTE_STORE_NAME`) is cut whole:
+  `Error: channel (rest of line withheld)` (#1498).
+
+The filter matches the channel and store names mbsync's config holds,
+so changing them changes nothing here.
 
 Redaction does not change how a sync is counted: these errors still fail
 it, and only the far-side `cannot be opened` line
@@ -570,15 +601,20 @@ servers, so the diagnostic depends on where you pointed it:
 - Host-side server: confirm it is listening on the configured port
   (`lsof -iTCP:<port> -sTCP:LISTEN`) and bound to `127.0.0.1`.
   Containers reach `127.0.0.1` on the host as
-  `host.docker.internal:<port>` via OrbStack.
-- Remote provider: verify outbound networking from a container:
+  `host.docker.internal:<port>` (OrbStack and Docker Desktop).
+- Remote provider: verify outbound networking from the container that
+  reports the error (`indexer` or `mcp-server`, while it is running;
+  both are on `app-net`):
 
   ```bash
-  docker run --rm curlimages/curl:latest -fsS https://example.com
+  docker exec indexer python -c "import urllib.request; urllib.request.urlopen('https://example.com', timeout=10); print('ok')"
   ```
 
-  If the hardened compose overlay is active (`internal: true` on
-  `app-net`), all remote provider calls are blocked by design.
+  It prints `ok` when the container reaches the internet, and a
+  `URLError` traceback when it does not. If the hardened compose overlay
+  is active (`internal: true` on `app-net`; `make status` shows
+  `No-egress overlay: active`), all remote provider calls are blocked
+  by design.
 
 ## Inference / embedder cold start
 
@@ -598,7 +634,7 @@ both `indexer/pyproject.toml` and `mcp-server/pyproject.toml` pin
 `sqlite-vec==0.1.9` or later, regenerate the lockfiles, then rebuild:
 
 ```bash
-docker compose build indexer mcp-server
+make build
 ```
 
 ## The indexer build fails with a trusted checksum mismatch
@@ -829,9 +865,10 @@ kind of reindex that needs depends on whether search data changes too:
   table) but changes no chunk, chunk text, embedding input, Message-ID
   or threading. Its migration queues every indexed message with reason
   `reparse` at startup; the indexer re-reads each file and rewrites its
-  per-message rows, with no embedding calls (attachment text comes from
-  the extraction cache; a thread left with no chunk by a dropped
-  attachment occurrence embeds its subject once, #1375). Search keeps working throughout; the data the
+  per-message rows, embedding only text with no stored chunk (attachment
+  text comes from the extraction cache; a refreshed cached result whose
+  text changed, a chunk that changed chunk budgets cut differently, and a thread left
+  with no chunk embed again; `docs/architecture.md`, "Reparse in place"). Search keeps working throughout; the data the
   release adds is missing for a message until its reparse runs (after
   the release that added `sender_ambiguous`, `query_messages` counts
   such a message as `indeterminate` under a sender filter, or under an
@@ -1060,7 +1097,7 @@ persists, check `docker compose logs indexer` for an embedder error.
 request to the embedder failed; the message carries the error type and
 status. The service exits and Docker restarts it, so a brief outage
 clears by itself; a 401, 403 or 404 is a credential or model setting to
-fix (see "Embedder or inference endpoint unreachable from containers").
+fix (the next paragraph says which).
 
 "embedder at ... rejected the warmup request (APIStatusError:
 status=402)" from the indexer means the embedder refused its first
@@ -1123,10 +1160,10 @@ account re-auth) before setting `INDEXER_DELETION_FORCE=true`.
 Tombstones and reaper actions can be inspected directly:
 
 ```bash
-docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
-    debian:bookworm-slim bash -c \
-    'apt-get -qq install -y sqlite3 >/dev/null && \
-     sqlite3 /data/mail.db "SELECT COUNT(*) FROM pending_deletions;"'
+docker exec indexer python -c '
+import os, sqlite3
+db = sqlite3.connect("file:" + os.environ["SQLITE_PATH"] + "?mode=ro", uri=True)
+print(db.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])'
 ```
 
 The reaper sweeps `pending_deletions` on startup and once per
@@ -1138,9 +1175,9 @@ indexer as described above.
 
 Every discovered Maildir file is written to an `indexing_jobs` table
 and drained by a worker loop. A failure specific to one message
-(parser error, SQLite lock contention, input the embedder rejects)
-gets exponential backoff and transitions the row to `dead` after
-`INDEXER_MAX_ATTEMPTS` attempts. An embedder outage or
+(parser error, SQLite lock contention) gets exponential backoff and
+transitions the row to `dead` after `INDEXER_MAX_ATTEMPTS` attempts;
+input the embedder rejects is dead-lettered at once. An embedder outage or
 misconfiguration (unreachable, rate-limited, bad key or model) is
 **not** charged to messages: their jobs are deferred without
 spending attempts, and indexing pauses — 30 s, doubling to 10 min —
@@ -1150,7 +1187,7 @@ EMBED_MODEL and the embed API key" error.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `INDEXER_MAX_ATTEMPTS` | `5` | Max retries before a row becomes `dead`. |
+| `INDEXER_MAX_ATTEMPTS` | `5` | Attempts, the first included, before a row becomes `dead`. |
 | `INDEXER_RETRY_BASE_SECONDS` | `30` | Base backoff. Each attempt multiplies by `2^(attempts-1)`, capped at 6 h. |
 | `INDEXER_MESSAGE_TIMEOUT_SECONDS` | `3600` | Stall guard: the indexer exits (and Compose restarts it) when one message's parse, or one attachment's extraction, runs this long. `0` disables. |
 
@@ -1168,12 +1205,14 @@ it; see [`get_mailbox_status`](mcp-tools.md#get_mailbox_status)). For the
 error class breakdown, inspect the table directly:
 
 ```bash
-docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
-    debian:bookworm-slim bash -c \
-    'apt-get -qq install -y sqlite3 >/dev/null && \
-     sqlite3 /data/mail.db \
-       "SELECT status, last_error_class, COUNT(*) FROM indexing_jobs
-        GROUP BY status, last_error_class;"'
+docker exec indexer python -c '
+import os, sqlite3
+db = sqlite3.connect("file:" + os.environ["SQLITE_PATH"] + "?mode=ro", uri=True)
+for row in db.execute(
+    "SELECT status, last_error_class, COUNT(*) FROM indexing_jobs"
+    " GROUP BY status, last_error_class"
+):
+    print(*row)'
 ```
 
 Every failed row records a `last_error_class`:
@@ -1333,8 +1372,10 @@ Queue and maintenance (all INFO unless noted):
   oldest_due_age=<s>s; deferrals since last
   heartbeat: parse=<n> embed=<n> trashed=<n>; suppressed_lines=<n>`,
   every 5 minutes, during the initial index too. `pending` jobs have
-  never failed; `retrying` jobs failed or were deferred by an embedder
-  outage; `deferred_permission` jobs could not be read yet (mbsync
+  never failed; `retrying` jobs failed, were deferred by an embedder
+  outage or for a rename, or were requeued from `dead` (they keep their
+  last error; `get_mailbox_status` counts those as `pending` and rename
+  deferrals as `deferred`); `deferred_permission` jobs could not be read yet (mbsync
   opens new files to the indexer only after its sync; deferred for up
   to 24 h, after which a still-unreadable file takes the normal retry
   path and counts as `retrying` until it is dead);
@@ -1351,7 +1392,10 @@ Queue and maintenance (all INFO unless noted):
   `oldest_due_age` means due jobs are not being drained (an embedder
   outage pauses draining; see above), except during a reparse, whose
   jobs wait behind newer mail while `reparse: remaining=` falls (see
-  [Reparse or rebuild after an upgrade](#reparse-or-rebuild-after-an-upgrade)).
+  [Reparse or rebuild after an upgrade](#reparse-or-rebuild-after-an-upgrade)),
+  and during the initial index, whose backlog is queued due at each
+  message's own date, so the age is that of the oldest unindexed
+  message rather than a wait.
   The deferral counts are `defer`
   calls since the previous heartbeat, by stage. `suppressed_lines` is
   how many embed retry and recovery, health-file, ingestion-state and
@@ -1394,11 +1438,11 @@ Queue and maintenance (all INFO unless noted):
   record of which limit cut them, so each is extracted once, which
   records it. Already queued messages pick the refresh up on their own
   pass; dead-lettered ones keep their old text until `make
-  requeue-dead`. Raising `INDEXER_OCR_MAX_PAGES` lengthens the worst
-  case of each scanned PDF: up to `INDEXER_OCR_MAX_PAGES` ×
-  `INDEXER_OCR_TIMEOUT_SECONDS` of OCR plus its render, so keep
-  `INDEXER_MESSAGE_TIMEOUT_SECONDS` (the stall guard, per attachment)
-  above that, or the indexer restarts mid-extraction.
+  requeue-dead`. Raising `INDEXER_OCR_MAX_PAGES` lengthens the PDF
+  child's wall clock (`docs/architecture.md`, the limits table: 2,550 s
+  at the defaults), so keep `INDEXER_MESSAGE_TIMEOUT_SECONDS` (the stall
+  guard, per attachment) above it, or the indexer restarts
+  mid-extraction.
 - `container identification sweep (version <n>, signature set <n>): <n>
   message(s) with an attachment result cached before its OLE2 / ZIP
   container certification, under an older identification version or
@@ -1660,8 +1704,7 @@ logs these outcomes with counts, extractor names and exception types
 only, never filenames or text (`make logs`):
 
 - `extractor <module> failed (dispatch_via=<mime|extension|...>):
-  <ExceptionType>` (WARNING), per extraction that fails: an encrypted
-  PDF that needs a password, a Tesseract error or timeout, a DOCX,
+  <ExceptionType>` (WARNING), per extraction that fails: a Tesseract error or timeout, a DOCX,
   XLSX or PPTX the parser rejects (`PptxRelationshipChainError` is a
   deck whose parts are chained too deep to open, and
   `DocxRelationshipChainError` the same for a `.docx` or `.dotx`), or
@@ -1711,8 +1754,9 @@ only, never filenames or text (`make logs`):
   A DOCX, XLSX or PPTX is extracted in a child process with 1 GiB of
   address space, 30 s of CPU and a 45 s timeout (#1040): a file that
   needs more is `MemoryError` (or `XMLSyntaxError`, lxml's name for a
-  failed allocation), `ToolCrashError` or `ToolTimeoutError`. For a
-  `.xls`, `.docx`, `.xlsx`, `.pptx`, a PDF or an image, `ChildOutputError` means the
+  failed allocation), `ToolCrashError` or `ToolTimeoutError`. For an
+  extraction in the extractor child (`.xls`, OOXML, a PDF, an image, HTML
+  or an attached email), `ChildOutputError` means the
   extractor child's output broke its protocol or passed its byte cap
   (#1291). The limits and what they were measured on are in
   `docs/architecture.md` ("OOXML extraction runs in a child process").
@@ -1829,6 +1873,9 @@ only, never filenames or text (`make logs`):
   - `xls_sheets`, `xls_expanded_cells`, `xls_text_chars`: the same walk
     over a legacy `.xls` stopped at 1,024 sheets or at the cell or text
     budget above (#935).
+  - `html_text_chars`: an HTML attachment's converted text, stripped,
+    passed 10,000,000 characters in its child process; the text is cut
+    there (#1294).
   - `image_text_chars`: an image's OCR text, stripped of leading and
     trailing whitespace, passed 10,000,000 characters; the text is cut
     there and no later TIFF frame is read (#1292).
@@ -1903,7 +1950,7 @@ only, never filenames or text (`make logs`):
 
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
-  zip, image-pixel (the image child's ceiling: `unsupported`) and XLSX whole-part caps, the OCR timeout, the
+  zip cap, the image-pixel and XLSX whole-part caps (both `unsupported`), the OCR timeout, the
   legacy-Office tool timeouts and the `.xls` child's and the `.ppt`
   reader's memory and CPU limits); the OCR
   page caps have their own lines above. Like the OCR cap, a cap is reported
@@ -2224,8 +2271,9 @@ safety hints (#919; background and sources in
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`
-2. Check the server is responding: `curl http://localhost:3000/health`
-   should print `{"status":"ok"}`
+2. Check the server is responding: `curl http://127.0.0.1:3000/health`
+   (with your `MCP_PORT` in place of `3000` if you changed it) should
+   print `{"status":"ok"}`
 3. Check the client points at `http://127.0.0.1:3000/mcp`. The legacy
    `/sse` endpoint was removed and now returns `404`; see
    [Connect an MCP client](setup.md#7-connect-an-mcp-client) for the
@@ -2345,10 +2393,11 @@ and change client URLs from `/sse` to `/mcp`.
 Sign in again in the Bridge app. If its IMAP username or password
 changed (the app shows them in the account's mailbox details), copy the
 new username into `.env` and write the new password into
-`.secrets/bridge_pass.txt`:
+`.secrets/bridge_pass.txt` (paste it at the silent prompt and press
+Enter, so it stays out of your shell history):
 
 ```bash
-printf '%s' 'new-bridge-generated-pass' > .secrets/bridge_pass.txt
+(umask 077; IFS= read -rs pass && printf '%s' "$pass" > .secrets/bridge_pass.txt)
 chmod 600 .secrets/bridge_pass.txt
 make up
 ```

@@ -1,13 +1,14 @@
 """The #1218 sizing benchmark's synthetic index against the indexer.
 
 ``mcp-server/scripts/reconcile_bench.py`` writes its index row by row,
-so it runs in the mcp-server image at 200,000 messages. Every value it
+so it can build a large corpus (50,000 messages by default) in the
+mcp-server image. Every value it
 writes must be one the indexer writes for the same mail. Here the
 benchmark renders each synthetic message as a Maildir file
 (``render_eml``), the indexer's own first index (parser, threader,
 chunker, extractors, writer) indexes those files, and every row and
 schema object the benchmark builds is compared with what the indexer
-stored (#1376 review round 29: the corpus had drifted from production
+stored (#1376: the corpus had drifted from production
 one dimension at a time).
 """
 

@@ -9,8 +9,9 @@ flag. Without reconciliation the local index keeps the message forever.
 The reconciler provides a two-phase path. It runs by default (mirror
 mode); ``INDEXER_DELETION_ENABLED=false`` opts out (archive mode):
 
-1. **Tombstone**: a startup sweep plus live ``on_moved`` detection record every
-   ``T``-flagged file into the ``pending_deletions`` table. No primary data is
+1. **Tombstone**: a sweep (at startup and on the reconcile interval) plus live
+   ``on_moved`` detection record each ``T``-flagged indexed file, unless a
+   live byte-identical copy remains, into the ``pending_deletions`` table. No primary data is
    mutated — if mbsync un-flags the file on a later pull, the tombstone is
    cleared without data loss.
 
@@ -22,7 +23,8 @@ mode); ``INDEXER_DELETION_ENABLED=false`` opts out (archive mode):
    mcp-server can report a cited source as reaped; records
    expire after ``REAPED_RECORD_RETENTION_DAYS``.
 
-A mass-delete brake caps how many messages the reaper may touch in one pass,
+A mass-delete brake skips a whole reap pass, reaping nothing, when more
+tombstones are past the grace window than a fraction of the mailbox allows,
 so a transient Bridge outage (vault rebuild, folder rename, auth glitch) that
 causes mbsync to mark a large batch as ``T`` cannot silently wipe the index.
 """
@@ -44,10 +46,10 @@ from .threader import Thread, Threader
 
 log = logging.getLogger("indexer.reconciler")
 
-# Absolute lower bound on how many tombstones the reaper will process in
-# one pass even when ``max_batch_pct`` is the binding constraint. With a
-# 5% default and a 10-message mailbox, a single deletion is 10% and
-# would incorrectly trip the mass-delete brake. See ``reap()``.
+# Floor of the mass-delete brake's threshold: a pass with more
+# past-grace tombstones than ``max(this, max_batch_pct * total)`` reaps
+# nothing. Without it, with a 5% default and a 10-message mailbox, a
+# single deletion is 10% and would trip the brake. See ``reap()``.
 _REAP_ABSOLUTE_FLOOR = 10
 
 # Consecutive blocked passes before a thread crosses from "transient
@@ -448,9 +450,10 @@ class Reconciler:
             "threads_rebuilt": threads_rebuilt,
             "aborted": False,
             # Number of threads that failed to reap on this pass and
-            # remain in a stuck state. Surfaced so a stale deletion
-            # cleanup is visible in operator health checks instead of
-            # buried in per-pass WARN/ERROR log lines.
+            # remain in a stuck state. Reported on the reconcile pass's
+            # ``maintenance pass=reconcile`` line, so a stale deletion
+            # cleanup shows in one line per pass, not only in per-thread
+            # WARN/ERROR lines.
             "blocked_threads": blocked_count,
         }
 
@@ -561,7 +564,8 @@ class Reconciler:
                 return False, False
             except Exception as e:
                 # Content-pathology errors (malformed MIME the email
-                # module cannot decompose, html2text blowups, etc.) the
+                # module cannot decompose, a body / attachment walker
+                # error not caught locally, etc.) the
                 # parser deliberately propagates instead of swallowing.
                 # The indexer's main worker routes those through the
                 # queue's retry + dead-letter cascade; the reaper has

@@ -403,7 +403,7 @@ class TestPrivacyAndErrors:
         assert MARKER not in caplog.text
 
     def test_repeated_unknown_occurrences_log_one_warning(self, tmp_path, caplog):
-        """Codex round 1: a client can send unknown IDs as fast as it
+        """A client can send unknown IDs as fast as it
         likes, so the not-found WARNING is rate-limited; every call
         still errors and gets its own timing line."""
         handler = _handler(_db(tmp_path, {}))

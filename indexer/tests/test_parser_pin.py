@@ -1,10 +1,12 @@
 """#1077: the ``Message`` every parser fixture produces, pinned.
 
-Written against ``main`` before ``parse_email`` was split into
-``parse_email_bytes`` and the Maildir adapter, so the split can be shown
-output-identical. The catalogue is every raw message the indexer tests
-build for the parser: the ``.eml`` files under ``fixtures/chunker``, the
-synthetic baseline corpus (``tests/baseline/corpus.py``) and the shape
+First written before ``parse_email`` was split into
+``parse_email_bytes`` and the Maildir adapter, to show the split
+output-identical; it now pins the parser's output so any change to a
+fixture's ``Message`` shows as a diff. The catalogue is every raw
+message the indexer tests build for the parser: the ``.eml`` files
+under ``fixtures/chunker``, the synthetic baseline corpus
+(``tests/baseline/corpus.py``) and the shape
 catalogues ``tests/test_parser.py`` keeps at module level. Each is
 written to a Maildir under ``tmp_path``, parsed with ``parse_email`` and
 recorded field by field; the snapshot lives in

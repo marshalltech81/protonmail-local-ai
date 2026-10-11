@@ -255,7 +255,7 @@ class TestFolderWatchRefresher:
 
     @pytest.mark.parametrize("victim", ["Box", "Box/new"])
     def test_directory_recreated_at_the_same_path_is_rewatched(self, tmp_path, victim):
-        """Review round 1: deleting a directory drops its watch, and
+        """Deleting a directory drops its watch, and
         mbsync recreates it 0700, so watchdog cannot add the new one. Same
         path, new inode: re-watch."""
         root = tmp_path / "maildir"
@@ -276,7 +276,7 @@ class TestFolderWatchRefresher:
         assert observer.calls == ["schedule", "unschedule", "schedule"]
 
     def test_a_created_directory_forces_a_rewatch(self, tmp_path):
-        """Review round 2: a directory deleted and recreated between two
+        """A directory deleted and recreated between two
         refreshes may get its old inode number back, so the walk alone
         cannot see it. The watch's own directory-create event marks the
         watch stale; the next refresh re-schedules once."""

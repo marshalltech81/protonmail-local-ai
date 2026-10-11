@@ -307,8 +307,9 @@ class TestPinnedFilterSemantics:
 
     def test_apply_filters_evaluates_senders_on_the_thread_row(self, mixed_db):
         """``search_emails`` matches ``from_addr`` against the thread's
-        recorded senders, not the per-message rows: a message whose From
-        is not the thread's primary author on any message does not count."""
+        recorded senders, not the per-message rows: an address the
+        thread row does not record does not select the thread, even when
+        a message's stored From carries it."""
         thread = mixed_db.get_thread("t-mix")
         thread.senders = ["only@four.example"]
         assert mixed_db._apply_filters([thread], from_addr="alice@one.example") == []
@@ -358,12 +359,14 @@ _SAMPLES: dict[str, object] = {
     "role, domain": ("visible_recipient", "example.test"),
 }
 
-# Registered leaves no adapter builds yet, each with its reason. The
-# flat filters compile to ``address_is``, ``address_or_name_contains``
-# and ``body_words`` (``inferred_address_leaf``; ``text``), which the
-# adapter check below counts; these three have no flat filter.
+# Registered leaves no flat-parameter adapter builds, each with its
+# reason. The flat filters compile to ``address_is``,
+# ``address_or_name_contains`` and ``body_words``
+# (``inferred_address_leaf``; ``text``), which the adapter check below
+# counts; these three have no flat filter and are built only from
+# ``where`` (``normalize_where``), which that check does not cover.
 _NOT_BUILT: dict[str, str] = {
-    name: "an explicit leaf for the where parameter (#1088 PR 2)"
+    name: "built only from the where parameter (normalize_where)"
     for name in ("address_contains", "display_name_contains", "domain_is")
 }
 
@@ -459,8 +462,8 @@ _QUERY_PARAMS = (
 
 class TestLeafRegistry:
     """Every registered leaf has a compiler, an evaluability rule and a
-    docs entry, and some adapter builds it (the capability report of
-    #1093 reads the same registry)."""
+    docs entry, and some adapter builds it (the capability report
+    planned in #1093 is to read the same registry)."""
 
     def test_registry_is_keyed_by_leaf_name(self):
         assert all(name == kind.name for name, kind in LEAVES.items())
@@ -531,7 +534,7 @@ class TestCompilerAndDigest:
         assert sql == f"m.folder IN (?) AND m.seen = ? AND ({EFFECTIVE_EVIDENCE_SQL}) >= ?"
         assert params == ["INBOX", 0, "2024-01-01"]
 
-    def test_query_messages_sql_is_the_old_where_clause(self):
+    def test_query_messages_leaves_compile_to_the_expected_where_clause(self):
         sql, params = compile_leaves(
             query_messages_leaves(
                 sender="jane@example.test",
@@ -671,8 +674,8 @@ class TestCompilerAndDigest:
 
 class TestLogAllowlist:
     """No leaf value reaches the log: the ``log_tool_call`` allowlist is
-    the one from before the module, and a marker passed through every
-    tool parameter that becomes a leaf is withheld."""
+    pinned, each later addition with its issue, and a marker passed
+    through every tool parameter that becomes a leaf is withheld."""
 
     def test_allowlist_is_pinned(self):
         # #1085 added replied (bool) and size_min / size_max (ints);
@@ -799,9 +802,10 @@ def clocks_db(tmp_path) -> Database:
 
 class TestClockSizeAndRepliedLeaves:
     """``replied``, ``size_min`` / ``size_max`` and ``date_basis`` on
-    ``query_messages`` (#1085). A NULL size or a NULL clock under the
-    chosen basis is neither a match nor a miss: the row is left out
-    (its ``indeterminate`` count arrives with #1086)."""
+    ``Database.query_messages`` (#1085; the tool does not take
+    ``date_basis`` yet, #1150). A NULL size or a NULL clock under the
+    chosen basis is neither a match nor a miss: the row is left out and
+    counted as ``indeterminate``."""
 
     @pytest.mark.parametrize(
         ("filters", "expected"),
@@ -912,7 +916,7 @@ class TestClockSizeAndRepliedLeaves:
             ({"size_min": True}, "size_min"),
             ({"size_max": "12"}, "size_max"),
             # Beyond SQLite's INTEGER: sqlite3 would raise OverflowError at
-            # the bind (Codex round 1 on #1125).
+            # the bind (#1125).
             ({"size_min": 2**63}, "size_min"),
             ({"size_max": 2**63}, "size_max"),
             ({"size_min": 400, "size_max": 300}, "size_min/size_max"),
@@ -1081,9 +1085,10 @@ class TestClockSizeAndRepliedLeaves:
 
 @pytest.mark.parametrize("value", [[], 3, True, 1.5, {"basis": "sent"}])
 def test_normalize_date_basis_rejects_a_non_string_with_fixed_text(value):
-    """A raw non-string from the wire is an ``InvalidFilterError`` with
-    fixed text, not an ``AttributeError`` from ``.strip()`` (#1085,
-    Codex round 5)."""
+    """A non-string ``date_basis`` is an ``InvalidFilterError`` with
+    fixed text, not an ``AttributeError`` from ``.strip()`` (#1085). No
+    tool takes ``date_basis`` yet (#1150); this guards ``Database``
+    callers."""
     from src.lib.predicates import normalize_date_basis
 
     with pytest.raises(InvalidFilterError) as info:
@@ -1093,8 +1098,8 @@ def test_normalize_date_basis_rejects_a_non_string_with_fixed_text(value):
 
 
 def test_normalize_date_basis_keeps_none_as_the_default_for_database_callers():
-    """``Database`` callers pass ``None`` for "not given"; only the
-    tool rejects an explicit null (Codex round 6)."""
+    """``Database`` callers pass ``None`` for "not given", which is the
+    default basis."""
     from src.lib.predicates import DEFAULT_DATE_BASIS, normalize_date_basis
 
     assert normalize_date_basis(None) == DEFAULT_DATE_BASIS == "effective"

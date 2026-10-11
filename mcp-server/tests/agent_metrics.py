@@ -99,11 +99,11 @@ ENUMERATING_TOOL = "query_messages"
 # start and the next page's start (``None`` at the end).
 READ_FIELDS = ("message", "body", "body_offset", "next_offset")
 READING_TOOL = "get_message"
-# Its arguments that page rather than filter: the agent picks the page
-# size, and the cursor is checked against the previous page.
+# ``query_messages`` arguments that page rather than filter: the agent
+# picks the page size, and the cursor is checked against the previous page.
 _PAGING_ARGUMENTS = ("limit", "cursor")
 # Its string filters that ``Database.query_messages`` strips, a blank one
-# being absent (``src/lib/sqlite.py``).
+# being absent (``src/lib/predicates.py`` ``query_messages_leaves``).
 _STRIPPED_FILTERS = (
     "sender",
     "recipient",
@@ -511,11 +511,12 @@ def _content_reads(calls: Sequence[dict]) -> tuple[dict[str, str], dict[str, str
     the end (``_fully_read``) or a ``get_thread`` row returns it uncut
     (``body`` a string, ``body_omitted_chars`` 0): evidence past a cut needs
     ``get_message``. Attachment text is read only through a ``get_evidence``
-    passage whose ``source`` is ``attachment``: no tool returns a whole
-    attachment (#796), and a ``search_attachments`` snippet is a preview
-    the scorer cannot check holds the evidence, since traces carry IDs, not
-    text. Reads are keyed by claimant ID (#217): reading one file that
-    claims a Message-ID says nothing about another file claiming it.
+    passage whose ``source`` is ``attachment``; a ``get_attachment`` read
+    of the whole extracted text is not credited yet (#1527), and a
+    ``search_attachments`` snippet is a preview the scorer cannot check
+    holds the evidence, since traces carry IDs, not text. Reads are keyed
+    by claimant ID (#217): reading one file that claims a Message-ID says
+    nothing about another file claiming it.
     """
     bodies = _fully_read(calls)
     attachments: dict[str, str] = {}
@@ -1153,8 +1154,9 @@ _ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 def load_outstanding_truth(path: Path, sid: str) -> dict:
-    """The raw ground-truth entry for scenario ``sid`` (layer A reads its
-    ``evidence``; ``_load_outstanding`` the rest)."""
+    """The raw ground-truth entry for scenario ``sid``, which
+    ``_load_outstanding`` validates (the baseline's layer A reads the
+    file's ``evidence`` directly)."""
     truth = json.loads(path.read_text(encoding="utf-8"))["scenarios"]
     if sid not in truth:
         raise ValueError(f"{sid}: no ground truth in {path.name}")

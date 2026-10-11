@@ -215,7 +215,7 @@ class TestMarkSkipped:
         row = db._conn.execute("SELECT 1 FROM indexing_jobs WHERE filepath = '/m/gone'").fetchone()
         assert row is None
 
-    def test_mark_skipped_does_not_increment_attempts(self, db: Database):
+    def test_mark_skipped_drops_a_row_that_has_spent_attempts(self, db: Database):
         # If a file was previously failed once and now goes missing,
         # mark_skipped should drop the row outright. The attempts
         # counter is irrelevant — there's no retry budget to spend.
@@ -269,7 +269,7 @@ class TestMarkDeadTerminal:
         q.mark_dead_terminal("/m/huge", stage="parse", error="oversized")
         # ``initial_index`` consults ``is_dead`` before re-enqueueing
         # files surfaced by the Maildir walk; this gate is what
-        # prevents the retry storm the fix targets.
+        # prevents a retry storm on a dead file.
         assert q.is_dead("/m/huge") is True
 
     def test_claim_batch_skips_dead_terminal_rows(self, db: Database):
@@ -385,7 +385,7 @@ class TestBackoffCap:
     def test_backoff_caps_at_six_hours(self, db: Database):
         """A long streak of failures otherwise computes an impractical
         next_attempt_at (days or weeks out). The cap keeps it at six
-        hours so a transient outage doesn't hide work for longer than
+        hours so a message that keeps failing is retried at least once
         an ops shift."""
         q = _queue(db, max_attempts=100, base_backoff_seconds=3600)
         q.enqueue("/m/sustained", REASON_ON_CREATED)
@@ -577,6 +577,26 @@ class TestInFlightAttempts:
         assert "stopped while processing" in row["last_error"]
         assert _in_flight(restarted) is None
 
+    def test_exhausted_after_ordinary_failures_names_only_the_last_interruption(
+        self, tmp_path, caplog
+    ):
+        """Earlier attempts can be ordinary ``mark_failed`` failures, so the
+        dead-letter line must not claim the message was interrupted on
+        every attempt, only that it was interrupted with none left."""
+        caplog.set_level(logging.DEBUG)
+        db = Database(tmp_path / "q.db")
+        q = _queue(db, max_attempts=2)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        q.mark_failed("/m/a", stage="parse", error="ValueError")
+        assert _queue(db, max_attempts=2).begin_attempt("/m/a")  # process dies here
+
+        assert not _queue(db, max_attempts=2).begin_attempt("/m/a")
+
+        assert _row(db, "/m/a")["status"] == STATUS_DEAD
+        assert [r.getMessage() for r in _lines(caplog, "dead-letter: ")] == [
+            "dead-letter: /m/a interrupted mid-processing with its attempts exhausted"
+        ]
+
     def test_only_the_running_message_is_charged(self, tmp_path):
         """Charging the whole claimed batch would let an ordinary restart
         dead-letter healthy batchmates."""
@@ -651,7 +671,7 @@ class TestInFlightAttempts:
 
     def test_running_step_marks_the_row_interrupted_until_it_returns(self, tmp_path):
         """The marker is what a restarted indexer reads to know a row's
-        step never returned (review round 1)."""
+        step never returned."""
         db = Database(tmp_path / "q.db")
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
@@ -665,7 +685,7 @@ class TestInFlightAttempts:
         assert row["last_error"] is None
 
     def test_refund_does_not_touch_a_row_reenqueued_mid_step(self, tmp_path):
-        """Review round 1: the watchdog thread can re-enqueue the running
+        """The watchdog thread can re-enqueue the running
         path (fresh intent, attempts reset). The refund must not act on
         the reset row's state."""
         db = Database(tmp_path / "q.db")
@@ -723,7 +743,7 @@ class TestInFlightAttempts:
         assert _in_flight(q) is None
 
     def test_marking_a_batch_interrupted_spends_no_attempts(self, tmp_path):
-        """Review round 2: before the bulk embed a multi-message batch is
+        """Before the bulk embed a multi-message batch is
         marked so a kill there replays each message alone — without
         charging any of them."""
         db = Database(tmp_path / "q.db")

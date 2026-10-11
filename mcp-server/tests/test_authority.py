@@ -185,9 +185,9 @@ class TestLogging:
         )
 
 
-class TestReviewRound2Blank:
-    """Codex round 2 on #459: a blank ``authority_class`` is ignored, like
-    every other blank string filter, at every entry point."""
+class TestBlankAuthorityClass:
+    """A blank ``authority_class`` is ignored, like every other blank
+    string filter, at every entry point (#459)."""
 
     @pytest.mark.parametrize("blank", ["", "  "])
     def test_query_messages_ignores_blank(self, counsel_messages_db, blank):

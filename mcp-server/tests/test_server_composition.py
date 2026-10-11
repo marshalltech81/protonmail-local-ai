@@ -6,9 +6,8 @@ stubbed, and the app it would serve is captured. The tests pin what a
 client and the HTTP layer see: the registered tools with their full
 wire listing and annotations for every registration condition, the
 server's own middleware and identity, and the app's middleware, auth
-verifier, session idle timeout and routes. They were written against
-the inline composition before it moved into a factory and must pass
-unchanged after.
+verifier, session idle timeout and routes, so a change to the
+composition in ``_build_server`` cannot change what is served unnoticed.
 """
 
 import asyncio

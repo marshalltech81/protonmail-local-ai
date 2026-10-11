@@ -342,8 +342,7 @@ def window_cut_labels(tool: str, maps: Sequence[Mapping[str, Any]]) -> set[str]:
     show, only when the window cut the context (#949); a passage whose
     text is shorter in the shown map than there was cut by the window.
     This covers ``E1``, the thread's indexed text, which has no chunk
-    offsets for ``runner._passage`` to compare (Codex round 2 on #656's
-    PR). The other tools build no such map (``ask_mailbox``'s thread-text
+    offsets for ``runner._passage`` to compare (#656). The other tools build no such map (``ask_mailbox``'s thread-text
     fallback is #1128).
     """
     if tool != "summarize_thread" or len(maps) < 2:

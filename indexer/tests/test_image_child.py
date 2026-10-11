@@ -2,7 +2,7 @@
 
 PIL's decode and Tesseract run in the child under the limits
 ``image.py`` passes; progress crosses the pipe as ``P`` frames and the
-OCR caps as ``C`` frames, which the parent logs and counts as before.
+OCR caps as ``C`` frames, which the parent logs and counts.
 Most tests here stub the child's output or run the child in this
 process (``tests/conftest.py``); those marked ``real_extractor_child``
 start the real process, and the ones that read ``/proc`` or run
@@ -114,7 +114,8 @@ class TestLimits:
 
 class TestTesseractPath:
     """The child runs with no ``PATH``: the parent passes the Tesseract
-    its own ``PATH`` finds, so OCR works wherever it did in process."""
+    its own ``PATH`` finds, so OCR works wherever the indexer's own
+    ``PATH`` finds Tesseract."""
 
     def test_with_no_tesseract_the_bare_name_is_passed(self, monkeypatch):
         calls = stub_child_output(monkeypatch, b"T 0\n")
@@ -207,7 +208,7 @@ class TestCapFrames:
 
 
 def _main_text(pages: list[str], max_extracted_chars: int | None) -> str | None:
-    """What main's in-process path stored for these OCR pages: the
+    """What the in-process extraction (before #1292) stored for these OCR pages: the
     extractor joined them, the dispatcher stripped and cut the result."""
     cleaned = "\n\n".join(pages).strip()
     if not cleaned:
@@ -255,7 +256,7 @@ class TestTextBudgetAfterStrip:
     """Owner decision 2026-10-08 on #1325: the child strips the joined
     OCR text, as the dispatcher does, before its 10,000,000-character
     budget applies, so any image whose stripped text is within the
-    budget stores what main stored, whatever
+    budget stores what the in-process extraction stored, whatever
     ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`` is; past it the text is
     the stripped text cut at the budget, reported as a cap."""
 
@@ -299,7 +300,8 @@ class TestTextBudgetAfterStrip:
 
     def test_whitespace_past_the_real_budget_is_not_a_cut(self, monkeypatch, caplog):
         """12,000,000 characters of OCR output whose stripped text is
-        short: identical to main, no cap, with the real budget."""
+        short: identical to the in-process extraction, no cap, with the
+        real budget."""
         caplog.set_level("DEBUG")
         pages = [" " * 6_000_000 + "a", "b" + " " * 6_000_000]
         _stub_pages(monkeypatch, pages)
@@ -410,10 +412,10 @@ _CEILING = 10_000
 
 class TestPixelCeiling:
     """#1401: the image child's own pixel ceiling. At or under it, full
-    resolution as before; over it, a JPEG or MPO is decoded at the
+    resolution; over it, a JPEG or MPO is decoded at the
     smallest ``draft`` factor up to ``MAX_DRAFT_FACTOR`` that fits, and
     anything else is ``unsupported`` under a permanent error. The global
-    cap is the cap of every other PIL consumer and is left as it was."""
+    cap is the cap of every other PIL consumer and is unchanged."""
 
     @pytest.fixture(autouse=True)
     def _ceiling(self, monkeypatch):
@@ -538,8 +540,9 @@ class TestPixelCeiling:
             image_child.extract_text(buf.getvalue(), "20", "0")
 
     def test_a_jpeg_too_thin_to_scale_is_refused(self, monkeypatch):
-        """One pixel high: ``draft`` keeps the full size, which the
-        returned-size check catches."""
+        """One pixel high: libjpeg rounds a scaled side up, so even at 1/2
+        scale the image is over the ceiling (10,001 pixels), and no
+        allowed factor fits."""
         monkeypatch.setattr(
             image_child.pytesseract, "image_to_string", lambda *_a, **_k: pytest.fail("OCR'd")
         )
@@ -873,7 +876,7 @@ class TestRealChild:
 
     @requires_tesseract
     def test_the_childs_tesseract_launches_are_counted(self):
-        """#1236 (Codex round 1 on #1355): the child reports the
+        """#1236 (#1355): the child reports the
         Tesseract processes it started, one per OCR'd frame, and the
         parent adds them to its own launch count with the child's."""
         before = _runner.process_launches()
@@ -905,9 +908,10 @@ class TestLimitsInTheImage:
     (``_launcher``), and the process checks read ``/proc``."""
 
     def test_the_address_space_limit_fails_a_decode_bomb(self, monkeypatch):
-        """A 30,000,000-pixel RGBA PNG inside the pixel cap decodes to
-        about 420 MiB: under a 160 MiB limit the child's decode fails
-        (MemoryError), a ``failed`` row, with no page OCR'd."""
+        """A 30,000,000-pixel RGBA PNG inside the child's pixel ceiling,
+        whose decoded pixels alone take 114 MiB: under a 160 MiB
+        address-space limit the child fails (MemoryError), a ``failed``
+        row, with no page OCR'd."""
         monkeypatch.setattr(image, "CHILD_MAX_ADDRESS_SPACE_BYTES", 160 * 1024 * 1024)
         pages: list[int] = []
         start = time.monotonic()

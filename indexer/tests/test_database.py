@@ -2,8 +2,8 @@
 Tests for src/database.py.
 
 Covers: schema creation, ``upsert_thread`` (insert and body-accumulation
-update), threading lookups, file tracking, chunk + attachment writes,
-and stats.
+update), threading lookups, file tracking, migrations, and chunk +
+attachment writes.
 """
 
 import hashlib
@@ -19,7 +19,7 @@ from src.attachment_indexing import attachment_occurrence_id
 from src.chunker import CHUNK_KINDS, ChunkKind
 from src.database import (
     _PURGE_ORPHAN_EXTRACTION_SQL,
-    EMBEDDING_DIM,  # noqa: F401  -- via reuse
+    EMBEDDING_DIM,
     SCHEMA_APPLICATION_ID,
     SCHEMA_VERSION,
     Database,
@@ -29,11 +29,6 @@ from src.migrations import runner
 from tests.conftest import count_pending_deletions, make_message, make_thread
 
 FAKE_EMBEDDING = [0.1] * EMBEDDING_DIM
-
-
-# ---------------------------------------------------------------------------
-# Schema setup
-# ---------------------------------------------------------------------------
 
 
 def _tombstone_thread(db, thread_id: str) -> None:
@@ -57,6 +52,11 @@ def _reap_message(db, thread, message_id: str) -> list[str] | None:
         folder=thread.folder,
     )
     return db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, [message_id])
+
+
+# ---------------------------------------------------------------------------
+# Schema setup
+# ---------------------------------------------------------------------------
 
 
 class TestSchema:
@@ -118,7 +118,7 @@ class TestSchema:
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        v10 (#1356), skipping the migration files."""
+        the current version (v12), skipping the migration files."""
         assert SCHEMA_VERSION == 12
         assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 12
 
@@ -304,7 +304,7 @@ class TestMigrationV1:
     """#928: v0 -> v1 keys ``attachment_extractions`` by (content hash,
     extractor module) and links each occurrence to its row."""
 
-    def test_v0_database_migrates_to_the_fresh_v1_shape(self, tmp_path, caplog):
+    def test_v0_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         _build_v0_database(tmp_path / "v0.db")
         migrated = Database(tmp_path / "v0.db")
@@ -351,8 +351,8 @@ class TestMigrationV1:
         """No ``EXTRACTOR_VERSIONS`` bump comes with the re-keying: rows
         keep their stamps, so the current ones stay current. ``pdf-ocr@4``
         is stale from #931's own ``pdf`` bump, ``docx@5`` from #1031's
-        ``docx`` bump and ``image-ocr@3`` from #1400's ``image`` bump,
-        not from the migration."""
+        ``docx`` bump, ``image-ocr@3`` from #1400's ``image`` bump and
+        ``text@2`` from #970's ``text`` bump, not from the migration."""
         from src.extractors import is_stale_extractor
 
         _build_v0_database(tmp_path / "v0.db")
@@ -665,7 +665,7 @@ class TestMigrationV6:
     and queues the reparse (#1285): it re-reads each message, and a
     cached result with no record is re-extracted once."""
 
-    def test_v5_database_migrates_to_the_fresh_v6_shape(self, tmp_path, caplog):
+    def test_v5_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         db = Database(tmp_path / "v5.db")
         msg = make_message(message_id="old@x")
@@ -837,7 +837,7 @@ class TestUnknownSendDate:
         assert _FIRST.isoformat() not in body
 
     def test_the_reparse_drops_an_old_fallback_from_the_thread_text(self, db):
-        """Review round 1: the v7 writer put an undated message's made-up
+        """The v7 writer put an undated message's made-up
         date in its thread's FTS body. The reparse of that message (its
         row not yet assessed) removes that line, and only that one; a
         real date line, of another message, stays."""
@@ -877,7 +877,7 @@ class TestUnknownSendDate:
         assert text()[0] == body
 
     def test_a_repeated_fallback_header_is_left_alone(self, db, caplog):
-        """Review round 2: message text is sender-controlled, so when the
+        """Message text is sender-controlled, so when the
         old header pair occurs more than once nothing is removed (no
         sender line can be taken for the generated one), and the skip is
         logged with a count only."""
@@ -908,7 +908,7 @@ class TestUnknownSendDate:
         ).fetchone()[0]
         assert after == before
         lines = [r for r in caplog.records if "old fallback date line" in r.getMessage()]
-        # Review round 4: it lowers retrieval quality and sender text can
+        # It lowers retrieval quality and sender text can
         # trigger it, so WARNING through the shared rate limiter.
         assert [(r.levelname, r.getMessage()) for r in lines] == [
             (
@@ -951,7 +951,7 @@ class TestMigrationV12:
     indexed file, whose lookup certifies or re-identifies each row; a job
     already in the queue keeps its reason (``REPARSE_ENQUEUE_SQL``)."""
 
-    def test_v11_database_migrates_to_the_fresh_v12_shape(self, tmp_path, caplog):
+    def test_v11_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         db = Database(tmp_path / "v11.db")
         msg = make_message(message_id="old@x")
@@ -1009,7 +1009,7 @@ class TestMigrationV11:
     on every existing row, and queues nothing: the startup sweep's
     bootstrap arm re-queues the incomplete rows once."""
 
-    def test_v10_database_migrates_to_the_fresh_v11_shape(self, tmp_path, caplog):
+    def test_v10_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         db = Database(tmp_path / "v10.db")
         msg = make_message(message_id="old@x")
@@ -1053,7 +1053,7 @@ class TestMigrationV10:
     """#1356: v9 -> v10 adds ``thread_vector_sums`` with no rows and
     queues nothing; the backfill then fills each thread exactly."""
 
-    def test_v9_database_migrates_to_the_fresh_v10_shape(self, tmp_path, caplog):
+    def test_v9_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         db = Database(tmp_path / "v9.db")
         msg = make_message(message_id="old@x")
@@ -1098,7 +1098,7 @@ class TestMigrationV9:
     """#1236: v8 -> v9 adds the occurrence's extraction deferral mark,
     NULL on every existing row, with no reparse."""
 
-    def test_v8_database_migrates_to_the_fresh_v9_shape(self, tmp_path, caplog):
+    def test_v8_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         db = Database(tmp_path / "v8.db")
         msg = make_message(message_id="old@x")
@@ -1153,7 +1153,7 @@ class TestMigrationV8:
     def _rows(conn, sql) -> list[tuple]:
         return [tuple(r) for r in conn.execute(sql)]
 
-    def test_v7_database_migrates_to_the_fresh_v8_shape(self, tmp_path, caplog):
+    def test_v7_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         db = Database(tmp_path / "v7.db")
         dated = make_message(
@@ -1281,7 +1281,7 @@ class TestMigrationV7:
     """#824: v6 -> v7 adds the operator identity tables, seeded
     unconfigured, with no per-message column and no reparse."""
 
-    def test_v6_database_migrates_to_the_fresh_v7_shape(self, tmp_path, caplog):
+    def test_v6_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         db = Database(tmp_path / "v6.db")
         msg = make_message(message_id="old@x")
@@ -1361,7 +1361,7 @@ class TestAttachmentTextCompleteness:
         assert db.get_attachment_extraction("h2", "text")["text_complete"] == stored
 
     def test_unrecorded_rows_come_back_once_per_file(self, db):
-        """Review round 3 on #1286: a message with many unrecorded
+        """#1286: a message with many unrecorded
         occurrences yields one filepath, not one entry per occurrence, so
         the startup sweep keeps memory bounded by files; only occurrences
         with a record of their own are named for clearing (#1236)."""
@@ -1411,7 +1411,7 @@ class TestMigrationV5:
     """#1086: v4 -> v5 adds the completeness columns, NULL (not
     assessed) on every existing row, and queues the reparse."""
 
-    def test_v4_database_migrates_to_the_fresh_v5_shape(self, tmp_path, caplog):
+    def test_v4_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         db = Database(tmp_path / "v4.db")
         msg = make_message(message_id="old@x")
@@ -1549,7 +1549,7 @@ class TestMigrationV2:
     """#1144: v1 -> v2 adds ``messages.sender_ambiguous`` (NULL until a
     reparse assesses the message) and queues the reparse."""
 
-    def test_v1_database_migrates_to_the_fresh_v2_shape(self, tmp_path, caplog):
+    def test_v1_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         db = Database(tmp_path / "v1.db")
         _v1_from_fresh(db)
@@ -1603,7 +1603,7 @@ class TestMigrationV3:
         db._conn.commit()
         db.close()
 
-    def test_v2_database_migrates_to_the_fresh_v3_shape(self, tmp_path, caplog):
+    def test_v2_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         self._v2_with_rows(tmp_path / "v2.db")
         migrated = Database(tmp_path / "v2.db")
@@ -1731,9 +1731,9 @@ class TestEmbeddingDimGuard:
 class TestThreadVectorUnitNormInvariant:
     """Every vector written to ``threads_vec`` must be L2-unit-norm so
     the cosine-equals-dot-product assumption holds for downstream
-    retrieval. The three thread-vector write boundaries
-    (``upsert_thread``, ``replace_thread_vector``, and
-    ``_rewrite_thread_row`` via ``reap_thread_messages``) all normalize at the boundary so callers
+    retrieval. Every thread-vector write (``upsert_thread`` directly;
+    ``replace_thread_vector``, the reap rewrite and the vector-sum
+    backfill through ``_write_thread_vector``) normalizes, so callers
     that pass a non-unit mean cannot bypass the
     invariant. Zero placeholders survive normalization because the
     Phase 1 seed logic depends on them as a sentinel."""
@@ -1759,7 +1759,7 @@ class TestThreadVectorUnitNormInvariant:
         # Magnitude-2 input: every component is 2.0/sqrt(EMBEDDING_DIM),
         # so the vector's L2 norm is 2.0. Without normalization, vec0
         # stores it raw and ``vec_distance_cosine`` no longer collapses
-        # to a dot product. After this PR the boundary normalizes.
+        # to a dot product. The boundary normalizes.
         from src.database import EMBEDDING_DIM
 
         thread = make_thread()
@@ -1770,8 +1770,8 @@ class TestThreadVectorUnitNormInvariant:
 
     def test_replace_thread_vector_normalizes_non_unit_input(self, db):
         # Phase 2c writes a chunk mean here; a mean of unit
-        # vectors generally has norm < 1. Use a 3-4-5 style scaled
-        # vector to make the normalization observable.
+        # vectors generally has norm < 1. Use a uniformly scaled
+        # non-unit vector to make the normalization observable.
         from src.database import EMBEDDING_DIM
 
         thread = make_thread()
@@ -1799,7 +1799,7 @@ class TestThreadVectorUnitNormInvariant:
     def test_zero_placeholder_seed_is_preserved(self, db):
         # Phase 1 writes an all-zero seed for genuinely-new threads;
         # ``l2_normalize`` deliberately preserves zero vectors so the
-        # three-case priority chain in ``main._batched_phase1`` keeps
+        # three-case seed priority chain in ``main._phase1_commit_thread`` keeps
         # working. Normalizing to NaN here would corrupt every brand-
         # new thread.
         from src.database import EMBEDDING_DIM
@@ -2234,12 +2234,12 @@ class TestUpsertThreadUpdate:
     def test_per_message_body_cap_matches_across_insert_and_update_paths(self, db, threader):
         # Both the fresh-insert path (``Thread.build_body_text``) and
         # the accumulation path (``Database._compute_body``) must apply
-        # the SAME per-message char cap. The previous shape used 500 chars
-        # on insert and 2000 chars on update — meaning a thread that
-        # arrived as a single 3000-char message had only the first 500
-        # chars indexed for FTS forever, while an identical thread that
-        # arrived as a sequence of replies got 2000 chars per message.
-        # The asymmetry was permanent and tied to arrival ordering.
+        # the SAME per-message char cap. With 500 chars on insert and
+        # 2000 on update, a thread arriving as a single 3000-char message
+        # would keep only its first 500 chars indexed for FTS forever,
+        # while an identical thread arriving as a sequence of replies
+        # would get 2000 chars per message: a permanent asymmetry tied to
+        # arrival order.
         from src.threader import PER_MESSAGE_BODY_CAP_CHARS
 
         long_body = "X" * (PER_MESSAGE_BODY_CAP_CHARS + 1000)
@@ -2532,7 +2532,7 @@ class TestFtsRowidAndReplacement:
 
 
 # ---------------------------------------------------------------------------
-# Pending deletions — tombstone CRUD
+# threads.senders
 # ---------------------------------------------------------------------------
 
 
@@ -2643,6 +2643,11 @@ class TestSendersColumn:
         ).fetchone()
         senders = json.loads(row["senders"])
         assert set(senders) == {"alice@example.com", "bob@example.com"}
+
+
+# ---------------------------------------------------------------------------
+# Pending deletions — tombstone CRUD
+# ---------------------------------------------------------------------------
 
 
 class TestPendingDeletions:
@@ -2905,17 +2910,19 @@ class TestReapThreadMessages:
         assert not db.is_indexed("/r/2")
         assert not db.has_pending_deletion("/r/2")
 
-    def test_atomic_reap_rolls_back_when_thread_rewrite_fails(self, db, threader):
-        """If the thread rewrite step raises, the per-message removals must
-        not have taken effect — the transaction rolls back cleanly."""
+    def test_reap_with_a_wrong_dimension_embedding_removes_nothing(self, db, threader):
+        """The thread rewrite rejects the embedding before anything is
+        written, so the per-message removals never take effect. (A
+        rollback after a write is covered by
+        ``test_a_failed_reap_rolls_back_the_purge``.)"""
         t1, _, _ = self._seed_two_message_thread(db, threader)
 
         with pytest.raises(ValueError):
-            # Wrong-dimension embedding trips the validator in upsert_thread /
-            # _rewrite_thread_row, before the remove loop runs.
+            # Wrong-dimension embedding trips _rewrite_thread_row's
+            # dimension check, before the remove loop runs.
             db.reap_thread_messages(
                 make_thread(thread_id=t1.thread_id),
-                [0.0] * 10,  # wrong dim, but rewrite path doesn't check dim
+                [0.0] * 10,  # wrong dim
                 ["r2@x"],
             )
         # Nothing was removed — tombstone and map entry still intact
@@ -3015,13 +3022,12 @@ class TestReapRewritesThreadRow:
         assert "Second message body." in row["body_text"]
 
     def test_reap_refreshes_display_subject_when_root_message_reaped(self, db, threader):
-        """Codex review of main caught that ``_rewrite_thread_row`` did
-        not refresh ``display_subject`` — reaping the original root of a
-        thread (which contributed the user-facing label via
-        ``upsert_thread``) would leave search results rendering with the
-        deleted message's subject. The rewrite now derives
-        ``display_subject`` from the surviving messages the same way
-        ``upsert_thread`` does (oldest message's original subject)."""
+        """Reaping the original root of a thread (which contributed the
+        user-facing label via ``upsert_thread``) must not leave search
+        results rendering with the deleted message's subject:
+        ``_rewrite_thread_row`` derives ``display_subject`` from the
+        surviving messages the same way ``upsert_thread`` does (oldest
+        message's original subject)."""
         from src.threader import Thread
 
         original = make_message(
@@ -3376,7 +3382,7 @@ class TestReplaceMessageChunks:
         """Storage invariant: every vector written to
         ``message_chunks_vec`` must be L2-unit-norm so cosine ranking
         does not depend on per-row magnitude. Production writes flow
-        through ``OpenAIEmbedder._extract_embeddings`` which already
+        through ``OpenAIEmbedder._embed_one_batch``, which already
         normalizes provider output, but the ``EmbeddingBackend``
         contract is generic — a fake backend in a test or a future
         non-OpenAI caller could pass non-unit vectors. Enforce the
@@ -3453,7 +3459,7 @@ class TestMessageDateOnChunks:
         assert "message_date" not in inspect.signature(db.replace_message_chunks).parameters
 
     def test_redated_message_moves_the_thread_range(self, db):
-        """Review round 2: reprocessing a message with a corrected date
+        """Reprocessing a message with a corrected date
         sets the thread's range from its messages' ``sent_at``; the old
         date does not linger as an endpoint (the threader hands over the
         stored range widened by the new date)."""
@@ -3681,7 +3687,7 @@ class TestUpsertAttachment:
         assert row["size_bytes"] == 1234
         assert row["fts_rowid"] is not None
 
-    def test_repeat_upsert_returns_false_and_no_extra_fts(self, db, threader):
+    def test_repeat_upsert_returns_false_and_adds_no_row(self, db, threader):
         msg = make_message(message_id="att2@x", filepath="/m/att2")
         thread = threader.assign_thread(msg)
         db.upsert_thread(thread, FAKE_EMBEDDING)
@@ -3706,7 +3712,7 @@ class TestUpsertAttachment:
         assert db.upsert_attachment(**kwargs) is True
         assert db.upsert_attachment(**kwargs) is False
 
-        # Exactly one attachments row + one FTS row.
+        # Exactly one attachments row.
         cnt = db._conn.execute(
             "SELECT COUNT(*) FROM attachments WHERE claimant_id = ?", ("att2@x",)
         ).fetchone()[0]
@@ -5491,10 +5497,10 @@ class TestZeroVectorRecoveryBatching:
 
 
 class TestFtsSubjectScanBound:
-    """#439 review round 2: rebuilding the ``threads_fts`` subject read
+    """#439: rebuilding the ``threads_fts`` subject read
     and normalized every stored subject of the thread on each upsert,
     quadratic in a long thread of long subjects. Rows and characters
-    examined per rewrite are now capped."""
+    examined per rewrite are capped."""
 
     def test_long_thread_of_long_subjects_is_bounded(self, db, monkeypatch):
         import time

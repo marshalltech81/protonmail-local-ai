@@ -1,0 +1,16 @@
+Return-Path: <sender-one@mail.example>
+Received: from relay.mail.example (relay.mail.example [192.0.2.10])
+	by imap.example (Example MTA) with ESMTPS id 4F2A9C0001
+	for <recipient@imap.example>; Tue, 02 Jan 2024 09:15:30 +0000
+From: Sender One <sender-one@mail.example>
+To: Recipient <recipient@imap.example>
+Cc: Copy Reader <copy-reader@mail.example>
+Subject: Synthetic source handoff
+Date: Tue, 02 Jan 2024 09:15:00 +0000
+Message-ID: <synthetic-source-001@mail.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+X-Mailer: Example Mail Client 1.0
+
+SRCFIXTURE-1483 delivered body from an ordinary IMAP server.

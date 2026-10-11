@@ -582,7 +582,10 @@ class TestExtractBounds:
         assert statuses["a"] == "verified"
         assert set(statuses.values()) == {"verified", "uncited"}
 
-    def test_non_list_evidence_entries_name_no_label(self):
+    def test_only_label_strings_and_lists_name_labels(self):
+        """An ``_evidence`` that is not an object, or an entry that is an
+        object, names no label; an entry that is one string is read for
+        labels like a list (``"E1, E1"`` names E1 once)."""
         known = {"E1": EvidenceRef("E1", "t", None, None, "alpha")}
         records = [
             {"a": "alpha", "_evidence": "E1"},

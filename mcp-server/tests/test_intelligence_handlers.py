@@ -12,11 +12,13 @@ seeded DB and the FakeEmbedClient / FakeInferenceClient stubs. Coverage targets:
 - max_threads / limit clamping forwards a sane bound to the db layer;
 - an empty search in ``ask_mailbox`` / ``extract_from_emails``
   returns a "no matching emails" message rather than calling the LLM;
-- exceptions on db, embed, or completion paths, and an unknown
-  ``summarize_thread`` thread, are raised as ``ToolError`` so the
-  client receives ``isError: true`` and no LLM call is made;
-- ``extract_from_emails`` tolerates both single-object and array LLM
-  responses and skips invalid JSON without aborting the loop.
+- a db or completion failure, an unknown ``summarize_thread`` thread
+  and an invalid date filter are raised as ``ToolError`` so the client
+  receives ``isError: true``; an unknown thread or an invalid filter
+  makes no LLM call;
+- ``extract_from_emails`` accepts single-object and array LLM
+  responses and reports a reply that is not usable JSON as a thread
+  that could not be extracted, without aborting the loop.
 """
 
 import asyncio
@@ -133,8 +135,9 @@ class TestAskMailbox:
     def test_requests_more_evidence_chunks_per_thread(
         self, fake_server, seeded_db, fake_embed, fake_inference
     ):
-        """#285: three chunks per thread left a later matching passage out
-        of the prompt even when the shared budget had room for it."""
+        """#285: ask_mailbox asks for six evidence chunks per thread, so a
+        later matching passage reaches the prompt when the shared budget
+        has room for it."""
         seen: dict = {}
         original = seeded_db.hybrid_search
 
@@ -248,7 +251,7 @@ class TestSummarizeThread:
         self, fake_server, seeded_db, fake_embed, fake_inference
     ):
         # The fallback rescues calls where the model passed a phrase
-        # rather than an opaque ID. The fake llm returns the canned
+        # rather than an opaque ID. The fake embedder returns the canned
         # embedding ``[1, 0, 0, 0]`` which aligns with t-alpha's
         # vector, so hybrid_search resolves to t-alpha and the summary
         # is produced for that thread instead of "Thread not found".
@@ -289,7 +292,7 @@ class TestSummarizeThread:
         # archive"; the query "zzznosuchsubject" overlaps with none.
         # Without this gate, vector KNN would rank t-alpha (matching
         # the canned [1,0,0,0] embedding) and the summary would land
-        # on the invoice thread — silently wrong. Now we surface
+        # on the invoice thread — silently wrong. The gate surfaces
         # "Thread not found" instead.
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
         with pytest.raises(ToolError, match="Thread not found"):
@@ -305,7 +308,7 @@ class TestSummarizeThread:
         # resolve through tokens of its own domain or local part. The
         # domain "invoice" overlaps t-alpha's subject "invoice for
         # march", which the fixed [1, 0, 0, 0] embedding also ranks
-        # first, so before the fix this summarized t-alpha.
+        # first, so resolving on those tokens would summarize t-alpha.
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
         with pytest.raises(ToolError, match="Thread not found"):
             asyncio.run(handler(thread_id="<not-present@invoice.com>"))
@@ -348,7 +351,7 @@ class TestSummarizeThread:
     def test_recent_chunks_supplement_body_text(
         self, fake_server, chunked_db, fake_embed, fake_inference
     ):
-        """Codex P1: the recent-chunk tail is *appended* to ``body_text``,
+        """The recent-chunk tail is *appended* to ``body_text``,
         not substituted for it. ``body_text`` is front-preserved, so a
         ``"detailed"`` summary must see BOTH the start of the thread
         (body) AND its latest activity (chunk tail). ``chunked_db.t-alpha``
@@ -383,8 +386,7 @@ class TestSummarizeThread:
 
 
 class TestTruncatedProse:
-    """#222: a prose answer cut off at max_tokens ended mid-way with no
-    marker; it now says so."""
+    """#222: a prose answer cut off at max_tokens is marked as cut off."""
 
     def test_ask_mailbox_marks_a_truncated_answer(self, fake_server, seeded_db):
         llm = FakeInferenceClient(
@@ -455,7 +457,7 @@ class TestExtractFromEmails:
         assert "not a JSON object" in text
 
     def test_json_of_an_unusable_shape_is_a_failure(self, fake_server, seeded_db):
-        """Review round 1: valid JSON that is neither an object, a list of
+        """Valid JSON that is neither an object, a list of
         objects, nor null says nothing about the thread's data."""
         llm = FakeInferenceClient(complete_responses=['"Acme"', "42", '["a", "b"]'])
         handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
@@ -465,8 +467,8 @@ class TestExtractFromEmails:
         assert "3 of 3 threads could not be extracted" in text
 
     def test_mixed_array_keeps_its_records_and_reports_the_rest(self, fake_server, seeded_db):
-        """Review round 2: non-object entries in an array were dropped
-        silently, so the thread looked fully extracted."""
+        """Non-object entries in an array are reported, so the thread
+        does not look fully extracted."""
         llm = FakeInferenceClient(
             complete_responses=['[{"vendor": "Acme"}, "Beta"]', "null", "null"]
         )
@@ -523,8 +525,7 @@ class TestExtractFromEmails:
         assert "_date" in text
 
     def test_accepts_array_response_per_thread(self, fake_server, seeded_db):
-        # Same prompt, but the model returned an array — the previous
-        # behavior aborted with TypeError. Now each item should be
+        # Same prompt, but the model returns an array: each item is
         # accepted and annotated independently.
         llm = FakeInferenceClient(
             complete_responses=[
@@ -1190,7 +1191,7 @@ class TestPersonFilters:
     @pytest.mark.parametrize("tool", _PERSON_TOOLS)
     @pytest.mark.parametrize("blank", ["", " ", "\t"])
     def test_blank_person_filters_are_absent(self, fake_server, person_db, tool, blank):
-        # Review round 1 (#702): a client that sends unset optionals as
+        # #702: a client that sends unset optionals as
         # whitespace must not filter on a substring " " or look up " ".
         called: list = []
         person_db.find_contact = lambda *a, **_k: called.append(a) or []  # type: ignore[assignment]
@@ -1219,8 +1220,8 @@ class TestPersonFilters:
         "padded", ["  Dana Example  ", " dana@example.com ", "\t@example.com "]
     )
     def test_padded_participant_is_stripped(self, fake_server, person_db, tool, padded):
-        # Review round 2 (#702): the substring fallback used the padded
-        # value, so " Dana Example " matched no participant string.
+        # #702: the substring fallback uses the stripped value; padded,
+        # " Dana Example " would match no participant string.
         out = _person_call(
             fake_server, person_db, FakeInferenceClient(response="null"), tool, participant=padded
         )
@@ -1243,7 +1244,7 @@ class TestPersonFilters:
 
     @pytest.mark.parametrize("tool", _PERSON_TOOLS)
     def test_person_guidance_covers_the_folder_scope(self, person_db, tool):
-        # Review round 2 (#702): find_contact ranks contacts over every
+        # #702: find_contact ranks contacts over every
         # folder, so with ``folders`` set its top address may have no
         # thread in scope; the description says what to do then. Read
         # on the wire, not from ``__doc__`` (#1011).

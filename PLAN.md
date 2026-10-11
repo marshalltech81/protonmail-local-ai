@@ -91,7 +91,9 @@ Outcomes:
 Release gates:
 
 - **Corpus and privacy correctness:** no open P0 or P1 issue. Met on
-  2026-10-08 (#1031, #1040 fixed); #1236 is an accepted P2 risk.
+  2026-10-08 (#1031, #1040 fixed); #1236 is an accepted P2 risk
+  (updated 2026-10-11: PR #1355 added its per-message extraction
+  budget; it stays open for child confinement, #1354).
 - **Measured answer quality:** written pass thresholds for evidence
   recall, supported conclusions, chronology, abstention, exhaustive
   workflows and truncation disclosure, met on the synthetic eval
@@ -122,7 +124,7 @@ containers run beside the Proton Mail Bridge app:
   persistent pin.
 - **indexer** — parses Maildir, threads, embeds through any
   OpenAI-compatible `/v1/embeddings` provider and writes SQLite
-  (schema v5, numbered migrations since the first deployment;
+  (numbered migrations since the first deployment;
   4096-dim vectors; per-message records keyed by claimant ID). One
   durable `indexing_jobs` queue drives the initial scan, steady state
   and in-place reparses (#1078), fresh mail ahead of the backlog.
@@ -154,7 +156,7 @@ transient infrastructure failures never cause permanent source
 omission.
 
 Open follow-ups that matter most: bounded work on crafted attachments
-(#1021, #1236), threading (#752 replies indexed before
+(#1236), threading (#752 replies indexed before
 their root stay split; #756 subject fallback, owner picks an option),
 attachment formats without an extractor (#695, #923, #947, #691).
 
@@ -318,7 +320,11 @@ schema change needs a numbered migration.
    decision 19).
 3. **Richer temporal retrieval:** `sent_at`, `occurred_at` (top
    `Received:`) and the effective time `COALESCE(occurred_at, sent_at)`
-   for every filter, span and ordering (`docs/architecture.md`,
+   for every filter, span and ordering (updated 2026-10-11: since #1080
+   it is `COALESCE(occurred_at, sent_at, first_indexed_at)`; the date
+   bounds of `query_messages` and `query_attachments` never read
+   `first_indexed_at`, thread spans and `search_attachments` do,
+   #1373) (`docs/architecture.md`,
    "Message time"). **Done.** Per decision 35 the effective time stays
    the default; `date_basis` lets a caller choose `sent`, `occurred` or
    `internal` (#1150, #1092), and a missing `Date:` stays unknown
@@ -347,7 +353,7 @@ schema change needs a numbered migration.
    there is no nesting to bound (#1087). **Open, in order:** grouped
    aggregation as its own tool over the same engine (#823); the
    selectable clock `date_basis` (#1150, depending on #1080 for
-   `sent`), counting its own NULL clocks the same way so no basis ever
+   `sent`; updated 2026-10-11: #1080 is done), counting its own NULL clocks the same way so no basis ever
    drops unknown rows silently; leaves
    that wait on the evidence model (#1089 headers, #1090 Bcc, #1091
    attachment text, #1092 internal date); a capability report in
@@ -647,7 +653,13 @@ superseded entries keep their number and one line.
 14. **Evening walkthrough of 2026-10-02:**
     - **`occurred_at`** is the top `Received:` header's date, NULL when
       absent or unparseable, never `Date:`; date filters and thread
-      spans use `COALESCE(occurred_at, sent_at)`.
+      spans use `COALESCE(occurred_at, sent_at)` (updated 2026-10-11:
+      since #1080, migration 0008, the effective time is
+      `COALESCE(occurred_at, sent_at, first_indexed_at)`; the last
+      orders an undated message, places it in its thread's span and
+      is read by `search_attachments`' bound, #1373, while
+      `query_messages` and `query_attachments` count it as
+      indeterminate).
     - **Date-range evidence:** any passage of a thread whose span
       overlaps the range, each with its own dates; passage dates are
       read from `messages`.
@@ -771,7 +783,10 @@ superseded entries keep their number and one line.
     because `catppt` reads no slide text from current decks. Every
     external parser runs through one runner (temp file, no shell,
     timeout, output cap, and address-space and CPU limits set before
-    the parser loads; the OCR path has a timeout only, #1021). Accepted
+    the parser loads; the OCR path has a timeout only, #1021; updated
+    2026-10-11: image OCR, #1292, and PDF parse, render and OCR, #1293
+    and PR #1453, now run in the limited extractor child, closing
+    #1021). Accepted
     risk: catdoc's unfixed Debian CVEs (none at HIGH/CRITICAL).
 33. **Per-extractor extraction cache (2026-10-07, #928):** the
     attachment extraction cache is keyed by content hash and extractor
@@ -844,7 +859,9 @@ superseded entries keep their number and one line.
     DOCX, PPTX and XLSX extraction runs in a child process with memory,
     CPU and wall-clock limits (#1040); per-message extraction launches
     stay unbounded as an accepted P2 risk until a scheduling design
-    lands (#1236). Attachments are enumerated exhaustively by
+    lands (#1236; updated 2026-10-11: PR #1355 added the per-message
+    extraction budget, and #1236 stays open for child confinement,
+    #1354). Attachments are enumerated exhaustively by
     `query_attachments` and their stored text read by `get_attachment`, whose
     streaming reader reports an exact `total_chars` on every page;
     `date_basis` for both listing tools comes with #1150 (#796).
@@ -872,7 +889,8 @@ superseded entries keep their number and one line.
     process the child's tree runs at once, output caps derived from
     the configured input budget times the decode's worst expansion).
     Only `text` is exempt: a fixed codec set and constant-pass decoding
-    with no structural parsing, locked by a CI test (#1295). Order:
+    with no structural parsing, to be locked by a CI test (#1295;
+    updated 2026-10-11: not written yet, #1295 is open). Order:
     #1230, the runner (#1291), `image` (#1292), `pdf` (#1293), `html`
     with body HTML conversion (#1294), then #922; extracted text stays
     byte-identical. The stdlib message parse stays in-process for now:
@@ -910,6 +928,44 @@ superseded entries keep their number and one line.
     responsibility. Ruled out so far: request reconciliation and
     lifecycle statuses, and identifier extraction with cross-thread
     linking.
+45. **IMAP ingestion boundary (2026-10-10, #1346):** provider policy
+    owns connection and trust requirements, mailbox selection, roles,
+    source categories and the assessment of any optional provider
+    identity or provenance. The transport owns validated configuration
+    rendering, sync, Maildir layout and state, recovery and content-safe
+    diagnostics; mbsync and Maildir stay the first transport, behind the
+    bytes-plus-source-metadata seam (#1077). The core owns exact
+    evidence, threading, indexing, retrieval and citations, and never
+    requires a provider identity. Durable account scope and
+    connection or address coverage are distinct; sources, mailbox
+    occurrences and scoped collection observations are distinct. Unknown
+    metadata stays unknown, a failed or incomplete scan cannot establish
+    absence, and equal bytes do not establish one logical message.
+    Retained companion metadata restores dated label observations; a
+    Maildir-only rebuild needs a refresh (owner, 2026-10-11, #1313). The
+    Proton path is extracted unchanged: rendered configuration,
+    environment variables, channel and store names, public interfaces,
+    every control and the pin-rotation semantics. New configuration or
+    state formats, collectors, role behaviour, reconciliation, renamed
+    channels or stores, any path around a Proton control (a synthetic
+    source included) and additional sources each need their own
+    decision; open parts stay in #1083, #1313, #1316 and #1317.
+46. **Proton provider settings (2026-10-11, #1497):** `SOURCE_MODE`
+    (only `proton-bridge`, the default) selects the provider and is read
+    once at startup; no control is conditional on it. Every Proton value
+    is an operator setting that defaults to today's value and is
+    validated by one shared helper at `scripts/validate-env.sh` and the
+    mbsync entrypoint before rendering or any network use; a forbidden
+    value is refused with fixed text naming the decision that would
+    allow it, never the value. The Bridge stays on this Mac: the host
+    is an allowlist of container aliases tested to forward to the
+    host's `127.0.0.1`, the certificate name a loopback identity; off-Mac
+    Bridge is #1499. #1313 enables metadata-only labels; the payload
+    exclusions of `Labels/*`, `All Mail` and top-level `Starred` remain
+    required (owner, 2026-10-11).
+    Channel and store names follow log redaction (#1498). Replacing the
+    Compose literals with this validation is an owner decision under
+    decision 43, which stands unchanged.
 
 ## Notes for Agents
 

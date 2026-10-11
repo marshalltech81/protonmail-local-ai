@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead reparse clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead reparse clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-make-status test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -20,7 +20,7 @@ help:
 	@echo "  build        Build all Docker images"
 	@echo "  build-nocache Rebuild all Docker images from scratch (skips BuildKit cache)"
 	@echo "  ppt-checksums Rewrite indexer/java/checksums/checksums.sha256 after an indexer/java/pom.xml change (downloads from Maven Central)"
-	@echo "  up           Start the full stack (mbsync reaches the Bridge app on the host)"
+	@echo "  up           Create missing secret files and run validate-env, then start the full stack (mbsync reaches the Bridge app on the host)"
 	@echo "  down         Stop the full stack"
 	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml or config/identity.toml)"
 	@echo "  logs         Tail logs from all containers"
@@ -28,7 +28,7 @@ help:
 	@echo "  backup-index Copy the live index to BACKUP_DIR=<dir outside the checkout> (mode 700/600), checked with integrity_check"
 	@echo "  restore-index Replace the index with BACKUP=<file from backup-index> (asks first; stops indexer and mcp-server, restarts mcp-server once the indexer verifies the index)"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
-	@echo "  reparse      Queue every indexed message to be parsed again in place, without embedding calls (except a thread left with no chunk embeds its subject once)"
+	@echo "  reparse      Queue every indexed message to be parsed again in place; unchanged chunks are not embedded again (docs/architecture.md, Reparse in place)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
 	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status, index backup, image pin, Trivy flag and Maven checksum script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
@@ -37,6 +37,7 @@ help:
 	@echo "  test-mbsync  Run mbsync entrypoint tests only"
 	@echo "  test-mbsync-tls  Run the mbsync TLS check against a synthetic Bridge (needs Docker)"
 	@echo "  test-mbsync-layout  Run the mbsync Maildir layout and UIDVALIDITY checks with synthetic stores (needs Docker)"
+	@echo "  test-mbsync-host-aliases  Check each accepted BRIDGE_HOST name reaches a 127.0.0.1-only listener on this Mac (needs Docker, python3; not in CI)"
 	@echo "  test-compose Run Compose rendering and merged-hardening tests"
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
 	@echo "  test-index-backup  Run backup-index and restore-index tests against a fake docker (no daemon)"
@@ -56,8 +57,9 @@ help:
 # Create placeholder secret files required by Docker Compose.
 # Run this once during initial setup before make up.
 # Each layer (inference / embed / rerank) has one secret file. Each
-# file must exist with mode 600 so the docker-compose ``secrets:``
-# reference resolves cleanly. The file must be NON-EMPTY when its
+# file must exist, since Compose cannot create a container whose
+# ``secrets:`` file is missing, and have mode 600, which validate-env
+# requires of every secret file. The file must be NON-EMPTY when its
 # matching layer is enabled (EMBED_MODE is always enabled;
 # INFERENCE_MODE != none; RERANK_MODE == cohere). For unauthenticated
 # host-side servers (LM Studio, vLLM, mlx_lm.server) write any
@@ -229,9 +231,12 @@ requeue-dead:
 
 # Queue every indexed message for an in-place reparse (#1078), the same
 # statement a migration that needs one ends with. For recovery; the
-# running indexer drains the jobs without embedding calls, except that a
-# thread a drop of stale attachment occurrences leaves with no chunk embeds
-# its subject once (#1375).
+# running indexer drains the jobs, embedding only text with no stored
+# chunk: attachment text a stale cached result now extracts differently,
+# chunks that INDEXER_CHUNK_* budgets changed since indexing cut
+# differently, and the subject of a thread left with no chunk (#1375) or
+# still at the zero placeholder (docs/architecture.md, "Reparse in
+# place").
 reparse:
 	docker exec indexer python -m src.reparse
 
@@ -264,6 +269,9 @@ test-mbsync:
 
 test-mbsync-tls:
 	bash mbsync/tests/tls_check.sh
+
+test-mbsync-host-aliases:
+	bash mbsync/tests/host_alias_check.sh
 
 test-mbsync-layout:
 	bash mbsync/tests/layout_check.sh

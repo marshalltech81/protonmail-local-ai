@@ -16,7 +16,9 @@ The evidence passages and the candidate answer are untrusted (mail is
 attacker-controlled; an answer can repeat it). They sit inside
 ``<untrusted_evidence>`` / ``<untrusted_answer>`` blocks whose
 delimiters they cannot forge, and the system prompt tells the judge to
-treat them as data. The judge gets no tools. This is defense in depth,
+treat them as data. The judge is given no tools (but see ``cli_judge``'s
+known limitation, #827, for Codex models that advertise their own).
+This is defense in depth,
 not immunity: the injection cases test that it holds, not that it must.
 
 Every failure is an explicit evaluation error with a fixed category:
@@ -178,8 +180,7 @@ def build_judge_prompt(
     reference facts the budget left out or cut (``omitted_facts``,
     ``graders.budget_omitted_facts``), the only ones the note can excuse.
 
-    An ``ask_mailbox`` case opens with its question, exactly as before
-    #656; another tool's case opens with the tool and its task
+    An ``ask_mailbox`` case opens with its question; another tool's case opens with the tool and its task
     (``Case.question``), and an extraction says what its numbered
     statements are (#1137)."""
     if case.tool == "ask_mailbox":

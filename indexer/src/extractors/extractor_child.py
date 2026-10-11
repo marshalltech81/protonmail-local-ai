@@ -14,7 +14,7 @@ The module's ``extract_text`` does the whole extraction (for the OOXML
 formats: the pre-open budgets, the library's open and the budgeted
 walk; for ``xls``: xlrd's open and the walk in ``xls_child``; for
 ``image``: the decode and Tesseract in ``image_child``, which takes the
-page cap and OCR timeout as its options, #1292; for ``html``: the
+page cap, OCR timeout and Tesseract path as its options, #1292; for ``html``: the
 conversion of one or more documents in ``html_child``, which takes
 their byte lengths as its options, #1294; for ``pdf``: pypdf, Poppler
 and Tesseract in ``pdf_child``, #1293; for ``container``: the

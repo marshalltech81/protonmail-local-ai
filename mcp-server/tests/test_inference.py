@@ -53,9 +53,10 @@ class TestFactory:
         assert isinstance(c._backend, _AnthropicBackend)
 
     def test_anthropic_with_empty_base_url_omits_kwarg_so_sdk_default_applies(self, monkeypatch):
-        # The Anthropic SDK's default endpoint is the documented contract
-        # for INFERENCE_MODE=anthropic with INFERENCE_BASE_URL=default,
-        # which ``main.py`` passes as an empty ``base_url`` (#750).
+        # An empty ``base_url`` leaves the endpoint to the Anthropic SDK.
+        # ``main.py`` never passes one: it resolves
+        # INFERENCE_BASE_URL=default to https://api.anthropic.com (#750);
+        # only the answer evaluation passes it, for ``default``.
         # The backend must NOT substitute a hardcoded URL constant or
         # pass an empty ``base_url`` kwarg — either would override the
         # SDK default. Verify the kwarg is genuinely ABSENT from the
@@ -81,8 +82,7 @@ class TestFactory:
         )
         assert isinstance(c._backend, _AnthropicBackend)
         # The contract: no ``base_url`` kwarg reaches AsyncAnthropic
-        # for INFERENCE_BASE_URL=default (an empty ``base_url``). ``api_key``
-        # and ``timeout`` still flow through.
+        # for an empty ``base_url``; ``api_key`` still flows through.
         assert "base_url" not in captured["kwargs"]
         assert captured["kwargs"]["api_key"] == "sk-ant-test"  # pragma: allowlist secret
         # After construction, ``self.base_url`` reflects the SDK's
@@ -149,11 +149,12 @@ class TestFactory:
             )
 
     def test_openai_with_empty_base_url_falls_back_to_sdk_default(self, monkeypatch):
-        # An empty ``base_url`` is what ``main.py`` passes for an
-        # explicit ``INFERENCE_BASE_URL=default`` with
-        # ``INFERENCE_MODE=openai`` (#750): "use the SDK default"
-        # (OpenAI proper). Symmetric with ``_AnthropicBackend``'s empty-URL path and
-        # with ``EmbedClient`` / ``OpenAIEmbedder``.
+        # An empty ``base_url`` means "use the SDK default" (OpenAI
+        # proper). ``main.py`` never passes one: it resolves
+        # ``INFERENCE_BASE_URL=default`` to https://api.openai.com/v1
+        # (#750); only the answer evaluation passes it, for ``default``.
+        # Symmetric with ``_AnthropicBackend``'s empty-URL path and with
+        # ``EmbedClient`` / ``OpenAIEmbedder``.
         #
         # Intercept ``AsyncOpenAI`` to confirm ``base_url`` is NOT
         # passed as a kwarg when empty — passing an empty string would
@@ -184,7 +185,7 @@ class TestFactory:
         assert "base_url" not in captured["kwargs"]
         assert captured["kwargs"]["api_key"] == "sk-real"  # pragma: allowlist secret
         # After construction, ``self.base_url`` reflects the SDK's
-        # resolved endpoint, not the empty string the operator typed.
+        # resolved endpoint, not the empty string passed in.
         assert c._backend.base_url == "https://api.openai.com/v1"
 
     def test_openai_with_explicit_base_url_passes_kwarg(self, monkeypatch):
@@ -212,11 +213,9 @@ class TestFactory:
 
     def test_client_re_exposes_backend_base_url(self, monkeypatch):
         # ``main.py`` logs ``inference_client.base_url`` at startup so
-        # operators see the resolved wire endpoint (the SDK default
-        # literal, not the empty string they typed). The class must
-        # re-expose ``backend.base_url`` — without this attribute the
-        # startup log would have to print "(SDK default)" again, which
-        # is too vague in a privacy-sensitive deployment.
+        # operators see the wire endpoint the SDK resolved. The class
+        # must re-expose ``backend.base_url``: a placeholder such as
+        # "(SDK default)" would not name where mail excerpts are sent.
         class FakeAsyncAnthropic:
             def __init__(self, **kwargs):
                 self.base_url = "https://api.anthropic.com"
@@ -285,12 +284,10 @@ class TestComplete:
     def test_anthropic_backend_raises_when_no_text_block(self):
         # A Messages response with only non-text blocks (e.g. tool_use
         # only) is an actionable provider error, not a "successful empty
-        # answer." Pre-fix the backend returned ``""``, which surfaced
-        # to the caller as a blank tool response with no signal that
-        # anything went wrong — structured callers got a confusing
-        # JSONDecodeError two layers down, prose callers passed the
-        # empty string straight to the agent. Raise here so all callers
-        # see a sanitized RuntimeError naming the failure mode.
+        # answer." Returning ``""`` would reach the caller as a blank
+        # tool response with no sign of failure (structured callers would
+        # hit a JSONDecodeError two layers down), so the backend raises a
+        # sanitized RuntimeError naming the failure mode.
         c = InferenceClient.create(
             mode="anthropic",
             base_url="https://api.anthropic.com",
@@ -328,10 +325,9 @@ class TestComplete:
     def test_openai_backend_raises_when_choices_empty(self):
         # OpenAI-compatible servers occasionally return empty
         # ``choices`` (provider error states, content-filter trips).
-        # Pre-fix this raised an opaque ``IndexError`` on
-        # ``resp.choices[0]``; the new contract is a sanitized
-        # RuntimeError naming the failure mode so the operator-facing
-        # log line is actionable.
+        # The contract is a sanitized RuntimeError naming the failure
+        # mode, not an opaque ``IndexError`` on ``resp.choices[0]``, so
+        # the operator-facing log line is actionable.
         c = InferenceClient.create(
             mode="openai",
             base_url="http://x/v1",
@@ -347,10 +343,8 @@ class TestComplete:
             asyncio.run(c.complete("sys", "user"))
 
     def test_openai_backend_raises_when_content_none(self):
-        # A ``message.content=None`` case (tool-call-only delta,
-        # length-truncated response) was previously coerced to ``""``
-        # via ``or ""`` and returned as a successful empty answer. Now
-        # it raises so the failure is visible.
+        # A ``message.content=None`` (tool-call-only delta) is not an
+        # answer: it raises so the failure is visible.
         c = InferenceClient.create(
             mode="openai",
             base_url="http://x/v1",
@@ -368,9 +362,8 @@ class TestComplete:
             asyncio.run(c.complete("sys", "user"))
 
     def test_openai_backend_raises_when_content_empty_string(self):
-        # The ``or ""`` coercion previously swallowed an explicit
-        # empty string too. Reject the same way as None — both are
-        # "no answer" signals from the provider.
+        # An explicit empty string is rejected the same way as None:
+        # both are "no answer" signals from the provider.
         c = InferenceClient.create(
             mode="openai",
             base_url="http://x/v1",
@@ -437,8 +430,7 @@ class TestComplete:
         # The Chat Completions API accepts ``max_tokens`` and most
         # OpenAI-compatible servers (vLLM, mlx_lm.server, LM Studio,
         # DeepInfra) honor it. INFERENCE_MAX_TOKENS must reach the
-        # OpenAI path too — pre-fix the kwarg was silently dropped, so
-        # an operator who set the env var saw no effect in OpenAI mode.
+        # OpenAI path too, or setting the env var has no effect in OpenAI mode.
         c = InferenceClient.create(
             mode="openai",
             base_url="http://x/v1",
@@ -458,9 +450,9 @@ class TestComplete:
 
 
 class TestTruncatedOutput:
-    """#222: a response cut off at max_tokens was returned as if complete,
-    so truncated JSON read as "no data" and prose answers ended mid-way
-    with no marker."""
+    """#222: a response cut off at max_tokens raises with its partial
+    text, so truncated JSON never reads as "no data" and a cut prose
+    answer can be marked."""
 
     def _openai(self):
         return InferenceClient.create(mode="openai", base_url="http://x/v1", model="m", api_key="k")
@@ -531,8 +523,8 @@ class TestTruncatedOutput:
 
 
 class TestFilteredOutput:
-    """Review round 1: a provider that stops an answer with a content
-    filter / refusal returned its prefix as a finished answer."""
+    """A provider that stops an answer with a content filter or a
+    refusal raises; its prefix never passes as a finished answer."""
 
     def test_openai_content_filter_is_an_error(self, monkeypatch):
         c = InferenceClient.create(mode="openai", base_url="http://x/v1", model="m", api_key="k")
@@ -564,7 +556,7 @@ class TestFilteredOutput:
             asyncio.run(c.complete("sys", "user"))
 
     def test_anthropic_context_window_stop_is_truncation(self, monkeypatch):
-        """Review round 2: a context-window stop cuts the answer off just
+        """A context-window stop cuts the answer off just
         like max_tokens does."""
         c = InferenceClient.create(mode="anthropic", base_url="", model="m", api_key="k")
 
@@ -578,7 +570,7 @@ class TestFilteredOutput:
         with pytest.raises(InferenceTruncatedError) as err:
             asyncio.run(c.complete("sys", "user"))
         assert err.value.partial == "Partly"
-        # Codex review round 2 on #883: the stop reason is kept as a fixed
+        # #883: the stop reason is kept as a fixed
         # value. #890: the message names INFERENCE_CONTEXT_TOKENS, not the
         # output reserve, which a context-window stop is not about.
         assert err.value.reason == "context_window"

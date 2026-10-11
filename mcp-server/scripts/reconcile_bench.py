@@ -1360,8 +1360,8 @@ MESSAGE_FILTERS: tuple[dict, ...] = (
     {"where": {"all": _WHERE_LEAVES}},
     {"where": {"all": [{"any": _WHERE_LEAVES[:8]}, *_WHERE_LEAVES[8:15]]}},
 )
-# ``query_attachments`` takes the message leaves except subject, body
-# text and authority, plus its own: a filename substring (casefolded,
+# ``query_attachments`` takes the message filters sender, recipient,
+# participant, folder and dates, plus its own: a filename substring (casefolded,
 # over sender-controlled text), MIME type, extraction status, carrying
 # claimant and thread (``thread_id`` is filled in per corpus).
 OCCURRENCE_FILTERS: tuple[dict, ...] = (
@@ -1422,9 +1422,11 @@ def phase_filtered(db_path: str, kind: str, filters: dict, rotate: int = 0) -> d
 
 
 def write_request_shape(out: Path, shape: str, n: int) -> int:
-    """A synthetic upload of ``n`` digests in ``shape``, or for
+    """A synthetic upload of ``n`` digests in ``shape``; for
     ``short_array`` as many two-character strings as fit in the byte
-    size of ``n`` hex digests; returns its size in bytes."""
+    size of ``n`` hex digests, and for ``packed_junk`` an empty packed
+    upload with as many junk strings as fit in the size of ``n`` packed
+    digests; returns its size in bytes."""
     if shape == "packed":
         digests = b"".join(hashlib.sha256(str(i).encode()).digest() for i in range(n))
         body = json.dumps({"hashes": base64.b64encode(digests).decode()}).encode()
@@ -3016,8 +3018,8 @@ MAX_ATTACHMENTS = 10_000 - 2
 MAX_EXTRACTED_CHARS = 10_000_000
 # ``message_id`` and ``_wide_digits`` stay unique below this.
 MAX_MESSAGES = 2**30
-# The most digits an upload holds: built in memory (430 MB packed),
-# over 16 times the proposed caps.
+# The most digests an upload holds: built in memory (430 MB packed),
+# over 16 times the largest upload #1469's sizing runs send (600,000).
 MAX_UPLOAD = 10_000_000
 
 

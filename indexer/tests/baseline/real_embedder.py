@@ -20,8 +20,8 @@ flips between repeats.
 
 Vectors are cached in ``<cache_dir>/vectors.sqlite`` (git-ignored,
 mode 600) under a key of the text and the whole request it was sent
-in, the repeat number and the embedding identity (endpoint, a digest
-of the whole base URL, model, batch size, dimensions, SDK and
+in, the repeat number and the embedding identity (the whole endpoint
+URL, model, request shape and batch size, dimensions, SDK and
 encoding), so a rerun with an unchanged
 corpus and configuration sends nothing, and a change re-sends whole
 every request it changed. Delete the cache to measure the variation
@@ -157,8 +157,8 @@ ARGUMENTS: tuple[Argument, ...] = (
     Argument("--secrets-dir", "flag", "secrets_dir"),
     # At least two: the variation is measured between repeats.
     Argument("--repeats", "flag", "int", minimum=2, maximum=5, default="2"),
-    # One repeat is about 100 requests at the default batch size: seven
-    # chunk batches, one calibration and one per query (92, each sent
+    # One repeat is about 90 requests at the default batch size: seven
+    # chunk batches, one calibration and one per query (82, each sent
     # alone as mcp-server sends a search query).
     Argument("--max-requests", "flag", "int", minimum=1, maximum=1000, default="250"),
     # The indexer's own default (``EMBED_BATCH_SIZE``).

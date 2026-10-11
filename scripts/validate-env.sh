@@ -11,6 +11,11 @@ readonly RERANK_KEY_FILE="${ROOT_DIR}/.secrets/rerank_api_key.txt"
 readonly MCP_TOKEN_FILE="${ROOT_DIR}/.secrets/mcp_auth_token.txt"
 readonly AUTHORITY_FILE="${ROOT_DIR}/config/authority.toml"
 readonly IDENTITY_FILE="${ROOT_DIR}/config/identity.toml"
+# The Proton settings' defaults and validators, the file mbsync's
+# entrypoint sources in the image (PLAN.md decision 46).
+readonly PROTON_SETTINGS_FILE="${ROOT_DIR}/mbsync/proton-settings.sh"
+# shellcheck source=mbsync/proton-settings.sh disable=SC1091 # linted on its own
+source "$PROTON_SETTINGS_FILE"
 
 require_file() {
     local path="$1"
@@ -259,8 +264,9 @@ require_private_optional_file() {
 }
 
 # API keys are wired as Docker secrets (see ``secrets:`` in
-# docker-compose.yml). Putting them in ``.env`` would surface them in
-# ``docker inspect`` and is therefore disallowed.
+# docker-compose.yml), so a key in ``.env`` is refused: Compose passes
+# no ``*_API_KEY`` variable to the containers, so it would never be
+# used, and it would sit in ``.env``, which is not held to mode 600.
 reject_secret_in_env() {
     local key_name="$1"
     local secret_path="$2"
@@ -446,10 +452,13 @@ env_value() {
 }
 
 # env_value with surrounding whitespace removed, for the values the
-# Python services read with ``.strip()``: every number, boolean and mode
-# below. SYNC_INTERVAL and SYNC_DEADLINE_SECONDS (mbsync's shell),
-# MCP_PORT (also Compose's port mapping), URLs and model names are
-# passed on unstripped, so they are read with env_value.
+# Python services read with ``.strip()``: every number and boolean
+# below, and EMBED_MODEL and RERANK_MODEL (modes are read with env_value
+# and trimmed by normalize_mode). SYNC_INTERVAL and
+# SYNC_DEADLINE_SECONDS (mbsync's shell), MCP_PORT (also Compose's port
+# mapping) and URLs are passed on unstripped, so they are read with
+# env_value (resolve_base_url trims a URL itself); INFERENCE_MODEL is
+# read both ways, since only an empty value takes Compose's default.
 env_value_stripped() {
     local value
 
@@ -515,10 +524,9 @@ check_mcp_token
 # fallback: choosing a mode without its required vars is a startup error.
 #
 # *_API_KEY values must never appear in .env: they are wired as Docker
-# secrets in docker-compose.yml. A key pasted into .env would leak into
-# ``docker inspect`` output and silently mask the secret-file value,
-# since both services read the secret file first and only fall back to
-# the env var.
+# secrets in docker-compose.yml (see reject_secret_in_env). Under
+# Compose the secret file always exists, and both services read it
+# first, falling back to the env var only when the file is absent.
 reject_secret_in_env "INFERENCE_API_KEY" "$INFERENCE_KEY_FILE"
 reject_secret_in_env "EMBED_API_KEY" "$EMBED_KEY_FILE"
 reject_secret_in_env "RERANK_API_KEY" "$RERANK_KEY_FILE"
@@ -582,6 +590,30 @@ BRIDGE_CERT_FINGERPRINT_HEX="$(printf '%s' "${BRIDGE_CERT_FINGERPRINT_HEX//:/}" 
     echo "ERROR: BRIDGE_CERT_FINGERPRINT in .env must be the SHA-256 fingerprint of the Bridge app's certificate: 64 hex digits, with or without colons (docs/setup.md, step 4.3)." >&2
     exit 1
 }
+
+# The Proton settings, checked by the same function mbsync's entrypoint
+# runs (mbsync/proton-settings.sh) on the values Compose passes it: an
+# empty one takes the default, and BRIDGE_HOST is compared without
+# surrounding whitespace, in lower case. The text is fixed and never
+# repeats the value. As env_value resolves them, except that a value
+# exported in the calling shell is kept as it is: a command substitution
+# would drop its trailing newlines, which the entrypoint refuses.
+for name in BRIDGE_HOST BRIDGE_CERT_HOST PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME \
+    PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME; do
+    if [[ -z "${!name+set}" ]]; then
+        printf -v "$name" '%s' "$(get_env_value "$name")"
+    fi
+done
+BRIDGE_HOST="$(proton_normalize_bridge_host "${BRIDGE_HOST:-$PROTON_DEFAULT_BRIDGE_HOST}")"
+if ! proton_problem="$(proton_settings_problem "$BRIDGE_HOST" \
+    "${BRIDGE_CERT_HOST:-$PROTON_DEFAULT_BRIDGE_CERT_HOST}" \
+    "${PROTON_IMAP_ACCOUNT_NAME:-$PROTON_DEFAULT_IMAP_ACCOUNT_NAME}" \
+    "${PROTON_REMOTE_STORE_NAME:-$PROTON_DEFAULT_REMOTE_STORE_NAME}" \
+    "${PROTON_LOCAL_STORE_NAME:-$PROTON_DEFAULT_LOCAL_STORE_NAME}" \
+    "${PROTON_CHANNEL_NAME:-$PROTON_DEFAULT_CHANNEL_NAME}")"; then
+    printf 'ERROR: %s\n' "$proton_problem" >&2
+    exit 1
+fi
 
 # ----- INFERENCE -----
 INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-none}")"
@@ -760,6 +792,8 @@ fi
 if [[ -n "$INDEXER_RETRY_BASE_SECONDS" ]]; then
     require_integer_min "INDEXER_RETRY_BASE_SECONDS" "$INDEXER_RETRY_BASE_SECONDS" 1
 fi
+# The stall guard's per-message timeout (main._int_env, minimum 0; 0
+# disables it), not a queue setting.
 if [[ -n "$INDEXER_MESSAGE_TIMEOUT_SECONDS" ]]; then
     require_integer_min "INDEXER_MESSAGE_TIMEOUT_SECONDS" "$INDEXER_MESSAGE_TIMEOUT_SECONDS" 0
 fi
@@ -930,8 +964,9 @@ require_private_optional_file "$IDENTITY_FILE"
 # - ``RERANK_MODE=cohere``: requires a non-empty rerank key.
 #
 # Disabled inference / rerank layers (``*_MODE=none``) can leave the
-# file empty; the file must still exist with mode 600 so the
-# docker-compose ``secrets:`` reference resolves cleanly.
+# file empty; the file must still exist, since Compose cannot create a
+# container whose ``secrets:`` file is missing, and have mode 600 (checked
+# above for every secret file).
 if [[ "$INFERENCE_MODE" != "none" ]]; then
     require_nonempty_file "$INFERENCE_KEY_FILE" "Inference API key"
 fi

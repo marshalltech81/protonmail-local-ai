@@ -131,9 +131,9 @@ class TestBatchComposition:
         _add(queue, "/f/due", REASON_ON_CREATED, 2)
         assert [r["filepath"] for r in queue.claim_batch(8)] == ["/f/due", "/r/due"]
 
-    def test_first_index_order_is_unchanged(self, queue):
-        """No reparse rows: the batch is the oldest due rows, as before
-        (#699), whatever the reason."""
+    def test_first_index_order_is_oldest_due_first(self, queue):
+        """No reparse rows: the batch is the oldest due rows (#699),
+        whatever the reason."""
         dues = [7, 3, 9, 1, 5, 2]
         for i, minutes in enumerate(dues):
             reason = REASON_RECOVERY if i == 2 else REASON_INITIAL_SCAN
@@ -361,8 +361,8 @@ class TestPipeline:
         assert sorted(rows) == sorted([*paths, *fresh])
         for row in rows.values():
             assert (row["status"], row["attempts"]) == (STATUS_QUEUED, 0)
-        # The batch held both fresh rows and one reparse row; the two
-        # reparse rows left out of it were never touched.
+        # The batch held both fresh rows and two reparse rows; the third
+        # reparse row, left out of it, was never touched.
         claimed = [fp for fp, row in rows.items() if row["last_error_class"] is not None]
         assert sorted(claimed) == sorted([*fresh, *paths[:2]])
         assert {rows[fp]["last_error_class"] for fp in claimed} == {"retryable"}

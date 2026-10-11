@@ -20,9 +20,9 @@ A migration that adds per-message data only the parser produces (a new
 ``queue.REPARSE_ENQUEUE_SQL``, copied verbatim: it queues every indexed
 file with reason ``reparse`` and leaves existing jobs (pending,
 retrying, dead) alone, and the worker re-parses them afterwards without
-embedding calls (#1078; docs/architecture.md, "Reparse in place"). Do
-not parse mail inside a migration: it runs under one write lock with
-no progress, retries or dead-letter path.
+re-embedding unchanged chunks (#1078; docs/architecture.md, "Reparse in
+place"). Do not parse mail inside a migration: it runs under one write
+lock with no progress, retries or dead-letter path.
 """
 
 from __future__ import annotations
@@ -67,7 +67,8 @@ def discover_migrations(directory: Path) -> list[tuple[int, Path]]:
 
     Sorted ascending by version. Raises ``RuntimeError`` if any
     filename does not match the expected ``NNNN_<slug>.sql`` shape, if
-    a version of ``0000`` appears (reserved — pre-runner state), or if
+    a version of ``0000`` appears (reserved: version 0 is the initial
+    schema ``Database._apply_initial_schema`` builds), or if
     two files share a version.
     """
     found: list[tuple[int, Path]] = []

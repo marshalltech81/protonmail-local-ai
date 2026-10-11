@@ -22,7 +22,8 @@ Input contract:
   upstream: ``chunk_segments`` takes the ``(kind, text)`` segments and
   chunks each on its own, so a chunk never spans kinds (#646).
 - ``char_start`` / ``char_end`` are offsets into the *normalized* body the
-  chunker produced (CRLF → LF, runs of 3+ blank lines collapsed to 2;
+  chunker produced (CRLF → LF, runs of three or more newlines collapsed
+  to two, leading and trailing newlines dropped;
   for several segments, the normalized segments joined by a blank
   line). Offsets are stable across runs for the same input but are not
   offsets into the raw ``.eml`` source — map back through the same
@@ -43,14 +44,13 @@ from typing import Literal, get_args
 from tokenizers import Tokenizer
 
 # Path to the bundled HuggingFace tokenizer.json for
-# ``Qwen/Qwen3-Embedding-8B`` — used by ``estimate_tokens`` so chunk
-# size budgets reflect real BPE token counts instead of a
-# 4-chars-per-token heuristic that under-counted CJK / URL / Base64 /
-# code text by 4-6× and produced chunks past the embed model's
-# practical context window. Tokenizer is matched to Qwen3-Embedding-8B
-# (the schema-default embedding model); the file is vendored from the
-# model's HuggingFace repo so the indexer never performs a runtime
-# download.
+# ``Qwen/Qwen3-Embedding-8B`` — used by ``estimate_tokens`` so chunk size
+# budgets reflect real BPE token counts: a 4-chars-per-token estimate
+# under-counts CJK / URL / Base64 / code text by 4-6× and would let chunks
+# exceed the embed model's practical context window. Tokenizer is matched to
+# Qwen3-Embedding-8B (the model the 4096-dim schema was sized for), whatever
+# EMBED_MODEL is; the file is vendored from the model's HuggingFace repo so
+# the indexer never performs a runtime download.
 _TOKENIZER_PATH = Path(__file__).parent / "data" / "qwen3-embedding" / "tokenizer.json"
 
 # Paragraph: one or more non-blank lines separated from the next paragraph
@@ -187,7 +187,7 @@ _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES = 8192
 def _cached_estimate_tokens(text: str) -> int:
     """Cached path for ``estimate_tokens`` — only invoked for short text.
 
-    The size-gating wrapper above ensures we never insert a large
+    The size-gating wrapper ``estimate_tokens`` ensures we never insert a large
     string into the cache, so the entry-count-based ``maxsize`` is
     also a memory bound. ``maxsize=1024`` is well above the typical
     chunker working set per message (a few dozen unique spans) and
@@ -204,11 +204,9 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
     index that might split a multi-byte codepoint or a token mid-way).
     Returns the input unchanged when it already fits.
 
-    Used for thread-level body caps (``THREAD_BODY_TEXT_MAX_TOKENS``)
-    so the cap aligns with the embed model's actual context budget.
-    A char-based cap under-counted CJK / URL / Base64 / dense code
-    text by 4-6× and forced unnecessarily aggressive truncation in
-    ASCII-heavy threads.
+    Used for the thread FTS body cap (``THREAD_BODY_TEXT_MAX_TOKENS``;
+    the thread body is keyword-indexed, not embedded) and the first
+    chunk's subject prefix.
     """
     if not text or max_tokens <= 0:
         return ""
@@ -228,10 +226,9 @@ def estimate_tokens(text: str) -> int:
     """Return the real BPE token count for ``text``.
 
     Uses the bundled Qwen3-Embedding-8B tokenizer so chunk-size budgets
-    line up with the embed model's practical context window. The
-    previous char-count heuristic under-counted CJK / URL / Base64 /
-    dense code text by 4-6×, producing chunks that exceeded the embed
-    model's context.
+    line up with the embed model's practical context window; a
+    char-count estimate under-counts CJK / URL / Base64 / dense code
+    text by 4-6×.
 
     Special tokens are not added — the embed service adds those on the
     server side, so counting them here would double-count.
@@ -264,7 +261,7 @@ def normalize_body(body_text: str) -> str:
     if not body_text:
         return ""
     text = body_text.replace("\r\n", "\n").replace("\r", "\n")
-    # Runs of 3+ blank lines are almost always formatting noise
+    # Runs of three or more newlines are almost always formatting noise
     # (signature padding, Outlook-style spacing). Collapsing them keeps
     # paragraph detection simple and offsets stable.
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -290,7 +287,8 @@ def chunk_message(
     word and then token boundaries to meet it.
     ``overlap_tokens`` is the approximate size of the tail carried from
     the previous chunk into the next — overlap is always carried as whole
-    paragraph-spans, never mid-sentence. Every chunk gets ``kind``.
+    spans (a paragraph, or the sentence, word or token piece an oversized
+    paragraph was split into). Every chunk gets ``kind``.
     """
     return chunk_segments(
         message_pk=message_pk,
@@ -327,7 +325,7 @@ def chunk_segments(
 
     chunks: list[MessageChunk] = []
     # Index of the next packed group. A group that renders empty is
-    # skipped with its index, as before segments existed.
+    # skipped with its index.
     index = 0
     # Offset of the current segment in the joined normalized text.
     offset = 0
@@ -465,7 +463,8 @@ def _split_by_sentence(span: _Span, source: str, max_tokens: int) -> list[_Span]
 
 
 def _split_by_word(span: _Span, source: str, max_tokens: int) -> list[_Span]:
-    """Last-resort splitter for single sentences larger than ``max_tokens``.
+    """Splitter for single sentences larger than ``max_tokens``; a word
+    still over the ceiling goes to ``_split_by_tokens``.
 
     Budgets by the rendered slice length, not by summing per-word token
     estimates — the rendered chunk includes the whitespace between words,
@@ -548,11 +547,11 @@ def _first_overflow(text: str, start: int, ends: list[int], lo: int, max_tokens:
     """Return the first ``i >= lo`` whose ``text[start:ends[i]]`` is over ``max_tokens``.
 
     Returns ``len(ends)`` when none is; ``ends`` are increasing offsets
-    into ``text``. The splitters used to count the prefix up to every
-    sentence or word end in turn, re-tokenizing about the ceiling's worth
-    of text per sentence or word: some 400 times the paragraph at the
-    production budgets (#673). Instead one window from ``start``, a few
-    times the ceiling in size, is tokenized, and its token offsets give a
+    into ``text``. Counting the prefix up to every sentence or word end
+    in turn would re-tokenize about the ceiling's worth of text per
+    sentence or word: some 400 times the paragraph at the production
+    budgets (#673). Instead one window from ``start``, a few times the
+    ceiling in size, is tokenized, and its token offsets give a
     guess: the first end with more than ``max_tokens`` tokens before it.
     BPE counts are not additive, so a prefix counted on its own can differ
     from the window's count near the cut. Exact counts then settle it:
@@ -620,7 +619,8 @@ def _leading_trim(source: str, start: int, end: int) -> int:
     (#433). Tabs that do not open a line (a split mid-row) are dropped:
     the column of the value after them is unknown there. Nor can a chunk
     keep a run of tabs too long to fit in it (about 16 tabs per token, so
-    over ~7,800 empty leading cells at the default 500-token ceiling):
+    over ~7,800 empty leading cells per 500 tokens of ``max_tokens``,
+    about three times that at the indexer's default 1500):
     ``_split_by_tokens`` drops the tab-only slices and the value's slice
     starts mid-run, so that value still loses its column. One linear scan
     over the leading whitespace, then one back over the tabs it ends with.

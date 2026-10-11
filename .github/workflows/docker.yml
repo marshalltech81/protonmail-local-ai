@@ -1,11 +1,16 @@
 name: Docker
 
 # Runs when a build input changes: the three build contexts, the
-# Compose files, .env.example (copied to .env), the Makefile (make
+# docker-compose*.yml files, .env.example (copied to .env), the Makefile (make
 # init-secrets) and this file, and weekly, like security.yml, so the
-# image scan below sees advisories published since the last build. The
-# main ruleset requires no status checks, so a skipped run blocks no
-# merge.
+# image scan below sees advisories published since the last build.
+#
+# On main the push trigger filters by those paths. A pull request always
+# starts the workflow, so every job reports a check (#1559): the
+# `changes` job compares the PR's merge commit with its base and the
+# other jobs run only when a file matching the same paths changed, and
+# are skipped otherwise (a skipped job passes a required check). Keep
+# the push filter and the changes job's list the same.
 on:
   push:
     branches: [main]
@@ -19,14 +24,6 @@ on:
       - ".github/workflows/docker.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "mbsync/**"
-      - "indexer/**"
-      - "mcp-server/**"
-      - "docker-compose*.yml"
-      - ".env.example"
-      - "Makefile"
-      - ".github/workflows/docker.yml"
   schedule:
     - cron: "0 8 * * 0"
   workflow_dispatch:
@@ -43,8 +40,50 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decides whether the jobs below run; it works as security.yml's
+  # changes job does. A failure here runs them rather than skipping
+  # them.
+  changes:
+    name: docker inputs changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Compare the pull request with its base
+        id: diff
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            printf 'run=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git rev-parse --verify --quiet HEAD^2 > /dev/null
+          changed="$(git diff --name-only HEAD^1 HEAD -- \
+            ':(glob)mbsync/**' \
+            ':(glob)indexer/**' \
+            ':(glob)mcp-server/**' \
+            ':(glob)docker-compose*.yml' \
+            ':(glob).env.example' \
+            ':(glob)Makefile' \
+            ':(glob).github/workflows/docker.yml')"
+          if [[ -n "$changed" ]]; then
+            printf 'Build inputs changed:\n%s\n' "$changed"
+            printf 'run=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'No build input changed; the jobs are skipped.\n'
+            printf 'run=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
   compose-config:
     name: docker compose config
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -63,7 +102,10 @@ jobs:
     name: docker compose build
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: compose-config
+    # Runs only after compose-config passed, as before the gate;
+    # compose-config is skipped exactly when the gate says false.
+    needs: [changes, compose-config]
+    if: ${{ !cancelled() && needs.changes.outputs.run != 'false' && needs.compose-config.result == 'success' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

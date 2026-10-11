@@ -16,16 +16,22 @@ The dispatcher itself is the only place that:
 * honors ``INDEXER_OCR_ENABLED`` (a single switch turns off all OCR
   paths — image extraction and the scanned-PDF fallback — if the
   operator wants to disable Tesseract entirely);
-* turns extractor exceptions into ``failed`` ``ExtractionResult`` rows
-  rather than letting them bubble into the indexer queue and dead-
-  letter the parent message.
+* turns an extractor exception into a ``failed`` ``ExtractionResult``
+  row (``unsupported`` for a permanent one, ``PERMANENT_FAILURE_ERRORS``)
+  rather than letting it bubble into the indexer queue and dead-letter
+  the parent message; ``MemoryError`` and ``RecursionError`` propagate
+  as host pressure.
 
 Per-format extractors live in sibling modules and are intentionally
 tiny — they exist so each MIME type's library can be lazy-imported
 (see ``_safe_import``). A missing optional dependency for a rare
 format does not break the indexer; it surfaces as
 ``status="unsupported"`` with an extractor-specific error message
-operators can act on.
+operators can act on. That holds for modules imported only on dispatch that
+import their library in the indexer (``docx``, ``pptx``, ``xlsx``). A
+library missing from the extractor child (``pdf``, ``image``, ``xls``) is
+recorded ``failed`` by type name, and ``html`` is imported by the parser
+at load, so a missing ``html2text`` stops the indexer.
 """
 
 from __future__ import annotations
@@ -57,9 +63,10 @@ from ._runner import ChildError
 defusedxml.defuse_stdlib()
 
 
-# Process-wide cap for ALL PIL consumers — the standalone image
-# extractor here AND any transitive PIL user (pypdf rendering embedded
-# document images, openpyxl chart graphics, etc.). Set at module import
+# Process-wide cap for every PIL consumer except the image extractor's
+# child, which sets its own ceiling (``image.CHILD_MAX_IMAGE_PIXELS``):
+# transitive PIL users (pypdf rendering embedded document images,
+# openpyxl chart graphics, etc.). Set at module import
 # time so the cap applies uniformly the first time any indexer code
 # path reaches PIL.
 #
@@ -89,8 +96,8 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 # (#871), per extraction attempt, since the last drain:
 #
 # * ``pdf_pages_failed``: PDF pages whose text layer pypdf could not read.
-#   The PDF extractor skips such a page (one DEBUG line each) and counts
-#   it here, so a parser regression is visible without a line per page.
+#   The PDF child skips such a page and counts it here, so a parser
+#   regression is visible without a line per page.
 # * ``pdf_pages_unrecovered``: those of them whose text was never
 #   recovered (OCR off, a digital return before OCR, OCR reading nothing,
 #   or the OCR cap leaving the page unread).
@@ -104,18 +111,22 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 #   frames are not counted: the image extractor seeks one frame past
 #   the cap rather than walk the whole frame chain.
 # * ``extractor_caps``: caps inside an extractor that cut what it
-#   returned (#903), one per cap per extraction attempt: the dispatcher's
-#   ``max_extracted_chars``, the PDF digital-page cap, the OCR DPI
-#   lowered to fit the page-pixel budget, the XLSX node, cell and
-#   text budgets, the catdoc output byte cap, and the XLS sheet, cell
-#   and text budgets (#935). Each also logs a rate-limited WARNING
-#   naming the cap.
+#   returned (#903), one per cap per extraction attempt: every cap an
+#   extractor reports through ``warn_extractor_cap``, for example the
+#   dispatcher's ``max_extracted_chars``, the PDF digital-page cap, the
+#   OCR DPI lowered to fit the page-pixel budget, the XLSX, XLS, DOCX
+#   and PPTX walk budgets and the catdoc output byte cap (#935). Each
+#   also logs a rate-limited WARNING naming the cap.
 # * ``parser_caps_messages``: messages a parser work cap cut (#872),
 #   counted here so the parser's per-message line can be rate limited
-#   without losing a message (review round 5 on #884).
-# * ``warnings_suppressed``: per-item WARNINGs (failed extraction, OCR
-#   cap, OCR fallback failure, extractor cap, parser cap) that the rate
-#   limit below withheld (the budget's ``attachment`` bucket).
+#   without losing a message (#884).
+# * ``parser_recipients_merged_messages`` /
+#   ``parser_sender_ambiguous_messages``: messages whose repeated To/Cc
+#   headers were merged, or whose From was ambiguous (#1144).
+# * ``warnings_suppressed``: per-attachment lines sent through
+#   ``warn_rate_limited`` (failures, declines, caps, child degradation
+#   and the like) that the rate limit below withheld (the budget's
+#   ``attachment`` bucket).
 # * the budget's ``line`` bucket: the repeated indexer lines that share
 #   the rate limit (embed retries and recoveries, health-file and
 #   ingestion-state failures, #873, and the parser's repeated-header
@@ -123,8 +134,8 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 #   per-message terminal, retry and dead-letter lines, #1320), withheld. Counted
 #   apart from the attachment WARNINGs, and reported on the queue
 #   heartbeat as ``suppressed_lines``, because a suppressed embed or
-#   repeated-header line says nothing about attachment text (Codex
-#   round 2 on #904, round 3 on #1158).
+#   repeated-header line says nothing about attachment text (#904,
+#   #1158).
 #
 # Kept in this always-imported module because ``pdf`` is imported lazily.
 # A few integers and a window start: the state stays bounded.
@@ -149,7 +160,7 @@ _eml_filenames_degraded = 0
 _eml_charsets_degraded = 0
 
 # At most this many per-attachment WARNINGs per window, shared by every
-# kind (review rounds 1 and 2 on #884): a sender can attach many distinct
+# kind (#884): a sender can attach many distinct
 # malformed or over-long files, and one line each could flood the
 # retained log. The rest are counted.
 _WARNINGS_PER_WINDOW = 20
@@ -521,8 +532,8 @@ def warn_rate_limited(
     unless this window's budget is spent; then count it as suppressed:
     in ``warnings_suppressed`` for an attachment line (the default), or
     in the heartbeat's ``suppressed_lines`` for any other indexer line
-    (``attachment=False``). ``args`` must be counts, module names, type
-    names or fixed text. Returns whether the line was logged."""
+    (``attachment=False``). ``args`` must be counts, paths, module names,
+    type names or fixed text. Returns whether the line was logged."""
     bucket = _ATTACHMENT_LINES if attachment else _OTHER_LINES
     return _LINE_BUDGET.log(logger, bucket, msg, *args, level=level)
 
@@ -548,13 +559,16 @@ class ExtractionResult:
     * ``"unsupported"`` — no extractor registered for this MIME type
       *or* the format's optional dependency is missing in this image,
       or the extractor declined in a way the same bytes always repeat
-      (``PERMANENT_FAILURE_ERRORS``, #931).
+      (``PERMANENT_FAILURE_ERRORS``, #931), or the input needs OCR while
+      it is off (``OCR_DISABLED_ERROR``, re-run once OCR is on).
     * ``"too_large"`` — payload exceeded ``max_bytes``.
     * ``"failed"`` — extractor raised; ``error`` records the exception
-      type only, since its message can quote the document. Indexer
-      treats this as terminal for the attachment (won't keep
-      retrying), but a future re-extraction sweep can re-run after a
-      library upgrade.
+      type only, since its message can quote the document. The cached
+      row is honoured for 7 days (``_FAILED_CACHE_MAX_AGE``), then
+      re-run when the same bytes are processed again; an
+      ``EXTRACTOR_VERSIONS`` bump re-runs it at startup while
+      extraction is enabled (a dead-lettered message waits for
+      ``make requeue-dead``).
 
     ``ocr_pages_skipped`` is the scanned pages the PDF OCR page cap left
     unread (#891): set on a ``success`` or ``empty`` PDF result (0 when
@@ -580,14 +594,15 @@ class ExtractionResult:
 
     ``identifier`` (#1416) records how the payload's container was
     certified: ``CONTAINER_IDENTIFIER`` when it starts with an OLE2 or
-    ZIP signature and its directory was identified
-    (``container.identify``) before dispatch, ``NOT_CONTAINER_IDENTIFIER``
-    when it starts with neither signature of the current set, so no
-    identification applies to it, and ``None`` when no
-    dispatch ran (``too_large``). Kept on the cached row
+    ZIP signature, so its directory went through identification
+    (``container.identify``) before dispatch, whatever that
+    identification's outcome (a ``failed`` one included),
+    ``NOT_CONTAINER_IDENTIFIER`` when it starts with neither signature
+    of the current set, so no identification applies to it, and ``None``
+    when no dispatch ran (``too_large``). Kept on the cached row
     (``attachment_extractions.identifier``): a row with none, or one an
-    older identification or signature-set version certified, is refreshed
-    (``attachment_indexing.identification_due``).
+    older identification or signature-set version certified, is
+    refreshed (``attachment_indexing.identification_due``).
     """
 
     status: str
@@ -719,8 +734,7 @@ class ExtractionResult:
 # failed row is re-run only when its bytes are extracted again, so the
 # bump is what makes the startup sweep re-queue them; it re-OCRs every
 # cached image payload once (about 3,460 on the live index) and clears
-# ``text_complete`` on them until re-indexed (owner approved). A later
-# image change (#1413 routing) takes 5 or higher.
+# ``text_complete`` on them until re-indexed (owner approved).
 # image 5: the "OCR disabled" result of an image is stamped ``image@5``
 # (#1415), so a row recorded with no stamp, which may be a PDF sent
 # under an image label from before the routing to ``pdf``, is re-run
@@ -875,10 +889,10 @@ NO_EXTRACTOR_ERROR = "no extractor for this content type or filename extension"
 LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office file)"
 
 # ``unsupported`` error for a payload labelled ``.ppt`` /
-# ``application/vnd.ms-powerpoint`` that is not an OLE2 compound file
-# (#957): the ``ppt`` extractor reads only OLE2. Kept apart from "no
-# extractor" so the row holds for later ``.ppt`` occurrences instead of
-# re-running on each (``attachment_indexing``).
+# ``application/vnd.ms-powerpoint`` that is neither OLE2 nor ZIP (#957; an
+# OLE2 or ZIP payload is identified by its directory, #1416). Kept apart
+# from "no extractor" so the row holds for later ``.ppt`` occurrences
+# instead of re-running on each (``attachment_indexing``).
 NON_OLE2_PPT_ERROR = "not an OLE2 compound file (labelled legacy .ppt)"
 
 # ``unsupported`` error for a payload under a legacy ``.doc`` / ``.xls`` label
@@ -921,7 +935,7 @@ CONTAINER_IDENTIFIER = f"container@{CONTAINER_IDENTIFICATION_VERSION}"
 # against an older set is checked again, re-extracted if its payload now
 # carries a signature and otherwise restamped with its result kept.
 # ``test_the_signature_set_is_pinned_to_its_version`` pins the pair. 2:
-# the empty ZIP64 archive's lead record (review round 8 on #1444).
+# the empty ZIP64 archive's lead record (#1444).
 CONTAINER_SIGNATURE_VERSION = 2
 NOT_CONTAINER_IDENTIFIER = f"none@{CONTAINER_SIGNATURE_VERSION}"
 
@@ -994,15 +1008,15 @@ _MIME_DISPATCH: dict[str, str] = {
     # Word templates (``.dotx``): the DOCX extractor loads the template
     # main part (#937).
     "application/vnd.openxmlformats-officedocument.wordprocessingml.template": "docx",
-    # Legacy ``.doc`` / ``.xls`` labels select the legacy extractors for
-    # an OLE2 payload, and the OOXML ones otherwise, a best effort for
-    # OOXML files mislabelled as a legacy type (``_route_container``,
-    # #935).
+    # Legacy ``.doc`` / ``.xls`` labels: an OLE2 or ZIP payload runs
+    # what its directory names (#1416); other bytes are ``unsupported``
+    # (#1227). The cache namespace still follows the label
+    # (``extraction_module``, #935).
     "application/msword": "doc",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
     "application/vnd.ms-excel": "xls",
-    # Legacy PowerPoint: OLE2 only; anything else is ``unsupported``
-    # (``NON_OLE2_PPT_ERROR``, #957).
+    # Legacy PowerPoint: a payload that is neither OLE2 nor ZIP is
+    # ``unsupported`` (``NON_OLE2_PPT_ERROR``, #957).
     "application/vnd.ms-powerpoint": "ppt",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
     # Macro-enabled decks (``.pptm``, text only; macros are never read),
@@ -1151,10 +1165,12 @@ def _dispatch(
     """Run text extraction for one attachment payload.
 
     Returns an ``ExtractionResult`` regardless of outcome — the
-    dispatcher converts every exception inside a per-format extractor
-    into a ``failed`` result so a single malformed attachment cannot
-    dead-letter the parent message. The caller is expected to persist
-    the result via ``Database.store_attachment_extraction``.
+    dispatcher converts an exception inside a per-format extractor into
+    a ``failed`` result (``unsupported`` for a permanent one) so a
+    single malformed attachment cannot dead-letter the parent message;
+    ``MemoryError`` and ``RecursionError`` propagate as host pressure.
+    The caller is expected to persist the result via
+    ``Database.store_attachment_extraction``.
 
     ``max_extracted_chars`` (when supplied) caps the length of
     extracted text that is returned and persisted in the cache. A
@@ -1240,9 +1256,10 @@ def _dispatch(
             error=NOT_OLE2_OR_OOXML_ERROR,
         )
 
-    # The container decides between a legacy and an OOXML extractor
-    # (#694, #935): a constant-size prefix check; the aggregate counts an
-    # unsupported result, so no per-item line.
+    # A guard on the prefix rule ``extraction_module`` shares (#694,
+    # #935): a container payload was identified above (#1416) and other
+    # legacy-label bytes returned, so this leaves the module unchanged
+    # here; ``LEGACY_OLE2_ERROR`` is no longer written (its definition).
     module_name = _route_container(module_name, payload)
     if module_name is None:
         return ExtractionResult(
@@ -1462,9 +1479,9 @@ def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
 _LEGACY_TO_OOXML = {"doc": "docx", "xls": "xlsx"}
 # The lead signatures of a ZIP: a local file header, an empty archive's
 # end-of-central-directory record and an empty ZIP64 archive's ZIP64 one
-# (review round 8 on #1444), and the split / spanned marker and the
+# (#1444), and the split / spanned marker and the
 # temporary spanning marker (``PK00``, before a local header) a ZIP can
-# start with (Codex round 1 on #1444). A change here bumps
+# start with (#1444). A change here bumps
 # ``CONTAINER_SIGNATURE_VERSION``.
 _ZIP_SIGNATURES = (
     b"PK\x03\x04",
@@ -1656,10 +1673,10 @@ def _resolve_extractor(content_type: str, filename: str) -> tuple[str | None, st
 def _validate_zip_payload(payload: bytes) -> str | None:
     """Return an error string when ``payload`` looks like a zip bomb, else ``None``.
 
-    Walks the central directory and rejects the archive when:
+    Returns ``None`` for a payload that is not a valid zip (the
+    per-format extractor reports it as ``failed`` with a clearer error).
+    Otherwise walks the central directory and rejects the archive when:
 
-    * the file is not a valid zip (let the per-format extractor surface
-      that as ``failed`` for a clearer error string),
     * any single member declares an uncompressed size above the cap, or
     * the sum of declared uncompressed sizes exceeds the cap.
 

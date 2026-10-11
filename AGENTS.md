@@ -24,14 +24,17 @@ choice, not a project concern.
 
 Core behavior:
 
-- email storage, sync, and indexing stay local
+- email storage, sync, and the index stay local
 - Bridge is the only path to Proton
 - mbsync pulls mail into Maildir
 - indexer parses and stores thread-level data in SQLite
 - MCP exposes read-only search, retrieval, intelligence, and status tools over
   Streamable HTTP at `/mcp`
-- whether retrieved email content leaves the host depends on which
-  embedder + inference endpoint the operator wires up
+- whether mail text leaves the host depends on which embed,
+  inference and rerank endpoints the operator wires up: the indexer
+  sends message subjects, body text and extracted attachment text to
+  the embedder, and the MCP server sends queries and retrieved mail to
+  the enabled layers
 
 ## Priorities
 
@@ -81,7 +84,7 @@ High-level data flow:
 2. mbsync pulls from Bridge (via `host.docker.internal`) into Maildir.
 3. indexer parses Maildir messages, builds conversation threads, generates embeddings via an OpenAI-compatible `/v1/embeddings` endpoint (operator-supplied), and writes SQLite.
 4. MCP server reads from SQLite and exposes tools over Streamable HTTP at `/mcp`.
-5. Only the MCP server is exposed to the host on `localhost:3000` by default.
+5. Only the MCP server is exposed to the host, on `127.0.0.1:3000` by default (`MCP_PORT`).
 
 Important architecture facts:
 
@@ -127,7 +130,7 @@ Important architecture facts:
   OpenAI-compatible chat-completions endpoint: `INFERENCE_BASE_URL=default`
   for OpenAI proper, or set it to a host
   endpoint (LM Studio, vLLM, `mlx_lm.server` — containers reach a
-  host-side server via OrbStack's `host.docker.internal`) or to an
+  host-side server via `host.docker.internal`) or to an
   alternative provider (DeepInfra, OpenRouter, etc.). `none` skips
   registration of the intelligence tools.
 - embeddings go through the official `openai` SDK against any
@@ -173,6 +176,16 @@ Do not make any of the following changes unless the repository owner explicitly 
   no-host-networking and no-published-port rules apply. Do not rebind
   the app beyond `127.0.0.1` or add `network_mode: host` to make it
   reachable (for example on Linux, which is not supported).
+- The Bridge stays on this Mac (PLAN.md decision 46): `BRIDGE_HOST` is
+  an exact allowlist of names that forward to the Mac's `127.0.0.1`
+  (`host.docker.internal`, OrbStack's `host.orb.internal` and
+  `host.internal`), and `BRIDGE_CERT_HOST` an exact list of loopback
+  names, both in `mbsync/proton-settings.sh`. Add a host name only with
+  `make test-mbsync-host-aliases` passing for it on the runtime it
+  names, and a certificate name only with a `make test-mbsync-tls` case
+  (a matching certificate syncs, another is refused before `LOGIN`). A
+  Bridge elsewhere, a LAN name or address, `gateway.docker.internal` or
+  `extra_hosts` on mbsync needs #1499's decision first.
 
 ### Mail sync and safety constraints
 
@@ -180,6 +193,7 @@ Do not make any of the following changes unless the repository owner explicitly 
 - `mbsyncrc.template` must remain pull-only.
 - Do not remove `Expunge None`.
 - Do not add `All Mail`, `Labels/*` or the top-level `Starred` to mbsync Patterns.
+  Labels come from metadata (#1313), never from syncing these folders.
 - Do not weaken or bypass TLS verification casually.
 
 ### TLS and connection security constraints
@@ -218,21 +232,23 @@ Do not make any of the following changes unless the repository owner explicitly 
   deployment (2026-10-03).
 - A migration that adds per-message data only the parser can produce
   (it keeps chunk IDs) ends with `queue.REPARSE_ENQUEUE_SQL`, copied
-  verbatim, so existing mail is re-parsed through the job queue with
-  no re-embedding (#1078; `docs/architecture.md` "Reparse in place").
+  verbatim, so existing mail is re-parsed through the job queue without
+  re-embedding unchanged chunks (#1078; `docs/architecture.md` "Reparse in place").
   Never walk the Maildir inside a migration. Until a message is
   re-parsed, its new column is unknown, not false: a NULL answers
   "can't tell" and never qualifies a message for anything (owner,
   2026-10-08, #1144).
 - Do not change embedding dimensions or model assumptions without verifying schema and context-window implications.
 - Do not change chunk ID derivation away from the deterministic
-  `sha256(message_pk || index || text)` shape — re-runs depend on identical
+  `sha256(message_pk || index || text)` shape (NUL-separated,
+  `chunker._chunk_id`) — re-runs depend on identical
   inputs producing identical IDs so the diff-write path skips already-
   embedded chunks. Body chunks use the message's claimant ID as
   `message_pk`; attachment chunks use
   `message_pk = f"{claimant_id}::{attachment_id}"`.
 - Every per-message row (`messages`, `message_thread_map`,
-  `message_participants`, `message_chunks`, `attachments`,
+  `message_participants`, `message_participant_names`, `message_chunks`,
+  `attachments`, `reaped_messages`, and the `claimant_id` of
   `pending_deletions`) is keyed by the claimant ID — the Message-ID plus
   `#` and the first sixteen hex digits of the SHA-256 of the file's raw
   bytes (`indexer/src/parser.py` `claimant_id`) — never by the bare,
@@ -242,8 +258,9 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not store raw attachment payload bytes in SQLite. The current schema
   keeps bytes only in the `.eml` on disk. ``attachment_extractions`` caches
   the extracted *text* per content hash and extractor module (#928) so
-  OCR / parse cost runs at most once per unique payload and extractor,
-  not the bytes themselves.
+  OCR / parse cost is paid once per unique payload and cache key (the
+  module the occurrence's label selects, #1416) until the row is
+  refreshed, not the bytes themselves.
 - When a change makes an attachment extractor return different text for
   the same bytes, bump that module's entry in
   `indexer/src/extractors/__init__.py` `EXTRACTOR_VERSIONS`. The
@@ -256,8 +273,8 @@ Do not make any of the following changes unless the repository owner explicitly 
   Dead-lettered messages are skipped and keep their stale chunks until
   an operator runs `make requeue-dead`. A bump also re-runs that
   module on every cached payload the startup sweep considers (the
-  sweep does nothing while `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` is
-  off, and keeps `image-ocr` / `pdf-ocr` rows while OCR is off), so
+  sweep re-runs nothing while `INDEXER_ATTACHMENT_EXTRACTION_ENABLED`
+  is off, though it still clears stale `text_complete`, and keeps `image-ocr` / `pdf-ocr` rows while OCR is off), so
   before bumping a module whose post-open walk is not yet budgeted,
   read the issue or PR that last chose not to bump it (#1036 declined a `docx` bump
   while #1031 was open; #1068 bumped it anyway and #1075 reverted it).
@@ -277,9 +294,10 @@ Important facts:
 - Bridge is the official Proton Mail Bridge app on the host, outside
   Compose (#497; the only mode since the Bridge container was removed,
   owner, 2026-10-04). It binds IMAP to the host's `127.0.0.1`; login,
-  credentials and updates are managed in the app. `docker-compose.yml`
-  sets mbsync's `BRIDGE_HOST=host.docker.internal` and
-  `BRIDGE_CERT_HOST=127.0.0.1`. The app's certificate names only
+  credentials and updates are managed in the app. mbsync's `BRIDGE_HOST`
+  defaults to `host.docker.internal` and `BRIDGE_CERT_HOST` to
+  `127.0.0.1` (settings since PLAN.md decision 46, limited to this Mac;
+  see Network and exposure constraints). The app's certificate names only
   `127.0.0.1` and isync (1.5.1 in the image) checks Bridge's self-signed
   CA certificate against `Host`, so the entrypoint keeps `Host 127.0.0.1`
   and connects
@@ -350,8 +368,9 @@ Secrets are a hard boundary.
   not secret and belongs in `.env`
 - Each operator-supplied layer has one Docker secret:
   `.secrets/inference_api_key.txt`, `.secrets/embed_api_key.txt`,
-  `.secrets/rerank_api_key.txt`. Each file must exist with mode 600
-  so the docker-compose `secrets:` reference resolves cleanly. The
+  `.secrets/rerank_api_key.txt`. Each file must exist, since Compose
+  cannot create a container whose `secrets:` file is missing, and have
+  mode 600, which `make validate-env` requires of every secret file. The
   file must be **non-empty** when the matching layer's `*_MODE` is
   enabled (set to anything other than `none`); for unauthenticated
   host-side servers the operator supplies any placeholder string
@@ -546,7 +565,10 @@ is exactly what this forbids.
   `run_tool` (PLAN.md decision 42, #1290); parent-side byte limits and
   constant-size signature routing may stay in the parent. Only `text`
   is exempt: a fixed codec set and constant-pass decoding with no
-  structural parsing, locked by a CI test (#1295). `run_tool` enforces
+  structural parsing; the CI test that is to lock that implementation
+  is not written yet (#1295). The OOXML ZIP-size guard
+  (`_validate_zip_payload`) still reads the central directory in the
+  parent until #1438 moves it. `run_tool` enforces
   a wall-clock timeout and an output cap, and starts the tool through
   `_launcher.py`, which sets `RLIMIT_AS` and `RLIMIT_CPU` to the limits
   the caller passes before the parser loads; every caller passes both,
@@ -614,12 +636,14 @@ Every open issue carries, on GitHub (owner, 2026-10-07):
   leads to it), `documentation`, `test` (a test, fixture or eval-harness
   gap; nothing shipped changes) or `chore` (tooling, CI, build,
   housekeeping, or an investigation with no product change)
-- exactly one **priority** label, `P0`–`P3`, as the review rules above
-  use them
+- exactly one **priority** label: `P0` (fix now; blocks the live
+  deployment or leaks data), `P1` (next; a real defect or risk on live
+  mail), `P2` (planned; part of the current phase or a live-use gap)
+  or `P3` (backlog); the review rules below use these levels
 - one or more **area** labels, `area/mbsync`, `area/indexer`,
   `area/parser`, `area/extractors`, `area/database`, `area/mcp-server`,
   `area/mcp-tools`, `area/eval`, `area/docker`, `area/ci`,
-  `area/tooling`, `area/docs`, matching the commit scopes below
+  `area/tooling`, `area/docs`, named like the commit scopes above
 - one **milestone**: a PLAN.md phase, *Corpus and contract follow-ups*
   (Phase 0 and 1 follow-ups), *Operations and hardening* or *Evidence
   model*
@@ -649,7 +673,7 @@ under about 80 characters.
 
 ## Pull Requests and Review
 
-- When a PR first lands, one test-first commit per issue, with a
+- When a PR is opened, one test-first commit per issue, with a
   `Fixes #N` line for each issue the PR closes; behaviour-changing or
   schema-adjacent fixes get their own PR.
 - Every push starts a Codex code and security review. A round is done
@@ -785,7 +809,11 @@ under about 80 characters.
   review thread is resolved under the thread rule above, with that
   issue's link in the reply, and the PR's "Not done" lists it. Nothing
   found stays only in a thread, a PR body or a commit message.
-- Merge (squash) only on the owner's explicit go-ahead.
+- Merge (squash) only on the owner's explicit go-ahead. GitHub enforces
+  the mechanics on `main` (2026-10-11): squash is the only merge method,
+  history must be linear, the CI checks listed as required in the
+  repository rulesets must pass, and line review threads must be
+  resolved. Repository admins can bypass both rulesets.
 
 ## Review guidelines
 
@@ -835,8 +863,8 @@ All Dockerfiles in this repository must follow these rules:
   - `indexer=1002`
   - `mcp=1003`
 - the indexer reads mbsync-written Maildir files via "other" permission
-  bits, not a shared group. mbsync's entrypoint runs `chmod go+r` on new
-  Maildir files after each sync (because mbsync ignores umask and
+  bits, not a shared group. mbsync's entrypoint runs `chmod go+rx` on
+  Maildir directories and `chmod go+r` on files after every sync attempt (because mbsync ignores umask and
   `open()`s with mode 0600); the indexer mounts `/maildir` as `:ro` so
   the cross-UID separation also blocks any write path even on a future
   malicious-attachment-driven indexer compromise.
@@ -917,7 +945,7 @@ set -Eeuo pipefail
 - always wrap multi-step database writes in an explicit transaction; roll back on any error rather than committing partial state
 - never log API keys, passwords, or credential values in error messages or tracebacks; redact or omit before propagating to logs
 - always set an explicit per-request timeout on outbound async HTTP calls; do not rely solely on client-level defaults for per-call deadlines
-- do not hardcode LLM model names; use an environment variable with a pinned default string so the model can be updated without a code change
+- do not hardcode model names: every enabled layer reads `{LAYER}_MODEL` from the environment, with no in-code default, under the required-vars contract in the Architecture Summary. The one default is Compose's `INFERENCE_MODEL` (`claude-sonnet-5-5`), which `scripts/validate-env.sh` lets an empty value take only when `INFERENCE_MODE=anthropic`
 
 ## Service Responsibilities
 
@@ -932,9 +960,21 @@ Notes:
 - this is the only container that should speak IMAP directly to Bridge
 - keep sync pull-only
 - preserve TLS cert extraction behavior
-- `BRIDGE_HOST`, `BRIDGE_IMAP_PORT` and `BRIDGE_CERT_HOST` are validated
-  as a plain host name or IPv4 address and a port before they reach
-  `mbsyncrc` or the tunnel's shell command
+- `BRIDGE_HOST` (a plain host name, and one of the allowlisted names),
+  `BRIDGE_IMAP_PORT` (a port) and `BRIDGE_CERT_HOST` (an exact loopback
+  name) are validated before they reach `mbsyncrc` or the tunnel's
+  shell command
+- the Proton settings (`BRIDGE_HOST`, `BRIDGE_CERT_HOST` and the
+  `PROTON_*_NAME` isync names) have one implementation of their
+  defaults and validators, `mbsync/proton-settings.sh` (Bash 3.2
+  compatible), run by `scripts/validate-env.sh` and by the entrypoint's
+  `require_prerequisites` before rendering or any network use; a
+  refusal is fixed text that never repeats the value. Change it in that
+  file only, and keep `mbsync/tests/entrypoint_test.sh`'s table, which
+  runs every value at both sites, in step
+- the output filter's patterns take the channel and far store names
+  from the same values the template renders, as literal text; a channel
+  line no rule matches is cut, never passed on (#1498)
 - do not add writeback behavior
 
 ### `indexer/`
@@ -953,8 +993,10 @@ Notes:
 - review schema implications before changing embedding or storage assumptions
 - indexer and mcp-server must point at the same `EMBED_BASE_URL` +
   `EMBED_MODEL` so query vectors are comparable to indexed vectors —
-  swapping the embedder requires a full reindex if the new model
-  produces vectors of a different shape or distribution
+  on an existing index, an embedder that differs from the recorded
+  one fails both services at startup until the old embedder is
+  restored or the index is rebuilt (`docs/architecture.md`, "Embedder
+  identity record", lists what is compared)
 - embed has no disabled mode; see the Architecture Summary for the
   provider contract
 
@@ -1040,7 +1082,8 @@ Notes:
   of `make test`, no Trivy or Docker needed) fails when they differ, so
   a change to one is made in both.
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
-- prefer real `.eml` fixtures for parser tests
+- prefer `.eml` file fixtures for parser tests (synthetic, never
+  derived from real mail; see "Do not export mail in bulk")
 - a fixture generated with an office application (Word, PowerPoint,
   LibreOffice) records the creating user in its metadata (OLE2
   SummaryInformation, `docProps/core.xml`); set a synthetic author and
@@ -1097,14 +1140,14 @@ Notes:
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
 - mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic implicit-TLS server)
-- changes to `mbsync/mbsyncrc.template` should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery)
+- changes to `mbsync/mbsyncrc.template`, or to the Patterns exclusion sets in `mbsync/entrypoint.sh` (`PROTON_FOLDER_EXCLUSIONS`, Proton provider policy; `ISYNC_LAYOUT_EXCLUSIONS`, isync transport; #1481), should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery), and a deliberate change to the template or to what `render_mbsync_config` writes updates `mbsync/tests/mbsyncrc.golden`, which `make test-mbsync` compares byte for byte with the rendered file (#1480)
 - a base-image digest bump in `indexer/Dockerfile` or `mcp-server/Dockerfile` (Dependabot's or by hand) moves `PYTHON_IMAGE` in `mbsync/tests/tls_check.sh` with it; `scripts/tests/image_pin_test.sh` (`make test-image-pins`, also in CI) fails while the three differ, since Dependabot does not update the script. The same test fails while `.github/workflows/docker.yml` and `.github/workflows/tests.yml` pass `docker/setup-buildx-action` different `driver-opts: image=moby/buildkit:...` references (#1122): Dependabot does not track a driver option, so a BuildKit bump moves both by hand, together
 - a change to `indexer/java/pom.xml` (Dependabot's or by hand) rewrites `indexer/java/checksums/checksums.sha256` with `make ppt-checksums` in the same PR: the indexer build and the Trivy dependency job check every Maven artifact against it and fail while it lags (#1117). `scripts/tests/maven_checksums_test.sh` (`make test-maven-checksums`, also in CI) fails while the file lacks a line for a pinned artifact or the Maven flags in `indexer/Dockerfile` and `.github/workflows/security.yml` differ from the required set. Never edit a line by hand to make a build pass
 - Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - a PR that adds or removes baseline-corpus messages also regenerates the parser pin (`cd indexer && PARSER_PIN_UPDATE=1 uv run pytest tests/test_parser_pin.py`); its diff must be only the added or removed records, plus the corpus messages after the change renumbered under new file names with no other field changed, since corpus files are numbered in sequence (#1124)
-- `ask_mailbox`, `summarize_thread` or `extract_from_emails` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)
-- before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
+- `ask_mailbox`, `summarize_thread`, `extract_from_emails` or experimental `brief_issue` / `check_conclusion` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)
+- before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `uvx --from bandit==1.9.4 bandit -r src/ -ll` in each changed service (bandit is not a service dependency; this is the version and flag CI uses) and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
 
 Run tests with:
 
@@ -1124,6 +1167,27 @@ under the checkout (ignored by git, the service `.dockerignore` files
 and Semgrep), so parallel checkouts or worktrees never share one cache
 (#896); each fills its own once. Set `UV_CACHE_DIR` explicitly to
 override it.
+
+## Explanatory Writing
+
+Apply Grice's maxims wherever you explain something: documentation,
+code comments, commit messages, issues, PRs, reviews, and chat.
+
+- Quantity: give enough information for the reader's task, without
+  repetition or unnecessary detail.
+- Quality: make supported claims; distinguish facts, assumptions,
+  estimates, and uncertainty.
+- Relation: keep each explanation relevant to the reader's decision
+  or understanding, and place it where it is needed.
+- Manner: use clear, direct language and a logical order; avoid
+  ambiguity, jargon, and needless narrative.
+
+Preserve requirements, qualifications, rationale, safety constraints,
+and non-obvious failure modes. Brevity must not reduce accuracy or
+completeness. Do not impose word-count or reduction targets.
+
+Before finishing, ask: "Can the reader understand and act correctly
+with this explanation? Can anything be removed without losing that?"
 
 ## Documentation Expectations
 
@@ -1146,7 +1210,7 @@ signature or a real result. When a claim draws a review finding, prefer
 cutting it to qualifying it; #307, #1014 and #1100 each spent five or
 more rounds qualifying claims.
 
-If a change may stale `README.md`, `PLAN.md`, `docs/`, or `AGENTS.md`, update it or proactively suggest the follow-up. Contributor-facing defaults (`CONTRIBUTING.md`, `SECURITY.md`, issue/PR templates) live in the org-level `marshalltech81/.github` repo; flag follow-ups there when a change in this repo makes them stale.
+If a change may stale `README.md`, `PLAN.md`, `docs/`, or `AGENTS.md`, update it or proactively suggest the follow-up. Contributor-facing defaults (`CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `CODE_OF_CONDUCT.md`, `GOVERNANCE.md`, issue/PR templates) live in the account-level `marshalltech81/.github` repo, since this repository has no copies of its own; flag follow-ups there when a change in this repo makes them stale.
 
 ## When to Stop and Ask
 
@@ -1180,7 +1244,6 @@ The following should live elsewhere instead of this file:
 
 Suggested companion files:
 
-- `docs/ops-notes.md`
 - `docs/troubleshooting.md`
 - `PLAN.md`
 

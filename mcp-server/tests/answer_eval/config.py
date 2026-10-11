@@ -14,8 +14,8 @@ Two layers, each in the repository's ``{LAYER}_MODE`` / ``_BASE_URL`` /
 An enabled layer needs a non-empty model, key and base URL; the base
 URL ``default`` means the SDK's documented default (Anthropic API,
 OpenAI proper) and an empty one is refused, as for the server's layers
-(#750). The key comes from ``<secrets_dir>/<layer>
-_api_key.txt``, which must be mode 600, or, for local development only,
+(#750). The key comes from ``<secrets_dir>/inference_api_key.txt`` or
+``judge_api_key.txt``, which must be mode 600, or, for local development only,
 the ``{LAYER}_API_KEY`` environment variable. Keys are never logged,
 written to a report or taken as a command argument.
 
@@ -217,7 +217,9 @@ def load_layer(
         return _load_cli_judge(mode, env)
     if mode not in ENABLED_MODES:
         modes = (
-            "anthropic, claude-cli, none, openai" if layer == "JUDGE" else "anthropic, none, openai"
+            "anthropic, claude-cli, codex-cli, none, openai"
+            if layer == "JUDGE"
+            else "anthropic, none, openai"
         )
         raise ConfigError(f"{layer}_MODE must be one of: {modes}")
     base_url = env.get(f"{layer}_BASE_URL", "").strip()

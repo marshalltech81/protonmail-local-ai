@@ -89,7 +89,7 @@ def test_thread_exits_a_stalled_worker(tmp_path):
 
 
 def test_refund_waits_while_the_guard_is_exiting(tmp_path):
-    """Review round 1: a step that returns just as the guard fires must
+    """A step that returns just as the guard fires must
     not refund its charge (or charge the next message) before the exit —
     the guard decides and exits while holding the in-flight lock."""
     clock = _Clock()

@@ -2,9 +2,10 @@
 
 Payloads for the end-to-end cases come from the parser itself
 (``parse_email_bytes`` on a synthetic outer message), so the extractor
-gets what the indexer gives it. The budget cases run the child's
-extraction in this process (``_in_process_child``) so a budget can be
-patched; the rest run the real child.
+gets what the indexer gives it. Cases that patch a budget or count
+calls run the child's extraction in this process
+(``_in_process_child``); some call the parser's or the child's
+functions directly; the other ``extract`` calls run the real child.
 """
 
 from __future__ import annotations
@@ -129,7 +130,7 @@ class TestDispatch:
         assert EXTRACTOR_VERSIONS["eml"] == 3
 
     def test_a_version_1_row_is_stale(self):
-        """Review round 1 on #1398: the cached ``eml@1`` rows counted every
+        """#1398: the cached ``eml@1`` rows counted every
         quoted-printable part as lossy, so they are re-extracted."""
         assert extractors.is_stale_extractor("eml@1") is True
         assert extractors.is_stale_extractor("eml@2") is True  # #1402
@@ -402,8 +403,9 @@ class TestBodyOnlyWalk:
         assert walk.text_parts_left == parser.MAX_BODY_TEXT_PARTS - 1
 
 
-class TestReviewRound1:
-    """Codex round 1 on #1311."""
+class TestNestedEmailDecodeLossAndHeaderFallbacks:
+    """#1311: nested-email decode loss and header fallbacks counted in
+    the child."""
 
     def test_a_lossy_base64_nested_email_is_rendered_and_cut(
         self, monkeypatch, caplog, _in_process_child
@@ -481,14 +483,15 @@ class TestReviewRound1:
         assert extractors.drain_extractor_counts()["eml_headers_degraded"] == 3
         assert MARKER not in caplog.text
 
-    def test_other_callers_count_nothing(self):
+    def test_the_counter_is_optional(self):
         """The counter is optional: the parser's own callers pass none."""
         value = parser.email.header.make_header([(b"caf\xe9", "unknown-8bit")])
         assert parser._decode_text_header(value) == "caf�"
 
 
-class TestReviewRound2:
-    """Codex round 2 on #1311, as the owner decided."""
+class TestBodyPartDecodeLoss:
+    """#1311, as the owner decided: decode loss in body parts and inline
+    attached emails."""
 
     def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
         extractors.drain_extractor_counts()
@@ -630,9 +633,9 @@ class TestReviewRound2:
         assert walk.degraded == Counter({parser.CHARSET_DEGRADED: 1})
 
 
-class TestReviewRound3:
-    """Codex round 3 on #1311: guards decided from the declared
-    Content-Transfer-Encoding alone, as the owner decided for round 2."""
+class TestDeclaredTransferEncodings:
+    """#1311: guards decided from the declared
+    Content-Transfer-Encoding alone, as the owner decided."""
 
     def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
         extractors.drain_extractor_counts()
@@ -709,8 +712,9 @@ class TestReviewRound3:
         assert result.text is not None and "plain nested" in result.text
 
 
-class TestReviewRound5:
-    """Codex round 5 on #1311, as the owner decided."""
+class TestUnhandledEncodingsAndCharsetFallbacks:
+    """#1311, as the owner decided: body parts in unhandled encodings and
+    charset fallbacks."""
 
     @pytest.mark.parametrize("encoding", [b"x-uuencode", b"uuencode", b"uue", b"x-uue", b"x-other"])
     def test_a_body_part_in_an_unhandled_encoding_is_a_cut(self, encoding, caplog):
@@ -762,7 +766,7 @@ class TestReviewRound5:
         assert walked == default == "xn--caf-dma"
 
 
-# Review round 6 on #1311: declared multipart containers the standard
+# #1311: declared multipart containers the standard
 # library could not decompose, at the root, in a sub-part and in a nested
 # email. (payload, cut, text kept). A cut is exactly a part whose declared
 # maintype is multipart that did not parse into parts: its text is lost.
@@ -827,7 +831,7 @@ _STRUCTURE_SHAPES = {
 }
 
 
-class TestReviewRound6:
+class TestUndecomposedContainers:
     @pytest.mark.parametrize("shape", sorted(_STRUCTURE_SHAPES))
     def test_a_container_that_did_not_decompose_is_a_cut(self, shape, caplog):
         payload, cut, kept = _STRUCTURE_SHAPES[shape]
@@ -855,7 +859,7 @@ class TestReviewRound6:
         assert walk.structure_lost_parts == 1
 
 
-# Review round 8 on #1311.
+# #1311: losses in alternatives the body selects or sets aside.
 def _alternative(plain: bytes, html: bytes) -> bytes:
     """An attached email whose body is a ``multipart/alternative`` of
     the two given parts (headers included)."""
@@ -883,7 +887,7 @@ _LOSSY_PLAIN = (
 )
 
 
-class TestReviewRound8:
+class TestAlternativeSelectionOfLosses:
     def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
         extractors.drain_extractor_counts()
         with caplog.at_level(logging.WARNING):
@@ -949,10 +953,10 @@ class TestReviewRound8:
 _UNSPLIT = b"Content-Type: multipart/related\r\n\r\n" + MARKER.encode()
 
 
-class TestReviewRound9:
+class TestUndecomposedMultipartSelection:
     """An undecomposed ``multipart/*`` part counts as
     ``eml_body_structure`` only when the body could keep it, by the same
-    selection as round 8's decode counts."""
+    selection as the decode counts (``TestAlternativeSelectionOfLosses``)."""
 
     def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
         with caplog.at_level(logging.WARNING):
@@ -984,7 +988,7 @@ class TestReviewRound9:
         assert "eml_body_structure" not in caplog.text
 
 
-class TestReviewRound10:
+class TestDroppedHeaderLines:
     """A header line the parse dropped (a first line starting with
     whitespace, or a ``From `` line after the first) is lost text, at the
     root and in a nested email: ``eml_header_lines``. A leading ``From ``
@@ -1024,7 +1028,7 @@ class TestReviewRound10:
         assert "eml_header_lines" not in caplog.text
 
 
-class TestReviewRound11:
+class TestBodyPartHeaderLineLoss:
     """A body text part whose own header block lost a line to the parse
     (a part with no blank line after its boundary, whose text starts with
     whitespace; a ``From `` line there stays in the body) counts as
@@ -1074,7 +1078,7 @@ _INNER_PLAIN = _text("inner words", subject="inner")
 _INNER_HTML = b"Subject: inner\r\nContent-Type: text/html\r\n\r\n<p>inner html</p>"
 
 
-class TestReviewRound12:
+class TestInlineEmailsUnderAlternatives:
     """An inline attached email under a ``multipart/alternative`` or
     ``multipart/related`` takes part in that container's choice, as the
     default walk's body does: rendered (label, headers, body) where it
@@ -1136,7 +1140,7 @@ class TestReviewRound12:
             + "\n\n[Attached message, depth 3]\nSubject: inner\n\ninner words"
         )
 
-    def test_an_attachment_under_an_alternative_is_rendered_as_before(self, caplog):
+    def test_an_attachment_under_an_alternative_is_rendered(self, caplog):
         attached = (
             b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n\r\n"
             + _INNER_PLAIN
@@ -1196,8 +1200,9 @@ def _b64_email(inner: bytes, *, disposition: bytes = b"") -> bytes:
     )
 
 
-class TestReviewRound12Rework:
-    """The panel's design for round 12: every nested email is read once,
+class TestNestedEmailReadOnce:
+    """The approved design for inline emails under alternatives: every
+    nested email is read once,
     where the walk meets it, in document order; an inline candidate is
     chosen by its real content; unread or lossy candidates are reported
     only when the body could have kept them; emails inside a candidate
@@ -1311,7 +1316,7 @@ class TestReviewRound12Rework:
         )
 
 
-class TestReviewRound14:
+class TestEnvelopeLikeFirstLines:
     def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
         extractors.drain_extractor_counts()
         with caplog.at_level(logging.WARNING):

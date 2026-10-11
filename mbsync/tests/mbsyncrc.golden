@@ -1,0 +1,107 @@
+# =============================================================================
+# mbsync configuration template for protonmail-local-ai
+# =============================================================================
+# This file is a template — environment variables are substituted at container
+# startup by envsubst. Do not put real credentials here — committed to git.
+#
+# Variables substituted at runtime (see render_mbsync_config in entrypoint.sh):
+#   127.0.0.1    — the name Bridge's certificate is checked against
+#                            (BRIDGE_CERT_HOST)
+#   Tunnel "exec socat - TCP:host.docker.internal:1143" — a Tunnel to BRIDGE_HOST:BRIDGE_IMAP_PORT, the
+#                            Bridge app on the host
+#   synthetic@example.com         — Bridge IMAP username (from the Bridge app's
+#                            IMAP details)
+#   MBSYNC_IMAP_ACCOUNT, MBSYNC_REMOTE_STORE, MBSYNC_LOCAL_STORE,
+#   MBSYNC_CHANNEL         — isync's account, store and channel names,
+#                            from the PROTON_*_NAME settings
+#   MBSYNC_PROVIDER_EXCLUSIONS, MBSYNC_LAYOUT_EXCLUSIONS — the Channel's
+#                            Patterns exclusions (see the Channel comment);
+#                            named without the dollar-brace form here so
+#                            envsubst leaves this comment as it is
+# =============================================================================
+
+# IMAP Account — connection to the Proton Mail Bridge app's IMAP server.
+# PassCmd avoids credentials appearing in docker inspect or process list.
+# TLSType IMAPS: implicit TLS (RFC 8314, Bridge's "SSL" mode, #638). The
+# TLS handshake is the first thing on the connection, so there is no
+# plaintext phase to strip or inject into, and isync never falls back to
+# STARTTLS or plaintext. Bridge serves it on the IMAP port once the
+# Bridge app's IMAP connection mode is set to SSL. It must be set: with a
+# Tunnel, isync otherwise defaults to no TLS. (isync 1.5 renamed
+# SSLType to TLSType; the old name still works but prints a notice on
+# stderr every run, which the entrypoint would count as an error.)
+# Leave TLSVersions unset so isync/OpenSSL can negotiate the strongest
+# supported protocol instead of pinning the connection to TLS 1.2.
+# CertificateFile: extracted automatically at container startup by entrypoint.sh.
+IMAPAccount protonmail
+Host 127.0.0.1
+Tunnel "exec socat - TCP:host.docker.internal:1143"
+User synthetic@example.com
+PassCmd "cat /run/secrets/bridge_pass"
+TLSType IMAPS
+CertificateFile /tmp/mbsync/bridge-cert.pem
+
+# Remote store — maps IMAPAccount to a named store for use in Channel.
+IMAPStore protonmail-remote
+Account protonmail
+
+# Local store — where emails are written in Maildir format.
+# SubFolders Legacy: a top-level folder is the directory of that name, and
+# each child is its parent's directory plus "/." and the child's name, so
+# Folders/Clients/cur is /maildir/Folders/.Clients/.cur. A child can then
+# never land on its parent's own cur, new or tmp directory, as it did with
+# SubFolders Verbatim (#281), and names keep their dots, which
+# SubFolders Maildir++ refuses. The indexer reads the folder name back
+# from the path (indexer/src/parser.py _derive_folder).
+MaildirStore protonmail-local
+Path /maildir/
+Inbox /maildir/INBOX
+SubFolders Legacy
+
+# Channel — connects remote Bridge IMAP to local Maildir.
+# Its Patterns exclusions are filled in from two constants in
+# entrypoint.sh: PROTON_FOLDER_EXCLUSIONS (Proton provider policy: All
+# Mail, Labels/*, Starred) and ISYNC_LAYOUT_EXCLUSIONS (isync's own state
+# and layout files), PLAN.md decision 45.
+# Patterns excludes All Mail and Labels/*. All Mail is a virtual view that
+# Bridge's operation guard refuses to change. Labels are excluded by project
+# policy, not by a Bridge restriction: the index does not model label
+# membership apart from physical folders, so a label copy would add
+# duplicates it could not describe. Upstream Bridge source reviewed at
+# commit b9c5dac (point-in-time evidence, not a pin: Bridge updates are
+# managed by the app) does not restrict label mailboxes.
+# It excludes the top-level Starred folder too, which is also virtual: a
+# second copy of each starred message, whose star already arrives as the
+# F flag on the real copy (#692). A custom folder named Starred is
+# Folders/Starred and still syncs.
+# It also leaves out a child folder, and everything below it, named after
+# a file isync keeps in its parent's directory: under SubFolders Legacy
+# its directory would be that file (.uidvalidity, .isyncuidmap.db, and the
+# .mbsyncstate files of SyncState *). Such folders are not synced; see
+# docs/troubleshooting.md. The last matching pattern wins.
+# Sync Pull — one direction only, never pushes changes back to Proton.
+# SyncState * — each folder's sync state (UIDVALIDITY and UIDs) lives in
+#   its own Maildir directory as .mbsyncstate*, so it survives container
+#   restarts and two folders can never share a state file. A path prefix
+#   such as /maildir/.mbsyncstate would name each file after the folder
+#   with "/" written as "!", so Folders/A/B and Folders/A!B would collide
+#   (#275).
+# Expunge None — never permanently deletes on either side, and avoids the
+#   IMAP CLOSE error that Gluon reports under Expunge Both or Far
+#   (gluon#426).
+# CopyArrivalDate yes — a new near file's mtime is the message's IMAP
+#   INTERNALDATE, the arrival time Bridge reports, instead of the time
+#   mbsync wrote the file (#1081). Read-side only: it adds INTERNALDATE
+#   to each FETCH and sets the time on the file isync writes; with Sync
+#   Pull nothing is stored on the far side. Files synced before the
+#   option keep the mtime of their first sync (docs/architecture.md,
+#   "Message time").
+Channel protonmail
+Far :protonmail-remote:
+Near :protonmail-local:
+Patterns * !"All Mail" !"Labels/*" !"Starred" !"*/uidvalidity" !"*/uidvalidity/*" !"*/isyncuidmap.db" !"*/isyncuidmap.db/*" !"*/mbsyncstate" !"*/mbsyncstate/*" !"*/mbsyncstate.journal" !"*/mbsyncstate.journal/*" !"*/mbsyncstate.new" !"*/mbsyncstate.new/*" !"*/mbsyncstate.lock" !"*/mbsyncstate.lock/*"
+Create Near
+SyncState *
+Sync Pull
+Expunge None
+CopyArrivalDate yes

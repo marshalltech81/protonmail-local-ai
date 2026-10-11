@@ -40,9 +40,9 @@ from .parser import NO_SUBJECT, Message, canonical_addr
 # prefixes are excluded because of false-strip risk) actually hold
 # for the two-character cases that share surface with English prose.
 #
-# Single-letter prefixes (Italian ``R:``, French ``Réf:``) remain
-# excluded — even with the colon-only restriction, the false-strip
-# surface for one-letter starts (e.g. ``R: meeting`` vs ``R&D recap``)
+# Single-letter and other unlisted prefixes (Italian ``R:``, French
+# ``Réf:``) remain excluded — even with the colon-only restriction, the
+# false-strip surface for one-letter starts (e.g. ``R: meeting`` vs ``R&D recap``)
 # is too narrow to disambiguate.
 #
 # No ``^`` anchor: callers use ``.match(s, pos)``, which anchors at
@@ -58,9 +58,11 @@ _SUBJECT_WHITESPACE_RE = re.compile(r"\s+")
 # with the same normalized subject in the same folder would otherwise
 # collapse into a single thread. That produces false merges for common
 # subjects ("Re: Hello", "Invoice", "Follow up"), which is particularly
-# dangerous for invoice/legal/HOA records. Require at least one shared
-# participant AND proximity in time before accepting a subject-only
-# match; otherwise start a new thread.
+# dangerous for invoice/legal/HOA records. Require a shared correspondent
+# pair (the incoming author and another of its recipients, each in a
+# sender-assessed message of the thread; ``_subject_fallback_accepts``)
+# AND proximity in time before accepting a subject-only match; otherwise
+# start a new thread.
 SUBJECT_FALLBACK_WINDOW = timedelta(days=60)
 
 # Cap for the stored thread body text (the thread-level FTS input; the
@@ -88,9 +90,7 @@ THREAD_BODY_TEXT_MAX_TOKENS = 4000
 # (``Thread.build_body_text`` on fresh insert,
 # ``Database._compute_body`` on update) must share this constant so a
 # thread's FTS coverage does not depend on whether it arrived as one
-# message or as a sequence of replies — the previous shape kept fresh
-# inserts at 500 and updates at 2000, producing a permanent FTS
-# asymmetry tied to arrival ordering.
+# message or as a sequence of replies.
 PER_MESSAGE_BODY_CAP_CHARS = 2000
 
 log = logging.getLogger("indexer.threader")
@@ -184,7 +184,7 @@ class Threader:
                 thread.messages.sort(key=lambda m: m.effective_date)
                 # Dedup by canonical address so ``Bob <bob@x>`` does not
                 # shadow ``bob@x`` already in the list. Keep the existing
-                # (richer) display string when a canonical duplicate
+                # display string when a canonical duplicate
                 # arrives; add the new display string only when we have
                 # no entry for that canonical address yet.
                 seen_canonical = {canonical_addr(addr) for addr in thread.participants}
@@ -324,7 +324,8 @@ class Threader:
             candidate_id, sorted(authors), sorted(recipients)
         ):
             # Counted as a provenance rejection only when the displayed
-            # participants would have passed the old check.
+            # participants would have passed a check on displayed
+            # participants alone.
             thread_canonical = {canonical_addr(addr) for addr in thread.participants}
             unproven = bool(authors & thread_canonical) and bool(recipients & thread_canonical)
             return False, unproven
@@ -334,9 +335,8 @@ class Threader:
     def _participants(messages: list[Message]) -> list[str]:
         # Dedup by canonical lowercase email so ``Bob <bob@x>`` does not
         # appear separately from ``bob@x`` (or ``BOB@X``) in the output.
-        # The richer display string wins when duplicates exist because
-        # the first-seen entry is preserved; headers without an email
-        # address part are skipped.
+        # The first-seen display string is kept when duplicates exist;
+        # headers without an email address part are skipped.
         seen_canonical: set[str] = set()
         result: list[str] = []
         for msg in messages:
@@ -368,15 +368,16 @@ def _normalize_subject(subject: str) -> str:
     described in ``_SUBJECT_PREFIX_RE``.
 
     Advances an offset past each prefix and the whitespace after it,
-    then slices once, so the work is linear in the subject length. The
-    earlier strip-and-copy per prefix was quadratic in the prefix count
-    and let a crafted ``Re: Re: ...`` subject stall the worker (#293).
+    then slices once, so the work is linear in the subject length.
+    Stripping and copying per prefix would be quadratic in the prefix
+    count, letting a crafted ``Re: Re: ...`` subject stall the worker
+    (#293).
     """
     s = subject.lower().strip()
     pos = 0
     while match := _SUBJECT_PREFIX_RE.match(s, pos):
         pos = match.end()
-        # Same whitespace set ``str.strip()`` removed between passes.
+        # ``str.isspace()``: the whitespace set ``str.strip()`` removes.
         while pos < len(s) and s[pos].isspace():
             pos += 1
     return _SUBJECT_WHITESPACE_RE.sub(" ", s[pos:]).strip()

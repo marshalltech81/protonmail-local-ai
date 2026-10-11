@@ -5,8 +5,10 @@
 protonmail-local-ai is a containerised, privacy-first AI search and
 intelligence layer for ProtonMail. The official Proton Mail Bridge app
 runs on the host (see [Bridge](#bridge)) and three containers (mbsync,
-indexer, mcp-server) run beside it; storage, sync, and indexing never
-leave the host. Embedding and inference are operator-supplied
+indexer, mcp-server) run beside it; storage, sync and the index never
+leave the host, while the text sent for embedding, inference and
+reranking goes to whichever endpoints the operator configures.
+Embedding and inference are operator-supplied
 external dependencies — the project itself ships no model-serving
 components, and whether they run on the host (LM Studio, vLLM,
 `mlx_lm.server`, etc.) or against a remote provider is a deployment
@@ -27,7 +29,8 @@ Proton Mail Bridge app (on the host, outside Compose)
         │  IMAP over implicit TLS via host.docker.internal (socat tunnel)
         ▼
 mbsync container
-  - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop;
+  - Polls Bridge IMAP SYNC_INTERVAL seconds after each sync ends, in a
+    bounded retry loop;
     each mbsync run has a deadline (SYNC_DEADLINE_SECONDS, default a
     day) past which it is stopped and counted as a failed sync (#282)
   - Writes Maildir format to maildir-volume
@@ -47,7 +50,9 @@ mbsync container
     upstream; the local copy is kept) counts as successful, with a
     warning that gives a count, not folder names (#276). Other isync
     messages that name a folder or a Maildir path are logged with
-    `<folder>` or `<path>` in its place (#570)
+    `<folder>` or `<path>` in its place (#570), matched under the
+    configured channel and store names; a channel line it cannot match
+    is cut whole (#1498)
   - Healthcheck is liveness only: healthy while the sync loop is alive
     (a heartbeat touched around every attempt is fresh, or an mbsync or
     its permission repair walk is running, up to that run's deadline),
@@ -138,7 +143,7 @@ MCP client (host machine; Claude Desktop via the repo's stdio adapter)
 
 | Volume | Contents | Back up? |
 |---|---|---|
-| `maildir-volume` | Raw email in Maildir format | Optional — mbsync can re-sync |
+| `maildir-volume` | Raw email in Maildir format | Optional for mail still in Proton, which mbsync can re-sync. Mail and folders deleted in Proton are kept only here (`Expunge None`), so back it up if you rely on them, as archive mode does |
 | `mbsync-state` | mbsync's pinned Bridge certificate fingerprint | No — re-pinned from `BRIDGE_CERT_FINGERPRINT` |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
 
@@ -205,11 +210,12 @@ limit on the host.
 The stack uses two isolated bridge networks:
 
 - `bridge-net` for `mbsync` alone; it reaches the Bridge app on the
-  host through `host.docker.internal`
+  host through `host.docker.internal` (or another name `BRIDGE_HOST`
+  accepts; see [Bridge](#bridge))
 - `app-net` for `indexer` ↔ `mcp-server`. Both reach the
   operator-supplied embedder, inference, and (optional) reranker —
   either at remote URLs or, when the operator runs a host-side server,
-  via OrbStack's `host.docker.internal`.
+  via `host.docker.internal`.
 
 For stricter deployments, `docker-compose.hardened.yml` marks `app-net`
 as `internal: true`. This is compatible with operator-installed
@@ -235,7 +241,7 @@ ones (#274):
 | Bridge authenticated | An account is logged in to Bridge and accepts mbsync's `LOGIN` | No dedicated signal. Bridge listens, completes TLS and greets with no account logged in. The first proof is a successful sync; a rejected login is a failed sync in mbsync's log | — |
 | mbsync syncing | mbsync's sync loop is alive | mbsync container health (liveness: a heartbeat touched around every attempt, or a sync or its permission repair running, up to the run's deadline) | That any sync succeeded: the loop is healthy between failed attempts until five consecutive failures exit it and Docker restarts it |
 | Last successful sync | mbsync completed a sync | The success stamp `.mbsync-last-sync.json` at the Maildir root, written by mbsync. `get_mailbox_status` cannot read Maildir; its `last_sync_at` (and the reason `no successful mail sync has been recorded` or `last successful mail sync was ... ago`) is the last sync the indexer has acknowledged, after queuing that sync's mail, so it can lag the stamp | The stamp alone: that the indexer has read it. `last_sync_at`: that the queued mail is indexed yet |
-| Index current | The indexer has acknowledged a recent sync and has no pending, retrying or deferred jobs (parked trashed files do not count) | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
+| Index current | The indexer has acknowledged a recent sync, has reported within the last 10 minutes, and has no pending, retrying, deferred or extraction-deferred jobs (parked trashed files do not count) | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
 
 mbsync's own startup checks TLS and the pin with an error that names
 the cause, and its sync results and stamp report the rest. No
@@ -268,6 +274,55 @@ Login and updates happen in the app. On Linux, `host.docker.internal`
 loopback the app binds, so this setup is not supported there (see
 [setup.md](setup.md#platform-support)).
 
+The Bridge stays on this Mac (PLAN.md decision 46). `BRIDGE_HOST`,
+`BRIDGE_CERT_HOST` and isync's account, store and channel names are
+settings, checked by one implementation, `mbsync/proton-settings.sh`,
+at two sites: `scripts/validate-env.sh` and the entrypoint's
+`require_prerequisites`, before anything is rendered or connected. A
+refused value stops both with fixed text that names the setting, never
+the value.
+
+- `BRIDGE_HOST` (Compose passes it empty by default; empty means
+  `host.docker.internal`) is compared without surrounding whitespace,
+  in lower case, against an exact list of names that forward to this
+  Mac's `127.0.0.1`: `host.docker.internal`, and OrbStack's
+  `host.orb.internal` and `host.internal`. A name is listed only with
+  `mbsync/tests/host_alias_check.sh` (`make test-mbsync-host-aliases`,
+  run on the Mac, not in CI) showing it reaches a listener bound to
+  `127.0.0.1` alone; all three passed on OrbStack. Anything else
+  (`gateway.docker.internal`, an IP address, a LAN or `.local` name, a
+  suffix or trailing dot) is refused naming
+  [#1499](https://github.com/marshalltech81/protonmail-local-ai/issues/1499),
+  the decision on a Bridge elsewhere. The name is not resolved to check
+  it: DNS cannot show that a name is local, so the container engine and
+  its resolver are trusted to send it to this Mac's loopback.
+- `BRIDGE_CERT_HOST`, the name rendered as `Host` (empty means
+  `127.0.0.1`), has its own exact check, as written: `127.0.0.1`,
+  `localhost`, another `127.0.0.0/8` address in canonical dotted
+  decimal, or `::1`. The app's own certificate names only `127.0.0.1`,
+  so the others need a CA certificate issued for the name and imported
+  into the app. `tls_check.sh` shows isync accepting such a certificate
+  for each of `localhost`, `127.0.0.2`, `127.255.255.254` and `::1`, and
+  refusing a certificate for `127.0.0.1` under it before `LOGIN`.
+  Certificate extraction (`openssl s_client`) does no name check: there
+  the expected fingerprint and the pin check the certificate, and isync
+  checks the name on each sync. The host name pattern in
+  `validate_bridge_endpoint` still checks `BRIDGE_HOST`; for
+  `BRIDGE_CERT_HOST`, which is never connected to, it is the exact check
+  (`::1` holds colons).
+- `PROTON_IMAP_ACCOUNT_NAME`, `PROTON_REMOTE_STORE_NAME`,
+  `PROTON_LOCAL_STORE_NAME` and `PROTON_CHANNEL_NAME` default to the
+  names the template always held (`protonmail`, `protonmail-remote`,
+  `protonmail-local`, `protonmail`) and take 1 to 64 of
+  `A-Z a-z 0-9 _ -`, starting with a letter or digit, the two stores
+  different. The output filter that keeps folder names out of the log
+  matches the configured channel and far store names as literal text,
+  and cuts any channel line it cannot match (#1498). Each folder keeps
+  its sync state in its own directory (`SyncState *`), so renaming them
+  downloads nothing again (`layout_check.sh` check 9).
+
+The startup identity hash includes all six.
+
 The app's certificate is upstream Bridge's: self-signed, `CA:TRUE`,
 common name and only subject alternative name `127.0.0.1`. isync 1.5.1
 (the version in the mbsync image, Debian trixie; 1.4.4 behaves the same)
@@ -282,7 +337,7 @@ owner does not match hostname`. Overriding `localhost` with
 `extra_hosts` would not help either: the certificate has no `localhost`
 name, and only the literal `127.0.0.1` matches.
 
-`docker-compose.yml` therefore sets `BRIDGE_CERT_HOST=127.0.0.1`, and the
+`BRIDGE_CERT_HOST` therefore defaults to `127.0.0.1`, and with the defaults the
 entrypoint renders
 
 ```text
@@ -299,11 +354,12 @@ relays bytes. (`nc` cannot be the relay: isync waits for the server to
 close the connection after `LOGOUT`, and `nc` does not pass that close
 on unless Bridge sends a TLS close_notify.) The trust anchors are
 unchanged: `CertificateFile` holds only the certificate the entrypoint
-extracted and checked against the persistent pin (isync also loads the
+extracted and checked against `BRIDGE_CERT_FINGERPRINT` and the
+persistent pin (isync also loads the
 system CA store, and public CAs do not issue certificates
 for `127.0.0.1`), so a different
-certificate at that address is refused twice, by the pin at startup and
-by isync's chain check on every sync. `mbsync/tests/tls_check.sh` (`make
+certificate at that address is refused at startup, by the fingerprint
+and the pin, and by isync's chain check on every sync. `mbsync/tests/tls_check.sh` (`make
 test-mbsync-tls`, run in CI) exercises both with a synthetic server
 whose certificate has this shape and which speaks implicit TLS, along
 with recovery from a Bridge that is down at startup and the refusal of
@@ -348,7 +404,8 @@ dropped), `EMBED_MODEL`, the vector dimensions, and a **calibration
 vector** — the embedding of a fixed synthetic text — with that text's
 SHA-256. The columns for revision, tokenizer, context window, chunk
 configuration hash and label stay NULL: the OpenAI-compatible API
-exposes none of them. This is the first slice of the `vector_generations`
+exposes none of the first three, and the chunk configuration hash and
+label are not recorded yet. This is the first slice of the `vector_generations`
 registry in PLAN.md Phase 2; there is no generation lifecycle yet, so
 the table holds exactly one row.
 
@@ -410,8 +467,8 @@ the official `cohere` SDK against the Cohere rerank API
 (default) returns RRF order directly.
 
 When operator-installed servers run on the host, they should bind to
-`127.0.0.1` only. Containers reach them via OrbStack's
-`host.docker.internal` — this is the project's expectation. Binding a
+`127.0.0.1` only. Containers reach them via `host.docker.internal`
+(OrbStack and Docker Desktop) — this is the project's expectation. Binding a
 host-side server to `0.0.0.0` or a LAN IP exposes it to the network
 beyond what the project intends.
 
@@ -426,7 +483,7 @@ User query
     │
     ├─ Keyword list — three FTS5 lanes, fused with RRF into one ranked list:
     │    thread_fts     → BM25 over thread subject, participants, and
-    │                     accumulated body
+    │                     accumulated body (capped)
     │    chunk_fts      → BM25 over body and attachment-text chunks
     │                     (lifted to parent thread_id)
     │    attachment_fts → BM25 over attachment filenames / MIME types
@@ -571,6 +628,11 @@ discovery, with **per-message chunks** as the precise unit of retrieval.
    last message. One shared address is not enough: the mailbox owner
    is a recipient of nearly every message and the sender of every
    outgoing one, so two vendors' "Invoice" mails would otherwise merge.
+   The sender and the recipient must each appear in a message of the
+   thread whose sender is assessed unambiguous, and a message with an
+   ambiguous sender never joins by subject (see *Source authority*).
+   The 10 most recently active same-subject threads in the folder are
+   tried, newest first.
    Subjects are compared as stored, cut to `SUBJECT_MAX_CHARS` (2,000)
    characters (#541): two subjects that agree on their first 2,000
    characters match, and a `Re:` reply to a longer subject does not.
@@ -579,7 +641,8 @@ discovery, with **per-message chunks** as the precise unit of retrieval.
    (`indexer/src/chunker.py`); each chunk is FTS-indexed and gets its
    own vector embedding stored in `message_chunks_vec`
 4. The thread's vector in `threads_vec` is the **L2-normalized mean**
-   of its chunk vectors — coarse and precise retrieval derive from
+   of all its chunk vectors, body and attachment chunks alike (attachment
+   weighting: #288) — coarse and precise retrieval derive from
    the same source, and storing a unit-norm vector lets cosine
    similarity downstream collapse to a dot product
 5. New messages joining a thread emit new chunks (idempotent diff
@@ -600,8 +663,9 @@ cache rows, attachment chunks, and the final normalized thread vector
 in one per-message transaction. The two phases are separate
 transactions so a crash between them leaves a thread row + message map
 + indexed-file marker with the seed vector but no chunks or attachment
-rows yet — the queue retries Phase 2c on the next pass and the
-seed-vector chain converges. Within each phase, chunk and attachment
+rows yet — the queue re-runs the message (Phase 1 again,
+idempotently, then Phase 2) on the next pass and the seed-vector chain
+converges. Within each phase, chunk and attachment
 rows have foreign-key parents in `threads` / `message_thread_map`, and
 SQLite foreign-key enforcement is enabled on the indexer connection,
 so partial sidecar rows fail closed instead of becoming orphan
@@ -630,8 +694,9 @@ order the writes come in (`indexer/src/vector_sums.py`).
 - **Updates.** Every write of chunk vectors applies `S += new − old` and
   the count change in its own transaction: `replace_message_chunks`
   (a slice's inserted and deleted chunks; a deleted chunk counts
-  against its own row's thread) and `_delete_chunks_for_message` (a
-  reap's removed messages). Deleting a whole thread drops its row. A
+  against its own row's thread) and `_delete_chunks_in_batches`, which
+  every other chunk deletion uses (a reap's removed messages, a dropped
+  attachment occurrence's slice). Deleting a whole thread drops its row. A
   new thread starts with an empty sum. Moving a message to another
   thread in `message_thread_map` does not move its chunk rows, so it
   changes no sum. A write that changes no chunk reads no vector.
@@ -676,9 +741,14 @@ order the writes come in (`indexer/src/vector_sums.py`).
   2.8 s for one thread-wide read and mean before (each pass did two);
   the one-time inline fill of such a thread took 5.3 s.
 
-The stored `body_text` on `threads` still feeds FTS5 over the full
-accumulated thread content (users legitimately search quoted text and
-signatures). Chunk inputs are first passed through
+The stored `body_text` on `threads` still feeds FTS5 with the thread's
+accumulated text, quoted text and signatures included (users
+legitimately search them): each message's first 2,000 characters
+(`PER_MESSAGE_BODY_CAP_CHARS`) in arrival order, cut to 4,000 tokens
+(`THREAD_BODY_TEXT_MAX_TOKENS`), so a message added after the thread
+reaches that cap adds nothing to it. A reap that rebuilds a thread
+rebuilds this text from the survivors in date order, so after a reap
+the cap keeps the oldest survivors' text. Chunk inputs are first passed through
 `segment_for_embedding` (`indexer/src/quoting.py`), which keeps a
 message's own text as its `body` and leaves quotes, signatures and
 forwarded text out of it, so chunk vectors track substantive content of
@@ -745,7 +815,8 @@ thread's after `Re:`/`Fwd:` normalization, is kept searchable (#303):
 A message with no body text (for example attachment-only) has no body
 chunk to carry the prefix, so its subject is keyword-searchable only,
 with no semantic representation unless the thread has no chunks at all
-and falls back to a subject-only vector.
+and falls back to a vector of the thread's stored subject (its oldest
+message's, `display_subject`).
 
 **Message body assembly (#295, #298):** a message's body text is every
 non-blank inline `text/plain` and `text/html` part outside attachments
@@ -788,11 +859,14 @@ looks for its text values in the cited passages (see
 
 ### Chunk write idempotency
 
-Chunk IDs are `sha256(message_pk || index || chunk_text)` — the same
+Chunk IDs are `sha256(message_pk || index || chunk_text)`, the parts
+NUL-separated and the index in decimal (`chunker._chunk_id`) — the same
 body always produces the same ID set. The indexer's per-message chunk
 write diffs the new chunk IDs against stored IDs, embeds only the new
 ones, and deletes any that are no longer present. Re-running on
-unchanged input is therefore zero embed cost. A body chunk's
+unchanged input with the same chunk budgets (`INDEXER_CHUNK_*`) is
+therefore zero embed cost; a chunk that changed budgets cut
+differently gets a new ID and is embedded. A body chunk's
 `message_pk` is its message's claimant ID (see Per-Message Records);
 attachment chunks use a composite `message_pk` of
 `f"{claimant_id}::{attachment_id}"` so their chunk IDs are distinct from
@@ -812,7 +886,9 @@ file's size and mtime, and its path, which only names the message in
 log lines and the `filepath` record. Everything below the parser
 (threading, chunking, extraction, the database writer) sees the
 `Message`, so another source (an mbox import, say) would plug in at
-`parse_email_bytes` with its own adapter.
+`parse_email_bytes` with its own adapter. Read state is the exception:
+the writer still takes it from the Maildir flags in `filepath`
+(`maildir.message_state`), and `SourceMetadata.flags` is not read yet.
 
 **Claimant IDs.** A Message-ID is set by the sender, so two different
 files can claim the same one, by accident or to overwrite another
@@ -874,8 +950,8 @@ result (see `docs/mcp-tools.md`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.
-The row's `name` is the first display name the message gave that
-address in that role. When the message writes the address under more
+The row's `name` is the display name of the address's first
+occurrence in that role (NULL when that occurrence has none). When the message writes the address under more
 than one name (twice in one header, or again under a later role), every
 distinct decoded name is kept in `message_participant_names`, one row
 per (message, role, address, name), original casing kept and exact
@@ -917,7 +993,7 @@ semantics, `0` a known loss, `NULL` not assessed, with no default:
 | `subject_complete` | the subject was cut (`subject_length`) | phase 1, with the row |
 | `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete` | an `address_*` parser cap fired while that role's headers were read, or an entry yielded no storable address (`address_unparsed`); all three when the header scan stopped (`address_fields`); From also for a repeated `From`, whose later headers are not parsed | phase 1, with the row |
 | `attachments_manifest_complete` | a cap stopped the walk or left an attached email unwalked (`attached_depth`, `attached_fields`, `transport_decode`, `transport_lossy`, `decoded_bytes`, `container_serialize`, `mime_parts`, `delivery_status_parts`) | phase 1, with the row |
-| `body_complete` | text parts were left out of the body (`body_parts`, `html_body`, `mime_parts`) | phase 2c, in the transaction that commits the body chunks |
+| `body_complete` | text parts were left out of the body (`body_parts`, `html_body`, `mime_parts`); not yet detected, so still `1`: a body text part whose transfer decode lost bytes (#1360) and a `multipart` part the parser could not split (#1348) | phase 2c, in the transaction that commits the body chunks |
 
 `_write_message_record` writes the phase-1 columns from the parse and
 resets `body_complete` to `NULL` on every write, and
@@ -1021,8 +1097,8 @@ dead-lettered messages too) and logs the count; only a later commit of
 the occurrence's chunks sets it again. The 7-day retry of a `failed`
 row is unchanged. No filter reads the flag yet.
 
-The MCP leaves read these flags (`docs/mcp-tools.md`, "Filter
-predicates"): a stored match decides a leaf; finding nothing decides it
+The MCP leaves read the per-message `messages` flags above
+(`docs/mcp-tools.md`, "Filter predicates"): a stored match decides a leaf; finding nothing decides it
 false only under `1`, and `query_messages` counts the message as
 `indeterminate` otherwise.
 Address headers are unfolded (RFC 5322 §2.2.3: a line break followed by
@@ -1045,9 +1121,9 @@ exception type (#942). Header bytes sent raw, without an encoded-word
 with no log line when they are valid UTF-8; otherwise with replacement
 characters and one rate-limited WARNING per chunk (#1147). An
 encoded-word beside raw bytes in Subject or the From fallback is kept
-as sent, with its own rate-limited WARNING (#1186). A value whose encoded-words still do not
+as sent, with its own rate-limited WARNING (#1186). A filename whose encoded-words still do not
 decode is kept as sent, with
-one rate-limited WARNING naming the exception type, and a value that
+one rate-limited WARNING naming the exception type, and one that
 decodes to nothing is kept as sent too, so the part stays an
 attachment. Filenames stored before this are corrected only when their
 message is re-indexed.
@@ -1118,7 +1194,7 @@ reason and the file's path, never the header text.
 
 **`occurred_at`** is the delivery time: the date of the topmost
 `Received:` header, which the last receiving server adds (expected to
-be Proton's; to be checked against real mail at go-live). The parser takes the text after that header's last
+be Proton's; not recorded as checked against real mail). The parser takes the text after that header's last
 `;` (RFC 5321 puts the date there), parses it with
 `parsedate_to_datetime`, and stores it in UTC like `sent_at`
 (`indexer/src/parser.py` `_parse_received_date`). It is NULL when the
@@ -1432,12 +1508,14 @@ the tables from SQLite and gets no `/config` mount.
 ## Attachment Indexing
 
 Email attachments flow through the same chunker and embedder pipeline
-as message bodies. Two extra tables sit alongside `message_chunks`:
+as message bodies. Three extra tables sit alongside `message_chunks`: `attachments_fts`
+(contentless FTS5 over filename and MIME type, joined by
+`attachments.fts_rowid`) and the two below:
 
 | Table | Keyed by | Purpose |
 |---|---|---|
 | `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. `extractor_module` names the extraction row the occurrence uses (see below; '' when its label selects no extractor). `text_complete` and `text_extractor` record whether its committed chunks hold all its text, and the stamp of the result that applied (#1242; see *Attachment text completeness*). When one message carries the same bytes under labels that run different extractors, the texts share the message's chunk slice for the payload, and every text's chunks are kept. A text hit in `search_attachments` is attributed to an occurrence whose row is a success; with two such occurrences in one message, to the first by occurrence id. |
-| `attachment_extractions` | (attachment_id, extractor_module) | Cache of extracted text + status, keyed by the payload's sha256 and the extractor namespace the occurrence's MIME type and filename select for those bytes after the constant-size prefix check (OOXML bytes labelled `.doc` are keyed `docx` and share the `.docx` row, PDF bytes under an image label are keyed `pdf` and share the `.pdf` row (#1415); '' when the label selects no extractor) (#928). An OLE2 or ZIP payload runs the extractor its directory names whatever the key, recorded in the `extractor` stamp (see *Extractor dispatch*, #1416). Dispatch from a label and the bytes is deterministic, so every occurrence with the same key would extract the same result, and an occurrence is served only what an extraction under its own label gives, whatever labels of the same bytes arrived before it: an OLE2 `.doc` first seen as `.txt`, or a PowerPoint file first sent as `.doc` (#986), no longer decides the later occurrences' result. The same bytes under two labels that run different extractors store two rows; the cost is one extraction per module the bytes arrive under and a second copy of the text, which is negligible next to the mail itself. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per payload and module, including within one indexing batch, where results not yet committed are shared by the same key. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it holds: an "OCR disabled" row until OCR is turned on, except an image one recorded with no stamp (before #1415), which never holds; an "OLE2 compound file" row (an OLE2 payload under an OOXML label, #694, #936), a "binary payload labelled as text" row (#932), a "not an OLE2 compound file" row under the `ppt` module (#957), a "not an OLE2 or OOXML container" row under a legacy `doc` / `xls` label (#1227) and a "no extractor" row for good, since the label and the bytes decide them; an encrypted-PDF or pypdf-limit row under `pdf`, an eager-part-budget row under `xlsx` and a pre-open package-budget row under `pptx` or `docx` for good too, since that module would decline the same bytes again (#931, #1032); any other (an extractor not importable in the image) only under the '' module; `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is re-extracted by the next occurrence that uses it, and the indexer re-queues every message with an occurrence using it once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that uses it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message with an occurrence using an "OCR disabled" row, and, whatever the OCR setting, one using an image "OCR disabled" row with no stamp, keyed `image` or '' (#1415). The sweep also re-queues, whatever the OCR setting, each message whose occurrence uses a "no extractor" or "OLE2 compound file" row but whose label now selects another module, as when a release starts routing an extension such as `.heic` (#691), `.dotx` (#937), `.pptx` (#936), `.ppt` (#957), `.pptm` / `.ppsx` / `.potx` (#947) or `.ppsm` / `.potm` (#1042); the reprocess writes the occurrence's own row and points the occurrence at it, so each is re-queued once. Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message with an occurrence using a `too_large` row whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). `ocr_pages_skipped` holds the scanned pages the PDF OCR page cap left unread (0 when none, NULL when unknown: a non-PDF result, a `failed` or `unsupported` one, or a row cached before schema v3), so an occurrence served the row is still counted as capped once its message commits (#891); the text served is the same. `text_complete` records whether the result lost no text (#1242); a `success` or `empty` row with none (cached before schema v6) is re-extracted once, except an `-ocr` row while OCR is off (#1285). `ocr_pages_cap`, `digital_pages_cap` and `extracted_chars_cap` record the configured limit that cut a `success` or `empty` result (#1418): `INDEXER_OCR_MAX_PAGES` (scanned PDF pages, TIFF frames; recorded by `pdf` and `image`), `INDEXER_PDF_MAX_DIGITAL_PAGES` (`pdf`) and `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` (the dispatcher's cut for every module, and the `.doc` / `.ppt` tools' output bound when the setting, not the 40 MiB ceiling, set it): the limit's value when it cut, 0 when it did not, NULL when it does not apply or the row predates schema v11. A hardcoded limit (an image's 10,000,000-character text budget, a TIFF frame that cannot be read past the cap, the tools' ceiling, the page-pixel budgets) records nothing; a fix to one is an `EXTRACTOR_VERSIONS` bump. A row a limit cut is not served once that limit is raised (higher, or `0` for the two that have no-limit values; lowering never counts), and an incomplete row (`text_complete` 0) cached before schema v11 is re-extracted once to record its caps. While OCR is off, a row an OCR extractor wrote (`-ocr` stamp) or whose `ocr_pages_cap` or `ocr_pages_skipped` is above 0 is kept out of both, so a refresh cannot record "OCR disabled" over it or forget its unread pages; it is refreshed once OCR is on. The lookup (`attachment_indexing.cap_raised`, `cap_bootstrap_due`) and the startup sweep (`Database.find_cap_refresh_attachment_filepaths`, the same test in SQL) agree; the sweep queues every message using such a row before the drain replaces it, and logs one INFO line with the three settings and its counts (`docs/troubleshooting.md`). A cut that remains on a result served from the cache is counted and logged at commit, as a fresh one is. `identifier` (#1416) records how the payload's container was certified: `container@<n>` (the identification version, `extractors.CONTAINER_IDENTIFICATION_VERSION`) for an OLE2 or ZIP payload whose directory was identified before dispatch, `none@<n>` (the signature-set version, `extractors.CONTAINER_SIGNATURE_VERSION`, owner decision on #1416) for one with neither signature, NULL for a `too_large` row (no dispatch reached it) and for every row cached before schema v12. A row with none, a `container@` row of an older identification version, or a `none@` row of an older signature set is not served: checked beside the stale stamp, before any status (an `unsupported` one included) is honoured, the lookup stamps `none@<n>` on a row whose payload has neither signature (a constant-size check; the result is kept) and identifies and re-extracts the rest. A newer version (after a rollback) is kept, and so is a row an OCR extractor wrote while OCR is off. The lookup (`attachment_indexing.identification_due`, `identification_refreshes`) and the startup sweep (`Database.find_identification_refresh_attachment_filepaths`, the same test in SQL, without the prefix check, which needs the bytes) agree; the sweep queues every message using such a row, clearing its occurrences' `text_complete`, before the drain replaces it, and logs one INFO line with its counts (`docs/troubleshooting.md`). The v12 migration also queues a reparse of every indexed file, which passes every occurrence through the lookup once; chunks whose text is unchanged keep their IDs and vectors, and only text a re-identified container now yields (an Office file sent under another type, recorded `failed` or `unsupported` before) is new chunks, embedded by the configured embedder. A container sent under a `message/*` label also changes attachment ID (its payload was the serialized email, now the bytes as sent): the reparse removes the old occurrence with its FTS row, chunks and vectors (see *Cascade on message removal*, #1375) and embeds the new one's text once. Schema v1 introduced the key; see *Schema versions*. |
+| `attachment_extractions` | (attachment_id, extractor_module) | Cache of extracted text + status, keyed by the payload's sha256 and the extractor namespace the occurrence's MIME type and filename select for those bytes after the constant-size prefix check (OOXML bytes labelled `.doc` are keyed `docx` and share the `.docx` row, PDF bytes under an image label are keyed `pdf` and share the `.pdf` row (#1415); '' when the label selects no extractor) (#928). An OLE2 or ZIP payload runs the extractor its directory names whatever the key, recorded in the `extractor` stamp (see *Extractor dispatch*, #1416). Dispatch from a label and the bytes is deterministic, so every occurrence with the same key would extract the same result, and an occurrence is served only what an extraction under its own label gives, whatever labels of the same bytes arrived before it: an OLE2 `.doc` first seen as `.txt`, or a PowerPoint file first sent as `.doc` (#986), no longer decides the later occurrences' result. The same bytes under two labels that run different extractors store two rows; the cost is one extraction per module the bytes arrive under and a second copy of the text, which is negligible next to the mail itself. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs once per payload and cache key until the row is refreshed, including within one indexing batch, where results not yet committed are shared by the same key. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it holds: an "OCR disabled" row until OCR is turned on, except an image one recorded with no stamp (before #1415), which never holds; an "OLE2 compound file" row (an OLE2 payload under an OOXML label, #694, #936), a "binary payload labelled as text" row (#932), a "not an OLE2 compound file" row under the `ppt` module (#957), a "not an OLE2 or OOXML container" row under a legacy `doc` / `xls` label (#1227) and a "no extractor" row for good, since the label and the bytes decide them; an encrypted-PDF or pypdf-limit row under `pdf`, an eager-part-budget row under `xlsx`, a pre-open package-budget row under `pptx` or `docx`, an encrypted legacy `.ppt` row under `ppt` (#983), an image over the image child's pixel ceiling (#1401) and the container results (#1416) for good too, since the same bytes would be declined again (`PERMANENT_FAILURE_ERRORS`, #931, #1032); any other (an extractor not importable in the image) only under the '' module; `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is re-extracted by the next occurrence that uses it, and the indexer re-queues every message with an occurrence using it once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that uses it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message with an occurrence using an "OCR disabled" row, and, whatever the OCR setting, one using an image "OCR disabled" row with no stamp, keyed `image` or '' (#1415). The sweep also re-queues, whatever the OCR setting, each message whose occurrence uses a "no extractor" or "OLE2 compound file" row but whose label now selects another module, as when a release starts routing an extension such as `.heic` (#691), `.dotx` (#937), `.pptx` (#936), `.ppt` (#957), `.pptm` / `.ppsx` / `.potx` (#947) or `.ppsm` / `.potm` (#1042); the reprocess writes the occurrence's own row and points the occurrence at it, so each is re-queued once. Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message with an occurrence using a `too_large` row whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). `ocr_pages_skipped` holds the scanned pages the PDF OCR page cap left unread (0 when none, NULL when unknown: a non-PDF result, a `failed` or `unsupported` one, or a row cached before schema v3), so an occurrence served the row is still counted as capped once its message commits (#891); the text served is the same. `text_complete` records whether the result lost no text (#1242); a `success` or `empty` row with none (cached before schema v6) is re-extracted once, except an `-ocr` row while OCR is off (#1285). `ocr_pages_cap`, `digital_pages_cap` and `extracted_chars_cap` record the configured limit that cut a `success` or `empty` result (#1418): `INDEXER_OCR_MAX_PAGES` (scanned PDF pages, TIFF frames; recorded by `pdf` and `image`), `INDEXER_PDF_MAX_DIGITAL_PAGES` (`pdf`) and `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` (the dispatcher's cut for every module, and the `.doc` / `.ppt` tools' output bound when the setting, not the 40 MiB ceiling, set it): the limit's value when it cut, 0 when it did not, NULL when it does not apply or the row predates schema v11. A hardcoded limit (an image's 10,000,000-character text budget, a TIFF frame that cannot be read past the cap, the tools' ceiling, the page-pixel budgets) records nothing; a fix to one is an `EXTRACTOR_VERSIONS` bump. A row a limit cut is not served once that limit is raised (higher, or `0` for the two that have no-limit values; lowering never counts), and an incomplete row (`text_complete` 0) cached before schema v11 is re-extracted once to record its caps. While OCR is off, a row an OCR extractor wrote (`-ocr` stamp) or whose `ocr_pages_cap` or `ocr_pages_skipped` is above 0 is kept out of both, so a refresh cannot record "OCR disabled" over it or forget its unread pages; it is refreshed once OCR is on. The lookup (`attachment_indexing.cap_raised`, `cap_bootstrap_due`) and the startup sweep (`Database.find_cap_refresh_attachment_filepaths`, the same test in SQL) agree; the sweep queues every message using such a row before the drain replaces it, and logs one INFO line with the three settings and its counts (`docs/troubleshooting.md`). A cut that remains on a result served from the cache is counted and logged at commit, as a fresh one is. `identifier` (#1416) records how the payload's container was certified: `container@<n>` (the identification version, `extractors.CONTAINER_IDENTIFICATION_VERSION`) for an OLE2 or ZIP payload whose directory was identified before dispatch, `none@<n>` (the signature-set version, `extractors.CONTAINER_SIGNATURE_VERSION`, owner decision on #1416) for one with neither signature, NULL for a `too_large` row (no dispatch reached it) and for every row cached before schema v12. A row with none, a `container@` row of an older identification version, or a `none@` row of an older signature set is not served: checked beside the stale stamp, before any status (an `unsupported` one included) is honoured, the lookup stamps `none@<n>` on a row whose payload has neither signature (a constant-size check; the result is kept) and identifies and re-extracts the rest. A newer version (after a rollback) is kept, and so is a row an OCR extractor wrote while OCR is off. The lookup (`attachment_indexing.identification_due`, `identification_refreshes`) and the startup sweep (`Database.find_identification_refresh_attachment_filepaths`, the same test in SQL, without the prefix check, which needs the bytes) agree; the sweep queues every message using such a row, clearing its occurrences' `text_complete`, before the drain replaces it, and logs one INFO line with its counts (`docs/troubleshooting.md`). The v12 migration also queues a reparse of every indexed file, which passes every occurrence through the lookup once; chunks whose text is unchanged keep their IDs and vectors, and only text a re-identified container now yields (an Office file sent under another type, recorded `failed` or `unsupported` before) is new chunks, embedded by the configured embedder. A container sent under a `message/*` label also changes attachment ID (its payload was the serialized email, now the bytes as sent): the reparse removes the old occurrence with its FTS row, chunks and vectors (see *Cascade on message removal*, #1375) and embeds the new one's text once. Schema v1 introduced the key; see *Schema versions*. |
 
 Per-occurrence chunks land in `message_chunks` with the
 `attachment_id` column populated and `kind` set to `attachment`. They embed exactly like body chunks
@@ -1453,6 +1531,8 @@ to a per-format module:
 ```
 content_type → _MIME_DISPATCH (text/plain, application/pdf, ...)
    ↓ unknown MIME
+image/* prefix → image
+   ↓ not image/*
 filename ext → _EXT_DISPATCH (.pdf, .docx, .xlsx, .pptx, .png, ...)
    ↓ no match
 status="unsupported" (still searchable by filename via attachments_fts)
@@ -1461,7 +1541,8 @@ status="unsupported" (still searchable by filename via attachments_fts)
 Per-format modules live under `indexer/src/extractors/` and are
 lazy-imported so a missing optional dependency (e.g. `python-docx`
 not in this image) downgrades to `unsupported` rather than crashing
-the indexer at startup.
+the indexer at startup. A library missing from the extractor child
+(pypdf, pytesseract, xlrd) is recorded `failed` by type name instead.
 
 Container identification (#1416, owner decision on #1416, 2026-10-10):
 a payload that starts with the OLE2 signature (`D0 CF 11 E0 A1 B1 1A
@@ -1509,7 +1590,7 @@ decide.
   extractor's own budget still decides a package between the two), an
   OLE2 header may declare no more FAT and DIFAT sectors than the file
   holds; the two metadata members together at most 8 MiB compressed
-  (charged before either is opened) and 8 MiB decompressed (counted as
+  (each charged just before it is read) and 8 MiB decompressed (counted as
   zipfile hands each chunk over, so a member that understates its size
   is bounded too) and at most 100,000 XML elements, with no text kept;
   and the classification is one pass over the names or the metadata
@@ -1613,8 +1694,9 @@ occurrence of it now selects a module.
   directory walk recurses with no cycle check (`RecursionError`). So
   the child runs under 512 MiB of address space and 30 s of CPU, set
   before it starts, and the parent kills it after 45 s. Inside
-  those limits it applies the XLSX extractor's budgets, counted while
-  reading: at most 1,024 sheets, loaded one at a time and unloaded after
+  those limits it applies the XLSX extractor's cell and text budgets,
+  plus a sheet budget of its own, counted while reading: at most 1,024
+  sheets, loaded one at a time and unloaded after
   each; 5,000,000 cells visited (padding included, plus 64 per row),
   checked before the next sheet loads; 10,000,000 characters. A budget
   that cut the text is logged through the extractor-cap WARNING
@@ -1670,7 +1752,8 @@ would choose for that message, with no quote stripping. The inner
 `From` is a claim inside a claim: it is searchable attachment text
 only, never a participant, an authority input or a direction (#1235).
 Each nested email is read once, where the walk meets it, so the
-64 MB decoded-bytes budget goes in document order. An inline nested
+64 MB budget of transfer-encoded nested-email bytes goes in document
+order. An inline nested
 email under a `multipart/alternative` or `multipart/related` takes
 part in that container's choice by its real content, as the default
 parser's body does: it is rendered (label, headers, body) where it
@@ -1685,7 +1768,7 @@ own. A nested `.eml` or `application/eml` file is such a leaf
 attachment; the attachments inside an `.eml` file are not walked by
 the parser at all. Every message of one payload shares one budget: 10,000 parts
 walked and 200 text parts decoded (the parser's per-message caps), 20
-levels of nesting, 64 MB of transfer-decoded nested emails, 2,000
+levels of nesting, 64 MB of transfer-encoded nested emails decoded, 2,000
 characters per header and 10,000,000 characters of text; a budget
 that cut the text is logged through the extractor-cap WARNING
 (`eml_*`) and marks the text incomplete, and so does a decode that
@@ -1734,8 +1817,8 @@ took 3 to 5 s in the image, and html2text on 32 MB of HTML took 18 to
 payload nested past Python's recursion limit (about 1,000 levels) is
 recorded `failed` as `RecursionError`.
 
-All three, and the extractor child below (OOXML, images, attached
-emails and HTML), run through one subprocess runner (`extractors/_runner.py`).
+All three, and the extractor child below (OOXML, `.xls`, images,
+PDFs, attached emails, HTML and container identification), run through one subprocess runner (`extractors/_runner.py`).
 It starts every tool through `extractors/_launcher.py` (`python -I`),
 which lowers its own address space (`RLIMIT_AS`) and CPU time
 (`RLIMIT_CPU`) to the limits the extractor passes, caps glibc at two
@@ -1772,7 +1855,7 @@ log or `last_error`.
 
 The Python extractor child (`extractors/extractor_child.py
 <module>`, for the OOXML formats, `.xls`, images, PDFs, attached
-emails and HTML) reports its result in a
+emails, HTML and container identification) reports its result in a
 framed protocol the runner parses as it arrives (#1291): `P` lines for
 progress, passed to the dispatcher's progress callback as they are
 read so a long extraction can refresh the heartbeat; a `C <name>` line
@@ -1814,6 +1897,7 @@ The limits on every external program the indexer runs:
 | Program | Address space | CPU time | Wall clock |
 |---|---|---|---|
 | catdoc (`.doc`) | 64 MiB | 10 s | 60 s |
+| extractor child, container identification (OLE2 / ZIP payloads) | 256 MiB | 5 s | 10 s |
 | extractor child, xlrd (`.xls`) | 512 MiB | 30 s | 45 s |
 | Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
 | extractor child, OOXML (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
@@ -1880,7 +1964,7 @@ same text and status as before, and failures keep their type names.
 
 Image extraction runs in the extractor child (PLAN.md decision 42,
 #1292): `image.py` starts `extractor_child.py image <pages> <OCR
-timeout>`, whose `image_child.py` decodes the image with Pillow (and
+timeout> <Tesseract path>`, whose `image_child.py` decodes the image with Pillow (and
 pillow-heif) and runs Tesseract through pytesseract, as the indexer did
 before. Each Tesseract is a process the child starts, so it inherits
 the child's limits (each process has its own) and is killed with the
@@ -2087,7 +2171,8 @@ of plain paragraphs is about 51,000,000 characters). 50 MB of `<hr>`
 (about 92,000,000 characters of output) and 50 MB of bytes that are
 not UTF-8 fail with `MemoryError` at the limit, and so does a 32 MB
 attachment of bytes that are not UTF-8 (950 MB in process). 1 GiB is
-2.5 times the largest peak of the shapes that complete; 60 s is 1.6
+about 1.5 times the largest peak of the shapes that complete
+(unclosed `<div>`, 692 MB); 60 s is 1.6
 times the slowest.
 
 Starting the child adds about 58 ms to the parse of a message with any
@@ -2495,8 +2580,7 @@ English language data (`eng`, plus `osd`), and the extractors pass no
 language to Tesseract, so it uses its English default. Scans in a
 non-Latin script or with heavy accents extract poorly, and installing
 another `tesseract-ocr-*` language pack would not change that by
-itself, since nothing selects it. There is no setting for this today;
-issue #490 tracks it.
+itself, since nothing selects it. There is no setting for this.
 
 With OCR off, images, and PDFs whose whole text layer is below the
 threshold, are recorded as "OCR disabled". When the indexer starts
@@ -2518,7 +2602,7 @@ scanned pages are not re-read when OCR is turned on later.
 | `INDEXER_OCR_MAX_PAGES` | `20` | Cap pages OCR'd per PDF or multipage TIFF. Raising it re-queues, once at startup, the messages whose cached results it cut (#1418). |
 | `INDEXER_OCR_TIMEOUT_SECONDS` | `60` | Per-page Tesseract timeout — bounds runaway OCR on a crafted high-noise image — and the deadline for rendering a scanned PDF's pages with Poppler. pdf2image's own page count before each render takes no timeout, so the indexer first times one bounded page count: one over half the deadline is an OCR timeout, and each render's timeout holds back that time. A page count much slower on pdf2image's call than on the timed one is bounded by the PDF child's wall clock (#868, #1293). Set `0` to disable both. Image OCR also runs under a CPU limit per process of 4 × this value + 30 s (270 s with `0` or the default), which `0` does not lift (#1292); the PDF child's CPU limit and wall clock are sized from it too (#1293). |
 | `INDEXER_PDF_MAX_DIGITAL_PAGES` | `500` | Cap pages walked by the digital pypdf path — protects against text-only PDFs with thousands of pages. Set `0` to disable. A PDF cut here logs the `pdf_digital_pages` extractor-cap WARNING (#903). Raising or disabling it re-queues, once at startup, the messages whose cached results it cut (#1418). |
-| `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. The XLSX extractor also stops at 10,000,000 characters of its own, whatever this is set to, so shared strings repeated across many cells cannot expand without limit (#294). The legacy `.doc` and `.ppt` tools' output is read up to four bytes per character of this cap, never past 40 MiB, whatever it is set to (#1308). Text cut by either logs an extractor-cap WARNING (`extracted_chars`, `xlsx_text_chars`) and counts in the attachments line's `extractor_caps` (#903). Raising or disabling it re-queues, once at startup, the messages whose cached results it cut; the 10,000,000-character and 40 MiB limits are not settings and are not refreshed (#1418). |
+| `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. Every extractor that runs in the extractor child (DOCX, PPTX, XLSX, `.xls`, attached emails, HTML, images and PDFs) also stops at 10,000,000 characters of its own, whatever this is set to (for XLSX, so shared strings repeated across many cells cannot expand without limit, #294). The legacy `.doc` and `.ppt` tools' output is read up to four bytes per character of this cap, never past 40 MiB, whatever it is set to (#1308). Text cut by any of these logs an extractor-cap WARNING (`extracted_chars`, or the format's own `*_text_chars` cap such as `xlsx_text_chars`) and counts in the attachments line's `extractor_caps` (#903). Raising or disabling it re-queues, once at startup, the messages whose cached results it cut; the 10,000,000-character and 40 MiB limits are not settings and are not refreshed (#1418). |
 
 The XLSX extractor has fixed budgets of its own besides these. It cuts
 worksheets at an XML node budget (#432). The parts openpyxl loads whole
@@ -2851,13 +2935,14 @@ DELETE FROM attachment_extractions WHERE NOT EXISTS (
 
 ## Schema versions
 
-The indexer stamps the schema version in `schema_version` (and
-`PRAGMA application_id`). A fresh install creates the current schema
+The indexer stamps the schema version in `schema_version`, and a fixed
+`PRAGMA application_id` (`SCHEMA_APPLICATION_ID`) that marks the
+schema after the v0 renumbering. A fresh install creates the current schema
 directly; an existing index runs the forward migrations in
 `indexer/src/migrations/` at startup, each in its own transaction, so a
 failure leaves the last applied version stamped and the next start
-retries it. A version above the code's, or a missing migration file,
-stops startup (`docs/troubleshooting.md`).
+retries it. A version above the code's, a missing migration file, or a
+database without that application ID stops startup (`docs/troubleshooting.md`).
 
 Before deploying a release that adds a migration, take a snapshot with
 `make backup-index BACKUP_DIR=<directory outside the checkout>`: a
@@ -2868,7 +2953,7 @@ Maildir (`docs/troubleshooting.md`, "Back up and restore the index").
 
 A migration that adds parser-produced per-message data ends with the
 shared reparse statement, so the worker fills the new data for mail
-already indexed without embedding calls (see *Reparse in place*).
+already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 
 | Version | Migration | Change |
 |---|---|---|
@@ -2879,7 +2964,7 @@ already indexed without embedding calls (see *Reparse in place*).
 | 9 | `0009_attachment_extraction_deferral.sql` | `attachments.extraction_deferred_at` (#1236; see *Per-message extraction budget*): when the budget deferred the occurrence's extraction to a later pass, NULL otherwise, with the partial index `idx_attachments_deferred` on `(claimant_id, attachment_id)` over the deferred rows (the MCP server's per-chunk flag reads it). No message was deferred before it, so every row starts NULL and no reparse is queued. |
 | 8 | `0008_unknown_sent_dates.sql` | Unknown send dates (#1080; see *Message time*): `messages` is rebuilt with a nullable `sent_at`, `sent_at_status` (`parsed` / `missing` / `invalid`, NULL until assessed) and `first_indexed_at`, and `effective_at` becomes `COALESCE(occurred_at, sent_at, first_indexed_at)`. Every existing value is kept, the participant rows are copied aside and back in the same transaction, and the migration queues a reparse, which stores an unknown date as NULL and moves the old fallback to `first_indexed_at` without embedding calls. Until the reparse reaches a message without a delivery date, a date bound counts it as indeterminate. |
 | 7 | `0007_operator_identity.sql` | `operator_addresses` and `operator_identity` (#824; see *Operator identity*), seeded `unconfigured` with no addresses until the indexer's next start loads `config/identity.toml`. No per-message column, so no reparse is queued. |
-| 6 | `0006_attachment_text_complete.sql` | Attachment text completeness (#1242): `attachments.text_complete` (0 / 1, NULL until assessed, no default) and `attachments.text_extractor`, and `attachment_extractions.text_complete` (NULL when unknown). Every existing row starts NULL and the migration queues a reparse (see *Reparse in place*), which re-extracts each cached `success` or `empty` result once, since none has a record yet (#1285). |
+| 6 | `0006_attachment_text_complete.sql` | Attachment text completeness (#1242): `attachments.text_complete` (0 / 1, NULL until assessed, no default) and `attachments.text_extractor`, and `attachment_extractions.text_complete` (NULL when unknown). Every existing row starts NULL and the migration queues a reparse (see *Reparse in place*), which re-extracts each cached `success` or `empty` result once, since none has a record yet, except an `-ocr` row while OCR is off, refreshed once OCR is on (#1285). |
 | 5 | `0005_message_completeness.sql` | Per-message completeness on `messages` (#1086): `subject_complete`, `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete`, `attachments_manifest_complete`, `body_complete` (0 / 1, NULL until assessed, no default) and `caps_json`. Every existing row starts NULL and the migration queues a reparse, which fills them without embedding calls; a dead-lettered job keeps its message NULL until `make requeue-dead`. Until the reparse reaches a message, a subject, text, attachment, address or authority filter that does not match it counts it as indeterminate. |
 | 4 | `0004_participant_names.sql` | `message_participant_names` and `messages.participant_names_complete` (#1140), seeded with each participant's first name; the migration queues a reparse (see *Reparse in place*). |
 | 3 | `0003_extraction_ocr_pages_skipped.sql` | `attachment_extractions.ocr_pages_skipped` (#891): the scanned pages the PDF OCR cap left unread, NULL when unknown, no default. Every existing row starts NULL and counts as nothing; the column is the extractor's, not the parser's, so no reparse is queued, nothing is re-extracted and no `EXTRACTOR_VERSIONS` entry is bumped. |
@@ -2900,8 +2985,11 @@ by default (mirror mode: upstream deletions leave the local index);
 append-only and keeps deleted mail). An unrecognized value fails indexer
 startup rather than picking a mode.
 
-1. **Tombstone** — a startup sweep plus a live `on_moved` watchdog handler
-   record every `T`-flagged file in a `pending_deletions` table. No primary
+1. **Tombstone** — a sweep at startup and every
+   `INDEXER_DELETION_SWEEP_INTERVAL_SECS` (default 1 h), plus a live
+   `on_moved` watchdog handler, record each `T`-flagged indexed file in a
+   `pending_deletions` table, unless a live byte-identical copy remains
+   (see *Byte-identical copies*). No primary
    data is mutated at tombstone time, so the soft-delete is fully reversible
    if mbsync un-flags the file on a later pull. A tombstone is recorded
    only for the path `message_thread_map` currently holds for the
@@ -2921,10 +3009,12 @@ startup rather than picking a mode.
    fresh tombstone — after the reaper read its tombstones is left for a
    later pass), and
    either rebuilds the parent thread from the surviving messages on disk
-   (re-parsed, re-embedded) or deletes the thread entirely when nothing
-   remains. Embedding-endpoint failures during rebuild (operator-supplied
-   `EMBED_BASE_URL`) cause the reaper to back off and retry on the next
-   pass.
+   (re-parsed; the thread vector is the survivors' chunk mean, derived
+   from the stored sums with no re-embedding, #1356) or deletes the
+   thread entirely when nothing remains. Only when no chunk survives does
+   the rebuild embed a subject (the first non-empty subject among the
+   survivors, oldest first, or `(empty thread)` when none has one); an
+   embedding failure there makes the reaper back off and retry on the next pass.
 
 **Reaped-source records.** A citation or search hit from an earlier
 answer can name a message or thread the reaper has since removed. Such
@@ -3024,13 +3114,14 @@ is not the mapped path and is moved to another folder keeps its old
 path in `indexed_files`, so the lookup cannot find it until the next
 periodic rescan indexes the destination.
 
-A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
-the fraction of total indexed messages the reaper will touch in a single
-pass. Transient Bridge outages (vault rebuilds, folder renames, auth
+A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) stops a
+reap pass outright, reaping nothing, when the tombstones past the grace
+window outnumber that fraction of total indexed messages; it does not
+reap a slice. Transient Bridge outages (vault rebuilds, folder renames, auth
 glitches) can cause mbsync to `T`-flag a huge batch at once; the brake
 stops the reaper from acting, while still recording tombstones that will
-clear themselves if mbsync reverts the flags. An absolute floor of 10
-tombstones per pass is always allowed regardless of the percentage so
+clear themselves if mbsync reverts the flags. Up to 10
+tombstones per pass are always allowed regardless of the percentage so
 that routine cleanup on small mailboxes is not gated by the 5% default.
 `INDEXER_DELETION_FORCE=true` overrides the brake for intentional bulk
 cleanups.
@@ -3082,7 +3173,11 @@ connection:
 
 - the watchdog observer thread, via `MaildirHandler.on_created` /
   `on_moved` callbacks
-- the main loop, via periodic `Reconciler.sweep()` / `reap()` passes
+- the main loop, which runs the queue drain (every pipeline write) and
+  the periodic reconciler, WAL and recovery passes
+
+`make reparse` and `make requeue-dead` write from a separate process on
+their own connection, serialized by SQLite's file lock.
 
 `sqlite3.connect(check_same_thread=False)` lets both threads share the
 connection, but the Python-level `BEGIN IMMEDIATE` / execute / commit
@@ -3106,7 +3201,9 @@ contentless configuration two things are true that matter here:
 each row's rowid is stored in `threads.fts_rowid`. Writes delete by rowid
 before re-inserting; the MCP keyword search joins on
 `threads_fts.rowid = threads.fts_rowid`. This avoids both the stale-token
-problem and the always-null join.
+problem and the always-null join. `message_chunks_fts` and
+`attachments_fts` follow the same pattern, through
+`message_chunks.fts_rowid` and `attachments.fts_rowid`.
 
 ## Durable Indexing Queue
 
@@ -3250,13 +3347,15 @@ Failure isolation is preserved across phases:
   succeed.
 
 The queue's `claim_batch(N)` fetches a snapshot of N distinct due rows
-in one query so the gather phase cannot re-claim the same row
+in two SELECTs under one lock (fresh mail first, one slot kept for a
+reparse row) so the gather phase cannot re-claim the same row
 repeatedly while Phase 2c is deferred.
 
 ### Recovery sweep for chunkless zero-vector threads
 
-A recovery sweep (`_recover_zero_vector_threads`) runs at the head
-of every `initial_index` call AND periodically from the main loop
+A recovery sweep (`_recover_zero_vector_threads`) runs in every
+`initial_index` call, after the Maildir walk and before the drain, AND
+periodically from the main loop
 on `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (default 30 min). It
 catches the failure modes the queue retry path can't fix on its own
 without breaking the durable queue's bounded-retry contract:
@@ -3283,7 +3382,8 @@ without breaking the durable queue's bounded-retry contract:
     also the genuine crash-mid-batch case: a process killed
     between Phase 1 and `mark_failed`/`mark_succeeded` leaves the
     row at `queued`, charged one attempt only if it was the message
-    being parsed or extracted when the process died (see below).
+    being parsed or extracted, or a lone survivor in the bulk embed or
+    its commit, when the process died (see below).
   - **`dead` row** (deterministic Phase 2 failure exhausted
     `max_attempts`): skipped — left alone as an operator-visible
     terminal state. Auto-resurrecting would burn embedder load
@@ -3294,8 +3394,9 @@ without breaking the durable queue's bounded-retry contract:
     (optionally `CLASS=...`), which resets dead rows to `queued`
     with a fresh attempt budget.
 
-Healthy chunkless threads (e.g., subject-fallback threads from
-blank-body messages) are not touched — the DB query filters out
+With deletion reconciliation on, `T`-flagged files are skipped: the
+reaper owns them. Healthy chunkless threads (e.g., subject-fallback
+threads from blank-body messages) are not touched — the DB query filters out
 non-zero `threads_vec` rows.
 
 Each job carries `attempts`, `last_stage`, `last_error`, `last_error_class`
@@ -3361,8 +3462,8 @@ message's parse, or one attachment's extraction — has run longer than
 `INDEXER_MESSAGE_TIMEOUT_SECONDS` (default 3600, `0` disables). Each
 attachment, and each completed embed request while a lone survivor is
 watched through the bulk embed, restarts the clock, so a message with many legitimately
-slow scanned PDFs (up to ~21 min each at the default OCR limits) is not
-cut off. The restart policy brings the indexer back with the attempt
+slow scanned PDFs (each allowed up to its child's wall clock, 2,550 s
+at the defaults; see the limits table) is not cut off. The restart policy brings the indexer back with the attempt
 counted.
 
 The container healthcheck (`indexer/healthcheck.sh`) fails once the
@@ -3384,13 +3485,20 @@ per-message rows through `upsert_thread`; Phase 2a finds every chunk ID
 already stored and queues nothing to embed; a chunkless thread keeps
 its stored subject-fallback vector instead of embedding it again (one
 still at the zero placeholder is repaired as usual). So a reparse
-makes no embedding call, except for a thread whose last chunk goes with
-a dropped attachment occurrence (#1375): its subject is embedded once
-for the thread vector. Attachment text comes from the extraction
-cache, unless the cached row is stale: an older extractor version, or
-(since v6) a `success` or `empty` row with no completeness record, which
-is re-extracted once; a chunk whose text is unchanged keeps its ID and
-is not embedded again. Retries, dead letters, the stall guard and heartbeats are the
+embeds only text that has no stored chunk. Attachment text comes from
+the extraction cache unless the lookup refreshes the cached row (an
+older extractor version, a missing completeness or limit record, a
+limit raised since it cut the text, a container certification due, or
+a `failed` result past its 7-day window): a chunk whose text is
+unchanged keeps its ID and is not embedded again, and text the
+re-extraction changes is embedded as new chunks (the v12 reparse embeds
+the newly readable Office attachments this way). Chunks are cut with
+the current `INDEXER_CHUNK_*` budgets, so a chunk that budgets changed
+since a message was indexed cut differently gets a new ID and is
+embedded. A thread vector still at the zero placeholder, and a thread
+whose last chunk goes with a dropped attachment occurrence (#1375),
+embed the thread's subject, once for each such message in a pass
+(chunkless siblings in one batch each reserve the fallback). Retries, dead letters, the stall guard and heartbeats are the
 queue's own, and a message that fails to parse dead-letters instead of
 failing a migration. A reparse job whose file is gone while its path is
 still indexed waits for the rename like any other job for an indexed
@@ -3523,7 +3631,7 @@ drained between two heartbeats still gets its completion line.
 if the file is restored, so they are counted in `parked_trashed`
 instead, and the completion line notes any still parked (#1331). `get_mailbox_status` reports
 the queued reparse jobs as `queue.reparse` (a subset of `pending`,
-`retrying` and `deferred`), names them in the not-current reason, and `make status`
+`retrying`, `deferred` and `extraction_deferred`), names them in the not-current reason, and `make status`
 prints a line saying search finds those messages but the data the
 upgrade adds is missing until the reparse finishes.
 
@@ -3611,11 +3719,12 @@ attempt that opens no new directory costs only the folder walk. The
 same check also runs with the periodic rescan, for a marker that
 could not be written and to retry a re-schedule that failed.
 
-When deletion reconciliation is enabled, every enqueue path — the
-startup scan, the periodic rescan, the zero-vector recovery sweep, and
-the watchdog's `on_created` / new-delivery `on_moved` branches — skips
-`T`-flagged files, and the drain never indexes a claimed job whose file
-has been `T`-flagged since it was queued (the reaper owns that message):
+When deletion reconciliation is enabled, the Maildir walks (startup
+scan, periodic rescan), the zero-vector recovery sweep and the
+watchdog's `on_created` / new-delivery `on_moved` branches skip
+`T`-flagged files, and for every enqueue path (a reparse, a
+re-extraction and `make requeue-dead` included) the drain never
+indexes a claimed job whose file is `T`-flagged (the reaper owns that message):
 a message still in the index keeps its job parked, which the reap
 deletes or, if mbsync clears the flag first, the rename moves back to the
 live path and makes due at once; a trashed file never indexed has its job dropped. A reaped message's `.eml` stays on disk (the indexer never deletes
@@ -3626,7 +3735,9 @@ the next sweep would start a fresh grace window). If mbsync later
 clears the `T` flag because the message was restored upstream, the
 file is live mail again and is re-indexed normally. With
 reconciliation disabled (archive mode), the index is append-only and
-`T`-flagged files are indexed like any other. Archive mode writes no
+`T`-flagged files are indexed like any other, so switching from mirror
+to archive also re-indexes mail an earlier mirror-mode run reaped,
+whose `T`-flagged files are still in the Maildir. Archive mode writes no
 tombstones and reaps nothing, but it inherits any `pending_deletions`
 row an earlier mirror-mode run left: the watchdog handler and the
 startup rename sweep carry such a tombstone along with flag renames,
@@ -3666,7 +3777,7 @@ Two stage outcomes short-circuit the retry path entirely:
 Three environment variables shape the queue: `INDEXER_MAX_ATTEMPTS`,
 `INDEXER_RETRY_BASE_SECONDS`, and `INDEXER_MESSAGE_TIMEOUT_SECONDS`.
 None is required — the defaults are
-suitable for typical mailboxes, and both are documented in
+suitable for typical mailboxes, and all three are documented in
 `docs/troubleshooting.md` for operators who need to tune retry aggressiveness
 against an unreliable embed service or a flaky mailbox.
 
@@ -3730,8 +3841,10 @@ pending is already indexed, so the rename is not re-enqueued, and a job
 left on the old path would be dropped as missing.
 
 `content_hash` is read by one lookup, `find_identical_copies`: when a
-message's mapped file is gone, the reconciler sweep and the startup
-rename sweep look for another indexed path with the same bytes and
+message's mapped file is gone (or, for the reconciler sweep,
+`T`-flagged), the reconciler sweep and the rename sweep (`sweep_paths`:
+at startup, before each periodic rescan and on folder-watch recovery)
+look for another indexed path with the same bytes and
 remap the message to it, and the reaper unmarks every such path of a
 message it removes (see *Byte-identical copies* under *Deletion
 Reconciliation*, #1102). `indexed_files` has no `content_hash` index,
@@ -3877,10 +3990,10 @@ covers is docs only.
 
 | Boundary and threat | Controls in place | Shared assumptions | Accepted limitations and pending decisions | Locked by |
 | --- | --- | --- | --- | --- |
-| **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools, the `xls`, `docx`, `pptx`, `xlsx`, `eml`, `image`, `pdf` and `html` extractors and the HTML conversion of message bodies run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. One pass of one message may start at most a budget of extraction processes and seconds on attachments the cache cannot serve; the rest are deferred to later passes, between other mail (`indexer/src/attachment_indexing.py` `ExtractionBudget`, #1236). Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | Every extractor but `text` runs in a child; `text` stays in-process by decision 42. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_image_child.py`; `indexer/tests/test_html_child.py`; `indexer/tests/test_pdf_child.py`; `indexer/tests/test_extraction_budget.py`; `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
+| **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools, the `xls`, `docx`, `pptx`, `xlsx`, `eml`, `image`, `pdf` and `html` extractors container identification and the HTML conversion of message bodies run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. One pass of one message may start at most a budget of extraction processes and seconds on attachments the cache cannot serve; the rest are deferred to later passes, between other mail (`indexer/src/attachment_indexing.py` `ExtractionBudget`, #1236). Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | Every extractor but `text` runs in a child; `text` stays in-process by decision 42, and the CI test that is to lock its implementation is not written yet (#1295). The dispatcher's OOXML ZIP-size guard reads the central directory in the indexer process until #1438. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_image_child.py`; `indexer/tests/test_html_child.py`; `indexer/tests/test_pdf_child.py`; `indexer/tests/test_extraction_budget.py`; `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
 | **Secrets.** The Bridge password, provider API keys or the MCP token reach the repository, `docker inspect`, a log, or another local account. | Each secret is a Docker secret read from `.secrets/` (the `secrets` section of `docker-compose.yml`). `scripts/validate-env.sh`, which `make up` runs first, requires mode 600 on every secret file (`require_mode_600`) and rejects the API keys and `MCP_AUTH_TOKEN` in `.env` (`reject_secret_in_env`). `.gitignore` excludes `.env`, `.secrets/` and `*.pem`; the `detect-secrets` pre-commit hook also runs in CI (`lint.yml`). Clients get the token from a file, never an argument (`scripts/mcp-auth-headers.sh`; `mcp-server/src/stdio_adapter.py` refuses a group- or other-readable file). | Every secret rests on the operator's account and mode 600 on the host's disk: processes running as the operator are trusted (see [Endpoint authentication](#endpoint-authentication)). | Secrets are stored unencrypted on the host's disk. A plain `docker compose up` skips `validate-env.sh`. | `scripts/tests/validate_env_test.sh` (`loose_secret_mode_fails`, `loose_mcp_token_mode_fails`, `api_key_in_env_fails`, `mcp_token_in_env_fails`); `mcp-server/tests/test_stdio_adapter.py` `test_group_or_other_access_fails_closed`; `mcp-server/tests/test_http_transport.py` `test_tokens_stay_out_of_the_log`; Semgrep `shell-xtrace-enabled`. The `.gitignore` entries and the `detect-secrets` hook are docs only. <!-- pragma: allowlist secret --> |
-| **Network exposure.** Another machine, another local account or a web page reaches the MCP endpoint, or a container other than mbsync logs in to Bridge. | Only `mcp-server` publishes a port, `127.0.0.1:${MCP_PORT:-3000}` (`docker-compose.yml`). mbsync alone joins `bridge-net` and alone mounts the `bridge_pass` secret. No service shares the host's network namespace. `mcp-server/src/main.py`: `_HostOriginGuard` rejects a bad Host (421) or Origin (403), and `_StaticBearerTokenVerifier` checks the bearer token with `hmac.compare_digest` before any session exists. `docker-compose.hardened.yml` makes `app-net` internal. | The loopback bind keeps other machines out; the token is what stops other local accounts. | The bearer token is the only caller-authentication control against another local account, and it does not separate code running as the operator. `app-net` is not internal by default, so the indexer and mcp-server can reach remote providers. No network control limits Bridge's port to mbsync: on macOS `host.docker.internal` reaches the host's loopback from any container, so only the Bridge password, which mbsync alone mounts, keeps the others from logging in. | `scripts/tests/compose_test.sh` (ports and `bridge-net` membership on every overlay combination); Semgrep `compose-port-on-other-service`, `compose-port-not-loopback`, `compose-bridge-net-member`, `compose-host-namespace`; `mcp-server/tests/test_http_transport.py` (`test_missing_token_is_unauthorized`, `test_wrong_token_is_unauthorized`, `test_empty_token_fails_closed`, `test_compare_is_constant_time`, `test_streamable_http_rejects_other_host`, `test_streamable_http_rejects_other_origin`). |
-| **Bridge TLS.** Another listener on the Bridge app's loopback port (another local account while the app is down) receives the Bridge password, or the connection falls back to plaintext. | `mbsync/entrypoint.sh` `extract_bridge_cert` connects over implicit TLS only, with no STARTTLS or plaintext fallback, and checks the certificate against the required `BRIDGE_CERT_FINGERPRINT` (`verify_expected_fingerprint`) and then the pin in `mbsync-state` (`verify_cert_pin`) on every start, before the first sync sends the password. With `BRIDGE_CERT_PIN_ROTATE=true` a changed certificate that matches the fingerprint replaces the pin instead of failing. The certificate lives on tmpfs at `/tmp/mbsync/bridge-cert.pem`, which isync uses as `CertificateFile` with `TLSType IMAPS` (`mbsync/mbsyncrc.template`). `validate-env.sh` refuses a missing or malformed fingerprint. The template is pull-only: `Sync Pull`, `Expunge None`. | The fingerprint check, the pin and isync's `CertificateFile` all check the certificate extracted at start. On first boot or during a rotation the pin is written from that certificate, so a fingerprint taken from the wrong certificate passes all three; after that, the pin also refuses a certificate other than the pinned one. | Pull-only sync is one configuration control, the template's settings. isync's own validity and host name checks run on each sync, not at startup. `BRIDGE_CERT_PIN_ROTATE=true` stays in effect until mbsync is recreated with it false, and while it does the pin check does not stop a certificate change; the fingerprint check still does. | `mbsync/tests/entrypoint_test.sh` (`mismatch_is_refused_without_rotation`, `first_boot_with_another_expected_fingerprint_is_refused_unpinned`, `missing_expected_fingerprint_is_refused_at_startup`, `config_keeps_sync_safety`); `mbsync/tests/tls_check.sh`; `mbsync/tests/layout_check.sh`; `scripts/tests/validate_env_test.sh` `missing_bridge_cert_fingerprint_fails`; Semgrep `shell-tls-verification-disabled`. |
+| **Network exposure.** Another machine, another local account or a web page reaches the MCP endpoint, or a container other than mbsync logs in to Bridge. | Only `mcp-server` publishes a port, `127.0.0.1:${MCP_PORT:-3000}` (`docker-compose.yml`). mbsync alone joins `bridge-net` and alone mounts the `bridge_pass` secret. No service shares the host's network namespace. `mcp-server/src/main.py`: `_HostOriginGuard` rejects a bad Host (421) or Origin (403), and `_StaticBearerTokenVerifier` checks the bearer token with `hmac.compare_digest` before any session exists. `docker-compose.hardened.yml` makes `app-net` internal. mbsync reaches the Bridge app only through a name for this Mac's `127.0.0.1`: `BRIDGE_HOST` must be exactly one of `host.docker.internal`, `host.orb.internal`, `host.internal` (each with a recorded forwarding test, `mbsync/tests/host_alias_check.sh`), and `BRIDGE_CERT_HOST` a loopback name, checked by `mbsync/proton-settings.sh` in `scripts/validate-env.sh` and in the entrypoint's `require_prerequisites` before any render or connection; mbsync has no `extra_hosts`. | The loopback bind keeps other machines out; the token is what stops other local accounts. The container engine and its resolver send the `BRIDGE_HOST` names to this Mac's loopback: the name is not resolved to check it. | The bearer token is the only caller-authentication control against another local account, and it does not separate code running as the operator. `app-net` is not internal by default, so the indexer and mcp-server can reach remote providers. No network control limits Bridge's port to mbsync: on macOS `host.docker.internal` reaches the host's loopback from any container, so only the Bridge password, which mbsync alone mounts, keeps the others from logging in. Decision 46 (owner, 2026-10-11, #1497) replaced the fixed `BRIDGE_HOST` and `BRIDGE_CERT_HOST` in `docker-compose.yml` with this exact-value validation; decision 43 stands, with the caveat that the two sites share one implementation, so a fault in `proton-settings.sh` reaches both. The forwarding test runs on the Mac, not in CI. A Bridge on another machine waits on #1499. | `scripts/tests/compose_test.sh` (ports and `bridge-net` membership on every overlay combination); Semgrep `compose-port-on-other-service`, `compose-port-not-loopback`, `compose-bridge-net-member`, `compose-host-namespace`; `mbsync/tests/entrypoint_test.sh` `every_setting_row_agrees_at_both_sites` (each accepted and refused value at both sites, refused before any render or connection); `mbsync/tests/tls_check.sh` check 7; `scripts/tests/compose_test.sh` (no `extra_hosts` on mbsync); `mbsync/tests/host_alias_check.sh` (on the Mac only); `mcp-server/tests/test_http_transport.py` (`test_missing_token_is_unauthorized`, `test_wrong_token_is_unauthorized`, `test_empty_token_fails_closed`, `test_compare_is_constant_time`, `test_streamable_http_rejects_other_host`, `test_streamable_http_rejects_other_origin`). |
+| **Bridge TLS.** Another listener on the Bridge app's loopback port (another local account while the app is down) receives the Bridge password, or the connection falls back to plaintext. | `mbsync/entrypoint.sh` `extract_bridge_cert` connects over implicit TLS only, with no STARTTLS or plaintext fallback, and checks the certificate against the required `BRIDGE_CERT_FINGERPRINT` (`verify_expected_fingerprint`) and then the pin in `mbsync-state` (`verify_cert_pin`) on every start, before the first sync sends the password. With `BRIDGE_CERT_PIN_ROTATE=true` a changed certificate that matches the fingerprint replaces the pin instead of failing. The certificate lives on tmpfs at `/tmp/mbsync/bridge-cert.pem`, which isync uses as `CertificateFile` with `TLSType IMAPS` (`mbsync/mbsyncrc.template`). `validate-env.sh` refuses a missing or malformed fingerprint. isync checks the certificate's name against `BRIDGE_CERT_HOST`, which both sites limit to loopback names (`127.0.0.1` by default, the only name in the app's own certificate); extraction itself does no name check. The template is pull-only: `Sync Pull`, `Expunge None`. | The fingerprint check, the pin and isync's `CertificateFile` all check the certificate extracted at start. On first boot or during a rotation the pin is written from that certificate, so a fingerprint taken from the wrong certificate passes all three; after that, the pin also refuses a certificate other than the pinned one. | Pull-only sync is one configuration control, the template's settings. isync's own validity and host name checks run on each sync, not at startup. `BRIDGE_CERT_PIN_ROTATE=true` stays in effect until mbsync is recreated with it false, and while it does the pin check does not stop a certificate change; the fingerprint check still does. | `mbsync/tests/entrypoint_test.sh` (`mismatch_is_refused_without_rotation`, `first_boot_with_another_expected_fingerprint_is_refused_unpinned`, `missing_expected_fingerprint_is_refused_at_startup`, `config_keeps_sync_safety`, `rendered_config_matches_the_golden_file`, and the whole-entrypoint startup order cases such as `expected_fingerprint_mismatch_stops_before_the_pin`); `mbsync/tests/tls_check.sh` (check 6: a certificate for another name is refused before `LOGIN` under each accepted `BRIDGE_CERT_HOST`); `mbsync/tests/layout_check.sh`; `scripts/tests/validate_env_test.sh` `missing_bridge_cert_fingerprint_fails`; Semgrep `shell-tls-verification-disabled`. |
 
 ## Privacy Model
 
@@ -3896,7 +4009,7 @@ reference.
 | Email storage | ✅ | Never |
 | Vector index | ✅ (SQLite) | Never |
 | Keyword search | ✅ (SQLite FTS5) | Never |
-| Send/Move/Flag | Disabled by default | Never |
+| Send/Move/Flag | Not implemented: no mail-changing tool, and mbsync is pull-only | Never |
 
 ### At rest (on the host's disk)
 
@@ -3910,7 +4023,7 @@ the project adds no encryption of its own:
 | The index: thread and message text, chunks, extracted attachment text, participants, vectors | `sqlite-volume` (`mail.db` and its WAL) | Unencrypted |
 | Sync state, folder names and the Bridge certificate pin | `mbsync-state` and the Maildir | Unencrypted |
 | Credentials: the Bridge IMAP password, the MCP bearer token, provider API keys | `.secrets/*.txt` in the checkout | Unencrypted (mode 600) |
-| Operator configuration naming real people: source-authority rules (addresses, domains), the Bridge username | `config/authority.toml`, `.env` in the checkout | Unencrypted |
+| Operator configuration naming real people: source-authority rules (addresses, domains), the operator's own addresses, the Bridge username | `config/authority.toml`, `config/identity.toml`, `.env` in the checkout | Unencrypted |
 
 Protecting them is the host's job, which makes it a setup requirement:
 
@@ -3935,7 +4048,7 @@ Protecting them is the host's job, which makes it a setup requirement:
   never inside the checkout. A backup of the checkout itself carries
   every git-ignored file, and any of them can hold private data:
   credentials (`.secrets/`, `*.pem`, `*.key`), addresses
-  (`config/authority.toml`, `.env`), eval queries grounded in the real
+  (`config/authority.toml`, `config/identity.toml`, `.env`), eval queries grounded in the real
   mailbox (`mcp-server/tests/eval/queries.json`, `eval-queries.md`),
   local Maildir or data copies (`maildir/`, `data/`) and logs. So
   protect a checkout backup like the volumes, or leave out every ignored
@@ -3964,17 +4077,17 @@ and exporter were present.
 | Operation | Local only | Leaves machine |
 |---|---|---|
 | Embedding — `EMBED_BASE_URL` points at a host-side server | ✅ | Never |
-| Embedding — `EMBED_BASE_URL` points at a remote provider | Retrieval queries + indexed content | Email body chunks → provider |
+| Embedding — `EMBED_BASE_URL` points at a remote provider | The index | Message subjects, body text and extracted attachment text at index time; search-query text at retrieval time → provider |
 | Reranking — `RERANK_BASE_URL` points at a host-side server | ✅ | Never |
-| Reranking — `RERANK_BASE_URL` points at a remote provider | Retrieval queries | Candidate thread subjects, up to five changed reply subjects each, and retrieved chunks → provider |
+| Reranking — `RERANK_BASE_URL` points at a remote provider | Retrieval | The search query, candidate thread subjects, up to five changed reply subjects each, and retrieved chunks → provider |
 | Q&A — `INFERENCE_MODE=openai`, host-side `INFERENCE_BASE_URL` | Retrieval local | Never |
-| Q&A — `INFERENCE_MODE=openai`, remote `INFERENCE_BASE_URL` | Retrieval local | Retrieved chunks → OpenAI-compatible provider |
-| Q&A — `INFERENCE_MODE=anthropic` | Retrieval local | Retrieved chunks → Anthropic-compatible provider |
+| Q&A — `INFERENCE_MODE=openai`, remote `INFERENCE_BASE_URL` | Retrieval local | Retrieved chunks with their subject, participants, dates and attachment names → OpenAI-compatible provider |
+| Q&A — `INFERENCE_MODE=anthropic` | Retrieval local | Retrieved chunks with their subject, participants, dates and attachment names → Anthropic-compatible provider |
 | Q&A — `INFERENCE_MODE=none` (default) | ✅ | Never (intelligence tools not registered) |
 
 > **Note on remote providers.** Pointing any of these at a remote
-> provider ships data over the network: every email body chunk
-> through the embedder at index time, every search-query string
+> provider ships data over the network: message subjects, body text
+> and extracted attachment text through the embedder at index time, every search-query string
 > through the embedder at retrieval time, and every retrieved chunk
 > through the inference and reranker endpoints. This is a deliberate
 > departure from a fully-local posture; choose the provider URLs
@@ -4009,7 +4122,7 @@ content regardless of `INFERENCE_MODE`.
 |---|---|
 | Claude Desktop | Anthropic (Claude runs in the cloud; tool results go back as conversation context) |
 | Local-LLM MCP client | Stays on machine |
-| Direct `docker exec` into mcp-server | Stays on machine |
+| Your own program calling the tools on this machine | Stays on machine |
 
 `INFERENCE_MODE` and the MCP client choice are independent boundaries and must
 both be set deliberately if "fully local conversations" is a goal.
@@ -4035,8 +4148,9 @@ compared in constant time (`hmac.compare_digest`). `/health` is a custom
 route outside that wrapper and stays open for the container
 healthcheck. The Host/Origin allowlist runs as before and still rejects
 a bad Host (`421`) or Origin (`403`) whatever the token. Startup fails
-when the token is empty, and neither the token nor the `Authorization`
-header is logged. Rejections are logged with a fixed reason
+when the token is empty, shorter than 32 characters or outside the
+RFC 6750 bearer-token characters, and neither the token nor the
+`Authorization` header is logged. Rejections are logged with a fixed reason
 (`missing_token`, `invalid_token`, `bad_host`, `bad_origin`; #878),
 rate-limited to the first per reason in each 60-second window plus one
 per-window count line, and

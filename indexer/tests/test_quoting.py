@@ -225,7 +225,7 @@ class TestWrappedReplyHeaders:
     """Gmail wraps the attribution line onto two lines when the
     address is long, pushing the verb (and colon) onto a line of its
     own. The single-line pattern can't catch the wrapped form, so a
-    pre-pass joins the two lines before the main loop runs.
+    pre-pass removes the two-line span before the main loop runs.
     """
 
     def test_english_wrapped_on_wrote_is_dropped(self):
@@ -423,7 +423,7 @@ class TestReplyHeaderWorkBound:
         ],
         ids=["en", "en-wrote-mid-line", "de", "fr", "es", "it", "nl"],
     )
-    def test_long_lead_word_line_is_linear(self, line):
+    def test_long_lead_word_line_finishes_quickly(self, line):
         # Unbounded, each of these takes minutes; bounded, milliseconds.
         started = time.perf_counter()
         result = _embedded_body(line + "\nNew reply text.")

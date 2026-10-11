@@ -14,8 +14,8 @@ client by design, so pointing the SDK at them via ``base_url=`` is the
 supported path.
 
 ``OpenAIEmbedder`` implements the ``EmbeddingBackend`` Protocol so
-callers in ``main.py``, ``reconciler.py``, and ``attachment_indexing.py``
-stay backend-agnostic and tests can substitute a duck-typed fake.
+callers in ``main.py`` and ``reconciler.py`` stay backend-agnostic and
+tests can substitute a duck-typed fake.
 """
 
 import contextvars
@@ -122,10 +122,11 @@ def scrub_embed_error(exc: BaseException) -> str:
     The OpenAI SDK's ``APIStatusError`` carries the provider's response
     body, which can echo input fragments back on 4xx — for the indexer
     that means email body text from the failing batch can flow into
-    ``indexing_jobs.last_error`` and any operator log sink. The repo
-    is public and the ``last_error`` row + truncated log line both
-    travel further than callers usually expect, so trim
-    ``APIStatusError`` down to type + status_code only.
+    ``indexing_jobs.last_error`` and any operator log sink. The
+    ``last_error`` row and the truncated log line both travel further
+    than callers usually expect (a log collector, an operator pasting
+    them into a public issue), so trim ``APIStatusError`` down to type
+    + status_code only.
 
     Connection / timeout errors and our own ``EmbedResponseError``
     carry no email content, so their full ``repr`` is safe to keep.
@@ -162,10 +163,8 @@ def _is_transient_embed_error(exc: BaseException) -> bool:
       provider returned a malformed batch and a retry would produce
       the same shape.
 
-    The indexer's outage detection (``main._drain_queue_batched``)
-    uses this same predicate to decide whether a failed embedder probe
-    is an outage (defer and back off) or a configuration problem
-    (operator action required).
+    The indexer's queue accounting does not use this predicate: it
+    asks ``classify_embed_failure`` (below) whose fault a failure is.
     """
     if isinstance(exc, APIStatusError):
         return exc.status_code >= 500 or exc.status_code in (408, 429)
@@ -224,7 +223,7 @@ def _retry_embed_attempt(retry_state: RetryCallState) -> bool:
     this request was, so a logged retry always gets its answer even
     with the shared budget spent (at most one line per logged retry);
     when every retry line was withheld, there is nothing to answer and
-    the recovery is withheld with them (Codex round 3 on #904)."""
+    the recovery is withheld with them (#904)."""
     outcome = retry_state.outcome
     if outcome is None:
         return False
@@ -334,8 +333,9 @@ class OpenAIEmbedder:
 
     Project-specific behavior preserved over the bare SDK:
 
-    - Custom retry classification (4xx config errors fail fast; 5xx
-      and connection errors retry with exponential backoff).
+    - Custom retry classification (4xx errors other than 408 and 429
+      fail fast; 5xx, 408, 429 and connection errors retry with
+      exponential backoff).
     - Defensive index-integrity check on the batch response so a
       provider that ever returns reordered / duplicate indices fails
       loudly instead of silently misaligning vectors with chunks.
@@ -402,8 +402,8 @@ class OpenAIEmbedder:
         #
         # ``max_retries=0`` because retry policy is owned by the
         # tenacity wrapper below — the SDK's built-in retry would
-        # double-up exponential backoff and obscure the 4xx-fast-fail
-        # / 5xx-retry classification.
+        # double-up exponential backoff and obscure the retry
+        # classification (``_is_transient_embed_error``).
         #
         # The SDK's HTTP client follows redirects and re-sends the body
         # (chunk text) to wherever ``Location`` points (#340). The request
@@ -469,9 +469,9 @@ class OpenAIEmbedder:
         Retry classification delegates to ``_is_transient_embed_error``
         — the same predicate ``_embed_one_batch`` uses — so startup
         and runtime share one definition of "transient". 4xx auth /
-        model / quota errors fail fast (deterministic config), as does
-        any non-SDK exception. 5xx and the SDK's connection / timeout
-        families retry until the connect deadline.
+        model errors fail fast (deterministic config), as does any
+        non-SDK exception. 5xx, 408, 429 and the SDK's connection /
+        timeout families retry until the connect deadline.
         """
         warmup_timeout = _float_env(
             "EMBED_WARMUP_TIMEOUT_SECS",
@@ -542,14 +542,16 @@ class OpenAIEmbedder:
 
         Splits ``texts`` into ``batch_size`` chunks and issues one
         OpenAI-compatible request per chunk. Per-chunk requests retry
-        independently on 5xx / connection errors. Response ``data`` is
-        sorted by ``index`` defensively so a future provider that
-        reorders the array does not silently misalign vectors with
-        their source texts.
+        independently on transient errors
+        (``_is_transient_embed_error``). Response ``data`` is sorted by
+        ``index`` defensively so a future provider that reorders the
+        array does not silently misalign vectors with their source
+        texts.
 
         ``on_batch_complete``, when supplied, is invoked after each
         internal batch completes successfully. The indexer wires it to
-        ``touch_health_file`` so a large cross-message embed that takes
+        ``main._embed_progress`` (``touch_health_file`` and the stall
+        guard's clock) so a large cross-message embed that takes
         longer than the per-iteration health threshold still refreshes
         the heartbeat between internal batches instead of only at the
         outer call boundaries. A failure inside ``_embed_one_batch``
@@ -705,8 +707,9 @@ class OpenAIEmbedder:
         # the ``EmbeddingBackend`` contract accepts arbitrary callers
         # — fakes, future non-OpenAI backends — that may not
         # normalize), so the storage invariant — every vector in
-        # ``threads_vec`` / ``message_chunks_vec`` is unit-norm —
-        # holds end-to-end. ``l2_normalize`` short-circuits
-        # already-unit-norm inputs, so this is a no-op against
-        # Qwen3-Embedding-8B.
+        # ``threads_vec`` / ``message_chunks_vec`` is unit-norm, except
+        # the all-zero thread placeholder ``l2_normalize`` keeps — holds
+        # end-to-end. ``l2_normalize`` returns already-unit-norm inputs
+        # unchanged, so this costs one pass for a provider that
+        # normalizes.
         return [l2_normalize(vec) for vec in vectors]

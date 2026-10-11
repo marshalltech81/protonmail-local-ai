@@ -6,7 +6,8 @@ set -Eeuo pipefail
 # stores; no IMAP server is contacted.
 #
 # The near side is mbsyncrc.template's own MaildirStore and Channel,
-# unchanged. Only the far side is replaced: the template's IMAP store
+# unchanged, with the Patterns exclusions the entrypoint substitutes
+# (#1481). Only the far side is replaced: the template's IMAP store
 # becomes a Maildir store at /far with SubFolders Legacy, which can hold
 # every folder name used here as its own directory, standing in for
 # Bridge. Each layout case (1-4) delivers synthetic messages, syncs,
@@ -43,6 +44,8 @@ set -Eeuo pipefail
 #      with the one error line the entrypoint withholds and tolerates;
 #      the rest still syncs and the local copy is kept. Runs before 5 and
 #      6, which switch to stores of their own.
+#   9. Renaming the channel and both stores (#1498) between runs carries
+#      on from the sync state: nothing is downloaded twice. Runs before 8.
 #   8. The far side's arrival time (#1081) reaches the near file's mtime:
 #      with CopyArrivalDate the far store's date for a message (the file
 #      mtime of a Maildir far side, INTERNALDATE of an IMAP one) is the
@@ -56,6 +59,9 @@ set -Eeuo pipefail
 
 MBSYNC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly MBSYNC_DIR
+# The default account, store and channel names (PLAN.md decision 46).
+# shellcheck source=mbsync/proton-settings.sh disable=SC1091 # linted on its own
+source "$MBSYNC_DIR/proton-settings.sh"
 readonly RUN_ID="mbsync-layout-check-$$"
 IMAGE="${MBSYNC_IMAGE:-}"
 WORK="$(mktemp -d)"
@@ -79,14 +85,46 @@ fail() {
     FAILURES=$((FAILURES + 1))
 }
 
+# One of the entrypoint's `readonly NAME='...'` constants, printed.
+entrypoint_constant() {
+    local line
+    line="$(grep -E "^readonly ${1}='[^']*'\$" "$MBSYNC_DIR/entrypoint.sh")" || true
+    if [[ -z "$line" ]]; then
+        printf 'cannot find readonly %s in %s\n' "$1" "$MBSYNC_DIR/entrypoint.sh" >&2
+        exit 1
+    fi
+    line="${line#*=\'}"
+    printf '%s' "${line%\'}"
+}
+
 # The template with its IMAP account dropped and its far store replaced
 # by a Maildir store. Everything else, the near store and the Channel
-# included, is copied as it is.
+# included, is copied as it is, with the two Patterns exclusion sets
+# substituted from the entrypoint's constants and the account, store and
+# channel names (#1498) as render_mbsync_config does: the defaults in
+# mbsync/proton-settings.sh, or $1 (channel), $2 (far store) and $3 (near
+# store).
 render_config() {
-    awk '
+    local provider layout
+    provider="$(entrypoint_constant PROTON_FOLDER_EXCLUSIONS)"
+    layout="$(entrypoint_constant ISYNC_LAYOUT_EXCLUSIONS)"
+    PROVIDER="$provider" LAYOUT="$layout" ACCOUNT="$PROTON_DEFAULT_IMAP_ACCOUNT_NAME" \
+        CHANNEL="${1:-$PROTON_DEFAULT_CHANNEL_NAME}" REMOTE="${2:-$PROTON_DEFAULT_REMOTE_STORE_NAME}" \
+        LOCAL="${3:-$PROTON_DEFAULT_LOCAL_STORE_NAME}" awk '
+        function put(placeholder, value,    i) {
+            while ((i = index($0, placeholder)) > 0) {
+                $0 = substr($0, 1, i - 1) value substr($0, i + length(placeholder))
+            }
+        }
+        { put("${MBSYNC_PROVIDER_EXCLUSIONS}", ENVIRON["PROVIDER"]) }
+        { put("${MBSYNC_LAYOUT_EXCLUSIONS}", ENVIRON["LAYOUT"]) }
+        { put("${MBSYNC_IMAP_ACCOUNT}", ENVIRON["ACCOUNT"]) }
+        { put("${MBSYNC_REMOTE_STORE}", ENVIRON["REMOTE"]) }
+        { put("${MBSYNC_LOCAL_STORE}", ENVIRON["LOCAL"]) }
+        { put("${MBSYNC_CHANNEL}", ENVIRON["CHANNEL"]) }
         /^IMAPAccount / { skip = 1 }
-        /^IMAPStore protonmail-remote$/ {
-            print "MaildirStore protonmail-remote"
+        $0 == "IMAPStore " ENVIRON["REMOTE"] {
+            print "MaildirStore " ENVIRON["REMOTE"]
             print "Path /far/"
             print "Inbox /far/INBOX"
             print "SubFolders Legacy"
@@ -97,6 +135,11 @@ render_config() {
         !skip { print }
     ' "$MBSYNC_DIR/mbsyncrc.template" >"$WORK/mbsyncrc"
     chmod 644 "$WORK/mbsyncrc"
+    # The same Patterns line the entrypoint renders (mbsyncrc.golden).
+    if [[ "$(grep '^Patterns ' "$WORK/mbsyncrc")" != "$(grep '^Patterns ' "$MBSYNC_DIR/tests/mbsyncrc.golden")" ]]; then
+        printf 'the rendered Patterns line differs from mbsync/tests/mbsyncrc.golden\n' >&2
+        exit 1
+    fi
 }
 
 # legacy_path NAME: a folder's directory in a SubFolders Legacy store,
@@ -203,7 +246,7 @@ deliver INBOX
 
 # The near side is the template's: pull-only, never expunging.
 if grep -qx 'Sync Pull' "$WORK/mbsyncrc" && grep -qx 'Expunge None' "$WORK/mbsyncrc" \
-    && grep -qx 'Near :protonmail-local:' "$WORK/mbsyncrc"; then
+    && grep -qx "Near :${PROTON_DEFAULT_LOCAL_STORE_NAME}:" "$WORK/mbsyncrc"; then
     pass "the check runs the template's own near store and channel"
 else
     fail "the check runs the template's own near store and channel"
@@ -290,6 +333,55 @@ if ((ok)) && located "Folders/Kept" "${TAGS[0]#*|}" \
     pass "folders named after isync's own files and the virtual Starred folder are skipped; their parent and Folders/Starred sync"
 else
     fail "folders named after isync's own files and the virtual Starred folder are skipped; their parent and Folders/Starred sync"
+fi
+
+# 9. #1498: the channel and both stores renamed between runs
+# (PROTON_CHANNEL_NAME, PROTON_REMOTE_STORE_NAME, PROTON_LOCAL_STORE_NAME).
+# isync keeps each folder's sync state in the folder's own directory
+# (SyncState *), not under a channel or store name, so the renamed config
+# carries on from it: no message already synced is downloaded again, new
+# ones arrive once, and no run reports an error. The defaults come back
+# for the checks that follow.
+near_messages() {
+    find "$NEAR" -type f \( -path '*/cur/*' -o -path '*/new/*' \) | wc -l | tr -d '[:space:]'
+}
+TAGS=()
+deliver INBOX
+deliver "Folders/Renamed"
+ok=1
+if ! sync_once rename-before; then
+    ok=0
+    sed 's/^/     /' "$WORK/sync-rename-before.log"
+fi
+before_rename="$(near_messages)"
+render_config Chan_9-x far-Store_9 near_store-9
+if ! grep -qx 'Channel Chan_9-x' "$WORK/mbsyncrc" || ! grep -qx 'Near :near_store-9:' "$WORK/mbsyncrc"; then
+    ok=0
+    printf '     the renamed config does not hold the new names\n'
+fi
+deliver INBOX
+deliver "Folders/Renamed"
+for run in first second; do
+    if ! sync_once "rename-after-${run}" || grep -qE '^(Error|Warning)' "$WORK/sync-rename-after-${run}.log"; then
+        ok=0
+        sed 's/^/     /' "$WORK/sync-rename-after-${run}.log"
+    fi
+done
+if [[ "$(near_messages)" != "$((before_rename + 2))" ]]; then
+    ok=0
+    printf '     %s messages before the rename and %s after two new ones\n' "$before_rename" "$(near_messages)"
+fi
+for entry in "${TAGS[@]}"; do
+    if [[ "$(copies "${entry#*|}")" != 1 ]] || ! located "${entry%%|*}" "${entry#*|}"; then
+        ok=0
+        printf '     %s: %s copies of %s\n' "${entry%%|*}" "$(copies "${entry#*|}")" "${entry#*|}"
+    fi
+done
+render_config
+if ((ok)); then
+    pass "renaming the channel and stores carries on from the sync state: nothing is downloaded twice"
+else
+    fail "renaming the channel and stores carries on from the sync state: nothing is downloaded twice"
 fi
 
 # 8. #1081: the far side's arrival time is copied onto the near file's

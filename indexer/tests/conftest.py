@@ -19,7 +19,7 @@ from src.threader import Thread, Threader
 def make_mock_embedder(vector: list[float] | None = None) -> MagicMock:
     """MagicMock that satisfies the EmbeddingBackend Protocol.
 
-    Production hot paths now call ``embed_batch(texts)`` instead of
+    Production hot paths call ``embed_batch(texts)``, not
     ``embed(text)`` per chunk. A bare ``MagicMock()`` would auto-create
     ``embed_batch`` as a child Mock that returns another Mock — which
     iterates as length 0, silently producing empty embedding dicts and
@@ -237,8 +237,9 @@ def count_pending_deletions(db: Database) -> int:
 
 @pytest.fixture(autouse=True)
 def _reset_extractor_warning_budget(monkeypatch):
-    """The failed-extraction WARNING rate limit is process-wide; give each
-    test a fresh window so earlier tests cannot spend its budget."""
+    """The shared rate-limited line budget (``warn_rate_limited``,
+    attachment and other lines) is process-wide; give each test a fresh
+    window so earlier tests cannot spend its budget."""
     from src import extractors
     from src.rate_limited_log import LineBudget
 
@@ -280,7 +281,7 @@ def _ooxml_child_in_process(request, monkeypatch):
     (#1416), through the same frames and parsing (progress frames as each
     page is read), so a test can patch a walk's budgets, stub Poppler or
     Tesseract or count calls. The ``xls`` extractor starts
-    the real child, as before. A test marked ``real_extractor_child``
+    the real child, and so does ``eml``. A test marked ``real_extractor_child``
     starts the real child process for every module
     (``tests/test_ooxml_child.py``, ``tests/test_image_child.py``)."""
     if request.node.get_closest_marker("real_extractor_child"):

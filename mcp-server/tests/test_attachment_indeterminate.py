@@ -180,7 +180,7 @@ class TestAttachmentIndeterminateCount:
 
     @pytest.mark.parametrize(("query", "listed"), [(None, 2), ("ledger", 2), ("bravo", 1)])
     def test_counts_as_the_results_list_repeated_occurrences(self, tmp_path, query, listed):
-        """One payload carried twice under one filename (Codex round 1):
+        """One payload carried twice under one filename:
         the filename lane and the scan list each occurrence, the text lane
         one. Decided, the results list ``listed`` rows; undecided, the
         count is the same number. With both lanes matching, the text row
@@ -222,7 +222,7 @@ class TestAttachmentIndeterminateCount:
 
     @pytest.mark.parametrize("query", [None, "ledger"])
     def test_without_from_addr_the_count_is_one_scalar(self, undecided_db, query):
-        """Codex round 1: without ``from_addr`` nothing per thread is
+        """Without ``from_addr`` nothing per thread is
         fetched (no ``senders`` JSON); with it, one row per thread."""
         connect = undecided_db._connect
         counts: list[tuple[str, int]] = []
@@ -314,7 +314,7 @@ class TestAttachmentIndeterminateCount:
         assert large < 3 * small
 
     def test_a_long_filename_is_not_copied_per_matching_chunk(self, tmp_path):
-        """Codex round 2: the text-lane candidates grouped matching chunk
+        """The text-lane candidates grouped matching chunk
         rows by the sender-controlled filename, so one 1 MB name on 300
         matching chunks of an undecided message held ~300 MB in SQLite's
         sorter. Chunks now reduce to occurrence IDs first. Peak RSS is
@@ -372,7 +372,7 @@ class TestAttachmentIndeterminateCount:
         assert grown_mb < 120
 
     def test_from_addr_rows_are_streamed_not_collected(self, tmp_path):
-        """Codex round 3: with ``from_addr`` the per-thread rows (each
+        """With ``from_addr`` the per-thread rows (each
         carrying its ``senders`` JSON) were collected with ``fetchall``
         before summing; 200 threads x 1 MB of senders held them all at
         once. They are read from the cursor one at a time."""
@@ -390,9 +390,10 @@ class TestAttachmentIndeterminateCount:
         assert grown_mb < 120
 
     def test_repeated_count_failures_are_rate_limited(self, undecided_db, monkeypatch, caplog):
-        """Codex round 3: a count that keeps failing logs its WARNING
-        once per window, then one summary line with the count; every
-        call still reports unavailable and marks its own timing line."""
+        """A count that keeps failing logs its WARNING once per window,
+        then one summary line with the count; every call still reports
+        the count unavailable (the timing-line mark is checked in
+        ``test_unavailable_count``)."""
         from src.lib.rate_limited_log import RateLimitedLog
 
         now = [0.0]
@@ -532,9 +533,9 @@ class TestAttachmentIndeterminateCount:
             conn.close()
 
     def test_a_repeatedly_failing_lane_logs_one_warning(self, tmp_path, caplog):
-        """#1216: a lane that keeps failing (a broken index) repeats its
-        fallback WARNING on every call; the first line per window is
-        logged and the rest are counted."""
+        """#1216: a lane that keeps failing (a broken index) logs its
+        fallback WARNING once per window, not on every call; the rest
+        are counted."""
         conn, path = _open_built_db_conn(tmp_path, "rate.db")
         _add(conn, "v1", "t", "2024-01-10T00:00:00+00:00", VENDOR)
         db = Database(str(path))

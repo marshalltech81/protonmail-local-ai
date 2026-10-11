@@ -608,11 +608,12 @@ class _HostOriginGuard:
     scheme, which this allowlist does not. It runs ahead of the Streamable
     HTTP session manager, so a rejected request creates no session.
 
-    It also logs every rejected request once at WARNING with a fixed
-    reason (#878): ``bad_host`` or ``bad_origin`` for its own 421 or 403,
-    and ``missing_token`` or ``invalid_token`` for the 401 the bearer
-    check answers further in, told apart by whether an
-    ``Authorization`` header was sent. Only the response status is
+    It also records every rejected request with a fixed reason (#878):
+    ``bad_host`` or ``bad_origin`` for its own 421 or 403, and
+    ``missing_token`` or ``invalid_token`` for the 401 the bearer check
+    answers further in, told apart by whether an ``Authorization``
+    header was sent. ``_RejectionLog`` logs the first rejection per
+    reason in each window at WARNING and counts the rest. Only the response status is
     read; the token and the header values are never logged, and the
     responses are unchanged.
     """
@@ -1023,10 +1024,9 @@ def main():
     if inference_client is not None:
         # Surface the resolved wire endpoint, not "(SDK default)". In a
         # privacy-sensitive deployment retrieved email excerpts go to
-        # whatever URL the SDK resolves to, so the operator-facing log
-        # must name it explicitly. ``InferenceClient.base_url`` reads
-        # the URL back from the SDK after fallback resolution — same
-        # pattern as ``EmbedClient.base_url`` above.
+        # this URL, so the operator-facing log must name it explicitly.
+        # ``InferenceClient.base_url`` reads the URL back from the SDK
+        # client — same pattern as ``EmbedClient.base_url`` above.
         log.info(f"  Inference:      {inference_client.base_url} (model={INFERENCE_MODEL})")
     log.info(f"  Rerank mode:    {RERANK_MODE}")
     if reranker is not None:

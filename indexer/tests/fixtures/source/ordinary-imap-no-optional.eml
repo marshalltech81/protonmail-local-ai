@@ -1,0 +1,5 @@
+From: sender-two@mail.example
+To: recipient@imap.example
+Message-ID: <synthetic-source-003@mail.example>
+
+SRCFIXTURE-1483 message with no Date, Subject or Received header.

@@ -2,15 +2,15 @@
 
 Run by ``_runner.run_tool`` as
 ``python -I _launcher.py <address space> <cpu seconds> <tool> <args...>``.
-It lowers its own address-space and CPU limits to the values the
-caller passes (each extractor's ``CHILD_MAX_ADDRESS_SPACE_BYTES`` and
-``CHILD_MAX_CPU_SECONDS``), then replaces itself with the tool through
-``os.execve``, so the limits hold for the tool from its first
-instruction, before it reads the payload (#957, #995). A launcher
-rather than ``preexec_fn``: the indexer is multi-threaded, and code
-between ``fork`` and ``exec`` in a threaded parent can deadlock. It
-imports only the standard library (``-I`` keeps this directory off
-``sys.path``).
+It lowers its own address-space and
+CPU limits to the values the caller passes (each extractor's
+``CHILD_MAX_ADDRESS_SPACE_BYTES``, and its ``CHILD_MAX_CPU_SECONDS`` or
+computed ``child_cpu_seconds``), then replaces itself with the tool
+through ``os.execve``, so the limits hold for the tool from its first
+instruction, before it reads the payload (#957, #995). A launcher rather
+than ``preexec_fn``: the indexer is multi-threaded, and code between
+``fork`` and ``exec`` in a threaded parent can deadlock. It imports only
+the standard library (``-I`` keeps this directory off ``sys.path``).
 """
 
 from __future__ import annotations

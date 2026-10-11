@@ -1,7 +1,7 @@
 """Image decode and OCR, run in the extractor child (#1292).
 
 ``image.extract`` runs it as
-``python -I extractor_child.py image <max pages> <OCR timeout> <payload file>``,
+``python -I extractor_child.py image <max pages> <OCR timeout> <Tesseract path> <payload file>``,
 through the runner's launcher (``_launcher.py``), which has already
 lowered the address-space and CPU limits ``image.py`` passes. Tesseract,
 which pytesseract starts here, inherits both limits and is killed with
@@ -40,9 +40,9 @@ run and restores it after:
   and its ``DecompressionBombError`` above twice it reject the image
   from the header alone.
 * A frame at or under the ceiling is decoded and OCR'd at full
-  resolution, as before.
-* A JPEG or MPO over it is decoded at the smallest scale (1/2, 1/4 or
-  1/8, up to ``MAX_DRAFT_FACTOR``, which is 2) that fits, through
+  resolution.
+* A JPEG or MPO over it is decoded at half scale when that fits
+  (``MAX_DRAFT_FACTOR`` is 2, so 1/4 and 1/8 are not tried), through
   ``Image.draft`` before any decode or rotation; the returned size is
   checked, and the factor is recorded for the parent
   (``record_image_scale_factor``), which reports it as an extractor cap.

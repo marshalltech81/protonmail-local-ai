@@ -384,15 +384,18 @@ def _synchronized(fn):
     """Serialize ``Database`` method calls across threads.
 
     The indexer runs two concurrent DB writers: the watchdog observer
-    (``MaildirHandler`` callbacks) and the main loop (periodic
-    reconciler sweeps). Python's ``sqlite3`` module allows cross-thread
+    (``MaildirHandler`` callbacks) and the main loop (the queue drain and
+    the periodic reconciler, WAL and recovery passes). Python's ``sqlite3`` module allows cross-thread
     connection use via ``check_same_thread=False``, but individual
     ``BEGIN IMMEDIATE``/execute/``commit`` sequences are not atomic at
     the Python layer — interleaving can trigger ``sqlite3.OperationalError``
     ("cannot start a transaction within a transaction") or silently
     commit partial state. A per-instance re-entrant lock around every
     public method makes the whole transaction atomic from the caller's
-    perspective.
+    perspective. The stepwise maintenance passes (``scrub_reaped_fts``
+    and the thread-vector-sum backfill and check) are not decorated:
+    they take the lock once per step, so a writer waits one step at
+    most.
     """
 
     @functools.wraps(fn)
@@ -503,9 +506,13 @@ class Database:
         ``secure_delete`` never frees and FTS5's ``secure-delete``
         option does not cover for this table type. Merging every
         segment into one drops the deleted terms (#641), those of
-        earlier deletes included. Only a reap marks a table: a re-index
-        replaces live mail with a newer version of itself, and FTS5's
-        automerge keeps its superseded rows in check (#670).
+        earlier deletes included. A reap marks a table, and so does a
+        re-index that removes indexed text: a chunk replacement
+        (``replace_message_chunks``) or an attachment occurrence the new
+        parse no longer produces (``delete_attachment_occurrences``); the
+        replaced text may be what a fix removed. A thread row that
+        ``upsert_thread`` replaces is not marked: FTS5's automerge keeps
+        its superseded rows in check (#670).
 
         The merge runs in steps, the incremental form of ``optimize``
         the FTS5 documentation gives: the first ``'merge'`` with a
@@ -517,10 +524,6 @@ class Database:
         finished within ``_FTS_SCRUB_MAX_STEPS`` stays pending and
         continues its merge on the next pass; one whose step fails stays
         pending, and the failure propagates to the caller.
-
-        Only a reap marks a table, and a message's chunk replacement,
-        which happens only when the extractor or chunker output changes
-        (the replaced text may be what a fix removed).
         """
         done: list[str] = []
         for table in _FTS_TABLES:
@@ -661,7 +664,8 @@ class Database:
         )
 
     def _apply_initial_schema(self, cur: sqlite3.Cursor):
-        """Create every table the indexer needs, in their final shape.
+        """Create every table the indexer needs, in their final shape, and
+        stamp ``SCHEMA_VERSION`` and ``SCHEMA_APPLICATION_ID``.
 
         Three families of tables, each with its FTS5 + sqlite-vec
         sidecar where applicable:
@@ -682,16 +686,22 @@ class Database:
           captures filename/MIME and the extractor module whose cached
           row it uses), ``attachments_fts`` (filename + MIME search), and
           ``attachment_extractions`` (a cache keyed by content hash and
-          extractor module, so OCR / PDF parse cost runs at most once per
-          unique payload and extractor regardless of forwarding count; a
-          row is deleted with the last occurrence that uses it).
+          extractor module, so OCR / PDF parse cost is paid once per payload
+          and cache key until the row is refreshed, whatever the
+          forwarding count; a row is deleted with the last occurrence
+          that uses it).
 
         Plus the cross-cutting tables: ``message_thread_map`` (message
-        → thread index), ``indexed_files`` (file identity for rename
+        → thread index), ``messages`` / ``message_participants`` /
+        ``message_participant_names`` (per-message records),
+        ``thread_vector_sums``, ``reaped_messages``, ``indexed_files`` (file identity for rename
         detection), ``pending_deletions`` (tombstones for the
         deletion reconciler), ``indexing_jobs`` (durable retry +
         dead-letter queue for the parse → embed → upsert pipeline), and
-        ``ingestion_state`` (last sync + indexer liveness for status).
+        ``ingestion_state`` (last sync + indexer liveness for status);
+        and, through the helper scripts below, ``entities`` /
+        ``entity_aliases``, ``vector_generations`` and
+        ``operator_addresses`` / ``operator_identity``.
         """
         # One transaction for every table and the version stamp, so an
         # interruption part-way leaves an empty database that the next
@@ -994,8 +1004,8 @@ class Database:
                 -- yet known (a row from before v4 the reparse has not
                 -- reached). It covers that stage only: it does not
                 -- certify that the participant rows or addresses are
-                -- complete, which #1086's per-role term needs its own
-                -- column or backfill design for. No default; mcp-server
+                -- complete; per-role address completeness is
+                -- ``from_/to_/cc_addresses_complete`` (#1086). No default; mcp-server
                 -- reads NULL as "can't tell".
                 participant_names_complete INTEGER
                     CHECK (participant_names_complete IN (0, 1)),
@@ -1056,7 +1066,7 @@ class Database:
                 ON message_participants(address, role);
             -- Every distinct display name a participant was written
             -- with in one message (#1140); ``message_participants.name``
-            -- keeps the first. Name matching, find_contact and entity
+            -- keeps the first occurrence's (NULL when it had none). Name matching, find_contact and entity
             -- aliases read these. Bounded per message by the parser's
             -- ``MAX_EXTRA_PARTICIPANT_*`` budget.
             CREATE TABLE message_participant_names (
@@ -1082,7 +1092,8 @@ class Database:
                 content_hash TEXT
             );
 
-            -- Tombstones for opt-in deletion reconciler. ``marked_at``
+            -- Tombstones for the deletion reconciler (mirror mode, the
+            -- default). ``marked_at``
             -- is ISO 8601 UTC so the reaper's lexicographic cutoff
             -- comparison is well-defined.
             CREATE TABLE pending_deletions (
@@ -1113,9 +1124,10 @@ class Database:
 
             -- Durable retry / dead-letter queue. Every discovered file
             -- is enqueued first; the worker loop claims due rows and
-            -- runs parse/thread/embed/upsert. Failures back off
-            -- exponentially up to ``INDEXER_MAX_ATTEMPTS`` then
-            -- transition to ``status='dead'``.
+            -- runs parse/thread/embed/upsert. Retryable failures back
+            -- off exponentially up to ``INDEXER_MAX_ATTEMPTS``, then
+            -- transition to ``status='dead'``; a failure no retry can
+            -- fix is dead-lettered at once.
             CREATE TABLE indexing_jobs (
                 filepath        TEXT PRIMARY KEY,
                 reason          TEXT NOT NULL,
@@ -1299,7 +1311,7 @@ class Database:
     @staticmethod
     def _drop_fallback_date_lines(cur: sqlite3.Cursor, thread, body: str) -> str:
         """``body`` without the made-up ``Date:`` line the v7 writer put in
-        it for an undated incoming message (#1080, review rounds 1-2).
+        it for an undated incoming message (#1080).
 
         Only a row not yet assessed (``sent_at_status`` NULL, from before
         v8) whose message now parses as undated has one: its stored
@@ -1329,7 +1341,7 @@ class Database:
                 ambiguous += 1
         if ambiguous:
             # Lowers retrieval quality and sender text can trigger it:
-            # WARNING, rate limited (review round 4).
+            # WARNING, rate limited.
             warn_rate_limited(
                 log,
                 "thread text kept the old fallback date line of %d message(s): "
@@ -1463,8 +1475,10 @@ class Database:
             # derived from the appended message only (get_thread returns
             # messages=[] by design), so an out-of-order older message would
             # otherwise replace a preview that still represents the actual
-            # newest message in the thread — date_last is merged via max()
-            # above, and the snippet should track that same rule.
+            # newest message in the thread — date_last tracks the newest
+            # message (the threader widens it with max(); the recompute
+            # below sets it from the stored rows), and the snippet should
+            # track that same rule.
             snippet = thread.snippet()
             if existing and existing["snippet"] and thread.messages:
                 newest_incoming = max(m.effective_date for m in thread.messages).isoformat()
@@ -1617,7 +1631,8 @@ class Database:
         Used by the indexer write path to compute the diff between newly
         chunked output and what is already stored. Chunks are paragraph-
         packed and the chunker's IDs are deterministic
-        (``sha256(message_pk || index || text)``) — so an unchanged body
+        (``sha256(message_pk || index || text)``, NUL-separated,
+        ``chunker._chunk_id``) — so an unchanged body
         yields a byte-identical ID set, and only genuinely new chunks
         need an embed call.
 
@@ -1625,7 +1640,7 @@ class Database:
         return:
 
         * ``None`` (default) — chunks derived from the message body only
-          (``attachment_id IS NULL`` rows). Matches the schema-v9 contract.
+          (``attachment_id IS NULL`` rows).
         * a string — chunks derived from that specific attachment within
           the message. Used by the indexer to diff per-attachment chunks
           independently of body chunks.
@@ -1675,8 +1690,8 @@ class Database:
         * a string — attachment chunks for that specific
           ``attachment_id`` within the message. The same content
           forwarded across N messages produces N distinct chunk
-          occurrences (one per parent thread) so any chunk hit can lift
-          its parent thread into ranking.
+          occurrences (one per message) so any chunk hit can lift its
+          message's thread into ranking.
 
         A chunk stores no copy of its message's date: readers take a
         passage's dates from its ``messages`` row (``sent_at``,
@@ -1684,8 +1699,8 @@ class Database:
         rewritten never shows a stale date (#575).
 
         ``delete_missing=False`` only adds: stored chunks missing from
-        ``chunks`` are kept. For an attachment slice that an occurrence
-        whose extraction was deferred also holds chunks in (#1236).
+        ``chunks`` are kept. Used for an attachment slice whose chunks an
+        occurrence with a deferred extraction also holds (#1236).
 
         All inserts / deletes across ``message_chunks``,
         ``message_chunks_fts`` and ``message_chunks_vec`` happen inside
@@ -1739,9 +1754,9 @@ class Database:
                 fts_rowid = existing_fts_rowids.get(chunk_id)
                 if fts_rowid is not None:
                     cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (fts_rowid,))
-                    # Chunks change only when the extractor or chunker
-                    # output does; the replaced text may be what a fix
-                    # removed (#670).
+                    # Chunks change when the parsed or extracted text or
+                    # the chunk budgets change; the replaced text may be
+                    # what a fix removed (#670).
                     self._mark_fts_scrub("message_chunks_fts")
                 cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (chunk_id,))
                 cur.execute("DELETE FROM message_chunks WHERE chunk_id = ?", (chunk_id,))
@@ -2218,7 +2233,7 @@ class Database:
         and for which ``qualifies`` holds (it gets the row's status, stamp
         and cached ``text_complete``), read ``SWEEP_FETCH_ROWS`` rows at a
         time and keeping filepaths only, so a message with many such
-        occurrences costs one entry (review round 3 on #1286). Each such
+        occurrences costs one entry (#1286). Each such
         occurrence that still has a record of its own (a parse cap can
         set 0 beside a cached row with none) has it cleared through
         ``assessed`` (#1236)."""
@@ -2461,9 +2476,12 @@ class Database:
         ``extraction_status`` is one of:
 
         * ``"success"`` — text extracted; ``extracted_text`` populated
-        * ``"empty"`` — extractor ran but produced no text (image of a
-          blank page, password-protected PDF with no fallback, etc.)
-        * ``"unsupported"`` — no extractor registered for the MIME type
+        * ``"empty"`` — extractor ran but produced no text (for example
+          a blank scanned page)
+        * ``"unsupported"`` — no extractor applies to the payload, or it
+          is not read by design (OCR disabled, an encrypted or over-limit
+          PDF, a legacy OLE2 payload under an OOXML label);
+          ``extraction_error`` holds the fixed reason
         * ``"too_large"`` — payload exceeds the configured byte cap
         * ``"failed"`` — extractor raised; ``extraction_error`` populated
 
@@ -2934,9 +2952,10 @@ class Database:
              and dead-lettered the file. Phase 1's commits remain
              but ``claim_batch`` no longer returns a 'dead' row.
 
-        Used by the indexer's startup recovery sweep
-        (``_recover_zero_vector_threads``) to re-enqueue these
-        files so the next drain pass can complete the indexing.
+        Used by the recovery sweep (``_recover_zero_vector_threads``, at
+        startup and periodically) to re-enqueue the files it can retry
+        so the next drain pass can complete the indexing; dead-lettered
+        files (cause 2) are left for ``make requeue-dead``.
 
         Excludes chunkless threads with a non-zero ``threads_vec``
         row — those are healthy subject-fallback threads from
@@ -3013,9 +3032,9 @@ class Database:
 
         Used by the chunkless-thread subject-fallback path in the
         indexer's Phase 2a so it embeds a stable subject text for the
-        thread. Without it, the fallback used the newly-arrived
-        message's subject (overwriting prior fallbacks on every
-        chunkless reply, producing order-dependent thread vectors).
+        thread. The newly-arrived message's subject would instead
+        overwrite the fallback on every chunkless reply, making thread
+        vectors depend on arrival order.
         The reconciler's reap rebuild does not read it: the stored
         value can still hold a reaped message's subject, so the
         rebuild embeds from survivors only.
@@ -3160,7 +3179,7 @@ class Database:
 
         Depends on ``threads.fts_rowid`` tracking the FTS rowid; without it
         the DELETE would no-op silently and stale tokens would linger in the
-        index (see the pre-squash migration notes in git history).
+        index.
         """
         existing = cur.execute(
             "SELECT fts_rowid FROM threads WHERE thread_id = ?", (thread_id,)
@@ -3459,8 +3478,10 @@ class Database:
         """Return ``"queued"`` / ``"dead"`` / ``None`` for ``filepath``.
 
         ``None`` when the row does not exist — the file has never been
-        enqueued or has succeeded and been deleted. Callers (initial
-        scan, reconciler) use this to decide whether to re-enqueue a
+        enqueued or has succeeded and been deleted. Callers (through
+        ``IndexingQueue.is_dead`` / ``has_pending_row``: the initial scan
+        and rescans, the recovery sweep and the startup extraction sweep)
+        use this to decide whether to re-enqueue a
         path that's known to be dead-lettered: blindly re-enqueuing
         every dead row on every container restart turns one failed
         payload into a recurring retry storm against the same
@@ -4138,9 +4159,9 @@ class Database:
         reconciliation sweeps can still find the file.
 
         Goes through ``_begin_if_needed`` / ``_commit_if_started`` /
-        ``_rollback_if_started`` like every other write helper so a
-        future caller wrapping this in ``with db.transaction():`` does
-        not crash on a nested ``BEGIN``.
+        ``_rollback_if_started``, so it joins an enclosing
+        ``db.transaction()`` (as ``remap_to_identical_copy`` uses it)
+        instead of failing on a nested ``BEGIN``.
         """
         if old_path == new_path:
             return
@@ -4500,8 +4521,8 @@ class Database:
         # leaves the dead message's subject as the user-facing label —
         # search results would render with text from a message that no
         # longer exists in the index. None when no survivor has a
-        # subject, or when the thread has no messages (the deletion-reconciler then drops the thread row
-        # entirely a few lines below; the value never reaches storage).
+        # subject. (A thread with no survivors never reaches here: the
+        # reconciler removes it with ``delete_thread_completely``.)
         display_subject = next(
             (
                 m.subject
@@ -4623,7 +4644,8 @@ class Database:
                 "SELECT organization_id FROM entities WHERE entity_id = ?", (person_id,)
             ).fetchone()
             if row is None:
-                # Past the per-message entity cap: never had an entity.
+                # No entity row (defensive: ``_participant_mentions``
+                # lists only addresses that own one).
                 continue
             if row["organization_id"] is not None:
                 orgs.add(row["organization_id"])
@@ -4646,9 +4668,10 @@ class Database:
             )
 
     def _remove_message_row(self, cur: sqlite3.Cursor, claimant_id: str) -> str | None:
-        """Remove a message's map / indexed_files / tombstone / chunk /
-        attachment rows using ``cur``. Returns the message's filepath
-        (for optional on-disk cleanup), or ``None`` if no such message
+        """Remove a message's map / indexed_files / tombstone / queue /
+        chunk / attachment rows using ``cur``, and record it in
+        ``reaped_messages``. Returns the message's filepath (the file
+        stays on disk), or ``None`` if no such message
         was tracked. Used by ``reap_thread_messages``; the caller owns
         the enclosing transaction.
         """

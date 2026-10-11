@@ -245,8 +245,8 @@ def test_matches_exactly_what_query_messages_sender_matches(shapes_db, value, qu
 
 def test_the_differential_catalogue_covers_both_match_modes(shapes_db):
     """Guard the catalogue: exact and substring values both match some
-    message and some match none, and each matching value also has
-    messages the leaf cannot decide (``sender_ambiguous`` 1 or NULL,
+    message, a value matches none, and the exact vendor address also
+    has messages the leaf cannot decide (``sender_ambiguous`` 1 or NULL,
     #1153), which neither tool returns."""
     matched = {
         value: {m.claimant_id for m in shapes_db.query_messages(sender=value, limit=100).messages}

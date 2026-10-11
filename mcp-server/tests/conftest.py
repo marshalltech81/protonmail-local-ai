@@ -455,8 +455,9 @@ def _insert_extraction(
     """Insert one ``attachment_extractions`` row (per content hash and
     extractor module; an occurrence uses the row its module names).
 
-    Mirrors the indexer's extracted-text cache: ``status`` is
-    ``success`` / ``failed`` / ``pending``, ``extracted_text`` carries
+    Mirrors the indexer's extracted-text cache: ``status`` is one of
+    ``success`` / ``empty`` / ``unsupported`` / ``too_large`` /
+    ``failed``, ``extracted_text`` carries
     the parsed text on success and is ``None`` otherwise.
     """
     conn.execute(
@@ -942,11 +943,12 @@ def seeded_db(tmp_path: Path):
 
 @pytest.fixture
 def chunked_db(tmp_path: Path):
-    """Populated read-only DB with both thread-level rows and v9 per-message
+    """Populated read-only DB with both thread-level rows and per-message
     chunks.
 
-    Each thread also carries one or two chunks aligned to the same toy
-    4-dim embedding axis as its parent thread vector. Lets chunk-search
+    ``t-alpha`` and ``t-beta`` each carry one chunk aligned to the same
+    toy 4-dim embedding axis as its parent thread vector; ``t-gamma``
+    has none. Lets chunk-search
     and chunk-aware RRF tests assert that a chunk hit lifts its parent
     thread into ranking, without re-deriving the indexer pipeline.
     """
@@ -1027,7 +1029,7 @@ def messages_db(tmp_path):
     """Five messages across three threads for ``query_messages``.
 
     m4 and m5 share a ``sent_at`` so paging must break the tie on
-    message_id; m2 replies to m1 and has an attachment chunk whose text
+    claimant_id; m2 replies to m1 and has an attachment chunk whose text
     must not satisfy ``text``; m3 has two body chunks so ``text`` terms
     can span them.
     """
@@ -1458,7 +1460,8 @@ class FakeMCPServer:
     """Minimal stub of the FastMCP surface used by tool-registration functions.
 
     Captures every function passed to ``@server.tool()`` in ``tools`` keyed
-    by the function's name. ``custom_route`` is a no-op decorator so
+    by the function's name. ``custom_route`` records each handler in
+    ``custom_routes`` by path so
     ``main.py`` registration paths run without needing a real Starlette
     app. Nothing about the captured callables is wrapped or instrumented —
     tests invoke them exactly as the FastMCP dispatcher would, which is
@@ -1521,7 +1524,8 @@ class FakeInferenceClient:
         self._default_response = response
         self._queued = list(complete_responses) if complete_responses is not None else []
         self.mode = mode
-        # Off by default so a handler test sees today's prompt and parse;
+        # Off by default so a handler test sees the prompt and parse used
+        # without a schema;
         # the structured-output tests (#808) turn it on.
         self.structured_output = structured_output
         self.complete_calls: list[tuple[str, str]] = []

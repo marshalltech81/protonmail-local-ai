@@ -3,8 +3,9 @@
 Shared by the ``doc`` extractor (catdoc), the ``ppt`` extractor, which
 runs Apache POI in a Java process (#957), and the extractors that run
 in the Python extractor child (``extractor_child.py``: the OOXML
-formats, ``xls``, ``eml``, ``image`` and ``html``, which also converts
-message bodies) through ``run_child`` below. Every tool is
+formats, ``xls``, ``eml``, ``image``, ``pdf``, ``container``
+identification and ``html``, which also converts message bodies)
+through ``run_child`` below. Every tool is
 attacker-reachable parsing code, so the run is bounded and its output
 is treated as data:
 
@@ -122,16 +123,15 @@ _TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
 _COUNT = re.compile(r"[0-9]{1,18}")
 
 # Processes this interpreter has started (#1236): every
-# ``subprocess.Popen``, counted from the audit event it raises, so the
-# count covers the tools started here and the ones a library starts in
-# process (Poppler's ``pdfinfo`` and ``pdftoppm`` and Tesseract for a
-# scanned PDF), whichever library version starts them, plus the
-# processes an extractor child reports it started (``CHILD_LAUNCHES``:
-# Tesseract per image frame). The per-message extraction budget
-# (``attachment_indexing.ExtractionBudget``) reads it around each
+# ``subprocess.Popen``, counted from the audit event it raises, so the count
+# covers the tools started here (catdoc, the ``.ppt`` JVM, each extractor
+# child), plus the processes an extractor child reports it started
+# (``CHILD_LAUNCHES``: Tesseract per image frame, Poppler's ``pdfinfo`` and
+# ``pdftoppm`` and Tesseract for a scanned PDF). The per-message extraction
+# budget (``attachment_indexing.ExtractionBudget``) reads it around each
 # dispatch. Only the ingestion worker starts processes. A child killed
-# before it reports (a timeout, a crash) adds only its own launch; its
-# run still counts against the budget's seconds.
+# before it reports (a timeout, a crash) adds only its own launch; its run
+# still counts against the budget's seconds.
 _launches = 0
 
 # The count frame an extractor child sends with the processes it started.
@@ -422,14 +422,16 @@ def run_child(
     """Run ``module``'s extraction of ``payload`` in the extractor child
     under the caller's limits, and parse its frames (module docstring).
     ``options`` are the module's own arguments, fixed text the caller
-    builds from its settings (``image``: the page cap and OCR timeout).
+    builds from its settings (``image``: the page cap, OCR timeout and
+    Tesseract path).
     With ``names``, the text frame must carry one of them, returned as
     the result's ``name``. ``on_report`` (when set) is called once the
     output has parsed, with the caps, counts and recovered errors,
     before the text is returned or the child's error raised; not when
-    the run failed or its output broke the protocol. The wall-clock
-    timeout is past the CPU limit, so a CPU-bound child meets that
-    first."""
+    the run failed or its output broke the protocol. Each caller sizes
+    the wall-clock timeout from its own allowance; it is not always past
+    the CPU limit, so a CPU-bound child may end as ``ToolTimeoutError``
+    rather than ``ToolCrashError`` (both are ``failed``)."""
     global _launches
     frames = _Frames(caps, counts | {CHILD_LAUNCHES}, on_progress, names)
     try:

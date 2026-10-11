@@ -334,8 +334,7 @@ class TestSplitStatements:
         # ``sqlite3.complete_statement`` treats the leading comment as
         # part of the statement that follows it; sqlite3 is happy to
         # execute that as a single statement (the comment is a no-op).
-        # We do not strip comments — they may carry useful migration
-        # provenance to anyone reading the journal.
+        # We do not strip comments; sqlite3 executes them as no-ops.
         sql = "-- this is a comment\nCREATE TABLE a (x);"
         statements = runner._split_statements(sql)
         assert len(statements) == 1
@@ -343,8 +342,8 @@ class TestSplitStatements:
         assert "-- this is a comment" in statements[0]
 
     def test_inline_line_comment_after_statement(self):
-        # The trailing comment between two statements stays attached to
-        # whichever statement it is closer to per sqlite3's parser.
+        # A comment after a statement's ";" starts the next buffer, so it
+        # goes with the following statement; the split stays at two.
         sql = "CREATE TABLE a (x); -- trailing comment\nCREATE TABLE b (y);"
         statements = runner._split_statements(sql)
         assert len(statements) == 2

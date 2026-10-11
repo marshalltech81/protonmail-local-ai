@@ -1,16 +1,15 @@
 """
 Durable indexing queue backed by the ``indexing_jobs`` SQLite table.
 
-Before the indexing_jobs queue, the indexer processed files inline inside the
-watchdog callback: any crash mid-embed or embedding service outage left the file
-unindexed with no durable record of the failure, and a parser bug on a
-single message was silently retried on every restart without ever
-giving up. The queue makes both cases observable and bounded:
+The queue gives every file to index a durable row, so a crash
+mid-message or an embedder outage leaves a record of the failure, and a
+message that keeps failing stops being retried:
 
-- Every discovered filepath (watchdog event, initial scan, future
-  reconciler-driven reindex) is ``enqueue``d instead of processed
-  inline. Enqueue is fast — a single SQLite write — so the watchdog
-  callback thread no longer blocks on an embedding service round-trip.
+- Every discovered filepath (watchdog event, initial scan, periodic
+  rescan, recovery and re-extraction sweeps) is ``enqueue``d instead
+  of processed inline; a reparse is queued by ``REPARSE_ENQUEUE_SQL``.
+  Enqueue is a single SQLite write, so the watchdog callback thread
+  never waits on the embedder.
 - A worker loop in the main thread claims batches (``claim_batch``) and runs the
   existing parse → thread → embed → upsert pipeline against the
   returned path. Success deletes the row (``mark_succeeded``); failure
@@ -152,7 +151,7 @@ EXTRACTION_DEFERRED_ERROR = (
 # distinct from ``_stage_error``'s rendering of the same
 # ``PermissionError`` (``PermissionError: [Errno 13] ...``), which a job
 # past its deferral window writes on the normal retry path, so the
-# heartbeat tells the two apart (Codex round 2 on #904).
+# heartbeat tells the two apart (#904).
 PERMISSION_DEFERRED_ERROR = "PermissionError: deferred until mbsync opens the file"
 
 # Written by ``begin_attempt`` while a message's step runs and cleared
@@ -320,8 +319,10 @@ class IndexingQueue:
         ``last_stage = 'interrupted'``, so a process that dies mid-step
         leaves the row counted and marked. ``end_attempt`` or any outcome
         method refunds it and clears the mark. A marked row whose
-        attempts are exhausted got there only through such deaths, so it
-        is dead-lettered here rather than run again; an unmarked row over
+        attempts are exhausted was interrupted (a charged step, or
+        batch-wide work, which charges nothing) with no attempt left;
+        earlier attempts may be ordinary failures. It is dead-lettered
+        here rather than run again; an unmarked row over
         the limit (``INDEXER_MAX_ATTEMPTS`` lowered) still runs, and
         ``mark_failed`` decides.
         """
@@ -335,7 +336,7 @@ class IndexingQueue:
         ):
             warn_rate_limited(
                 log,
-                "dead-letter: %s interrupted mid-processing on every attempt",
+                "dead-letter: %s interrupted mid-processing with its attempts exhausted",
                 filepath,
                 level=logging.ERROR,
                 attachment=False,
@@ -359,8 +360,8 @@ class IndexingQueue:
 
     def note_progress(self) -> None:
         """Restart the in-flight clock: the step finished one bounded unit
-        of work (one attachment), so the stall guard's limit applies per
-        unit rather than to a whole message."""
+        of work (one attachment, or one embed request), so the stall
+        guard's limit applies per unit rather than to a whole message."""
         with self._lock:
             if self._in_flight is not None:
                 self._in_flight = (self._in_flight[0], time.monotonic())
@@ -464,7 +465,8 @@ class IndexingQueue:
     def mark_failed(self, filepath: str, *, stage: str, error: str) -> None:
         """Record a failed attempt and schedule the next retry or dead-letter.
 
-        ``stage`` is one of ``"parse" | "thread" | "embed" | "db_write"``
+        ``stage`` is one of ``"parse" | "thread" | "thread_commit" |
+        "chunk" | "embed" | "db_write"``
         — useful for operators to see which pipeline step broke. The
         value is stored verbatim so new stages can be introduced without
         migrating existing rows.
@@ -605,8 +607,8 @@ class IndexingQueue:
         of clobbering them via ``enqueue``'s ``INSERT OR REPLACE``.
         Without this skip, a container restart re-enqueues every
         previously-failed file, resets its retry counter to zero, and
-        starts the 5-attempt backoff cascade over again — wasting
-        ~30 minutes of embedding service load per file with no change in
+        starts the backoff cascade (``INDEXER_MAX_ATTEMPTS``) over again — wasting
+        embedding service load per file with no change in
         upstream behavior. The watchdog rename / on-created events
         keep going through ``enqueue`` (and DO reset dead state)
         because those signal real change in the underlying file.
@@ -626,8 +628,8 @@ class IndexingQueue:
         return self.db.queue_get_status(filepath) == STATUS_QUEUED
 
     def stats(self) -> dict[str, int]:
-        """Return ``{'queued': n, 'dead': n}`` — surfaced through the
-        indexer health file / MCP ``get_mailbox_status`` so operators can
+        """Return ``{'queued': n, 'dead': n}``, logged at startup as the
+        carry-over and with each periodic timing summary so operators can
         see when work is backing up or files are giving up."""
         return self.db.queue_stats()
 
@@ -648,7 +650,9 @@ class IndexingQueue:
         trashed (#1331) and ``reparse_dead`` the dead ones (#1078).
         ``oldest_due_age``
         is how long, in seconds, the longest-waiting due row has been due
-        (0 when none is due): it grows while draining is stalled.
+        (0 when none is due): it grows while draining is stalled. During
+        the initial index it is not a wait: that backlog is queued due at
+        each message's own date (``oldest_first``).
         """
         now = now or datetime.now(UTC)
         counts, oldest_due = self.db.queue_heartbeat_counts(
@@ -682,7 +686,7 @@ def _now_iso() -> str:
 
 
 def _truncate_error(error: str, limit: int = 200) -> str:
-    """Cap log output for stack traces. The full text is already in the
+    """Cap the error text in a log line. The full text is already in the
     ``last_error`` column for post-mortem; logs just need a hint."""
     if len(error) <= limit:
         return error

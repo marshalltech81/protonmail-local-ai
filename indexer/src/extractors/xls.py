@@ -1,22 +1,24 @@
 """Legacy Excel ``.xls`` extractor (#935).
 
 A legacy ``.xls`` is an OLE2 compound file holding a BIFF workbook,
-which openpyxl cannot read. The dispatcher routes an OLE2 payload
-labelled ``.xls`` / ``application/vnd.ms-excel`` here; a
-``.xls``-labelled payload that is not OLE2 (an OOXML file mislabelled
-as ``.xls``) still goes to ``xlsx``.
+which openpyxl cannot read. An OLE2 or ZIP payload, whatever its
+label, runs the extractor its directory names (``container.identify``,
+#1416): this one for an OLE2 file with a workbook stream. A payload
+under a ``.xls`` label whose bytes are neither OLE2 nor ZIP is recorded
+``unsupported``
+("not an OLE2 or OOXML container", #1227).
 
 The workbook is read by xlrd in the extractor child
-(``extractor_child.py``, running the walk in ``xls_child.py``),
-started through ``_runner.run_child``. xlrd's work on opening a
-workbook is not bounded by the payload size, so the runner's launcher
-caps the child's address space and CPU time before it starts, and the
-runner adds a wall-clock timeout; see ``xls_child`` for the per-sheet
-budgets, which match the xlsx extractor's. The child costs a launcher
-and a child Python start-up, the extractors package and an xlrd import
-per workbook, measured plainly in the image on the fixture workbook:
-about 0.06 s and 39 MiB of address space (0.02 s and 21 MiB while the
-child imported xlrd alone, before #1291).
+(``extractor_child.py``, running the walk in ``xls_child.py``), started
+through ``_runner.run_child``. xlrd's work on opening a workbook is not
+bounded by the payload size, so the runner's launcher caps the child's
+address space and CPU time before it starts, and the runner adds a
+wall-clock timeout; see ``xls_child`` for the workbook budgets (sheet
+count, cells and text), which follow the xlsx extractor's. The child
+costs a launcher and a child Python start-up, the extractors package and
+an xlrd import per workbook, measured plainly in the image on the
+fixture workbook: about 0.06 s and 39 MiB of address space (0.02 s and
+21 MiB while the child imported xlrd alone, before #1291).
 
 A limit hit, a timeout or a crash raises a fixed-text error from
 ``_runner``; an xlrd error (or the child's ``MemoryError`` or

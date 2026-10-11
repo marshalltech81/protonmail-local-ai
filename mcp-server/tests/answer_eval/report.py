@@ -6,9 +6,12 @@ labels: no question, answer, passage, claim or judge explanation. Those
 go only to the optional detail artifact. Both are written mode 600 in a
 mode 700 directory.
 
-Every rate's denominator is the cases selected for the run: a case that
-errored, timed out or was skipped counts as not passing, so failures can
-never improve a score.
+A case that errored, timed out or was skipped counts as not passing in
+every pass rate (over the cases selected, or the selected cases a check
+or dimension applies to), as 0 in evidence coverage and as missing in
+the missing-fact rate, so failures cannot improve them. The
+unsupported-claim rate is over judged claims only: an unjudged case
+adds nothing to it.
 """
 
 import json
@@ -105,7 +108,7 @@ def detail_record(case: Case, run: CaseRun, judge: JudgeOutcome) -> dict[str, An
         # extract_from_emails: the records themselves (provider output).
         "records": view.records if view else None,
         "tool_error": run.error_detail,
-        # What the judge was allowed to excuse (review round 9).
+        # What the judge was allowed to excuse.
         "coverage_note": view.coverage_note if view else None,
         "omitted_facts": budget_omitted_facts(case, run),
         "retrieved_threads": [t.thread_id for t in view.threads] if view else [],

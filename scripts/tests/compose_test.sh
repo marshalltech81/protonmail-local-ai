@@ -44,6 +44,7 @@ render() {
         ${EMBED_BASE_URL:+EMBED_BASE_URL="$EMBED_BASE_URL"} \
         ${EMBED_MODEL:+EMBED_MODEL="$EMBED_MODEL"} \
         ${RENDER_MCP_PORT:+MCP_PORT="$RENDER_MCP_PORT"} \
+        ${RENDER_ENV[@]+"${RENDER_ENV[@]}"} \
         docker compose --project-directory "$ROOT_DIR" --env-file /dev/null "${args[@]}" \
         config --format json >"$WORK/config.json" 2>"$WORK/compose.err" || {
         cat "$WORK/compose.err"
@@ -617,11 +618,24 @@ mcp_port_follows_the_published_port() {
     expect '.services["mcp-server"].ports | map("\(.host_ip):\(.published):\(.target)/\(.protocol)") == ["127.0.0.1:4000:4000/tcp"]' || return 1
 }
 
+# The Proton settings of PLAN.md decision 46 (#1497): Compose passes each
+# as set, empty when unset, without a warning; the entrypoint applies the
+# default (host.docker.internal, 127.0.0.1, today's isync names) and both
+# it and validate-env.sh refuse anything mbsync/proton-settings.sh does
+# not allow (mbsync/tests/entrypoint_test.sh walks the values).
+readonly PROTON_SETTINGS=(BRIDGE_HOST BRIDGE_CERT_HOST PROTON_IMAP_ACCOUNT_NAME
+    PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME)
+
 mbsync_points_at_the_host_app() {
+    local name
     render "$BASE"
-    expect '.services.mbsync.environment.BRIDGE_HOST == "host.docker.internal"' || return 1
+    for name in "${PROTON_SETTINGS[@]}"; do
+        expect ".services.mbsync.environment.${name} == \"\"" || return 1
+        if grep -F "\"${name}\" variable is not set" "$WORK/compose.err"; then
+            return 1
+        fi
+    done
     expect '.services.mbsync.environment.BRIDGE_IMAP_PORT == "1143"' || return 1
-    expect '.services.mbsync.environment.BRIDGE_CERT_HOST == "127.0.0.1"' || return 1
     expect '.services.mbsync.environment.BRIDGE_CERT_PIN_ROTATE == "false"' || return 1
     # Empty unless set: the entrypoint then refuses to trust the app's
     # certificate on first use.
@@ -631,6 +645,17 @@ mbsync_points_at_the_host_app() {
 mbsync_takes_the_expected_fingerprint_from_the_environment() {
     BRIDGE_CERT_FINGERPRINT="ab:cd" render "$BASE"
     expect '.services.mbsync.environment.BRIDGE_CERT_FINGERPRINT == "ab:cd"' || return 1
+}
+
+mbsync_takes_the_proton_settings_from_the_environment() {
+    local name RENDER_ENV=()
+    for name in "${PROTON_SETTINGS[@]}"; do
+        RENDER_ENV+=("${name}=synthetic-${name}")
+    done
+    render "$BASE"
+    for name in "${PROTON_SETTINGS[@]}"; do
+        expect ".services.mbsync.environment.${name} == \"synthetic-${name}\"" || return 1
+    done
 }
 
 mbsync_takes_the_port_from_the_environment() {
@@ -712,7 +737,7 @@ expect_make_commit() {
     }
 }
 
-# The Makefile in a scratch repository (Codex review round 2 on #893):
+# The Makefile in a scratch repository (#893):
 # the short HEAD hash when clean, -dirty for a modified tracked file or
 # a new untracked one, but not for a git-ignored file such as .env, and
 # empty outside a checkout.
@@ -727,7 +752,7 @@ make_build_passes_the_source_commit() {
     scratch_git "$repo" commit -q -m synthetic
     head="$(scratch_git "$repo" rev-parse --short HEAD)"
     expect_make_commit "$repo" "$head" || return 1
-    # Codex review round 6 on #893: a GIT_COMMIT left in the shell or CI
+    # #893: a GIT_COMMIT left in the shell or CI
     # does not replace the checkout's commit; GIT_COMMIT_OVERRIDE does.
     expect_make_commit "$repo" "$head" GIT_COMMIT=stale || return 1
     expect_make_commit "$repo" synthetic-override GIT_COMMIT=stale \
@@ -746,7 +771,7 @@ the_base_composes_with_the_hardened_overlay() {
     render "$BASE" "$HARDENED"
     expect '.services | keys == ["indexer", "mbsync", "mcp-server"]' || return 1
     expect '.networks["app-net"].internal' || return 1
-    expect '.services.mbsync.environment.BRIDGE_HOST == "host.docker.internal"' || return 1
+    expect '.services.mbsync.environment.BRIDGE_HOST == ""' || return 1
 }
 
 # The base file's own render, every profile included: what the merged
@@ -758,6 +783,8 @@ check "the base runs mbsync, indexer and mcp-server, with no Bridge dependency" 
     the_base_runs_mbsync_indexer_and_mcp_server
 check "mbsync points at the host app" mbsync_points_at_the_host_app
 check "mbsync takes the IMAP port from the environment" mbsync_takes_the_port_from_the_environment
+check "mbsync takes the Proton settings from the environment" \
+    mbsync_takes_the_proton_settings_from_the_environment
 check "mcp-server publishes the port MCP_PORT names on both sides" mcp_port_follows_the_published_port
 check "mbsync takes the expected fingerprint from the environment" \
     mbsync_takes_the_expected_fingerprint_from_the_environment

@@ -6,7 +6,8 @@
 - The official [Proton Mail Bridge](https://proton.me/mail/bridge) app,
   installed on the same Mac and signed in (Bridge requires a paid
   Proton plan)
-- Claude Desktop installed
+- An MCP client on the same Mac, such as Claude Desktop, Claude Code or
+  Codex (see [step 7](#7-connect-an-mcp-client))
 - Git configured with SSH key for GitHub
 - Full-disk encryption on the Mac (FileVault, in System Settings >
   Privacy & Security). The stack stores your decrypted mail, its search
@@ -25,7 +26,10 @@
 
 The stack syncs from the Proton Mail Bridge app running on the host.
 mbsync, the indexer and the MCP server run in containers; mbsync reaches
-the app through `host.docker.internal`.
+the app through `host.docker.internal` (`BRIDGE_HOST`; on OrbStack,
+`host.orb.internal` and `host.internal` also work). The engine and its
+resolver are trusted to send that name to this Mac's loopback: the name
+is not resolved to check it.
 
 - **macOS** (OrbStack or Docker Desktop): tested. There
   `host.docker.internal` forwards to the Mac's loopback interface, which
@@ -154,10 +158,12 @@ is back. Freshness is reported by `make status` as usual.
    BRIDGE_USER=your@proton.me          # the app's IMAP username
    ```
 
-   Write the password into the Docker secret file:
+   Write the password into the Docker secret file. The command reads it
+   without echoing it, so it stays out of your shell history; paste it
+   and press Enter:
 
    ```bash
-   printf '%s' 'bridge-generated-pass' > .secrets/bridge_pass.txt
+   (umask 077; IFS= read -rs pass && printf '%s' "$pass" > .secrets/bridge_pass.txt)
    chmod 600 .secrets/bridge_pass.txt
    ```
 
@@ -194,7 +200,20 @@ is back. Freshness is reported by `make status` as usual.
    `sha256 Fingerprint=…` line are all accepted. The value is not
    secret. The app's certificate must be issued for `127.0.0.1`, which
    is what Bridge generates; a certificate you imported into Bridge
-   yourself must be too.
+   yourself must be too, unless you set `BRIDGE_CERT_HOST` to the name
+   it is issued for: `localhost`, another `127.x.y.z` or `::1`, nothing
+   else.
+
+   Optional settings in the same `.env` block (PLAN.md decision 46;
+   `.env.example` lists them): `BRIDGE_HOST`, the container's name for
+   this Mac (`host.docker.internal` by default; OrbStack's
+   `host.orb.internal` or `host.internal` also work), and isync's
+   account, store and channel names (`PROTON_IMAP_ACCOUNT_NAME`,
+   `PROTON_REMOTE_STORE_NAME`, `PROTON_LOCAL_STORE_NAME`,
+   `PROTON_CHANNEL_NAME`). Leave them unset unless you need them.
+   `make validate-env` and mbsync both refuse any other value; the
+   Bridge must run on this Mac, and a Bridge elsewhere waits on
+   [#1499](https://github.com/marshalltech81/protonmail-local-ai/issues/1499).
 
 #### How TLS is checked
 
@@ -206,7 +225,7 @@ app's certificate names only `127.0.0.1`, and the isync shipped in the
 image (1.5.1) checks a self-signed CA certificate like Bridge's against
 the configured host name, so connecting to `host.docker.internal`
 directly fails with `certificate owner does not match hostname`.
-`docker-compose.yml` therefore sets `BRIDGE_CERT_HOST=127.0.0.1`: the
+`BRIDGE_CERT_HOST` therefore defaults to `127.0.0.1`: the
 generated `mbsyncrc` keeps `Host 127.0.0.1` for the certificate check
 and reaches `host.docker.internal:<port>` through an isync `Tunnel`
 (`socat`), which only relays bytes. TLS still runs end to end between
@@ -339,7 +358,8 @@ When disabled, hybrid search returns RRF-only ranking.
 make up
 ```
 
-`make up` now validates `.env` and the secret files first. It checks the
+`make up` first creates any missing secret file (`make init-secrets`),
+then validates `.env` and the secret files. It checks the
 values Compose will use: a variable exported in your shell overrides `.env`,
 and a key left empty or out takes its `docker-compose.yml` default, so
 `SYNC_INTERVAL`, `MCP_PORT` and (in `anthropic` mode)
@@ -358,6 +378,9 @@ services strip it. It fails fast if:
   set described above).
   For unauthenticated host-side servers, write any non-empty placeholder
   string (e.g. `unauthenticated`).
+- `INFERENCE_API_KEY`, `EMBED_API_KEY` or `RERANK_API_KEY` is set in
+  `.env`: Compose never passes it to the containers, so move the value
+  to the matching `.secrets/` file
 - any enabled layer's `{LAYER}_BASE_URL` is empty: set the provider's
   URL, or `default` for the SDK's default endpoint (OpenAI proper,
   Anthropic API, Cohere API); see the migration note in step 5
@@ -367,8 +390,8 @@ services strip it. It fails fast if:
   `openai` mode cannot use)
 - inference / embed / rerank secret placeholder files are missing or not `600`
   (validation requires the files to exist with `600` permissions even when the
-  matching layer is `none`, so the docker-compose `secrets:` references
-  resolve cleanly)
+  matching layer is `none`: Compose cannot create a container whose
+  `secrets:` file is missing, and every secret file is held to `600`)
 - `config/authority.toml`, when present, is not a regular file (a symlink
   counts as not one) or is not `600`; on a Linux host, also when it does
   not grant the indexer (UID 1002) read access through an ACL naming
@@ -395,9 +418,9 @@ You should see:
 Operator-supplied inference / embed / rerank endpoints are not in
 this list — they run wherever you choose (a remote provider, or a
 host-side OpenAI-compatible server such as LM Studio, vLLM,
-`mlx_lm.server`, or TEI). Verify reachability from your host with
-a small `curl` against `$EMBED_BASE_URL`, `$INFERENCE_BASE_URL`, or
-`$RERANK_BASE_URL` if a layer's container is failing to start.
+`mlx_lm.server`, or TEI). If a layer's container fails to start with a
+connection error, see "Embedder or inference endpoint unreachable from
+containers" in `docs/troubleshooting.md`.
 
 The initial index scan may take several minutes depending on mailbox size.
 It indexes the oldest mail first across every folder, so each message
@@ -583,7 +606,7 @@ a single env change away. Examples:
 
 ```bash
 # Host-side server (mlx_lm.server, LM Studio, vLLM, TEI, etc.) —
-# the privacy-preserving option; mail content never leaves the host.
+# the privacy-preserving option; embedding requests stay on the host.
 # (EMBED_BASE_URL=default selects OpenAI proper; empty fails startup.)
 EMBED_BASE_URL=http://host.docker.internal:8001/v1
 EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
@@ -622,23 +645,21 @@ After changing provider:
    any placeholder string (e.g. `unauthenticated`); compat servers
    ignore the bearer header.
 3. **Indexer and mcp-server must point at the same provider + model**
-   so query vectors are comparable to indexed vectors. A
-   dimension mismatch (e.g. pointing mcp-server at a 3072-dim
-   model against a 4096-dim index) surfaces at query time as a
-   `Search error: Embedding dimension mismatch` naming
-   `EMBED_BASE_URL` and `EMBED_MODEL`. A same-dim model with a
-   different vector distribution still degrades hybrid search
-   silently — there's no way to detect that without a full
-   reindex.
+   so query vectors are comparable to indexed vectors.
 4. The schema reserves a fixed 4096-dim vector. `EMBED_MODEL`
    must keep producing 4096-dim vectors (Qwen3-Embedding-8B variants)
    or a schema migration is required.
-5. Switching to a model with a different vector distribution requires
-   a full reindex (the existing 4096-dim index isn't comparable to the
-   new model's 4096-dim space).
+5. On an existing index, an embedder that differs from the one the
+   index recorded stops both services at startup with "The configured
+   embedder is not the one that built this index" (what is compared,
+   and the calibration tolerance, is in docs/architecture.md,
+   "Embedder identity record"). Rebuild
+   the index with the new embedder, or put the old settings back; see
+   "Embedder identity mismatch" in `docs/troubleshooting.md`.
 
-Privacy note: remote embedders ship every email body chunk to the
-provider at index time and every search query at retrieval time.
+Privacy note: remote embedders receive message subjects, body text
+and extracted attachment text at index time and every search
+query at retrieval time.
 Pointing at a host-side server keeps that traffic on your machine.
 Choose accordingly.
 
@@ -646,15 +667,6 @@ The embedder has no enable/disable toggle equivalent to
 `RERANK_MODE`. The SQLite schema is sized for 4096-dim vectors and
 the indexer needs an embedder — falling back to "no embedder" would
 mean a schema rollback plus a full reindex from Maildir.
-
-## Updating Bridge
-
-The Bridge app updates itself; nothing in this repository pins or
-builds it. If an update (or a reinstall) gives the app a new TLS
-certificate, mbsync refuses to sync until you set
-`BRIDGE_CERT_FINGERPRINT` to the new fingerprint and accept it once:
-see "mbsync refuses to sync — Bridge cert pin mismatch" in
-[`troubleshooting.md`](troubleshooting.md).
 
 ### 7. Connect an MCP client
 
@@ -850,6 +862,12 @@ connect to `http://127.0.0.1:3000/mcp` directly, sending the
 `Authorization: Bearer <token>` header. A client that cannot send a
 custom header cannot connect.
 
+The server answers only requests addressed to `localhost`,
+`127.0.0.1`, `[::1]` or `mcp-server` (its name inside the Compose
+network), on any port: a request with another `Host` header gets
+`421 Misdirected Request`, and a browser `Origin` other than those
+names over `http` gets `403`.
+
 **Rotating the token.** Write a new token to
 `.secrets/mcp_auth_token.txt` (the `openssl` command above), restart the
 server with `docker compose restart mcp-server` (the token is read once
@@ -866,9 +884,37 @@ restart Claude Desktop.
 `make up`, then add the header to each client as above. Until a client
 sends the token, its requests get `401`.
 
-**Upgrading to the isync 1.5.1 mbsync image (Debian trixie).** isync
-1.5 writes a folder whose name has a non-ASCII character or `&` under
-its decoded UTF-8 name, where isync 1.4.4 kept the modified UTF-7
+**Upgrading from a release that served `/sse` (breaking change).** The
+legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and
+the `MCP_TRANSPORT` values `sse` and `dual` were removed. Remove
+`MCP_TRANSPORT` from `.env`, and run `unset MCP_TRANSPORT` in any shell
+that exports it, since an exported value wins over `.env` (or set it to
+`streamable-http`): `sse` or
+`dual` now fails `make validate-env` and mcp-server startup with these
+steps. Change each client from `http://localhost:3000/sse` to
+`http://127.0.0.1:3000/mcp`, and for a client that picks its transport,
+choose Streamable HTTP (`http`), not SSE.
+
+A Streamable HTTP session that sees no request for
+`MCP_SESSION_IDLE_TIMEOUT_SECS` seconds (default 1800) is ended, so a
+session a client abandons without closing it does not hold server
+resources until a restart. A client that comes back after that gets
+`404` for the old session ID and starts a new session; raise the value
+in `.env` if a client of yours does not reconnect on its own.
+
+## Updating Bridge
+
+The Bridge app updates itself; nothing in this repository pins or
+builds it. If an update (or a reinstall) gives the app a new TLS
+certificate, mbsync refuses to sync until you set
+`BRIDGE_CERT_FINGERPRINT` to the new fingerprint and accept it once:
+see "mbsync refuses to sync — Bridge cert pin mismatch" in
+[`troubleshooting.md`](troubleshooting.md).
+
+## Upgrading to the isync 1.5.1 mbsync image (Debian trixie)
+
+isync 1.5 writes a folder whose name has a non-ASCII character or `&`
+under its decoded UTF-8 name, where isync 1.4.4 kept the modified UTF-7
 spelling (`Folders/.Caf&AOk-` becomes `Folders/.Café`; see
 `docs/architecture.md`, Maildir layout). An existing directory under
 the old spelling is not renamed: the first 1.5.1 sync downloads that
@@ -1015,29 +1061,6 @@ until the first sync and the rebuilt index look complete, then remove
 it (`docker volume rm "$backup"`). That also removes the
 script's "already applied" marker, so do not run the script again
 afterwards.
-
-**Upgrading from a release that served `/sse` (breaking change).** The
-legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and
-the `MCP_TRANSPORT` values `sse` and `dual` were removed. Remove
-`MCP_TRANSPORT` from `.env`, and run `unset MCP_TRANSPORT` in any shell
-that exports it, since an exported value wins over `.env` (or set it to
-`streamable-http`): `sse` or
-`dual` now fails `make validate-env` and mcp-server startup with these
-steps. Change each client from `http://localhost:3000/sse` to
-`http://127.0.0.1:3000/mcp`, and for a client that picks its transport,
-choose Streamable HTTP (`http`), not SSE.
-
-The server answers only requests addressed to `localhost`,
-`127.0.0.1` or `[::1]` (any port): a request with another `Host` header
-gets `421 Misdirected Request`, and a browser `Origin` other than those
-names over `http` gets `403`.
-
-A Streamable HTTP session that sees no request for
-`MCP_SESSION_IDLE_TIMEOUT_SECS` seconds (default 1800) is ended, so a
-session a client abandons without closing it does not hold server
-resources until a restart. A client that comes back after that gets
-`404` for the old session ID and starts a new session; raise the value
-in `.env` if a client of yours does not reconnect on its own.
 
 ## Switching to another Bridge installation
 

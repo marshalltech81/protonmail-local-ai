@@ -1,10 +1,10 @@
 """Evidence selection keeps the passage a keyword match found (#858).
 
-Each surfaced thread's passages were chosen by vector distance alone
-(after the chunks of an attachment the query named), so in a long
-thread the one chunk holding the query's exact word could fall outside
-the six. Evidence selection now reserves a slot for a keyword-matched
-chunk, after the named attachment's representative, ranked by how rare
+Vector distance alone (after the chunks of an attachment the query
+named) can leave the one chunk holding the query's exact word outside a
+long thread's six passages. Evidence selection reserves a slot for a
+keyword-matched chunk, after the named attachment's representative,
+ranked by how rare
 in its thread the query words it holds are (#1246), from a scratch FTS
 table of the fetched candidates. All data is synthetic; vectors are
 crafted so dense order alone leaves the keyword chunk out.
@@ -276,8 +276,8 @@ QUESTION = f"What is the status of invoice {RARE_ID}?"
 class TestRarityRanking:
     def test_natural_question_rare_identifier_wins_the_slot(self, tmp_path):
         """Every chunk holds a common word of the question; only the far
-        one holds its identifier. The slot used to go to the nearest
-        chunk holding any word; now the identifier's chunk wins."""
+        one holds its identifier, so the identifier's chunk wins the
+        slot over nearer chunks holding only common words."""
 
         def build(conn):
             _thread(conn, "t-q")
@@ -317,7 +317,7 @@ class TestRarityRanking:
         assert _ids(_select(db, "alpha beta gamma", "t-mix"))[0] == "t-mix-11"
 
     def test_word_in_every_chunk_is_ignored_but_qualifies(self, tmp_path):
-        """No informative word: the nearest holder wins, as before."""
+        """No informative word: the nearest holder wins."""
 
         def build(conn):
             _thread(conn, "t-all")

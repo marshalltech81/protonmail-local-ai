@@ -28,8 +28,8 @@ python-pptx as an opaque part and never read: only slide and notes
 text is. This route depends on python-pptx 1.0.2's ``Package`` /
 ``PartFactory`` API; ``test_python_pptx_route_for_variants_still_holds``
 fails if an upgrade breaks it. Legacy binary ``.ppt`` is an OLE2
-compound file, which the dispatcher records ``unsupported`` before this
-module runs.
+compound file, which the dispatcher sends to the ``ppt`` extractor
+(#957, #1416), never here.
 
 The work is bounded per extraction, counted as the walk goes:
 
@@ -161,7 +161,7 @@ _MAX_TEXT_CHARS = 10_000_000
 _ELEMENT_COST = 8
 
 # Bytes the package's members may expand by past their compressed size
-# (#936, review round 1). python-pptx parses every XML part whole when it
+# (#936). python-pptx parses every XML part whole when it
 # opens a deck: plainly timed, about 15 bytes of memory per byte of XML,
 # so 166 MB of slide XML peaked at 2.5 GB. Pictures and media are stored
 # already compressed and barely expand; a long text-heavy deck's XML
@@ -182,13 +182,13 @@ _MAX_EXPANSION_BYTES = 32 * 1024 * 1024
 # same figure as the DOCX extractor's.
 _MAX_DECLARED_BYTES = 48 * 1024 * 1024
 
-# Members in the package (review round 2). python-pptx builds a part for
+# Members in the package (#948). python-pptx builds a part for
 # every member a relationship names, about 18 microseconds each plainly
 # timed, and tiny stored members add nothing to the expansion above. A
 # 1,000-slide deck with notes and media has a few thousand members.
 _MAX_MEMBERS = 20_000
 
-# Declared bytes of relationship parts (review round 2). python-pptx reads
+# Declared bytes of relationship parts (#948). python-pptx reads
 # a part's relationships only from the member named for it under
 # ``_rels/`` ending ``.rels``, so the name finds every one, and it walks
 # each relationship, even to a part that does not exist: 300,000 took

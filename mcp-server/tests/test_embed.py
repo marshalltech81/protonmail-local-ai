@@ -162,13 +162,12 @@ class _StubEmbed:
 
 
 class TestEmbedQueryDimValidation:
-    """``embed_query`` is the boundary check that fixes the silent
-    wrong-dim degradation. Before this, a misconfigured ``EMBED_MODEL``
-    that returned (say) 3072-dim vectors against a 4096-dim index
-    raised inside sqlite-vec and got swallowed by the
-    ``except (sqlite3.Error, ValueError)`` in ``_chunk_vector_search``
-    — so semantic / hybrid search silently returned no results
-    instead of telling the operator the embedder was misconfigured.
+    """``embed_query`` checks the query vector at the boundary. A vector
+    whose dimension differs from the index's (a misconfigured
+    ``EMBED_MODEL``) would fail inside sqlite-vec, where the DB layer
+    treats it as a failed lane rather than a misconfiguration, so the
+    operator would not be told the embedder is wrong. Non-finite and
+    all-zero vectors are refused too.
     """
 
     def test_returns_vector_unchanged_when_dim_matches(self):
@@ -177,12 +176,11 @@ class TestEmbedQueryDimValidation:
         assert out == [0.1, 0.2, 0.3, 0.4]
 
     def test_skips_check_when_expected_dim_is_none(self):
-        # Fresh-install / pre-indexer state: schema doesn't declare a
-        # vec table yet, so ``Database.get_embedding_dim()`` returns
-        # None and the helper has nothing to compare against. Pass
-        # through rather than fail closed — keyword search still works
-        # and semantic / hybrid will surface the missing-table error
-        # via the DB layer.
+        # ``Database.get_embedding_dim()`` returns None when it finds no
+        # declared dimension (a missing or unrecognised vec table), so
+        # there is nothing to compare against and the vector passes
+        # through. A fresh install the indexer has not built never gets
+        # here: the embedder identity startup check fails closed first.
         stub = _StubEmbed([0.1, 0.2, 0.3])
         out = asyncio.run(embed_query(stub, "query", expected_dim=None))
         assert out == [0.1, 0.2, 0.3]

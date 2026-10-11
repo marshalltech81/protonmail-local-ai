@@ -409,8 +409,10 @@ def _run_tool_calls() -> dict[str, list[ast.Call]]:
     return calls
 
 
-# External programs the indexer starts without ``run_tool``, so without
-# its address-space and CPU limits, and why. Each has a timeout only.
+# External programs the indexer does not start through ``run_tool``
+# directly, and why. Each runs inside an extractor child that
+# ``run_child`` started through ``run_tool``, so it inherits that
+# child's address-space and CPU limits.
 _TOOLS_OUTSIDE_RUN_TOOL = {
     # Runs only in the extractor child, which ``image.py`` starts through
     # ``run_child``: each Tesseract inherits the child's limits and dies
@@ -1420,7 +1422,7 @@ class TestRawOutputCap:
 
     def test_only_doc_and_ppt_take_the_configured_cap(self):
         """The dispatcher passes ``max_extracted_chars`` to the raw-tool
-        extractors only; every other extractor's signature is unchanged."""
+        extractors only; none of the other extractors listed here takes it."""
         import importlib
         import inspect
 
@@ -1589,7 +1591,7 @@ class TestRawOutputCapThroughTheDispatcher:
 
 
 def test_raw_tool_versions_are_bumped_for_the_derived_cap():
-    """#1308: the same bytes can now yield different text, so rows the
+    """#1308: the same bytes can yield different text, so rows the
     previous versions wrote are re-extracted once."""
     from src.extractors import EXTRACTOR_VERSIONS, is_stale_extractor
 
