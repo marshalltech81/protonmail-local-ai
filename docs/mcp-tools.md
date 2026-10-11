@@ -2564,15 +2564,26 @@ mail a population run will read; the steps are not sent to clients:
      multi-lane recipe).
 
    The list is complete for its filters only when `indeterminate` is
-   0; otherwise report both counts. In `query_attachments`,
-   `status_counts` counts the occurrences with no extracted text (any
-   status but `success`): report them as unread, not as not matching.
+   0; otherwise report both counts. For attachments, that covers only
+   the stored occurrences: an attachment the parser left out of an
+   incomplete manifest has no row and is in neither count
+   ([#1282](https://github.com/marshalltech81/protonmail-local-ai/issues/1282)).
+   In `query_attachments`, `status_counts` counts the occurrences with
+   no extracted text (any status but `success`): keep them in the
+   population as unread, their relevance undecided, not as not
+   matching.
 3. Run `extract_from_emails` with `participant` set to the vendor's
    address (the tool has no `sender`) and a schema that declares its
    own `invoice_date` and `invoice_number`, splitting the period into
-   date windows that each hold at most 50 of the enumerated threads
-   (`limit` is clamped to 50); set `limit` to at least the window's
-   thread count. The two tools do not select the same set:
+   date windows, with `limit=50` (its maximum). A call's `threads`
+   output lists the threads it searched: check that some window
+   searched every enumerated thread, and narrow a window whose call
+   left one out. Other threads that rank for `query` take slots too,
+   and a thread falls in every window its span overlaps, so narrowing
+   can fail: when a window at the smallest interval the bounds can
+   express still leaves enumerated threads unsearched, report them as
+   not extracted rather than narrowing further. The two tools do not
+   select the same set:
    - Dates: the enumeration dates the carrying message, while
      `extract_from_emails` takes any thread whose span overlaps the
      window, so a January invoice in a thread with a June reply is
@@ -2597,25 +2608,30 @@ mail a population run will read; the steps are not sent to clients:
    its source through its `_evidence` labels: look each label up by
    `label` in that call's top-level `citations` list, whose entries
    carry `thread_id`, `claimant_id`, `attachment_id`, `sent_at` and
-   `occurred_at`. Key each attachment occurrence by `claimant_id` and
-   `attachment_id` together, as `query_attachments` rows carry them:
-   `attachment_id` is the payload's content hash, shared by every
+   `occurred_at`. These IDs name sources, not records: one occurrence
+   or message can yield several records, and one record can cite
+   several sources. Key an attachment occurrence by `claimant_id` and
+   `attachment_id` together, as `query_attachments` rows carry them
+   (`attachment_id` is the payload's content hash, shared by every
    message carrying the same bytes, and `claimant_id` names the
-   message; key a body-backed record by `claimant_id`. Count a record
-   once, against the enumerated item its citations name; drop
-   duplicates, set aside for review a record that cites no enumerated
-   item, and report each enumerated item with no record (its stored
-   text can be read with `get_attachment` or `get_message`, after
-   telling the user how much). Copies of the same bytes attached twice
-   to one message share both IDs, so they cannot be reconciled one by
-   one.
+   message), and a message by `claimant_id`, and mark each enumerated
+   item a record cites as covered. Identify a record by the fields its
+   schema declares (here `invoice_number` with the line's own fields), and drop one
+   as a duplicate only when another with the same fields cites the
+   same item, as when overlapping windows extract one thread twice.
+   Set aside for review a record that cites no enumerated item, and
+   report each enumerated item no record cites (its stored text can be
+   read with `get_attachment` or `get_message`, after telling the user
+   how much). Copies of the same bytes attached twice to one message
+   share both IDs, so they cannot be reconciled one by one.
 
 Limits the recipe does not remove:
 
 - The enumeration covers its filters, not the topic: an item sent from
-  another address, filed under another name or type, or whose
-  attachment text was not extracted is not found by them, and nothing
-  shows it is missing.
+  another address, or under a filename or type the filters leave out,
+  is not listed, and nothing shows it is missing. A listed occurrence
+  with no extracted text stays an unread candidate; its relevance
+  cannot be decided from these results.
 - Each page is read in a fresh snapshot, so mail indexed or moved while
   paging can be missed ([`query_messages`](#query_messages) paging,
   [#1218](https://github.com/marshalltech81/protonmail-local-ai/issues/1218)).
