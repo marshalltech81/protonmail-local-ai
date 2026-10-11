@@ -9,9 +9,10 @@
 #   - forbidden settings (privileged, namespaces shared with the host or
 #     another container, cap_add, devices, docker socket, weakened
 #     security_opt, read_only other than true, unbounded pids_limit or
-#     logging, published ports, writable host bind mounts, extends and
-#     volumes_from, extra services on bridge-net) apply to every file, so an overlay cannot
-#     add them. A security setting whose value is interpolated
+#     logging, published ports, writable host bind mounts, extends,
+#     volumes_from and a top-level include, a root user, an interpolated
+#     network, extra services on bridge-net) apply to every file, so an
+#     overlay cannot add them. A security setting whose value is interpolated
 #     (`${VAR:-default}`) counts as unsafe, since its default can be;
 #   - required hardening (read_only, no-new-privileges, cap_drop ALL,
 #     pids_limit, logging) applies where a service is defined, that is
@@ -60,8 +61,8 @@ rules:
       `$KEY: $VALUE` shares a namespace with the host or with another
       container. The host's removes the container's isolation (AGENTS.md
       forbids `network_mode: host`); another container's gives it that
-      container's access, such as mbsync's route to Bridge. Interpolated
-      values are rejected because their default can be either.
+      container's access. Interpolated values are rejected because their
+      default can be either.
     paths:
       include:
         - "docker-compose*.yml"
@@ -118,9 +119,10 @@ rules:
     languages: [yaml]
     severity: ERROR
     message: >-
-      `$OPT` disables seccomp, AppArmor, SELinux labelling or
-      no-new-privileges, or is interpolated and so could. AGENTS.md keeps
-      the default confinement in place.
+      `$OPT` disables seccomp, AppArmor, SELinux labelling, masked system
+      paths (`systempaths=unconfined`) or no-new-privileges, or is
+      interpolated and so could. AGENTS.md keeps the default confinement
+      in place.
     paths:
       include:
         - "docker-compose*.yml"
@@ -257,10 +259,11 @@ rules:
     languages: [yaml]
     severity: ERROR
     message: >-
-      `$VOL` mounts a host path writable. Host bind mounts are read-only
-      (`:ro`, or `read_only: true` in the long syntax) so a compromised
-      container cannot change files on the host; data the service writes
-      belongs in a named volume.
+      This mounts a host path writable, or backs a named volume with a
+      host directory (`o: bind`). Host bind mounts are read-only (`:ro`,
+      or `read_only: true` in the long syntax) so a compromised container
+      cannot change files on the host; data the service writes belongs in
+      a named volume without `o: bind`.
     paths:
       include:
         - "docker-compose*.yml"
@@ -472,9 +475,9 @@ rules:
     languages: [yaml]
     severity: ERROR
     message: >-
-      Service `$SVC` joins bridge-net. Only mbsync may reach Bridge
-      (AGENTS.md: mbsync is the only container that talks to Bridge
-      IMAP; indexer and mcp-server get no access).
+      Service `$SVC` joins bridge-net, mbsync's network, which only mbsync
+      may join (AGENTS.md: mbsync is the only container that talks to
+      Bridge IMAP; indexer and mcp-server get no access).
     paths:
       include:
         - "docker-compose*.yml"

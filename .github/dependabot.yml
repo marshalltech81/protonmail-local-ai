@@ -1,6 +1,6 @@
 version: 2
 
-# Labels follow the repository scheme (PLAN.md, Notes for Agents):
+# Labels follow the repository scheme (AGENTS.md, "Issue Conventions"):
 # `dependencies` is the type, the second label is the area the update
 # lands in. The ecosystem labels (python, docker, java, pre-commit,
 # github-actions) were retired on 2026-10-07.
