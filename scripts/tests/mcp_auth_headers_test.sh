@@ -1,9 +1,9 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-# Tests for scripts/mcp-auth-headers.sh, Claude Code's headersHelper for
-# the MCP bearer token. Each case copies the script into a fresh
-# temporary root with a synthetic token file.
+# Tests for scripts/mcp-auth-headers.sh, the headers helper Claude Code
+# and Codex run for the MCP bearer token. Each case copies the script
+# into a fresh temporary root with a synthetic token file.
 #
 # Run: bash scripts/tests/mcp_auth_headers_test.sh
 

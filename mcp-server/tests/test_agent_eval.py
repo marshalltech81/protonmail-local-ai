@@ -108,6 +108,7 @@ def _registered_tools() -> dict[str, Callable[..., Any]]:
         ("query_messages", "``find_contact`` is capped"),
         ("search_attachments", "anything other than ``success``"),
         ("search_attachments", "``too_large``, ``empty`` or null"),
+        ("search_attachments", "may still return text indexed before"),
         ("search_attachments", "fewer than 50 results"),
         ("get_thread", "For a potentially exhaustive review"),
         ("get_thread", "before the first call"),
