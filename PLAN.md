@@ -448,12 +448,13 @@ indexer; mbsync is not replaced (Deferred).
    messages resolve to by ID, and two of them never merge by an empty
    ID) and update AGENTS.md in the same PR. Until then the claimant-ID
    invariant stands unchanged.
-7. **Occurrence model** — one `messages` row is one occurrence while
-   Proton folders are exclusive and the virtual folders are excluded;
-   the `,U=` in a Maildir file name is never read; `.mbsyncstate` is
-   never parsed (#1083, decision). Byte-identical files claiming one
-   Message-ID share a claimant ID; removing one such copy no longer
-   reaps a message whose other copy survives (#1102).
+7. **Occurrence model** — each Maildir copy of a message becomes its
+   own occurrence (decision 47; #1566, #1567, #1568, #1569). Until
+   then one `messages` row holds one folder, path and flag state, so
+   byte-identical files claiming one Message-ID share a claimant ID and
+   one row; removing one such copy no longer reaps a message whose
+   other copy survives (#1102). The `,U=` in a Maildir file name is
+   never read; `.mbsyncstate` is never parsed.
 
 ## Not doing (decided 2026-09-26)
 
@@ -966,6 +967,22 @@ superseded entries keep their number and one line.
     Channel and store names follow log redaction (#1498). Replacing the
     Compose literals with this validation is an owner decision under
     decision 43, which stands unchanged.
+47. **Mailbox occurrences (2026-10-11, #1083):** each Maildir copy of
+    a message is its own occurrence, keyed by account scope, folder,
+    Maildir uniq and claimant ID, bound only after its full content
+    hash is verified. The account scope is #1313's local account UUID,
+    kept outside SQLite; a mismatch fails startup closed. Occurrences
+    own folder, path, flags, observation dates, lifecycle, provenance
+    and arrival time; `messages` keeps content, headers and source
+    dates. A flag rename keeps an occurrence; a folder, uniq or content
+    change replaces it. A message is reaped only after losing its last
+    active occurrence that is not `T`-flagged, under the existing grace,
+    brakes and retention; a partial scan establishes no absence.
+    Filters match within one occurrence, results are deduplicated
+    before counting and paging, source counts stay the default, and
+    source categories derive from the folder at read time. The
+    migration seeds one occurrence per message and reparses without
+    re-embedding. The near-side UID and `.mbsyncstate` stay unread.
 
 ## Notes for Agents
 
