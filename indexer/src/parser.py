@@ -405,7 +405,8 @@ def _decode_lost_bytes(part: email.message.Message, decoded: bytes | None = None
     records a defect; quoted-printable and uuencode record none, so they
     are checked here (#1288): a quoted-printable ``=`` that is no escape
     or soft break, and a uuencode decode that fell back to the transport
-    text or stopped before its ``end`` line (``_uu_decode_fell_back``).
+    text or whose last non-blank line is not ``end``
+    (``_uu_decode_fell_back``).
     ``decoded`` is the part's decoded payload when the caller has it
     (uuencode compares against it rather than decoding again)."""
     if any(isinstance(d, _DECODE_LOSS_DEFECTS) for d in part.defects):
@@ -787,8 +788,9 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     Other content-pathology errors (a malformed MIME structure ``email`` cannot
     decompose, anything raised by the body / attachment walker that is
     not already caught locally) propagate; an HTML conversion failure is
-    caught and counted as ``html_body``, and only ``OSError`` from
-    starting the HTML child propagates. They are not collapsed into the
+    caught, and counted as ``html_body`` when the failed part could have
+    contributed to the body; only ``OSError`` from starting the HTML
+    child propagates. They are not collapsed into the
     ``None`` channel of a missing Message-ID, which would silently
     un-index the file with no dead-letter visibility: letting the
     exception escape routes the row through the queue's retry +
@@ -2515,7 +2517,9 @@ _MAX_ADDRESS_CHARS = 998
 # ``PARSE_CAPS``.
 MAX_ADDRESS_HEADER_FIELDS = 10_000
 MAX_ADDRESS_OCCURRENCES = 64
-# Three headers at the per-value cap (one each for From, To and Cc).
+# Three per-value caps' worth of characters, shared by every address-
+# header occurrence of a message (repeated fields included), not
+# reserved per role: three full To fields can spend it before Cc is read.
 _MAX_ADDRESS_TOTAL_CHARS = 3 * _MAX_ADDRESS_HEADER_CHARS
 MAX_ADDRESS_ELEMENTS = 20_000
 MAX_MESSAGE_ADDRESSES = 10_000
