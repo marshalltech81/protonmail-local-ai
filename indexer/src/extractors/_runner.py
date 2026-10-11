@@ -123,16 +123,15 @@ _TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
 _COUNT = re.compile(r"[0-9]{1,18}")
 
 # Processes this interpreter has started (#1236): every
-# ``subprocess.Popen``, counted from the audit event it raises, so the
-# count covers the tools started here and the ones a library starts in
-# process (Poppler's ``pdfinfo`` and ``pdftoppm`` and Tesseract for a
-# scanned PDF), whichever library version starts them, plus the
-# processes an extractor child reports it started (``CHILD_LAUNCHES``:
-# Tesseract per image frame). The per-message extraction budget
-# (``attachment_indexing.ExtractionBudget``) reads it around each
+# ``subprocess.Popen``, counted from the audit event it raises, so the count
+# covers the tools started here (catdoc, the ``.ppt`` JVM, each extractor
+# child), plus the processes an extractor child reports it started
+# (``CHILD_LAUNCHES``: Tesseract per image frame, Poppler's ``pdfinfo`` and
+# ``pdftoppm`` and Tesseract for a scanned PDF). The per-message extraction
+# budget (``attachment_indexing.ExtractionBudget``) reads it around each
 # dispatch. Only the ingestion worker starts processes. A child killed
-# before it reports (a timeout, a crash) adds only its own launch; its
-# run still counts against the budget's seconds.
+# before it reports (a timeout, a crash) adds only its own launch; its run
+# still counts against the budget's seconds.
 _launches = 0
 
 # The count frame an extractor child sends with the processes it started.
@@ -423,7 +422,8 @@ def run_child(
     """Run ``module``'s extraction of ``payload`` in the extractor child
     under the caller's limits, and parse its frames (module docstring).
     ``options`` are the module's own arguments, fixed text the caller
-    builds from its settings (``image``: the page cap and OCR timeout).
+    builds from its settings (``image``: the page cap, OCR timeout and
+    Tesseract path).
     With ``names``, the text frame must carry one of them, returned as
     the result's ``name``. ``on_report`` (when set) is called once the
     output has parsed, with the caps, counts and recovered errors,

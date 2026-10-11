@@ -34,9 +34,8 @@ recorded in the child (its text loss and counts) comes back as ``N``
 frames and is re-applied here (``apply_child_degradation``, #1314). A
 type name in the format's
 ``permanent`` map is raised as that class, so the dispatcher records it
-``unsupported`` as before (#931, #1032); any other is raised as
-``ChildError``, which the dispatcher records ``failed`` under that type
-name, as it recorded the exception in-process.
+``unsupported`` (#931, #1032); any other is raised as ``ChildError``,
+which the dispatcher records ``failed`` under that type name.
 
 Output that breaks the protocol or that the runner cut at its byte cap
 is rejected as ``ChildOutputError``, never returned as text. A timeout,
@@ -45,7 +44,8 @@ the runner's fixed-text errors. All of these are recorded ``failed`` by
 type name, with a rate-limited WARNING from the dispatcher. A
 ``MemoryError`` or ``RecursionError`` in the child is the child's
 limit, not host pressure: it is reported by type and recorded
-``failed``, where in-process the dispatcher re-raised it. The
+``failed``, whereas the same error in the parent is re-raised as host
+pressure. The
 address-space limit can also surface as a parser's own error type:
 lxml reports a failed allocation as ``XMLSyntaxError``.
 """

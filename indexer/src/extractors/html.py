@@ -38,8 +38,8 @@ Each text comes back stripped, as the dispatcher and the parser strip
 it, so surrounding whitespace never counts against the budget.
 A lone surrogate, which UTF-8 cannot hold (a UTF-7 body can decode to
 one), is replaced by ``?`` before a body crosses
-(``replace_lone_surrogates``), and the parser logs the count; in process
-it was kept, and the chunker's UTF-8 encode then failed the message.
+(``replace_lone_surrogates``), and the parser logs the count; kept, it
+would fail the chunker's UTF-8 encode and with it the message.
 """
 
 from __future__ import annotations
