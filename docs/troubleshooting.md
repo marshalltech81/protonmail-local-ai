@@ -85,7 +85,8 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
   else the service reads listed with its reason in
   `_IDENTITY_EXCLUDED`; a test fails when a new setting is in neither),
   or `SOURCE_MODE` and `BRIDGE_HOST` (each trimmed, in lower case),
-  `BRIDGE_IMAP_PORT`, `BRIDGE_CERT_HOST`, `PROTON_FOLDER_EXCLUSIONS`,
+  `BRIDGE_IMAP_PORT`, `BRIDGE_CERT_HOST`, `PROTON_FOLDER_EXCLUSIONS`
+  (as `default` or its number of patterns, never the folder names),
   `PROTON_IMAP_ACCOUNT_NAME`,
   `PROTON_REMOTE_STORE_NAME`, `PROTON_LOCAL_STORE_NAME`,
   `PROTON_CHANNEL_NAME`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
@@ -295,10 +296,14 @@ and the connection.
   `true` or `false`, in lower case: `TRUE`, `yes` or `1` is refused
   rather than read as false. `PROTON_FOLDER_EXCLUSIONS` is folder
   patterns separated by `|`, none empty or with a space at either end,
-  written with `A-Z a-z 0-9`, spaces and `. / _ * % & + , ( ) @ -`; it
+  written with `A-Z a-z 0-9`, spaces, `. / _ * % & + , ( ) @ -` and
+  non-ASCII characters (a folder name in UTF-8, as Proton shows it); it
   must keep `All Mail`, `Labels/*` and `Starred`, which mbsync never
   syncs (labels come from message metadata, #1313): add folders after
-  them, for example `All Mail|Labels/*|Starred|Folders/Old*`.
+  them, for example `All Mail|Labels/*|Starred|Folders/Old*`. Adding a
+  folder stops mbsync syncing it from then on; mail already synced from
+  it stays in the Maildir and the index until you remove it, as in
+  [Remove mail from a folder you have just excluded](#remove-mail-from-a-folder-you-have-just-excluded).
   Unset a setting, or leave it empty, for its default.
   These names are not resolved to check them: DNS cannot show that a
   name is local, so the container engine and its resolver are trusted
@@ -353,6 +358,53 @@ The warning repeats for as long as the local copy exists. Nothing removes
 it automatically. Removing or moving the folder out of the Maildir yourself
 stops the warning, but its messages then count as deleted for the indexer
 (see [Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)).
+
+## Remove mail from a folder you have just excluded
+
+Adding a folder to `PROTON_FOLDER_EXCLUSIONS` stops mbsync from syncing
+it from then on. Mail already synced from it stays: its files remain in
+the Maildir, and its messages stay in the index, searchable, with their
+text already sent to the embedder (and, if those layers are enabled, to
+the inference and rerank providers for any answer that used it). Nothing
+removes them automatically, and text already sent to a provider cannot
+be recalled. To remove the local copy as well:
+
+1. Set the new exclusions in `.env` and run `make up`, so mbsync is
+   recreated with them. Once its folder is excluded, isync leaves it
+   alone and does not create it again after you remove it
+   (`mbsync/tests/layout_check.sh` check 10).
+2. Remove the folder's directory from the Maildir. A top-level folder
+   is the directory of its name; each level below adds `/.` and the
+   name (`SubFolders Legacy`), so `Folders/Old` is `/maildir/Folders/.Old`:
+
+   ```bash
+   docker exec mbsync rm -rf -- '/maildir/Folders/.Old'
+   ```
+
+   The directory holds the folder's subfolders too. Exclude those as
+   well (`Folders/Old*` matches `Folders/Old` and everything below it),
+   or they sync again into a new directory.
+3. What happens next depends on the indexer's retention mode
+   ([Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)):
+   - **Mirror** (`INDEXER_DELETION_ENABLED=true`, the default): the next
+     reconciler sweep (at indexer startup and every
+     `INDEXER_DELETION_SWEEP_INTERVAL_SECS`) tombstones each message
+     whose file is gone, unless a byte-identical copy remains in another
+     folder, in which case the message stays indexed under that copy.
+     The reaper removes tombstoned messages from the index after
+     `INDEXER_DELETION_GRACE_DAYS`; until then they stay searchable. If
+     more are past the grace window at once than
+     `INDEXER_DELETION_MAX_BATCH_PCT` of the index allows (at least 10
+     always are), the mass-delete brake skips the whole reap and the
+     indexer logs `reaper aborted: ... set INDEXER_DELETION_FORCE=true
+     to override`. For this cleanup, set `INDEXER_DELETION_FORCE=true`,
+     run `make up`, wait for the next reap, then set it back to `false`
+     and run `make up` again, so the brake protects later passes.
+   - **Archive** (`INDEXER_DELETION_ENABLED=false`): the index never
+     removes a message, so its rows stay. Removing them means rebuilding
+     the index from the Maildir, as in
+     [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume),
+     which embeds every remaining message again.
 
 ## Folder names in mbsync's log
 

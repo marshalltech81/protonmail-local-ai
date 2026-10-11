@@ -47,8 +47,11 @@ set -Eeuo pipefail
 #   9. Renaming the channel and both stores (#1498) between runs carries
 #      on from the sync state: nothing is downloaded twice. Runs before 8.
 #  10. Exclusions added to PROTON_FOLDER_EXCLUSIONS (PLAN.md decision 46)
-#      leave their folders out alongside All Mail, Labels/* and Starred;
-#      other folders still sync. Runs after 9, before 8.
+#      leave their folders out alongside All Mail, Labels/* and Starred,
+#      a UTF-8 name included; other folders still sync. A folder synced
+#      before its exclusion keeps its local copy, gets nothing new, and
+#      is not created again once that copy is removed. Runs after 9,
+#      before 8.
 #   8. The far side's arrival time (#1081) reaches the near file's mtime:
 #      with CopyArrivalDate the far store's date for a message (the file
 #      mtime of a Maildir far side, INTERNALDATE of an IMAP one) is the
@@ -392,15 +395,27 @@ else
 fi
 
 # 10. PLAN.md decision 46: exclusions an operator adds to
-# PROTON_FOLDER_EXCLUSIONS (a name with a space, a trailing wildcard)
-# leave those folders out next to the three that always stay out, and the
-# rest still syncs. The defaults come back for the checks that follow.
-render_config "" "" "" "All Mail|Labels/*|Starred|Folders/Skip me|Folders/Old*"
+# PROTON_FOLDER_EXCLUSIONS (a name with a space, a trailing wildcard, a
+# name in UTF-8) leave those folders out next to the three that always
+# stay out, and the rest still syncs. A folder that had already synced
+# keeps its local copy and gets nothing new; once that copy is removed by
+# hand, isync does not create it again. The defaults come back for the
+# checks that follow.
+ok=1
 TAGS=()
-for name in "Folders/Skip me" "Folders/Old2020" "All Mail" "Labels/Synthetic" "Folders/Kept10"; do
+deliver "Folders/Late"
+if ! sync_once added-exclusions-before; then
+    ok=0
+    sed 's/^/     /' "$WORK/sync-added-exclusions-before.log"
+fi
+late_before="${TAGS[0]#*|}"
+render_config "" "" "" \
+    "All Mail|Labels/*|Starred|Folders/Skip me|Folders/Old*|Folders/Caf"$'\xc3\xa9'"|Folders/Late"
+TAGS=()
+for name in "Folders/Skip me" "Folders/Old2020" "Folders/Caf"$'\xc3\xa9' "All Mail" \
+    "Labels/Synthetic" "Folders/Late" "Folders/Kept10"; do
     deliver "$name"
 done
-ok=1
 for run in first second; do
     if ! sync_once "added-exclusions-${run}"; then
         ok=0
@@ -416,12 +431,23 @@ for entry in "${TAGS[@]}"; do
         printf '     %s: %s copies of %s\n' "$name" "$(copies "${entry#*|}")" "${entry#*|}"
     fi
 done
-render_config
-if ((ok)) && located "Folders/Kept10" "${TAGS[4]#*|}"; then
-    pass "added exclusions leave their folders out with the three protected ones; the rest syncs"
-else
-    fail "added exclusions leave their folders out with the three protected ones; the rest syncs"
+if [[ "$(copies "$late_before")" != 1 ]]; then
+    ok=0
+    printf '     Folders/Late: the copy synced before the exclusion is gone\n'
 fi
+rm -rf "${NEAR:?}/$(legacy_path "Folders/Late")"
+if ! sync_once added-exclusions-removed || [[ -e "$NEAR/$(legacy_path "Folders/Late")" ]]; then
+    ok=0
+    printf '     Folders/Late: removing the local copy did not hold\n'
+    sed 's/^/     /' "$WORK/sync-added-exclusions-removed.log"
+fi
+render_config
+if ((ok)) && located "Folders/Kept10" "${TAGS[6]#*|}"; then
+    pass "added exclusions leave their folders out with the three protected ones; an already synced copy stays until removed; the rest syncs"
+else
+    fail "added exclusions leave their folders out with the three protected ones; an already synced copy stays until removed; the rest syncs"
+fi
+
 
 # 8. #1081: the far side's arrival time is copied onto the near file's
 # mtime, and stays there through a flag rename and the entrypoint's

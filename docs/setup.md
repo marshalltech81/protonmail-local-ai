@@ -211,8 +211,10 @@ is back. Freshness is reported by `make status` as usual.
    (`host.docker.internal` by default; OrbStack's `host.orb.internal`
    or `host.internal` also work); `BRIDGE_CERT_PIN_ROTATE` (`false`;
    exactly `true` or `false`); `PROTON_FOLDER_EXCLUSIONS`, folders
-   mbsync never syncs (`All Mail|Labels/*|Starred`, which must stay in
-   the list; you may add more after them, separated by `|`); and
+   mbsync does not sync (`All Mail|Labels/*|Starred`, which must stay in
+   the list; you may add more after them, separated by `|`; mail already
+   synced from an added folder stays in the Maildir and the index until
+   you remove it, see [troubleshooting.md](troubleshooting.md#remove-mail-from-a-folder-you-have-just-excluded)); and
    isync's account, store and channel names
    (`PROTON_IMAP_ACCOUNT_NAME`, `PROTON_REMOTE_STORE_NAME`,
    `PROTON_LOCAL_STORE_NAME`, `PROTON_CHANNEL_NAME`). Leave them unset

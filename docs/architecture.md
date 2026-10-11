@@ -338,22 +338,33 @@ the value.
   false.
 - `PROTON_FOLDER_EXCLUSIONS` (empty means `All Mail|Labels/*|Starred`)
   is a list of folder patterns separated by `|`. The whole value is
-  checked first: only `A-Z a-z 0-9`, spaces, `. / _ * % & + , ( ) @ -`
-  and the `|` separator, with no empty pattern (a leading, trailing or
-  doubled `|`). Each pattern must then have no space at either end, and
+  checked first: of ASCII, only `A-Z a-z 0-9`, spaces,
+  `. / _ * % & + , ( ) @ -` and the `|` separator, with no empty pattern
+  (a leading, trailing or doubled `|`). Non-ASCII characters are
+  accepted, because isync 1.5 matches `Patterns` against folder names
+  decoded to UTF-8 (`layout_check.sh` check 10 excludes a folder named
+  in UTF-8). Each pattern must then have no space at either end, and
   `All Mail`, `Labels/*` and `Starred` must each be one of them: these
   stay excluded whatever else is added (see "Virtual folders" above).
   Each pattern is rendered as a quoted `!"…"` exclusion, in order, by
   parameter expansion alone (no `eval`, word splitting or globbing),
   before isync's own layout exclusions, which stay last. Quotes,
-  backslashes, `!`, `$`, `#`, control and non-ASCII characters are
-  never accepted, so a pattern cannot end isync's quoting or re-include
-  a folder, and a `.env` line Compose would read differently from
-  `validate-env.sh` is refused. `layout_check.sh` check 10 shows an added
-  exclusion leaving its folder out.
+  backslashes, `!`, `$`, `#` and control characters are never accepted,
+  so a pattern cannot end isync's quoting or re-include a folder, and a
+  `.env` line Compose would read differently from `validate-env.sh` is
+  refused. `layout_check.sh` check 10 shows an added exclusion leaving
+  its folder out. An exclusion only stops further syncing: mail synced
+  from the folder before it stays in the Maildir and the index
+  (searchable, its text already sent to the embedder) until the operator
+  removes the folder from the Maildir, after which isync does not create
+  it again and the deletion reconciler handles its messages
+  ([troubleshooting.md](troubleshooting.md#remove-mail-from-a-folder-you-have-just-excluded)).
+  Nothing removes local mail automatically when a pattern is added.
 
 The startup identity hash includes all of these settings, each as
-resolved (an unset `SOURCE_MODE` and `proton-bridge` hash alike).
+resolved (an unset `SOURCE_MODE` and `proton-bridge` hash alike), except
+that `PROTON_FOLDER_EXCLUSIONS` enters it as `default` or as its number
+of patterns: an added pattern names a folder, which is mailbox content.
 
 The app's certificate is upstream Bridge's: self-signed, `CA:TRUE`,
 common name and only subject alternative name `127.0.0.1`. isync 1.5.1

@@ -197,7 +197,10 @@ Do not make any of the following changes unless the repository owner explicitly 
   `PROTON_FOLDER_EXCLUSIONS` may add exclusions but must keep these
   three; `mbsync/proton-settings.sh` refuses a value without them, with
   fixed text, at `scripts/validate-env.sh` and at mbsync startup. Do not
-  relax that check.
+  relax that check. An added exclusion only stops further syncing: mail
+  already synced stays in the Maildir and the index until the operator
+  removes it (`docs/troubleshooting.md`); do not add automatic removal
+  without an owner decision.
 - Do not weaken or bypass TLS verification casually.
 
 ### TLS and connection security constraints

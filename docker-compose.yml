@@ -78,7 +78,8 @@ services:
       PROTON_REMOTE_STORE_NAME: ${PROTON_REMOTE_STORE_NAME:-}
       PROTON_LOCAL_STORE_NAME: ${PROTON_LOCAL_STORE_NAME:-}
       PROTON_CHANNEL_NAME: ${PROTON_CHANNEL_NAME:-}
-      # Folder patterns mbsync never syncs, separated by |; empty means
+      # Folder patterns mbsync stops syncing (mail already synced stays;
+      # docs/troubleshooting.md), separated by |; empty means
       # All Mail|Labels/*|Starred, and those three must always stay in the
       # list (mbsync/proton-settings.sh).
       PROTON_FOLDER_EXCLUSIONS: ${PROTON_FOLDER_EXCLUSIONS:-}

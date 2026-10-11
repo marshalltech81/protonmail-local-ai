@@ -2842,7 +2842,7 @@ SETTING_CASES=(
     $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|*'
     $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|%'
     $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|*/Archive'
-    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|Folders/Caf&AOk-'
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|Folders/Caf\xc3\xa9'
     $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|Starred'
     $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|a.b_c-d (1),e+f@g%h/i j'
     $'refuse\tPROTON_FOLDER_EXCLUSIONS= '
@@ -2865,8 +2865,10 @@ SETTING_CASES=(
     $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9:marker'
     $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9;marker'
     $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9\x01marker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9\x7fmarker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9\x1bmarker'
     $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9marker\nPatterns *'
-    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9marker\xc3\xa4' # pragma: allowlist secret
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|\xe6\x97\xa5|Folders/\xc3\xa4 b'
     $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*'
     $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=All Mail|Starred'
     $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=Labels/*|Starred'
@@ -3034,7 +3036,7 @@ every_setting_row_agrees_at_both_sites() {
     for ((i = 0; i < ${#SETTING_CASES[@]}; i++)); do
         setting_row_agrees "${SETTING_CASES[i]}" "$i" || return 1
     done
-    ((${#SETTING_CASES[@]} == 191)) || return 1
+    ((${#SETTING_CASES[@]} == 193)) || return 1
 }
 
 check "the Proton settings: each value is accepted or refused alike at both sites" \
@@ -3173,7 +3175,8 @@ isync_names_change_the_hash() {
 
 # The source selector and Proton's folder exclusions (PLAN.md decision
 # 46) change what runs and what is synced, so each one is an input; a
-# value is hashed as resolved, so an unset selector and proton-bridge
+# value is hashed as resolved (the exclusions as "default" or their
+# count, never their folder names), so an unset selector and proton-bridge
 # give the same hash.
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 source_mode_and_exclusions_change_the_hash() {
@@ -3194,6 +3197,22 @@ source_mode_and_exclusions_change_the_hash() {
         [[ "${changed##* }" != "${before##* }" ]] || exit 1
     ) || {
         printf 'PROTON_FOLDER_EXCLUSIONS does not change the hash\n'
+        return 1
+    }
+    # An added pattern names a folder (mailbox content): only the number
+    # of patterns is hashed, so two names give the same hash and neither
+    # reaches the line.
+    (
+        PROTON_FOLDER_EXCLUSIONS="${PROTON_DEFAULT_FOLDER_EXCLUSIONS}|Folders/zq9marker-one"
+        before="$(identity_fields)"
+        PROTON_FOLDER_EXCLUSIONS="${PROTON_DEFAULT_FOLDER_EXCLUSIONS}|Folders/zq9marker-two"
+        changed="$(identity_fields)"
+        [[ "${changed##* }" == "${before##* }" ]] || exit 1
+        if grep -q zq9marker <<<"$(log_startup_identity)"; then
+            exit 1
+        fi
+    ) || {
+        printf 'a folder name in PROTON_FOLDER_EXCLUSIONS reaches the hash or the line\n'
         return 1
     }
     order_setup identity-source-mode

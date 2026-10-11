@@ -108,18 +108,23 @@ proton_port_allowed() {
 }
 
 # Succeeds when PROTON_FOLDER_EXCLUSIONS is well formed. The whole value
-# first: only the characters an element may hold and the | between
-# elements, and no empty element (a leading, trailing or doubled |). Then
-# each element: no space at either end. Quotes, backslashes, !, $, #,
-# control and non-ASCII characters are never accepted, so an element is
-# written inside isync's quotes as it is, and a .env line that Compose
-# would read differently from scripts/validate-env.sh (a $ expansion, an
-# inline # comment) is refused rather than read two ways.
+# first: not empty, every ASCII character one an element may hold or the
+# | between elements, and no empty element (a leading, trailing or
+# doubled |). Characters outside ASCII are accepted: isync (1.5) matches
+# Patterns against folder names decoded to UTF-8, so a folder with such a
+# name is excluded by writing it in UTF-8. Then each element: no space at
+# either end. Quotes, backslashes, !, $, # and control characters are
+# never accepted, so an element is written inside isync's quotes as it
+# is, and a .env line that Compose would read differently from
+# scripts/validate-env.sh (a $ expansion, an inline # comment) is refused
+# rather than read two ways.
 proton_folder_exclusions_allowed() {
-    local LC_ALL=C rest="$1|" element
-    local value_re='^[A-Za-z0-9 ./_*%&+,()@|-]+$'
+    local LC_ALL=C rest="$1|" element ascii_left
     local element_re='^[^ ](.*[^ ])?$'
-    [[ "$1" =~ $value_re ]] || return 1
+    # With the allowed ASCII characters removed, no ASCII character (in
+    # the C locale, every printable or control one) may be left.
+    ascii_left="${1//[A-Za-z0-9 .\/_*%&+,()@|-]/}"
+    [[ -n "$1" && "$ascii_left" != *[[:print:][:cntrl:]]* ]] || return 1
     case "$1" in
         "|"* | *"|" | *"||"*) return 1 ;;
     esac
@@ -208,7 +213,7 @@ proton_settings_problem() {
         return 1
     fi
     if ! proton_folder_exclusions_allowed "$6"; then
-        printf 'PROTON_FOLDER_EXCLUSIONS must be folder patterns separated by |, none empty and none with a space at either end, written with A-Z, a-z, 0-9, spaces and . / _ * %% & + , ( ) @ - only.\n'
+        printf 'PROTON_FOLDER_EXCLUSIONS must be folder patterns separated by |, none empty and none with a space at either end, written with A-Z, a-z, 0-9, spaces, . / _ * %% & + , ( ) @ - and non-ASCII characters only.\n'
         return 1
     fi
     if ! proton_folder_exclusions_protected "$6"; then

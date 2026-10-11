@@ -453,8 +453,18 @@ log_startup_identity() {
     # so nothing here can fail on a malformed setting. An endpoint value
     # with an "@" (userinfo, which validation would refuse) is hashed as a
     # marker, so the hash cannot be used to test guesses at a password.
-    local commit="${GIT_COMMIT:-unknown}" boot config rotate="false"
+    # Proton's folder exclusions are hashed as "default" or as the number
+    # of patterns, never the patterns: an added one names a folder, which
+    # is mailbox content, and a short hash of a low-entropy name could be
+    # tested against guesses.
+    local commit="${GIT_COMMIT:-unknown}" boot config rotate="false" exclusions pipes
     local host="$BRIDGE_HOST" port="$BRIDGE_IMAP_PORT" cert_host="$BRIDGE_CERT_HOST"
+    if [[ "$PROTON_FOLDER_EXCLUSIONS" == "$PROTON_DEFAULT_FOLDER_EXCLUSIONS" ]]; then
+        exclusions="default"
+    else
+        pipes="${PROTON_FOLDER_EXCLUSIONS//[!|]/}"
+        exclusions="custom:$((${#pipes} + 1))"
+    fi
     if [[ ! "$commit" =~ ^[0-9A-Za-z._-]{1,64}$ ]]; then
         commit="unknown"
     fi
@@ -466,7 +476,7 @@ log_startup_identity() {
     [[ "$cert_host" != *@* ]] || cert_host="<value-with-credentials>"
     boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
     config="$(printf 'SOURCE_MODE=%s\nBRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nPROTON_FOLDER_EXCLUSIONS=%s\nPROTON_IMAP_ACCOUNT_NAME=%s\nPROTON_REMOTE_STORE_NAME=%s\nPROTON_LOCAL_STORE_NAME=%s\nPROTON_CHANNEL_NAME=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nBRIDGE_CERT_PIN_ROTATE=%s\n' \
-        "$SOURCE_MODE" "$host" "$port" "$cert_host" "$PROTON_FOLDER_EXCLUSIONS" \
+        "$SOURCE_MODE" "$host" "$port" "$cert_host" "$exclusions" \
         "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" \
         "$PROTON_LOCAL_STORE_NAME" "$PROTON_CHANNEL_NAME" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
         "$(expected_fingerprint)" "$rotate" | sha256sum)"
