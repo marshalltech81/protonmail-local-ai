@@ -239,13 +239,15 @@ Do not make any of the following changes unless the repository owner explicitly 
   2026-10-08, #1144).
 - Do not change embedding dimensions or model assumptions without verifying schema and context-window implications.
 - Do not change chunk ID derivation away from the deterministic
-  `sha256(message_pk || index || text)` shape — re-runs depend on identical
+  `sha256(message_pk || index || text)` shape (NUL-separated,
+  `chunker._chunk_id`) — re-runs depend on identical
   inputs producing identical IDs so the diff-write path skips already-
   embedded chunks. Body chunks use the message's claimant ID as
   `message_pk`; attachment chunks use
   `message_pk = f"{claimant_id}::{attachment_id}"`.
 - Every per-message row (`messages`, `message_thread_map`,
-  `message_participants`, `message_chunks`, `attachments`,
+  `message_participants`, `message_participant_names`, `message_chunks`,
+  `attachments`, `reaped_messages`, and the `claimant_id` of
   `pending_deletions`) is keyed by the claimant ID — the Message-ID plus
   `#` and the first sixteen hex digits of the SHA-256 of the file's raw
   bytes (`indexer/src/parser.py` `claimant_id`) — never by the bare,
@@ -255,8 +257,9 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not store raw attachment payload bytes in SQLite. The current schema
   keeps bytes only in the `.eml` on disk. ``attachment_extractions`` caches
   the extracted *text* per content hash and extractor module (#928) so
-  OCR / parse cost runs at most once per unique payload and extractor,
-  not the bytes themselves.
+  OCR / parse cost is paid once per unique payload and cache key (the
+  module the occurrence's label selects, #1416) until the row is
+  refreshed, not the bytes themselves.
 - When a change makes an attachment extractor return different text for
   the same bytes, bump that module's entry in
   `indexer/src/extractors/__init__.py` `EXTRACTOR_VERSIONS`. The
@@ -269,8 +272,8 @@ Do not make any of the following changes unless the repository owner explicitly 
   Dead-lettered messages are skipped and keep their stale chunks until
   an operator runs `make requeue-dead`. A bump also re-runs that
   module on every cached payload the startup sweep considers (the
-  sweep does nothing while `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` is
-  off, and keeps `image-ocr` / `pdf-ocr` rows while OCR is off), so
+  sweep re-runs nothing while `INDEXER_ATTACHMENT_EXTRACTION_ENABLED`
+  is off, though it still clears stale `text_complete`, and keeps `image-ocr` / `pdf-ocr` rows while OCR is off), so
   before bumping a module whose post-open walk is not yet budgeted,
   read the issue or PR that last chose not to bump it (#1036 declined a `docx` bump
   while #1031 was open; #1068 bumped it anyway and #1075 reverted it).
@@ -855,8 +858,8 @@ All Dockerfiles in this repository must follow these rules:
   - `indexer=1002`
   - `mcp=1003`
 - the indexer reads mbsync-written Maildir files via "other" permission
-  bits, not a shared group. mbsync's entrypoint runs `chmod go+r` on new
-  Maildir files after each sync (because mbsync ignores umask and
+  bits, not a shared group. mbsync's entrypoint runs `chmod go+rx` on
+  Maildir directories and `chmod go+r` on files after every sync attempt (because mbsync ignores umask and
   `open()`s with mode 0600); the indexer mounts `/maildir` as `:ro` so
   the cross-UID separation also blocks any write path even on a future
   malicious-attachment-driven indexer compromise.

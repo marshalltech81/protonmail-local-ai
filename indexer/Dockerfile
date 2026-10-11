@@ -178,7 +178,7 @@ COPY --chmod=755 --chown=indexer:indexer healthcheck.sh /healthcheck.sh
 # the named-volume seeding race harmless: the maildir-volume is shared with
 # the mbsync container, and whichever image's mount is hit first by docker
 # compose seeds the volume's ownership. mbsync writes; the indexer reads via
-# "other" permission bits (mbsync's entrypoint chmods go+r after each sync)
+# "other" permission bits (mbsync's entrypoint chmods go+r, go+rx on directories, after every sync attempt)
 # and mounts /maildir :ro for defense-in-depth, so indexer does not need to
 # own this directory. Keeping both images' /maildir at 1001:1001 means either
 # seeding order produces a working volume.

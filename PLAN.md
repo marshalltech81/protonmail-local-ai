@@ -122,7 +122,7 @@ containers run beside the Proton Mail Bridge app:
   persistent pin.
 - **indexer** — parses Maildir, threads, embeds through any
   OpenAI-compatible `/v1/embeddings` provider and writes SQLite
-  (schema v5, numbered migrations since the first deployment;
+  (numbered migrations since the first deployment;
   4096-dim vectors; per-message records keyed by claimant ID). One
   durable `indexing_jobs` queue drives the initial scan, steady state
   and in-place reparses (#1078), fresh mail ahead of the backlog.
@@ -318,7 +318,8 @@ schema change needs a numbered migration.
    decision 19).
 3. **Richer temporal retrieval:** `sent_at`, `occurred_at` (top
    `Received:`) and the effective time `COALESCE(occurred_at, sent_at)`
-   for every filter, span and ordering (`docs/architecture.md`,
+   for every filter, span and ordering (2026-10-11: since #1080 it is
+   `COALESCE(occurred_at, sent_at, first_indexed_at)`) (`docs/architecture.md`,
    "Message time"). **Done.** Per decision 35 the effective time stays
    the default; `date_basis` lets a caller choose `sent`, `occurred` or
    `internal` (#1150, #1092), and a missing `Date:` stays unknown

@@ -1,7 +1,7 @@
 """Image decode and OCR, run in the extractor child (#1292).
 
 ``image.extract`` runs it as
-``python -I extractor_child.py image <max pages> <OCR timeout> <payload file>``,
+``python -I extractor_child.py image <max pages> <OCR timeout> <Tesseract path> <payload file>``,
 through the runner's launcher (``_launcher.py``), which has already
 lowered the address-space and CPU limits ``image.py`` passes. Tesseract,
 which pytesseract starts here, inherits both limits and is killed with

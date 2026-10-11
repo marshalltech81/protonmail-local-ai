@@ -384,8 +384,8 @@ def _synchronized(fn):
     """Serialize ``Database`` method calls across threads.
 
     The indexer runs two concurrent DB writers: the watchdog observer
-    (``MaildirHandler`` callbacks) and the main loop (periodic
-    reconciler sweeps). Python's ``sqlite3`` module allows cross-thread
+    (``MaildirHandler`` callbacks) and the main loop (the queue drain and
+    the periodic reconciler, WAL and recovery passes). Python's ``sqlite3`` module allows cross-thread
     connection use via ``check_same_thread=False``, but individual
     ``BEGIN IMMEDIATE``/execute/``commit`` sequences are not atomic at
     the Python layer — interleaving can trigger ``sqlite3.OperationalError``
@@ -661,7 +661,8 @@ class Database:
         )
 
     def _apply_initial_schema(self, cur: sqlite3.Cursor):
-        """Create every table the indexer needs, in their final shape.
+        """Create every table the indexer needs, in their final shape, and
+        stamp ``SCHEMA_VERSION`` and ``SCHEMA_APPLICATION_ID``.
 
         Three families of tables, each with its FTS5 + sqlite-vec
         sidecar where applicable:
@@ -682,16 +683,22 @@ class Database:
           captures filename/MIME and the extractor module whose cached
           row it uses), ``attachments_fts`` (filename + MIME search), and
           ``attachment_extractions`` (a cache keyed by content hash and
-          extractor module, so OCR / PDF parse cost runs at most once per
-          unique payload and extractor regardless of forwarding count; a
-          row is deleted with the last occurrence that uses it).
+          extractor module, so OCR / PDF parse cost is paid once per payload
+          and cache key until the row is refreshed, whatever the
+          forwarding count; a row is deleted with the last occurrence
+          that uses it).
 
         Plus the cross-cutting tables: ``message_thread_map`` (message
-        → thread index), ``indexed_files`` (file identity for rename
+        → thread index), ``messages`` / ``message_participants`` /
+        ``message_participant_names`` (per-message records),
+        ``thread_vector_sums``, ``reaped_messages``, ``indexed_files`` (file identity for rename
         detection), ``pending_deletions`` (tombstones for the
         deletion reconciler), ``indexing_jobs`` (durable retry +
         dead-letter queue for the parse → embed → upsert pipeline), and
-        ``ingestion_state`` (last sync + indexer liveness for status).
+        ``ingestion_state`` (last sync + indexer liveness for status);
+        and, through the helper scripts below, ``entities`` /
+        ``entity_aliases``, ``vector_generations`` and
+        ``operator_addresses`` / ``operator_identity``.
         """
         # One transaction for every table and the version stamp, so an
         # interruption part-way leaves an empty database that the next
@@ -994,8 +1001,8 @@ class Database:
                 -- yet known (a row from before v4 the reparse has not
                 -- reached). It covers that stage only: it does not
                 -- certify that the participant rows or addresses are
-                -- complete, which #1086's per-role term needs its own
-                -- column or backfill design for. No default; mcp-server
+                -- complete; per-role address completeness is
+                -- ``from_/to_/cc_addresses_complete`` (#1086). No default; mcp-server
                 -- reads NULL as "can't tell".
                 participant_names_complete INTEGER
                     CHECK (participant_names_complete IN (0, 1)),
@@ -1056,7 +1063,7 @@ class Database:
                 ON message_participants(address, role);
             -- Every distinct display name a participant was written
             -- with in one message (#1140); ``message_participants.name``
-            -- keeps the first. Name matching, find_contact and entity
+            -- keeps the first occurrence's (NULL when it had none). Name matching, find_contact and entity
             -- aliases read these. Bounded per message by the parser's
             -- ``MAX_EXTRA_PARTICIPANT_*`` budget.
             CREATE TABLE message_participant_names (
@@ -1617,7 +1624,8 @@ class Database:
         Used by the indexer write path to compute the diff between newly
         chunked output and what is already stored. Chunks are paragraph-
         packed and the chunker's IDs are deterministic
-        (``sha256(message_pk || index || text)``) — so an unchanged body
+        (``sha256(message_pk || index || text)``, NUL-separated,
+        ``chunker._chunk_id``) — so an unchanged body
         yields a byte-identical ID set, and only genuinely new chunks
         need an embed call.
 
@@ -1625,7 +1633,7 @@ class Database:
         return:
 
         * ``None`` (default) — chunks derived from the message body only
-          (``attachment_id IS NULL`` rows). Matches the schema-v9 contract.
+          (``attachment_id IS NULL`` rows).
         * a string — chunks derived from that specific attachment within
           the message. Used by the indexer to diff per-attachment chunks
           independently of body chunks.

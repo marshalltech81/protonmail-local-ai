@@ -67,7 +67,8 @@ def discover_migrations(directory: Path) -> list[tuple[int, Path]]:
 
     Sorted ascending by version. Raises ``RuntimeError`` if any
     filename does not match the expected ``NNNN_<slug>.sql`` shape, if
-    a version of ``0000`` appears (reserved — pre-runner state), or if
+    a version of ``0000`` appears (reserved: version 0 is the initial
+    schema ``Database._apply_initial_schema`` builds), or if
     two files share a version.
     """
     found: list[tuple[int, Path]] = []

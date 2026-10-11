@@ -320,8 +320,10 @@ class IndexingQueue:
         ``last_stage = 'interrupted'``, so a process that dies mid-step
         leaves the row counted and marked. ``end_attempt`` or any outcome
         method refunds it and clears the mark. A marked row whose
-        attempts are exhausted got there only through such deaths, so it
-        is dead-lettered here rather than run again; an unmarked row over
+        attempts are exhausted was interrupted (a charged step, or
+        batch-wide work, which charges nothing) with no attempt left;
+        earlier attempts may be ordinary failures. It is dead-lettered
+        here rather than run again; an unmarked row over
         the limit (``INDEXER_MAX_ATTEMPTS`` lowered) still runs, and
         ``mark_failed`` decides.
         """
@@ -335,7 +337,7 @@ class IndexingQueue:
         ):
             warn_rate_limited(
                 log,
-                "dead-letter: %s interrupted mid-processing on every attempt",
+                "dead-letter: %s interrupted mid-processing with its attempts exhausted",
                 filepath,
                 level=logging.ERROR,
                 attachment=False,
@@ -464,7 +466,8 @@ class IndexingQueue:
     def mark_failed(self, filepath: str, *, stage: str, error: str) -> None:
         """Record a failed attempt and schedule the next retry or dead-letter.
 
-        ``stage`` is one of ``"parse" | "thread" | "embed" | "db_write"``
+        ``stage`` is one of ``"parse" | "thread" | "thread_commit" |
+        "chunk" | "embed" | "db_write"``
         — useful for operators to see which pipeline step broke. The
         value is stored verbatim so new stages can be introduced without
         migrating existing rows.
@@ -606,7 +609,7 @@ class IndexingQueue:
         Without this skip, a container restart re-enqueues every
         previously-failed file, resets its retry counter to zero, and
         starts the 5-attempt backoff cascade over again — wasting
-        ~30 minutes of embedding service load per file with no change in
+        embedding service load per file with no change in
         upstream behavior. The watchdog rename / on-created events
         keep going through ``enqueue`` (and DO reset dead state)
         because those signal real change in the underlying file.
@@ -648,7 +651,9 @@ class IndexingQueue:
         trashed (#1331) and ``reparse_dead`` the dead ones (#1078).
         ``oldest_due_age``
         is how long, in seconds, the longest-waiting due row has been due
-        (0 when none is due): it grows while draining is stalled.
+        (0 when none is due): it grows while draining is stalled. During
+        the initial index it is not a wait: that backlog is queued due at
+        each message's own date (``oldest_first``).
         """
         now = now or datetime.now(UTC)
         counts, oldest_due = self.db.queue_heartbeat_counts(

@@ -22,7 +22,7 @@ provider, including a host-side server you install yourself.
 | Component | Role |
 |---|---|
 | Proton Mail Bridge | The official Bridge app, running on the host (not in a container): decrypts ProtonMail and exposes IMAP on the host's loopback. See [platform support](docs/setup.md#platform-support) |
-| mbsync | Incremental pull-only sync to local Maildir, every `SYNC_INTERVAL` seconds |
+| mbsync | Incremental pull-only sync to local Maildir, `SYNC_INTERVAL` seconds after each sync ends |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
 | Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings` returning 4096-dim vectors (the schema's fixed width — e.g. Qwen3-Embedding-8B). Point `EMBED_BASE_URL` at a remote provider (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
 | Inference (operator-supplied) | Off by default (`INFERENCE_MODE=none`); `INFERENCE_MODE=anthropic` for an Anthropic-compatible Messages API, or `INFERENCE_MODE=openai` for any OpenAI-compatible chat-completions endpoint, at `INFERENCE_BASE_URL` |

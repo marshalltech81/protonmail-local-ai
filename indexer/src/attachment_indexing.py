@@ -369,8 +369,8 @@ def attachment_occurrence_id(
 
 
 # How long to honor a cached ``STATUS_FAILED`` row before re-running the
-# extractor. AGENTS.md says ``attachment_extractions`` exists "so OCR /
-# parse cost runs at most once per unique payload" — but a ``failed``
+# extractor. AGENTS.md says ``attachment_extractions`` exists so OCR /
+# parse cost is paid once per unique payload — but a ``failed``
 # row may be due to a corrupt PDF that *will* keep failing or a
 # transient extractor bug that a future dependency bump fixes. Default
 # 7 days strikes a balance: most retries within a week of a real
@@ -385,9 +385,10 @@ NO_EXTRACTOR_MODULE = ""
 
 
 def extraction_cache_module(attachment: Attachment) -> str:
-    """The extractor module an occurrence's MIME type and filename run on
-    its bytes (``extractors.extraction_module``), or
-    ``NO_EXTRACTOR_MODULE``. With the content hash, the key of the
+    """The extraction cache namespace an occurrence's MIME type and
+    filename select for its bytes (``extractors.extraction_module``; for
+    an OLE2 or ZIP payload the extractor that runs can differ, recorded
+    in the stamp, #1416), or ``NO_EXTRACTOR_MODULE``. With the content hash, the key of the
     ``attachment_extractions`` row the occurrence uses (#928): dispatch
     from a label and the bytes is deterministic, so every occurrence with
     the same key would extract the same result."""
