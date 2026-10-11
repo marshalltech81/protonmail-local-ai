@@ -511,11 +511,12 @@ def _content_reads(calls: Sequence[dict]) -> tuple[dict[str, str], dict[str, str
     the end (``_fully_read``) or a ``get_thread`` row returns it uncut
     (``body`` a string, ``body_omitted_chars`` 0): evidence past a cut needs
     ``get_message``. Attachment text is read only through a ``get_evidence``
-    passage whose ``source`` is ``attachment``: no tool returns a whole
-    attachment (#796), and a ``search_attachments`` snippet is a preview
-    the scorer cannot check holds the evidence, since traces carry IDs, not
-    text. Reads are keyed by claimant ID (#217): reading one file that
-    claims a Message-ID says nothing about another file claiming it.
+    passage whose ``source`` is ``attachment``; a ``get_attachment`` read
+    of the whole extracted text is not credited yet (#1527), and a
+    ``search_attachments`` snippet is a preview the scorer cannot check
+    holds the evidence, since traces carry IDs, not text. Reads are keyed
+    by claimant ID (#217): reading one file that claims a Message-ID says
+    nothing about another file claiming it.
     """
     bodies = _fully_read(calls)
     attachments: dict[str, str] = {}

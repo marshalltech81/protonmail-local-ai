@@ -34,13 +34,16 @@ as failed extractions.
    port and checks that mcp-server's identity check accepts it there
    and refuses it on another port.
 2. **Check** (`test_retrieval_baseline.py`, mcp-server environment,
-   `BASELINE_DIR` set). This step runs every question in `golden.json`
-   through `hybrid_search` (no reranker) and `query_messages`:
+   `BASELINE_DIR` set). This step runs the `search` questions in
+   `golden.json` through `hybrid_search` (no reranker) and the
+   `enumerate` questions through `query_messages`, and checks the rest
+   as below:
    - **Golden checks, for correctness.** Each question lists its
      `required_evidence` as groups: every group is required, and any
      one thread in a group satisfies it (`[["t21"], ["t22"]]` needs
      both threads; `[["t27", "t28"]]` accepts either). The first hit
-     from any group must be at or above `max_rank`. Questions with an
+     from any group must rank at `max_rank` or better (rank ≤
+     `max_rank`). Questions with an
      evidence substring, and vector-only questions, add their own
      checks. MRR must meet `floors.mrr`. Evidence recall@10, the
      fraction of a question's groups found in the top 10, must meet
@@ -48,7 +51,9 @@ as failed extractions.
      `floors.multi_source_evidence_recall_at_10` over the questions
      with more than one group. Enumeration questions must return the
      exact message set. Unanswerable questions list `absent_terms`
-     that must occur in no message's subject, body or attachment; the
+     that must occur in no message's subject or text part (bodies and
+     text attachments; binary attachments such as PDF, DOCX, XLSX and
+     images are not checked, so keep the terms out of them by hand); the
      abstention scenarios in `tests/eval/agent_scenarios.json` rest on
      them.
    - **Agent scenario references.** Every message a scenario names must
@@ -68,9 +73,10 @@ as failed extractions.
      4,000 characters) and, for attachments, `get_evidence` and
      `search_attachments`. The file's `corpus_evidence` holds passages
      of corpus shapes outside any scenario, checked the same way (#907:
-     t89's sentence past the build's extracted-characters cap). A
+     t89's sentence past the build's extracted-characters cap; #908 and
+     #1113: t91's last page and t92's last frame past the OCR caps). A
      passage no tool returns is a strict xfail naming its issue (#795,
-     or #907 for that sentence), so a fix flips it. Boundary checks:
+     or the shape's own issue for these), so a fix flips it. Boundary checks:
      a Blair Reed participant lookup of more than 100 messages with
      required evidence on page 2, a 56-message thread with the decisive
      message past the first `get_thread` page and past the thread text,
