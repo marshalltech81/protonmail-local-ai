@@ -341,18 +341,23 @@ def _indexer_commits(bench, tmp_path, monkeypatch, n: int, batch: int):
             bench.render_eml(i, "typical", "typical", chunks=1, words=40, per_message=1)
         )
     statements: list[str] = []
-    real = Database._connect
+    real = sqlite3.connect
 
-    def traced(self):
-        conn = real(self)
+    def traced(*args, **kwargs):
+        # Traced from the start, so the connection's own settings are seen.
+        conn = real(*args, **kwargs)
         conn.set_trace_callback(statements.append)
         return conn
 
-    monkeypatch.setattr(Database, "_connect", traced)
+    monkeypatch.setattr(sqlite3, "connect", traced)
     db = Database(tmp_path / "indexer.db")
-    # The indexer's connection overwrites deleted content (#602); the
-    # writer must too, since a zeroed page is a written page.
-    assert db._conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+    # The settings the indexer's connection applies (secure_delete, the
+    # page cache, ...): each changes which pages a commit writes, so the
+    # writer applies every one of them (``_writer_commits``).
+    statements.clear()
+    db._connect().close()
+    pragmas = [s for s in statements if s.upper().startswith("PRAGMA")]
+    assert any("secure_delete" in p for p in pragmas)
     monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
     monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", batch)
     statements.clear()
@@ -364,7 +369,7 @@ def _indexer_commits(bench, tmp_path, monkeypatch, n: int, batch: int):
     )
     tables = _plain_tables(db._conn)
     db.close()
-    return _commits(statements, tables), tables
+    return _commits(statements, tables), tables, pragmas
 
 
 def _stop_after_batch(db: Path, stop: Path, messages: int):
@@ -393,7 +398,11 @@ def _stop_after_batch(db: Path, stop: Path, messages: int):
     return thread
 
 
-def _writer_commits(bench, tmp_path, monkeypatch, batch: int, tables: set[str]):
+def _setting(pragma: str) -> str:
+    return re.sub(r"\s+", "", pragma).lower()
+
+
+def _writer_commits(bench, tmp_path, monkeypatch, batch: int, tables: set[str], pragmas):
     """The WAL writer's commits for its first batch of ``batch``
     messages, its setup commit left out."""
 
@@ -414,7 +423,9 @@ def _writer_commits(bench, tmp_path, monkeypatch, batch: int, tables: set[str]):
     timer = _stop_after_batch(db, stop, 8 + batch)
     bench.phase_writer(str(db), str(stop), batch, 3600.0, shape=_SHAPE)
     timer.join()
-    assert "PRAGMA secure_delete = ON" in statements
+    # Every connection setting the indexer applies, the writer applies.
+    ours = {_setting(s) for s in statements if s.upper().startswith("PRAGMA")}
+    assert {_setting(p) for p in pragmas} <= ours
     commits = _commits(statements, tables | {"bench_writer_marks"})
     # The setup commit (before the writer is ready) records the corpus
     # high-water marks; every later commit is the batch.
@@ -430,8 +441,10 @@ def test_wal_writer_commits_what_the_indexer_commits_per_batch(bench, tmp_path, 
     # both the lone survivor's charge and the several survivors' mark,
     # and both a new thread and a reply, are compared. The expected
     # sequence is the indexer's own, traced, never the writer's.
-    expected, tables = _indexer_commits(bench, tmp_path / "indexer", monkeypatch, batch, batch)
-    ours = _writer_commits(bench, tmp_path / "writer", monkeypatch, batch, tables)
+    expected, tables, pragmas = _indexer_commits(
+        bench, tmp_path / "indexer", monkeypatch, batch, batch
+    )
+    ours = _writer_commits(bench, tmp_path / "writer", monkeypatch, batch, tables, pragmas)
     assert ours == expected
     # Every table the indexer wrote is one the benchmark builds or the
     # writer creates, and the writer creates exactly the rest.

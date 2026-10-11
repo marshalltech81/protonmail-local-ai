@@ -1740,6 +1740,11 @@ class _WriterThread:
     count: int = 0
     vector: bytes = bytes(4 * EMBEDDING_DIM)
 
+    def release(self) -> None:
+        """Drop what only a later message's phase 1 would read."""
+        self.participants, self.senders, self.message_ids, self.subjects = [], [], [], []
+        self.body = ""
+
 
 def _writer_phase1(
     conn: sqlite3.Connection, rec: _Record, thread: _WriterThread | None, now: str
@@ -2006,8 +2011,27 @@ def phase_writer(
     import sqlite_vec
 
     shape = shape or {}
+    identity = shape.get("identity", "typical")
+    records = shape.get("records", "typical")
     stress = shape.get("extracted_chars", 0)
+    # One stress text for every record (it can be 40 MB).
+    stress_text = _WIDE * stress if stress else None
     rng = random.Random(7)
+
+    def record(i: int) -> _Record:
+        # Made where it is used and dropped after, so memory holds one
+        # message, not a batch of them.
+        return _record(
+            i,
+            identity,
+            records,
+            shape.get("references", 0),
+            shape.get("chunks", 1),
+            shape.get("chunk_tokens", BODY_TOKENS),
+            shape.get("per_message", 0),
+            stress_text,
+        )
+
     wal = db_path + "-wal"
     commits = 0
     times: list[tuple[float, int]] = []
@@ -2015,9 +2039,14 @@ def phase_writer(
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
+        # indexer/src/database.py ``Database._connect``'s settings (the
+        # fidelity test checks every one is here): each changes which
+        # pages a commit writes or when they spill into the WAL.
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA secure_delete = ON")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-64000")
         conn.execute("PRAGMA wal_autocheckpoint=0")
         _writer_setup(conn)
         corpus = conn.execute("SELECT mark FROM bench_writer_marks WHERE name = 'messages'")
@@ -2070,22 +2099,10 @@ def phase_writer(
         try:
             thread: _WriterThread | None = None
             while not os.path.exists(stop):
-                recs = []
-                for _ in range(batch):
-                    recs.append(
-                        _record(
-                            next_i,
-                            shape.get("identity", "typical"),
-                            shape.get("records", "typical"),
-                            shape.get("references", 0),
-                            shape.get("chunks", 1),
-                            shape.get("chunk_tokens", BODY_TOKENS),
-                            shape.get("per_message", 0),
-                            _WIDE * stress if stress else None,
-                        )
-                    )
-                    next_i += 1
-                for rec in recs:
+                numbers = range(next_i, next_i + batch)
+                next_i += batch
+                paths = [maildir_path(i, identity, records) for i in numbers]
+                for path in paths:
                     # indexer/src/database.py ``queue_enqueue``.
                     now = datetime.now(UTC).isoformat()
                     with transaction():
@@ -2094,37 +2111,46 @@ def phase_writer(
                             "attempts, last_error, last_stage, last_error_class, created_at, "
                             "updated_at, next_attempt_at) "
                             "VALUES (?, 'on_created', 'queued', 0, NULL, NULL, NULL, ?, ?, ?)",
-                            (rec.path, now, now, now),
+                            (path, now, now, now),
                         )
                 threads = []
-                for rec in recs:
-                    charge(rec.path)
+                for i, path in zip(numbers, paths, strict=True):
+                    charge(path)
+                    if i % 4 == 0 and thread is not None:
+                        # No later message joins it: only phase 2c's
+                        # state is kept.
+                        thread.release()
                     with transaction():
                         thread = _writer_phase1(
-                            conn, rec, thread if rec.i % 4 else None, datetime.now(UTC).isoformat()
+                            conn,
+                            record(i),
+                            thread if i % 4 else None,
+                            datetime.now(UTC).isoformat(),
                         )
                     threads.append(thread)
-                    refund(rec.path)
-                for rec in recs:
-                    charge(rec.path)
-                    refund(rec.path)
+                    refund(path)
+                for path in paths:
+                    charge(path)
+                    refund(path)
                 if batch == 1:
-                    charge(recs[0].path)
+                    charge(paths[0])
                 else:
                     # indexer/src/database.py ``queue_mark_interrupted``.
                     with transaction():
                         conn.executemany(
                             "UPDATE indexing_jobs SET last_stage = ?, last_error = ? "
                             "WHERE filepath = ? AND status = 'queued'",
-                            [(*_INTERRUPTED, rec.path) for rec in recs],
+                            [(*_INTERRUPTED, path) for path in paths],
                         )
-                for rec, rec_thread in zip(recs, threads, strict=True):
+                for i, path, rec_thread in zip(numbers, paths, threads, strict=True):
                     with transaction():
-                        _writer_phase2c(conn, rec, rec_thread, rng, datetime.now(UTC).isoformat())
+                        _writer_phase2c(
+                            conn, record(i), rec_thread, rng, datetime.now(UTC).isoformat()
+                        )
                     if batch == 1:
-                        refund(rec.path)
+                        refund(path)
                     with transaction():
-                        conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (rec.path,))
+                        conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (path,))
                 resume = time.monotonic() + interval
                 while not os.path.exists(stop):
                     remaining = resume - time.monotonic()

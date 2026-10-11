@@ -1134,6 +1134,54 @@ def test_a_writer_that_fails_before_it_is_ready_fails_the_measurement(bench, tmp
     assert not (tmp_path / "unready.db.stop").exists()
 
 
+def test_writer_holds_one_message_at_a_time(bench, tmp_path, monkeypatch):
+    # A batch's records are made where each is used, not all before the
+    # first commit, share one stress text, and a finished thread keeps
+    # only what phase 2c reads: memory does not grow with the batch's
+    # messages.
+    import weakref
+
+    db = tmp_path / "memory.db"
+    bench.build(db, 8, 1, "typical", "typical")
+    live: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+    most = 0
+    stress: set[int] = set()
+    real = bench._record
+
+    def counted(*args):
+        nonlocal most
+        rec = real(*args)
+        live[id(rec)] = rec
+        most = max(most, len(live))
+        stress.update(id(a[3]) for a in rec.attachments)
+        return rec
+
+    monkeypatch.setattr(bench, "_record", counted)
+    threads = []
+    real_phase1 = bench._writer_phase1
+
+    def phase1(*args):
+        thread = real_phase1(*args)
+        if thread not in threads:
+            threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(bench, "_writer_phase1", phase1)
+    stop = tmp_path / "stop"
+    timer = _stop_after_batch(db, stop, 8 + 50)
+    shape = {"per_message": 2, "extracted_chars": 5}
+    bench.phase_writer(str(db), str(stop), 50, 3600.0, shape=shape)
+    timer.join()
+    # The record in use and the one being made.
+    assert most <= 2
+    assert len(stress) == 1
+    # Of each finished thread only phase 2c's state is kept: 50 messages
+    # in threads of four, the last one still open.
+    assert len(threads) == 13
+    assert all(t.participants == [] and t.body == "" for t in threads[:-1])
+    assert threads[-1].participants
+
+
 def test_writer_removes_what_an_earlier_writer_added(bench, tmp_path):
     # Each WAL configuration starts from the corpus build wrote.
     db = tmp_path / "again.db"
