@@ -122,10 +122,11 @@ def scrub_embed_error(exc: BaseException) -> str:
     The OpenAI SDK's ``APIStatusError`` carries the provider's response
     body, which can echo input fragments back on 4xx — for the indexer
     that means email body text from the failing batch can flow into
-    ``indexing_jobs.last_error`` and any operator log sink. The repo
-    is public and the ``last_error`` row + truncated log line both
-    travel further than callers usually expect, so trim
-    ``APIStatusError`` down to type + status_code only.
+    ``indexing_jobs.last_error`` and any operator log sink. The
+    ``last_error`` row and the truncated log line both travel further
+    than callers usually expect (a log collector, an operator pasting
+    them into a public issue), so trim ``APIStatusError`` down to type
+    + status_code only.
 
     Connection / timeout errors and our own ``EmbedResponseError``
     carry no email content, so their full ``repr`` is safe to keep.

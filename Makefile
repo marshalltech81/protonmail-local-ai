@@ -57,8 +57,9 @@ help:
 # Create placeholder secret files required by Docker Compose.
 # Run this once during initial setup before make up.
 # Each layer (inference / embed / rerank) has one secret file. Each
-# file must exist with mode 600 so the docker-compose ``secrets:``
-# reference resolves cleanly. The file must be NON-EMPTY when its
+# file must exist, since Compose cannot create a container whose
+# ``secrets:`` file is missing, and have mode 600, which validate-env
+# requires of every secret file. The file must be NON-EMPTY when its
 # matching layer is enabled (EMBED_MODE is always enabled;
 # INFERENCE_MODE != none; RERANK_MODE == cohere). For unauthenticated
 # host-side servers (LM Studio, vLLM, mlx_lm.server) write any
