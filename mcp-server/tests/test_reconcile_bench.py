@@ -1358,6 +1358,62 @@ def test_a_failed_wal_configuration_leaves_no_copy_behind(bench, tmp_path):
     assert not [p.name for p in tmp_path.iterdir() if bench.WAL_COPY_SUFFIX in p.name]
 
 
+def test_writer_makes_no_commit_once_stop_appears_while_it_waits_for_the_lock(bench, tmp_path):
+    # ``stop`` created while the writer is blocked on the order lock (the
+    # round holds it at its window's end): once it gets the lock it
+    # begins nothing, so every commit is stamped before ``stop``.
+    import fcntl
+    import threading
+
+    db = tmp_path / "locked.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    order = tmp_path / "order"
+    stopped_at: list[float] = []
+
+    def stop_under_the_lock() -> None:
+        ready = Path(str(stop) + ".ready")
+        deadline = time.monotonic() + 120
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.2)
+        with open(order, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            # The writer, committing without pause, is now waiting.
+            time.sleep(0.3)
+            stop.touch()
+            stopped_at.append(time.monotonic())
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+    timer = threading.Thread(target=stop_under_the_lock)
+    timer.start()
+    out = bench.phase_writer(str(db), str(stop), 1, 0.0, order=str(order))
+    timer.join()
+    assert out["commits"] > 0
+    assert all(when < stopped_at[0] for when, _ in out["commit_times"])
+
+
+def test_writer_rolls_back_a_transaction_during_which_stop_appeared(bench, tmp_path, monkeypatch):
+    # ``stop`` created while a transaction runs (a heavy phase 1, say):
+    # the transaction is rolled back, not committed.
+    db = tmp_path / "mid.db"
+    bench.build(db, 8, 0, "typical", "typical")
+    stop = tmp_path / "stop"
+    real = bench._writer_phase1
+
+    def phase1(conn, rec, now):
+        real(conn, rec, now)
+        stop.touch()
+
+    monkeypatch.setattr(bench, "_writer_phase1", phase1)
+    out = bench.phase_writer(str(db), str(stop), 1, 0.0)
+    # The enqueue and the charge committed; phase 1 did not.
+    assert out["commits"] == 2
+    with closing(sqlite3.connect(db)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 8
+        assert conn.execute("SELECT attempts FROM indexing_jobs").fetchall() == [(1,)]
+
+
 def test_writer_tokenizer_is_the_indexers_pinned_version():
     # The writer cuts thread bodies with the indexer's tokenizer; the
     # ``tokenizers`` this environment resolves (through cohere) must be

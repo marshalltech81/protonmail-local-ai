@@ -2285,7 +2285,8 @@ def phase_writer(
     file and the file's size is the WAL's logical end until the
     truncating checkpoint ``run_wal`` runs after the round. Once
     ``stop`` exists (the round is over) it makes no further commit, even
-    mid-batch, and the pause after a batch ends early."""
+    mid-batch (a transaction under way is rolled back), and the pause
+    after a batch ends early."""
     import sqlite_vec
 
     shape = shape or {}
@@ -2346,13 +2347,22 @@ def phase_writer(
             # the order lock (``_ordered``): a commit is in a round's
             # window only once it is durable, and every frame it writes
             # (a large one spills dirty pages into the WAL before COMMIT)
-            # falls on the same side of each boundary as its stamp.
+            # falls on the same side of each boundary as its stamp. No
+            # commit once ``stop`` exists: checked before waiting for the
+            # lock, again once it is held (the round may have ended
+            # meanwhile), and before COMMIT, which a transaction that ran
+            # past ``stop`` rolls back instead.
             nonlocal commits
             if os.path.exists(stop):
                 raise _WriterStopped
             with _ordered(order):
+                if os.path.exists(stop):
+                    raise _WriterStopped
                 conn.execute("BEGIN IMMEDIATE")
                 yield
+                if os.path.exists(stop):
+                    conn.execute("ROLLBACK")
+                    raise _WriterStopped
                 conn.execute("COMMIT")
                 times.append((time.monotonic(), os.stat(wal).st_size))
             commits += 1
