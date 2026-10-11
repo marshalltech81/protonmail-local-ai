@@ -10,6 +10,13 @@ name: Security Scan
 # shellcheck in lint.yml still lints the scripts for correctness, and
 # docker.yml validates the Compose syntax and scans the built images
 # with Trivy (#977).
+#
+# On main the push trigger filters by those paths. A pull request always
+# starts the workflow, so every job reports a check (#1559): the
+# `changes` job compares the PR's merge commit with its base and the
+# scan jobs run only when a file matching the same paths changed, and
+# are skipped otherwise (a skipped job passes a required check). Keep
+# the push filter and the changes job's list the same.
 on:
   push:
     branches: [main]
@@ -32,23 +39,6 @@ on:
       - ".github/workflows/security.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "**/pyproject.toml"
-      - "**/uv.lock"
-      - "**/pom.xml"
-      - "indexer/java/checksums/**"
-      - "**/Dockerfile"
-      - "indexer/src/**"
-      - "mcp-server/src/**"
-      - "**/docker-compose*.yml"
-      - "**/docker-compose*.yaml"
-      - "**/compose*.yml"
-      - "**/compose*.yaml"
-      - "**/*.sh"
-      - "scripts/**"
-      - ".semgrep/**"
-      - ".semgrepignore"
-      - ".github/workflows/security.yml"
   schedule:
     - cron: "0 8 * * 0"
   workflow_dispatch:
@@ -65,8 +55,64 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decides whether the scans run. Only a pull request can skip them:
+  # every other event (a push already filtered by path, the schedule, a
+  # manual dispatch) runs them. The pull-request checkout is the merge
+  # commit, so its first parent is the base it merges into and the diff
+  # is what the PR changes there. Git's glob pathspec matches as the
+  # paths filter does: `*` stays within one directory and `**/` matches
+  # any depth, the root included. The scans run unless this job says
+  # "false", so a failure here runs them rather than skipping them.
+  changes:
+    name: security inputs changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Compare the pull request with its base
+        id: diff
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            printf 'run=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git rev-parse --verify --quiet HEAD^2 > /dev/null
+          changed="$(git diff --name-only HEAD^1 HEAD -- \
+            ':(glob)**/pyproject.toml' \
+            ':(glob)**/uv.lock' \
+            ':(glob)**/pom.xml' \
+            ':(glob)indexer/java/checksums/**' \
+            ':(glob)**/Dockerfile' \
+            ':(glob)indexer/src/**' \
+            ':(glob)mcp-server/src/**' \
+            ':(glob)**/docker-compose*.yml' \
+            ':(glob)**/docker-compose*.yaml' \
+            ':(glob)**/compose*.yml' \
+            ':(glob)**/compose*.yaml' \
+            ':(glob)**/*.sh' \
+            ':(glob)scripts/**' \
+            ':(glob).semgrep/**' \
+            ':(glob).semgrepignore' \
+            ':(glob).github/workflows/security.yml')"
+          if [[ -n "$changed" ]]; then
+            printf 'Scanned inputs changed:\n%s\n' "$changed"
+            printf 'run=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'No scanned input changed; the scans are skipped.\n'
+            printf 'run=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
   trivy-deps:
     name: Trivy dependency scan
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -149,6 +195,8 @@ jobs:
 
   bandit:
     name: Bandit static analysis
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -169,6 +217,8 @@ jobs:
 
   trivy-misconfig:
     name: Trivy misconfiguration scan
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -202,6 +252,8 @@ jobs:
 
   semgrep:
     name: Semgrep Compose and shell scan
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
