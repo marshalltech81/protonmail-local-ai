@@ -47,7 +47,7 @@ synthetic mailbox) and a trace of the calls an agent made, score
   ``forbidden_answer_text`` string (case-insensitive substring; a value
   reformatted with spaces or dashes is not caught);
 - **outstanding items** (scenarios with an ``outstanding`` ground
-  truth, #798): action recall and precision, owner and status
+  truth): action recall and precision, owner and status
   accuracy, supported closures and deadlines, conclusion citation
   support and required evidence coverage (both counting only sources a
   result returned the content of, ``_content_reads``), forbidden sources
@@ -140,7 +140,7 @@ def is_held_out(scenario_id: str) -> bool:
 
 @dataclass(frozen=True)
 class ClaimTruth:
-    """The supported label of one claim kind on an action (#798).
+    """The supported label of one claim kind on an action.
 
     ``label`` is ``confirmed``, ``proposed`` or ``unverified``.
     ``sources`` is the kind's proof set: for ``sent`` the message in
@@ -155,7 +155,7 @@ class ClaimTruth:
 
 @dataclass(frozen=True)
 class OutstandingAction:
-    """One next action in an outstanding-items ground truth (#798).
+    """One next action in an outstanding-items ground truth.
 
     ``status`` is ``open``, ``waiting``, ``disputed``, ``unknown`` (all
     outstanding) or ``closed`` (to be excluded). ``due`` is the due date
@@ -190,7 +190,7 @@ class OutstandingTruth:
     """Ground truth of an outstanding-items scenario.
 
     ``forbidden_sources`` are messages no conclusion may cite (a decoy
-    sharing counsel's display name, a prompt injection, mail outside the
+    sharing the vendor's display name, a prompt injection, mail outside the
     window). ``completeness_blockers`` are messages whose decisive
     content the tools cannot return (a failed attachment extraction,
     text the indexer stripped): an answer must name each among its
@@ -1142,8 +1142,8 @@ OWNERS = frozenset(
         "sasha_ortiz",
         "emery_vance",
         "jordan",
-        "management",
-        "jordan_or_management",
+        "coordinator",
+        "jordan_or_coordinator",
         "unknown",
     }
 )

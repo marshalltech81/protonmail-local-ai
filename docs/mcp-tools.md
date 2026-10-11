@@ -2529,7 +2529,7 @@ inflated values fan out into that many model calls.
 ([#976](https://github.com/marshalltech81/protonmail-local-ai/issues/976)).**
 The threads searched are the top `limit` hits for `query`, not every
 match, and nothing names the threads left out. For every occurrence
-backed by an attachment (every invoice line for one material code from
+backed by an attachment (every invoice line for one product code from
 one vendor, say; a body-only population such as RSVPs has nothing to
 enumerate and uses `extract_from_emails` alone), follow this recipe.
 It covers an unscoped, non-Trash population only: `search_attachments`
@@ -2546,7 +2546,7 @@ mail a population run will read; the steps are not sent to clients:
    the calling model, and each extracted thread is one model call
    whose passages reach the inference provider.
 2. Enumerate the attachments with `search_attachments`, a lexical
-   match on the material code or its description, plus `sender` (the
+   match on the product code or its description, plus `sender` (the
    vendor's address, matched on the message carrying each attachment;
    `from_addr` would take every attachment in the vendor's threads)
    and `content_type` where they help, and `limit=50` (the default,

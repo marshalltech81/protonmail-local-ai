@@ -240,7 +240,7 @@ def build(
 
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
     # ``evidence_queries`` are get_evidence lookups the outstanding-items
-    # reachability checks make (#798); they rank nothing in the snapshot.
+    # reachability checks make; they rank nothing in the snapshot.
     # ``semantic`` questions are ranked only by the real-embedder run
     # (#1439).
     queries = (

@@ -807,7 +807,7 @@
       "review": "ai_drafted"
     },
     {
-      "id": "ask-dispenser-hire-outcome",
+      "id": "ask-fc4410-hire-outcome",
       "category": "correction",
       "tool": "ask_mailbox",
       "arguments": {"question": "Was the FC-4410 hire charge ever resolved, and what was the outcome?"},
@@ -816,7 +816,7 @@
       "expected_handling": "answer",
       "required_evidence": [["t100.11"]],
       "expected_facts": [
-        {"id": "f1", "fact": "Ferncastle's route representative said the item was never placed.", "sources": ["t100.11"], "excerpt": "He says that item has not been placed here at all"},
+        {"id": "f1", "fact": "Ferncastle's area representative said the item was never placed.", "sources": ["t100.11"], "excerpt": "He says that item has not been placed here at all"},
         {"id": "f2", "fact": "A credit is being reviewed for the months paid.", "sources": ["t100.11"], "excerpt": "Piers is now reviewing a credit for each month we paid"}
       ],
       "must_not_assert": [
@@ -828,19 +828,19 @@
       "review": "ai_drafted"
     },
     {
-      "id": "ask-dispenser-first-explanation",
+      "id": "ask-fc4410-entry-first-reason",
       "category": "exact_fact",
       "tool": "ask_mailbox",
-      "arguments": {"question": "What did Ferncastle Hygiene first say the FC-4410 entry was for?"},
+      "arguments": {"question": "What did Ferncastle Group first say the FC-4410 entry was for?"},
       "held_out": true,
       "answerable": true,
       "expected_handling": "answer",
       "required_evidence": [["t100.3"]],
       "expected_facts": [
-        {"id": "f1", "fact": "Ferncastle first said the FC-4410 entry is for a hand towel dispenser.", "sources": ["t100.3"], "excerpt": "The FC-4410 entry is for the hand towel dispenser our route team installed in your loading bay washroom"}
+        {"id": "f1", "fact": "Ferncastle first said the FC-4410 entry is for a display partition.", "sources": ["t100.3"], "excerpt": "The FC-4410 entry is for the display partition our fitting team installed in your ground floor stock room"}
       ],
-      "must_not_assert": ["Ferncastle first said the item was never placed (its route representative's later statement)."],
-      "deterministic": {"must_include": [["towel"]], "must_not_include": []},
+      "must_not_assert": ["Ferncastle first said the item was never placed (its area representative's later statement)."],
+      "deterministic": {"must_include": [["partition"]], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
       "review": "ai_drafted"
     },
@@ -865,7 +865,7 @@
       "review": "ai_drafted"
     },
     {
-      "id": "summarize-hall-open-points",
+      "id": "summarize-qh62-open-points",
       "category": "prompt_budget",
       "tool": "summarize_thread",
       "arguments": {"thread_id": "t62.1@baseline.example", "style": "action-items"},
@@ -876,10 +876,10 @@
       "required_evidence": [["t62.53"]],
       "expected_facts": [
         {"id": "f1", "fact": "Blair owes the redline of the warranty section and will send it by October 16.", "sources": ["t62.53"], "excerpt": "redline of the warranty section, which I will send by October 16", "values": ["October 16"]},
-        {"id": "f2", "fact": "Blair is waiting on Morgan for the contractor's lien waiver before the final payment can go out.", "sources": ["t62.53"], "excerpt": "waiting on Morgan for the contractor's lien waiver before the final payment", "values": ["lien waiver"]}
+        {"id": "f2", "fact": "Blair is waiting on Morgan for the contractor's sign-off sheet before the final payment can go out.", "sources": ["t62.53"], "excerpt": "waiting on Morgan for the contractor's sign-off sheet before the final payment", "values": ["sign-off sheet"]}
       ],
       "must_not_assert": [
-        "An open point from the message the window left out (the warranty redline, the lien waiver) stated as an action item without saying the context was incomplete."
+        "An open point from the message the window left out (the warranty redline, the sign-off sheet) stated as an action item without saying the context was incomplete."
       ],
       "deterministic": {"must_include": [], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": true, "relevance": true},
@@ -1115,7 +1115,7 @@
       }
     },
     {
-      "id": "ask-dispenser-position-june",
+      "id": "ask-fc4410-june-position",
       "category": "correction",
       "tool": "ask_mailbox",
       "arguments": {"question": "What was Ferncastle's position on the FC-4410 hire charge as of 1 June 2026, and did it change after that?"},
@@ -1124,11 +1124,11 @@
       "expected_handling": "answer",
       "required_evidence": [["t100.8"], ["t100.11"]],
       "expected_facts": [
-        {"id": "f1", "fact": "As of 1 June 2026 Ferncastle's last word was Piers Oduya's of 20 May: their records list the FC-4410 dispenser on the account, so the hire charge stands for now.", "sources": ["t100.8"], "excerpt": "Our records list the FC-4410 dispenser on your account, so the hire charge stands for now"},
-        {"id": "f2", "fact": "It changed later: on 16 July Della reported that Ferncastle's route representative, Ruben Kestle, said the item was never placed, and that Piers is reviewing a credit.", "sources": ["t100.11"], "excerpt": "He says that item has not been placed here at all"}
+        {"id": "f1", "fact": "As of 1 June 2026 Ferncastle's last word was Piers Oduya's of 20 May: their records list the FC-4410 partition on the account, so the hire charge stands for now.", "sources": ["t100.8"], "excerpt": "Our records list the FC-4410 partition on your account, so the hire charge stands for now"},
+        {"id": "f2", "fact": "It changed later: on 16 July Della reported that Ferncastle's area representative, Ruben Kestle, said the item was never placed, and that Piers is reviewing a credit.", "sources": ["t100.11"], "excerpt": "He says that item has not been placed here at all"}
       ],
       "must_not_assert": [
-        "As of 1 June Ferncastle had already accepted that no dispenser was installed.",
+        "As of 1 June Ferncastle had already accepted that no partition was installed.",
         "A credit has been issued or paid (it is only being reviewed)."
       ],
       "deterministic": {"must_include": [["credit"]], "must_not_include": []},
@@ -1137,7 +1137,7 @@
       "chronology": {
         "as_of": "2026-06-01",
         "positions": [
-          {"id": "p1", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.3", "date": "2026-03-10", "date_source": "sent", "values": [], "excerpt": "The FC-4410 entry is for the hand towel dispenser our route team installed"},
+          {"id": "p1", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.3", "date": "2026-03-10", "date_source": "sent", "values": [], "excerpt": "The FC-4410 entry is for the display partition our fitting team installed"},
           {"id": "p2", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.8", "date": "2026-05-20", "date_source": "sent", "values": [], "excerpt": "so the hire charge stands for now"},
           {"id": "p3", "actor": ["Ruben Kestle", "Kestle", "Ruben"], "kind": "disposition", "source": "t100.11", "date": "2026-07-16", "date_source": "relative", "values": [["credit"]], "excerpt": "He says that item has not been placed here at all"}
         ],
@@ -1146,18 +1146,18 @@
       }
     },
     {
-      "id": "brief-dispenser-hire-charge",
+      "id": "brief-fc4410-hire-charge",
       "category": "correction",
       "tool": "brief_issue",
-      "arguments": {"topic": "the FC-4410 dispenser hire charge dispute with Ferncastle Hygiene"},
+      "arguments": {"topic": "the FC-4410 partition hire charge dispute with Ferncastle Group"},
       "held_out": true,
       "answerable": true,
       "expected_handling": "answer",
       "required_evidence": [["t100.3"], ["t100.8"], ["t100.11"]],
       "expected_facts": [
-        {"id": "f1", "fact": "On 10 March Piers Oduya said the FC-4410 entry is for a hand towel dispenser installed in the loading bay washroom.", "sources": ["t100.3"], "excerpt": "The FC-4410 entry is for the hand towel dispenser our route team installed"},
-        {"id": "f2", "fact": "On 20 May Piers said Ferncastle's records list the dispenser, so the hire charge stands for now.", "sources": ["t100.8"], "excerpt": "so the hire charge stands for now"},
-        {"id": "f3", "fact": "On 16 July Della reported that Ferncastle's route representative, Ruben Kestle, said the item was never placed, and that Piers is reviewing a credit.", "sources": ["t100.11"], "excerpt": "He says that item has not been placed here at all"}
+        {"id": "f1", "fact": "On 10 March Piers Oduya said the FC-4410 entry is for a display partition installed in the ground floor stock room.", "sources": ["t100.3"], "excerpt": "The FC-4410 entry is for the display partition our fitting team installed"},
+        {"id": "f2", "fact": "On 20 May Piers said Ferncastle's records list the partition, so the hire charge stands for now.", "sources": ["t100.8"], "excerpt": "so the hire charge stands for now"},
+        {"id": "f3", "fact": "On 16 July Della reported that Ferncastle's area representative, Ruben Kestle, said the item was never placed, and that Piers is reviewing a credit.", "sources": ["t100.11"], "excerpt": "He says that item has not been placed here at all"}
       ],
       "must_not_assert": [
         "The charge was confirmed as valid and stands.",
@@ -1169,7 +1169,7 @@
       "chronology": {
         "as_of": null,
         "positions": [
-          {"id": "p1", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.3", "date": "2026-03-10", "date_source": "sent", "values": [], "excerpt": "The FC-4410 entry is for the hand towel dispenser our route team installed"},
+          {"id": "p1", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.3", "date": "2026-03-10", "date_source": "sent", "values": [], "excerpt": "The FC-4410 entry is for the display partition our fitting team installed"},
           {"id": "p2", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.8", "date": "2026-05-20", "date_source": "sent", "values": [], "excerpt": "so the hire charge stands for now"},
           {"id": "p3", "actor": ["Ruben Kestle", "Kestle", "Ruben"], "kind": "disposition", "source": "t100.11", "date": "2026-07-16", "date_source": "relative", "values": [["credit"]], "excerpt": "He says that item has not been placed here at all"}
         ],

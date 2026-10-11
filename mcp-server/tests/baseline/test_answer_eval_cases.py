@@ -762,12 +762,12 @@ def test_body_shape_reaches_the_answering_model(case_id: str, records: dict[str,
 # (t100.3) and has the closing message, which contradicts it, as its
 # decoy, so a recency-only answer fails once both are shown.
 _LATE_DISPOSITION_SHAPES = {
-    "ask-dispenser-hire-outcome": {("t100.11", "body"), ("t101.1", "body")},
-    "ask-dispenser-first-explanation": {("t100.3", "body"), ("t100.11", "body")},
+    "ask-fc4410-hire-outcome": {("t100.11", "body"), ("t101.1", "body")},
+    "ask-fc4410-entry-first-reason": {("t100.3", "body"), ("t100.11", "body")},
     # #291: the position as of 1 June and the disposition that changed
     # it; the brief's three positions.
-    "ask-dispenser-position-june": {("t100.8", "body"), ("t100.11", "body")},
-    "brief-dispenser-hire-charge": {("t100.3", "body"), ("t100.8", "body"), ("t100.11", "body")},
+    "ask-fc4410-june-position": {("t100.8", "body"), ("t100.11", "body")},
+    "brief-fc4410-hire-charge": {("t100.3", "body"), ("t100.8", "body"), ("t100.11", "body")},
 }
 # Known gap (#974): each thread's passages are chosen by the question's
 # words (#858) and then by vector distance to it, and t100.11 shares no
@@ -776,7 +776,7 @@ _LATE_DISPOSITION_SHAPES = {
 # cases out of the known gap.
 _LATE_DISPOSITION_GAP = ("t100.11", "body")
 # #291's #975-shaped chronology cases, which lose t100.11 to the same gap.
-_CHRONOLOGY_GAP = ("ask-dispenser-position-june", "brief-dispenser-hire-charge")
+_CHRONOLOGY_GAP = ("ask-fc4410-june-position", "brief-fc4410-hire-charge")
 
 
 @pytest.mark.xfail(
@@ -823,8 +823,8 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
     The hashed embedder has no semantics, so one natural-language
     question misses its thread; each prompt-budget case loses one source
     to its budget by design (``ask-kayak-tight-budget`` a thread,
-    ``summarize-hall-open-points`` the message past the window, #656).
-    ``ask-dispenser-hire-outcome`` (#975) is the known #974 gap: its
+    ``summarize-qh62-open-points`` the message past the window, #656).
+    ``ask-fc4410-hire-outcome`` (#975) is the known #974 gap: its
     thread is retrieved, but per-thread passage selection leaves out the
     late closing message, which shares no word with the question. A
     change here is a retrieval or prompt assembly change: explain it in
@@ -847,11 +847,11 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
     assert lost == {
         "ask-lisbon-dates": ["retrieval"],
         "ask-kayak-tight-budget": ["prompt_assembly"],
-        "summarize-hall-open-points": ["prompt_assembly"],
-        "ask-dispenser-hire-outcome": ["prompt_assembly"],
+        "summarize-qh62-open-points": ["prompt_assembly"],
+        "ask-fc4410-hire-outcome": ["prompt_assembly"],
         # #291's #975-shaped chronology cases, in the same #974 gap.
-        "ask-dispenser-position-june": ["prompt_assembly"],
-        "brief-dispenser-hire-charge": ["prompt_assembly"],
+        "ask-fc4410-june-position": ["prompt_assembly"],
+        "brief-fc4410-hire-charge": ["prompt_assembly"],
     }
 
 
@@ -861,7 +861,7 @@ def test_prompt_budget_case_detects_omitted_evidence(records: dict[str, dict]) -
     # #656: the summary's thread text (E1) the
     # window cut short is captured as truncated; the newest message
     # shown whole is not.
-    passages = _DETAILS["summarize-hall-open-points"]["passages"]
+    passages = _DETAILS["summarize-qh62-open-points"]["passages"]
     assert passages["E1"]["truncated"] is True, passages["E1"]
     assert all(not p["truncated"] for label, p in passages.items() if label != "E1"), passages
     for case in budget:
