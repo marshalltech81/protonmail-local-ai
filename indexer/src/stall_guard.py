@@ -1,15 +1,17 @@
-"""Ends the indexer when one unit of work — a message's parse, or one
-attachment's extraction — runs far past any legitimate duration.
+"""Ends the indexer when one unit of work — a message's parse, one
+attachment's extraction, or one embed request while a lone message is
+charged — runs far past any legitimate duration.
 
 The worker is a single synchronous thread, so a step that never returns
 (a parser or extractor stuck on hostile input) blocks all ingestion, and
 the health check alone cannot help: Compose does not restart an
 unhealthy container. The guard runs on a daemon thread, watches the
-queue's in-flight message, and exits the process once it has gone
-longer than the limit without progress (``IndexingQueue.note_progress``,
-called per attachment). Compose's restart policy brings the indexer
-back, and the attempt ``begin_attempt`` charged stays counted, so a
-message that stalls the worker every time reaches ``dead``.
+queue's in-flight message, and exits the process once it has gone longer
+than the limit without progress (``IndexingQueue.note_progress``, called
+per attachment and per completed embed request). Compose's restart
+policy brings the indexer back, and the attempt ``begin_attempt``
+charged stays counted, so a message that stalls the worker every time
+reaches ``dead``.
 
 ``os._exit`` rather than ``sys.exit``: the stuck step owns the main
 thread, so nothing short of ending the process stops it. SQLite rolls

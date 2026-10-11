@@ -1,18 +1,16 @@
 """
 Per-stage timing for the indexing hot path.
 
-The batched indexer runs five serial stages per message (parse,
-thread, chunk, embed, db_write) but until now exposed no per-stage
-cost. An operator investigating "why is indexing slow?" had no way to
-distinguish a slow embed call from a slow SQLite write. The aggregator
-collects timings in a bounded ring buffer and emits p50/p95 summaries
-on demand so the overhead stays trivial regardless of mailbox size.
+The batched indexer runs five stages per message (parse, thread,
+chunk, embed, db_write). Per-stage cost lets an operator investigating
+"why is indexing slow?" tell a slow embed call from a slow SQLite
+write. The aggregator collects timings in a bounded ring buffer and
+emits p50/p95 summaries on demand so the overhead stays trivial
+regardless of mailbox size.
 
 The aggregator is intentionally tiny — a deque, a copy-and-sort
 percentile, and a dict — so it can run on the indexing hot path without
-allocating per-message dicts or pulling in numpy/scipy. Anything fancier
-(prometheus exporter, histogram buckets) belongs in a follow-up once the
-basic numbers are in front of an operator.
+allocating per-message dicts or pulling in numpy/scipy.
 """
 
 from collections import deque
