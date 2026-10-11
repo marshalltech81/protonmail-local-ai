@@ -243,21 +243,23 @@ def register_system_tools(server, db):
         Also call this when asked which version or build of this server is running.
 
         This server answers only from the local index, which mbsync fills
-        from Proton every few minutes; it never contacts Proton itself. The
-        index is current when mail synced recently, the indexer is running,
-        and no message is waiting to be indexed (pending, retrying or
-        deferred). When it is not current, the
-        reasons are listed: say so before relying on the results, since
-        recent mail may be missing. Mail that reached Proton after the last
-        sync is never searchable yet.
+        from Proton once per sync interval (sync_interval_secs); it never
+        contacts Proton itself. The index is current when mail synced
+        recently, the indexer is running, and no message is waiting to be
+        indexed (pending, retrying or deferred) or to have its remaining
+        attachments extracted (extraction deferred). When it is not
+        current, the reasons are listed: say so before relying on the
+        results, since recent mail or attachment text may be missing.
+        Mail that reached Proton after the last sync is not in the index
+        yet, even when the index is current.
 
         Returns server_version (the deployed source commit, with -dirty for
         local changes, or unknown when build identity is unavailable),
         current and the reasons it is false, last sync time, indexer
-        liveness, queue counts (pending, retrying, deferred, parked
-        trashed files that do not count against current, dead, and
-        how many waiting messages are already indexed and being
-        reparsed), total threads
+        liveness, queue counts (pending, retrying, deferred, extraction
+        deferred, parked trashed files that do not count against
+        current, dead, and how many waiting messages are already
+        indexed and being reparsed), total threads
         and messages, the date range, and how many Message-IDs more
         than one file claims (counts only).
         """

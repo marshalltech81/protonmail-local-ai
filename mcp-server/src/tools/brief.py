@@ -924,7 +924,7 @@ def register_experimental_tools(
             from_addr: Optionally scope to a specific sender (canonical
                        email; resolve via find_contact if you only have
                        a name)
-            date_from: Optionally scope to emails after this date (ISO 8601)
+            date_from: Optional date lower bound (ISO 8601), inclusive.
                        A thread qualifies when its span (its
                        messages' occurred_at, else sent_at, else when first
                        indexed, #1373) overlaps
@@ -932,8 +932,10 @@ def register_experimental_tools(
                        each citation's occurred_at and sent_at give
                        that passage's own dates, which can fall
                        outside the range.
-            date_to: Optionally scope to emails before this date (ISO 8601)
-            max_threads: Maximum threads to use as evidence (default: 5)
+            date_to: Optional date upper bound (ISO 8601), inclusive; a
+                     date-only value covers the whole UTC day.
+            max_threads: Maximum threads to use as evidence (default 5,
+                         clamped to [1, 10])
 
         Returns:
             The brief as prose and as structured output (status, brief,
@@ -1201,7 +1203,7 @@ def register_experimental_tools(
             from_addr: Optionally scope to a specific sender (canonical
                        email; resolve via find_contact if you only have
                        a name)
-            date_from: Optionally scope to emails after this date (ISO 8601)
+            date_from: Optional date lower bound (ISO 8601), inclusive.
                        A thread qualifies when its span (its
                        messages' occurred_at, else sent_at, else when first
                        indexed, #1373) overlaps
@@ -1209,8 +1211,10 @@ def register_experimental_tools(
                        each citation's occurred_at and sent_at give
                        that passage's own dates, which can fall
                        outside the range.
-            date_to: Optionally scope to emails before this date (ISO 8601)
-            max_threads: Maximum threads to use as evidence (default: 5)
+            date_to: Optional date upper bound (ISO 8601), inclusive; a
+                     date-only value covers the whole UTC day.
+            max_threads: Maximum threads to use as evidence (default 5,
+                         clamped to [1, 10])
 
         Returns:
             The check as prose and as structured output (status,

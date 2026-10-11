@@ -1,6 +1,10 @@
 # MCP Tool Reference
 
-All tools are available inside Claude Desktop once the stack is running.
+An MCP client connected to the running server sees the search,
+retrieval and system tools. The intelligence tools (Group 3) are
+registered only when `INFERENCE_MODE` is not `none` (the default is
+`none`), and the [experimental tools](#experimental-tools) only when
+`MCP_EXPERIMENTAL_TOOLS=true` as well.
 
 The server retrieves and reports mail. Linking threads and tracking matters are left to the client; see PLAN.md decision 44.
 
@@ -1006,8 +1010,8 @@ filters and `extracted_only=false`. A text query cannot reveal unextracted
 files whose filename and MIME type do not match. There is no pagination beyond
 the 50-result cap. Report limited results and unread document text as
 coverage limits rather than claiming an exhaustive attachment audit.
-For a complete list or an exact count, use
-[`query_attachments`](#query_attachments).
+For every match with a count (and the number it could not decide,
+`indeterminate`), use [`query_attachments`](#query_attachments).
 With `from_addr`, sender filtering happens after a bounded candidate scan,
 so even fewer than 50 results (including zero) can omit matching attachments
 ([#1196](https://github.com/marshalltech81/protonmail-local-ai/issues/1196)).
@@ -1217,8 +1221,8 @@ here. The structured output echoes `filter_type`.
 |---|---|---|---|
 | `folder` | string | `INBOX` | Folder to list |
 | `filter_type` | string | `all` | `all`, `unread` (threads with an unread message in `folder`) or `flagged` (threads with a flagged / starred message in `folder`); any other value is an error |
-| `limit` | int | `20` | Number of threads |
-| `offset` | int | `0` | Pagination offset |
+| `limit` | int | `20` | Number of threads; clamped to `[1, 100]` |
+| `offset` | int | `0` | Pagination offset; clamped to `[0, 1000000]` |
 
 ### `list_folders`
 List every folder holding at least one indexed message, with its
@@ -2960,7 +2964,7 @@ and what it holds. Call this when asked which version or build is running.
 | Field | Meaning |
 |---|---|
 | `server_version` | MCP server image's source commit, including `-dirty` for local changes; `unknown` when build identity is unavailable. This identifies the server code, not the MCP protocol or SQLite schema version |
-| `current` | `true` only when all three hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, and no message is pending, retrying or deferred. A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
+| `current` | `true` only when all three hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, and no message is pending, retrying, deferred or extraction deferred. A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |
 | `last_sync_at` / `sync_interval_secs` | mbsync's last successful sync from Bridge, and how often it syncs |
 | `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
