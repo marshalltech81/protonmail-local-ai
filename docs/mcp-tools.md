@@ -2538,12 +2538,14 @@ The tool description says only that the top `limit` threads are
 searched, points here, and asks the model to tell the user how much
 mail a population run will read; the steps are not sent to clients:
 
-1. Before the first call, say the scope and the most rows, attachment
-   text and threads the run will read: enumeration rows carry private
-   metadata to the calling model, `get_attachment` returns stored text
-   to it, and each extracted thread is one model call whose passages
-   reach the inference provider. A first call with `limit=1` gives the
-   count.
+1. Size each step before running it, and tell the user what it will
+   read: a first call with `limit=1` returns `total_matches`, so state
+   that count of rows before paging (rows carry private metadata to the
+   calling model); before reading attachment text, the number of
+   occurrences `get_attachment` will read (each page states the text's
+   total length); and before extracting, the number of enumerated
+   threads and calls (each extracted thread is one model call whose
+   passages reach the inference provider).
 2. Enumerate the population, paging each query to the end with
    `next_cursor`:
    - For occurrences backed by an attachment (every invoice line for
@@ -2565,7 +2567,8 @@ mail a population run will read; the steps are not sent to clients:
      can suggest candidates, not enumerate them.
    - For a body-backed population (RSVPs, say), use
      [`query_messages`](#query_messages) with `sender`, `subject` or
-     `text` and the same bounds; a broad one needs several lanes (its
+     `text`, the same bounds, and `folder="Trash"` in a separate query
+     for messages in Trash; a broad one needs several lanes (its
      multi-lane recipe).
 
    The list is complete for its filters only when `indeterminate` is
@@ -2580,13 +2583,16 @@ mail a population run will read; the steps are not sent to clients:
 3. Run `extract_from_emails` with `participant` set to the vendor's
    address (the tool has no `sender`) and a schema that declares its
    own `invoice_date` and `invoice_number`, splitting the period into
-   date windows, with `limit=50` (its maximum). Run it once per folder
+   date windows that share no instant (with date-only bounds, end one
+   window the day before the next begins), with `limit=50` (its
+   maximum). Run it once per folder
    scope the enumeration used, with `folders` to match
    (`folders=["Trash"]` for the Trash query: without it, threads filed
    only in Trash are left out). A call's `threads`
    output lists the threads it searched: check that some call
-   searched every enumerated thread, and narrow a window whose call
-   left one out. Other threads that rank for `query` take slots too,
+   searched every enumerated thread, and replace a window whose call
+   left one out with narrower windows, discarding its call's records.
+   Other threads that rank for `query` take slots too,
    and a thread falls in every window its span overlaps, so narrowing
    can fail: when a window at the smallest interval the bounds can
    express still leaves enumerated threads unsearched, report them as
@@ -2595,16 +2601,17 @@ mail a population run will read; the steps are not sent to clients:
    - Dates: the enumeration dates the carrying message, while
      `extract_from_emails` takes any thread whose span overlaps the
      window, so a January invoice in a thread with a June reply is
-     listed for January but can be extracted (and take one of the
-     `limit` slots) in June.
-   - Folders: `query_attachments` and `query_messages` filter on the
-     message's own folder, while `folders` takes every thread with a
-     message in a named folder.
-   - Senders: `participant` selects whole threads, so attachments
-     carried by other people's messages in the vendor's threads are
-     extracted too, though the enumeration's `sender` leaves them out:
-     check a record's sender from its citation's `sender` before
-     counting it.
+     listed for January, and the June call also searches that thread
+     (taking one of its `limit` slots) with the January message as
+     context, whose data the model is told to leave out.
+   - Folders: `folders` takes every thread with a message in a named
+     folder, but puts in scope only the messages filed there now, the
+     folder `query_attachments` and `query_messages` filter on.
+   - Senders: `participant` puts in scope every message with the
+     vendor in From, To or Cc, so attachments on messages others sent
+     to the vendor are extracted too, though the enumeration's `sender`
+     leaves them out: check a record's sender from its citation's
+     `sender` before counting it.
 
    That `sender`, like the `sender` and `participant` filters, is the
    claimed From address: the index does not authenticate senders and
@@ -2623,11 +2630,14 @@ mail a population run will read; the steps are not sent to clients:
    (`attachment_id` is the payload's content hash, shared by every
    message carrying the same bytes, and `claimant_id` names the
    message), and a message by `claimant_id`, and mark each enumerated
-   item a record cites as covered. Each thread is extracted by one
-   model call, so when overlapping windows or folder scopes search one
-   thread more than once, keep that thread's records from one call
-   only, and keep every record that call returned, identical ones
-   included (one invoice can repeat a line).
+   item a record cites as covered. Each call marks a thread's messages
+   in or out of its own scope (its window and folders) and tells the
+   model to extract only from in-scope messages, so calls that search
+   one thread can return different, valid records. With windows that
+   share no instant and one call per folder scope, each message is in
+   scope for one call only: keep every record from every remaining
+   call, identical ones included (one invoice can repeat a line), and
+   never merge records across calls.
    Set aside for review a record that cites no enumerated item, and
    report each enumerated item no record cites (its stored text can be
    read with `get_attachment` or `get_message`, following each
