@@ -1741,9 +1741,17 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
   list of 1,015-byte claimant IDs, so a message's cost rises with the
   corpus: 173 s and 342 MB for 2,000 messages (about 86 ms a message,
   against 6 ms for typical records), 414 s for 4,000 and 534 s and
-  831 MB for 5,000. `--wal` with that identity is therefore refused
-  above 5,000 messages, before anything is built, which keeps the
-  build under ten minutes on that laptop.
+  831 MB for 5,000. Before anything is built, `--wal` estimates the
+  WAL index's build from every cost dimension together (messages;
+  per message its attachments, the dominant term at about 2 ms each,
+  body chunks, bytes written, participant rows and continuation
+  passes; the common-ID thread's growth), with coefficients fitted to
+  those plain timings on that laptop, and refuses a run estimated over
+  30 minutes. The documented command below is estimated at about 8
+  minutes; 5,000 messages accept at most 162 attachments each, and the
+  common-ID shape with one attachment at most 11,766 messages (an
+  extrapolation past the 5,000 measured). Another host's build differs:
+  the estimate bounds the work, it is not a deadline.
 
 Run it inside the mcp-server image so SQLite and Python match the
 server's; `--help` lists every option:

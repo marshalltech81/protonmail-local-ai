@@ -1004,52 +1004,105 @@ def test_forbidden_combinations_are_refused_before_building(bench, tmp_path, cha
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize(
-    ("changes", "refused"),
-    [
-        # The common-ID WAL baseline's build grows faster than linearly:
-        # at the bound it is accepted, one message over it is refused.
-        ({"--wal": None, "--identity": "ascii998common", "--messages": "5000"}, False),
-        ({"--wal": None, "--identity": "ascii998common", "--messages": "5001"}, True),
-        # Without --wal no baseline is built; other identities scale linearly.
-        ({"--identity": "ascii998common", "--messages": "5001"}, False),
-        ({"--wal": None, "--identity": "typical", "--messages": "5001"}, False),
-        ({"--wal": None, "--identity": "ascii998", "--messages": "5001"}, False),
-        # Other options do not move the bound.
-        (
-            {
-                "--wal": None,
-                "--identity": "ascii998common",
-                "--messages": "5001",
-                "--writer-lifecycle": "arrival",
-                "--writer-batch": "1",
-            },
-            True,
-        ),
-        (
-            {
-                "--wal": None,
-                "--identity": "ascii998common",
-                "--messages": "5000",
-                "--per-message": "0",
-                "--missing": "0",
-            },
-            False,
-        ),
-    ],
-)
-def test_the_common_id_wal_baseline_is_bounded(bench, tmp_path, monkeypatch, changes, refused):
-    # Refused before anything is built: no file in the work directory
-    # and no build started.
+def _wal_argv(changes: dict, tmp_path) -> list[str]:
+    # A small valid run with --wal; each case changes it.
+    return _argv({"--wal": None, "--missing": "0", **changes, "--workdir": str(tmp_path)})
+
+
+def _estimate(bench, changes: dict, tmp_path) -> float:
+    # Parsed at one message (within any budget), then sized.
+    args = bench.parse_args(_wal_argv({**changes, "--messages": "1"}, tmp_path))
+    args.messages = int(changes.get("--messages", "300"))
+    return bench.wal_baseline_estimate(args)
+
+
+def _edge(bench, tmp_path, flag: str, low: int, high: int, fixed: dict) -> int:
+    """The largest value of ``flag`` (in ``[low, high]``) whose estimate
+    is within the budget, the other arguments ``fixed``."""
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _estimate(bench, {**fixed, flag: str(mid)}, tmp_path) <= bench.WAL_BASELINE_BUDGET_S:
+            low = mid
+        else:
+            high = mid - 1
+    return low
+
+
+def _refused(bench, argv) -> str | None:
+    try:
+        bench.parse_args(argv)
+    except SystemExit as refused:
+        return str(refused)
+    return None
+
+
+@pytest.fixture
+def no_build(bench, monkeypatch):
+    # Refused or accepted, parsing the arguments builds nothing.
     monkeypatch.setattr(bench, "build", lambda *a, **k: pytest.fail("built"))
     monkeypatch.setattr(bench, "build_wal_baseline", lambda *a, **k: pytest.fail("built"))
-    argv = _argv({**changes, "--workdir": str(tmp_path)})
-    if refused:
-        with pytest.raises(SystemExit, match="ascii998common.*at most 5,000 messages"):
-            bench.parse_args(argv)
-    else:
-        args = bench.parse_args(argv)
-        assert args.messages == int(changes["--messages"])
+
+
+def test_the_documented_wal_run_is_within_the_budget(bench, tmp_path, no_build):
+    # docs/mcp-tools.md's command (50,000 typical messages, three PDFs
+    # each): estimated at about eight minutes, well inside 30.
+    argv = ["--workdir", str(tmp_path), "--messages", "50000", "--identity", "typical"]
+    args = bench.parse_args([*argv, "--wal", "--filtered"])
+    assert bench.wal_baseline_estimate(args) < bench.WAL_BASELINE_BUDGET_S / 2
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("flag", "low", "high", "fixed"),
+    [
+        # Attachments per message, the dominant term.
+        ("--per-message", 1, 9998, {"--messages": "5000"}),
+        # Bytes written per message: the extraction rows' stress text.
+        ("--extracted-chars", 0, 10_000_000, {"--messages": "2000", "--per-message": "1"}),
+        # Body chunks (paragraphs of 250 words: one chunk each).
+        (
+            "--chunks",
+            1,
+            4000,
+            {"--messages": "5000", "--per-message": "0", "--chunk-tokens": "250"},
+        ),
+        # The common-ID thread's growth.
+        ("--messages", 1, 100_000, {"--identity": "ascii998common", "--per-message": "1"}),
+    ],
+)
+def test_the_wal_baseline_budget_holds_along_each_dimension(
+    bench, tmp_path, no_build, flag, low, high, fixed
+):
+    edge = _edge(bench, tmp_path, flag, low, high, fixed)
+    assert low < edge < high
+    under = _wal_argv({**fixed, flag: str(edge)}, tmp_path)
+    over = _wal_argv({**fixed, flag: str(edge + 1)}, tmp_path)
+    assert _refused(bench, under) is None
+    assert "estimated" in (_refused(bench, over) or "")
+    # Without --wal no baseline is built: the same corpus is accepted.
+    plain = [a for a in over if a != "--wal"]
+    assert _refused(bench, plain) is None
+    assert not list(tmp_path.iterdir())
+
+
+def test_the_wal_baseline_budget_adds_its_dimensions(bench, tmp_path, no_build):
+    # Attachments and chunks each within the budget alone, over it
+    # together: one estimate, not one cap a dimension.
+    fixed = {"--messages": "5000", "--chunk-tokens": "250"}
+    attachments = _edge(bench, tmp_path, "--per-message", 1, 9998, fixed)
+    chunks = _edge(bench, tmp_path, "--chunks", 1, 4000, {**fixed, "--per-message": "0"})
+    a, c = str(attachments * 2 // 3), str(chunks * 2 // 3)
+    assert _refused(bench, _wal_argv({**fixed, "--per-message": a}, tmp_path)) is None
+    assert (
+        _refused(bench, _wal_argv({**fixed, "--per-message": "0", "--chunks": c}, tmp_path)) is None
+    )
+    together = _wal_argv({**fixed, "--per-message": a, "--chunks": c}, tmp_path)
+    assert "estimated" in (_refused(bench, together) or "")
+    # The finding's example.
+    example = _wal_argv(
+        {"--identity": "ascii998common", "--messages": "5000", "--per-message": "9998"}, tmp_path
+    )
+    assert "estimated" in (_refused(bench, example) or "")
     assert not list(tmp_path.iterdir())
 
 

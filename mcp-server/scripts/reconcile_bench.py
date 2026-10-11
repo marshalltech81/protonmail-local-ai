@@ -3390,14 +3390,31 @@ MAX_ATTACHMENTS = 10_000 - 2
 MAX_EXTRACTED_CHARS = 10_000_000
 # ``message_id`` and ``_wide_digits`` stay unique below this.
 MAX_MESSAGES = 2**30
-# The largest corpus ``--wal`` accepts with ``--identity ascii998common``:
-# every message rewrites the one thread's claimant-ID list (about 1 KB a
-# message already in it), so the WAL baseline's build grows faster than
-# linearly. A plain timing on a laptop (Apple silicon, macOS): 2,000
-# messages 173 s, 4,000 414 s, 5,000 534 s; the bound keeps the build
-# under ten minutes there. Other identities grow linearly (10,000
-# typical messages: 63 s).
-MAX_COMMON_WAL_MESSAGES = 5_000
+# The WAL baseline's build (``build_wal_baseline``) is estimated before
+# anything is built (``wal_baseline_estimate``) and refused over
+# ``WAL_BASELINE_BUDGET_S``. Coefficients fitted to plain timings of the
+# build on one laptop (Apple silicon, macOS, 2026-10-11), not a profiler;
+# another host differs, so the estimate bounds the work, not a deadline.
+# Per message: a fixed cost, each PDF attachment (its extraction rows,
+# chunk and 16 KB vector: the dominant term), each body chunk, each byte
+# written (the file, and the stress text of each extraction row), each
+# participant row, and each byte rebuilt by a further continuation pass.
+# The common-ID shape adds, per pass, a fixed cost a message (its one
+# thread's body is always at the token cap) and one that grows with the
+# messages already in the thread (each rewrites its claimant-ID list).
+# Measured: 2,000 typical messages of one PDF 10.9 s, 5,000 of three
+# 47.3 s, 1,000 of three 250-word chunks 10.2 s, 500 worst 15.4 s, 30
+# cardinality 5.2 s, 500 utf8x4 3.6 s, 200 of 200 PDFs 103 s, 100 of
+# 1,000 PDFs 210 s, ascii998common 2,000 173 s and 5,000 534 s.
+WAL_EST_MESSAGE_S = 0.001
+WAL_EST_ATTACHMENT_S = 0.0018
+WAL_EST_CHUNK_S = 0.002
+WAL_EST_BYTE_S = 0.16e-6
+WAL_EST_PARTICIPANT_S = 11.7e-6
+WAL_EST_PASS_BYTE_S = 0.05e-6
+WAL_EST_COMMON_MESSAGE_S = 0.0674
+WAL_EST_COMMON_GROWTH_S = 6.8e-6
+WAL_BASELINE_BUDGET_S = 1800
 # The most digests an upload holds: built in memory (430 MB packed),
 # over 16 times the largest upload #1469's sizing runs send (600,000).
 MAX_UPLOAD = 10_000_000
@@ -3667,37 +3684,98 @@ def _file_floor(args: argparse.Namespace) -> int:
     )
 
 
-def _largest_file(args: argparse.Namespace) -> int:
-    """The largest Maildir file of the corpus, exactly (or the first size
-    over ``PARSE_MAX_BYTES``, which is refused anyway): every size occurs
-    in the first ``SHAPE_PERIOD`` messages, and every attachment part of
-    a message has one size, so ``n`` parts cost ``n - 1`` times the
-    second part's bytes more than one."""
-
-    def size(i: int, parts: int) -> int:
-        return len(
-            render_eml(
-                i,
-                args.identity,
-                args.records,
-                args.references,
-                args.chunks,
-                args.chunk_tokens,
-                parts,
-            )
+def _file_sizes(args: argparse.Namespace) -> list[int]:
+    """The Maildir file size of each of the first ``SHAPE_PERIOD``
+    messages, exactly, where every size of the corpus occurs (stopping
+    at the first over ``PARSE_MAX_BYTES``, which is refused anyway):
+    every attachment part of a message has one size, so ``n`` parts
+    cost ``n - 1`` times the second part's bytes more than one. Cached
+    per shape: two rules use it."""
+    return list(
+        _file_sizes_of(
+            min(args.messages, SHAPE_PERIOD),
+            args.identity,
+            args.records,
+            args.references,
+            args.chunks,
+            args.chunk_tokens,
+            args.per_message,
         )
+    )
 
-    largest = 0
-    for i in range(min(args.messages, SHAPE_PERIOD)):
-        if args.per_message < 2:
-            largest = max(largest, size(i, args.per_message))
+
+@functools.lru_cache(maxsize=8)
+def _file_sizes_of(
+    probes: int,
+    identity: str,
+    records: str,
+    references: int,
+    chunks: int,
+    chunk_tokens: int,
+    per_message: int,
+) -> tuple[int, ...]:
+    def size(i: int, parts: int) -> int:
+        return len(render_eml(i, identity, records, references, chunks, chunk_tokens, parts))
+
+    sizes = []
+    for i in range(probes):
+        if per_message < 2:
+            sizes.append(size(i, per_message))
         else:
             one, two = size(i, 1), size(i, 2)
-            largest = max(largest, one + (args.per_message - 1) * (two - one))
-        if largest > PARSE_MAX_BYTES:
+            sizes.append(one + (per_message - 1) * (two - one))
+        if sizes[-1] > PARSE_MAX_BYTES:
             # Refused anyway: rendering the other probes is wasted work.
             break
-    return largest
+    return tuple(sizes)
+
+
+def _largest_file(args: argparse.Namespace) -> int:
+    """The largest Maildir file of the corpus, exactly (or the first size
+    over ``PARSE_MAX_BYTES``, which is refused anyway; ``_file_sizes``)."""
+    return max(_file_sizes(args), default=0)
+
+
+def wal_baseline_estimate(args: argparse.Namespace) -> float:
+    """The seconds ``build_wal_baseline`` is estimated to take for the
+    corpus ``args`` describe, every cost dimension in one sum (the
+    ``WAL_EST_*`` coefficients): messages; per message its attachments,
+    body chunks, bytes written (its file, which the References, words,
+    records and identity size, and ``--extracted-chars`` stress text on
+    each extraction row), participant rows, and the bytes rebuilt by
+    each further continuation pass (``--writer-extract-seconds`` sets
+    the passes); and the common-ID thread's growth."""
+    sizes = _file_sizes(args)
+    file_bytes = sum(sizes) / len(sizes) if sizes else 0
+    probes = min(args.messages, SHAPE_PERIOD)
+    people = (
+        sum(
+            len(shape["people"]) + len(shape.get("extra_names", []))
+            for shape in (
+                _shape(i, args.identity, args.records, args.references) for i in range(probes)
+            )
+        )
+        / probes
+    )
+    # Fresh extractions a pass admits (``_writer_plan``).
+    seconds = args.writer_extract_seconds
+    per_pass = EXTRACTION_TURN_LAUNCHES // PDF_LAUNCHES
+    if seconds > 0:
+        per_pass = min(per_pass, math.ceil(EXTRACTION_TURN_SECONDS / seconds))
+    passes = max(1, math.ceil(args.per_message / per_pass))
+    per_message = (
+        WAL_EST_MESSAGE_S
+        + WAL_EST_ATTACHMENT_S * args.per_message
+        + WAL_EST_CHUNK_S * args.chunks
+        + WAL_EST_BYTE_S * (file_bytes + 4 * args.extracted_chars * args.per_message)
+        + WAL_EST_PARTICIPANT_S * people
+        + WAL_EST_PASS_BYTE_S * (passes - 1) * file_bytes
+    )
+    total = args.messages * per_message
+    if args.identity == "ascii998common":
+        n = args.messages
+        total += passes * (WAL_EST_COMMON_MESSAGE_S * n + WAL_EST_COMMON_GROWTH_S * n * n)
+    return total
 
 
 def _missing_problem(args: argparse.Namespace) -> str | None:
@@ -3754,14 +3832,6 @@ _RULES: tuple = (
         lambda a: (
             "--wal needs the indexer's tokenizer asset: run from the repository, or mount "
             "indexer/src/data/qwen3-embedding at /app/tokenizer (docs/mcp-tools.md)"
-        ),
-    ),
-    (
-        lambda a: a.wal and a.identity == "ascii998common" and a.messages > MAX_COMMON_WAL_MESSAGES,
-        lambda a: (
-            f"--wal with --identity ascii998common takes at most "
-            f"{MAX_COMMON_WAL_MESSAGES:,} messages: its WAL baseline's build grows faster "
-            "than linearly (docs/mcp-tools.md)"
         ),
     ),
     (
@@ -3846,6 +3916,16 @@ _RULES: tuple = (
             "file limit; lower --references, --chunks, --chunk-tokens or --per-message"
             if (size := _largest_file(a)) > PARSE_MAX_BYTES
             else None
+        ),
+    ),
+    # Last: the estimate renders the probes the file rule checked.
+    (
+        lambda a: a.wal and wal_baseline_estimate(a) > WAL_BASELINE_BUDGET_S,
+        lambda a: (
+            f"--wal: the WAL baseline's build is estimated at "
+            f"{wal_baseline_estimate(a) / 60:,.0f} minutes, over the "
+            f"{WAL_BASELINE_BUDGET_S // 60}-minute budget; lower --messages, --per-message, "
+            "--chunks, --chunk-tokens, --references or --extracted-chars (docs/mcp-tools.md)"
         ),
     ),
 )

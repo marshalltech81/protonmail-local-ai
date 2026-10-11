@@ -1154,3 +1154,31 @@ def test_wal_baseline_and_replies_are_what_the_indexer_writes(
         sums = conn.execute("SELECT count, length(sum) FROM thread_vector_sums").fetchall()
         assert len(sums) == (1 if identity == "ascii998common" else -(-(n + batch) // 4))
         assert all(count and size for count, size in sums)
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--messages", "300", "--per-message", "3"],
+        # Two continuation passes a message (50 extractions a pass).
+        ["--messages", "30", "--per-message", "60"],
+    ],
+)
+def test_wal_baseline_estimate_is_near_a_measured_build(bench, tmp_path, argv):
+    # ``wal_baseline_estimate``'s coefficients are one laptop's plain
+    # timings; another host's build differs, but by less than a factor
+    # of four here (a CI runner included), or the budget bounds nothing.
+    import time
+
+    args = bench.parse_args(
+        [*argv, "--workdir", str(tmp_path), "--wal", "--missing", "0", "--k", "1"]
+    )
+    corpus = tmp_path / "corpus.db"
+    bench.build(corpus, args.messages, args.per_message, "typical", "typical")
+    shape = {"identity": "typical", "records": "typical", "per_message": args.per_message}
+    started = time.perf_counter()
+    bench.build_wal_baseline(str(corpus), str(tmp_path / "base.db"), args.messages, shape)
+    measured = time.perf_counter() - started
+    estimate = bench.wal_baseline_estimate(args)
+    assert measured / 4 <= estimate <= measured * 4, (estimate, measured)
