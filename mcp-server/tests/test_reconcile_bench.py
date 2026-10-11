@@ -1085,11 +1085,21 @@ def test_writer_indexes_each_batch_into_trash(bench, tmp_path):
         assert [conn.execute(sql, params).fetchone()[0] for sql, params in counts] == before
 
 
-def test_writer_stores_the_extraction_stress_text_as_build_does(bench, tmp_path):
+def test_writer_stores_the_extraction_stress_text_as_build_does(bench, tmp_path, monkeypatch):
     # ``--extracted-chars``: every extraction row holds that many
-    # four-byte characters and no attachment chunk is built.
+    # four-byte characters and no attachment chunk is built, so, as in
+    # the indexer, the empty attachment slice writes no thread sum.
     db = tmp_path / "stress.db"
     bench.build(db, 8, 1, "typical", "typical", extracted_chars=5)
+    statements: list[str] = []
+    real = bench.sqlite3.connect
+
+    def traced(*args, **kwargs):
+        conn = real(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(bench.sqlite3, "connect", traced)
     stop = tmp_path / "stop"
     timer = _stop_after_batch(db, stop, 9)
     shape = {"per_message": 1, "extracted_chars": 5}
@@ -1100,6 +1110,9 @@ def test_writer_stores_the_extraction_stress_text_as_build_does(bench, tmp_path)
         kinds = [r[0] for r in conn.execute("SELECT kind FROM message_chunks WHERE rowid > 8")]
     assert texts == {bench._WIDE * 5}
     assert kinds == ["body"]
+    # The body's sum in phase 2c; the new thread's empty sum in phase 1.
+    sums = [s for s in statements if s.startswith("INSERT INTO thread_vector_sums")]
+    assert ["DO UPDATE" in s for s in sums] == [False, True]
 
 
 def test_writer_stops_mid_batch_once_stop_appears(bench, tmp_path):

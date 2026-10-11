@@ -283,31 +283,37 @@ def test_benchmark_schema_is_the_indexers(bench, tmp_path, table):
 # Every table the indexer writes for a message: the benchmark's, and the
 # ones only the WAL writer creates (``_WRITER_SCHEMA``).
 _WRITTEN = re.compile(
-    r"^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)"
+    r"^\s*(INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)"
     r"\s+\"?(\w+)",
     re.IGNORECASE,
 )
 
 
-def _commits(statements: list[str], tables: set[str]) -> list[tuple[str, ...]]:
-    """The tables of ``tables`` each committed transaction wrote to, in
-    commit order. A transaction that wrote none (a read the indexer
-    commits, such as ``thread_chunk_mean``'s) adds no WAL frame and is
-    left out."""
-    out: list[tuple[str, ...]] = []
-    written: set[str] = set()
+def _writes(statements: list[str], tables: set[str]) -> list[list[str]]:
+    """Each committed transaction's write statements on ``tables``, in
+    order, as ``"<VERB> <table>"`` (INSERT, UPDATE or DELETE). A
+    transaction that wrote none (a read the indexer commits, such as
+    ``thread_chunk_mean``'s) adds no WAL frame and is left out."""
+    out: list[list[str]] = []
+    written: list[str] = []
     for statement in statements:
         match = _WRITTEN.match(statement)
-        if match and match.group(1) in tables:
-            written.add(match.group(1))
+        if match and match.group(2) in tables:
+            verb = match.group(1).split()[0].upper()
+            written.append(f"{'INSERT' if verb == 'REPLACE' else verb} {match.group(2)}")
         head = statement.strip().upper()
         if head.startswith(("COMMIT", "END")):
             if written:
-                out.append(tuple(sorted(written)))
-            written = set()
+                out.append(written)
+            written = []
         elif head.startswith("ROLLBACK"):
-            written = set()
+            written = []
     return out
+
+
+def _commits(statements: list[str], tables: set[str]) -> list[tuple[str, ...]]:
+    """The tables each committed transaction wrote to (``_writes``)."""
+    return [tuple(sorted({w.split()[1] for w in writes})) for writes in _writes(statements, tables)]
 
 
 _SHAPE = {
@@ -369,7 +375,7 @@ def _indexer_commits(bench, tmp_path, monkeypatch, n: int, batch: int):
     )
     tables = _plain_tables(db._conn)
     db.close()
-    return _commits(statements, tables), tables, pragmas
+    return _writes(statements, tables), tables, pragmas
 
 
 def _stop_after_batch(db: Path, stop: Path, messages: int):
@@ -427,7 +433,7 @@ def _writer_commits(bench, tmp_path, monkeypatch, batch: int, tables: set[str], 
     ours = {_setting(s) for s in statements if s.upper().startswith("PRAGMA")}
     assert {_setting(p) for p in pragmas} <= ours
     # The setup only creates tables: every commit is the batch's.
-    return _commits(statements, tables)
+    return _writes(statements, tables)
 
 
 @pytest.mark.parametrize("batch", [1, 4])
@@ -441,10 +447,14 @@ def test_wal_writer_commits_what_the_indexer_commits_per_batch(bench, tmp_path, 
         bench, tmp_path / "indexer", monkeypatch, batch, batch
     )
     ours = _writer_commits(bench, tmp_path / "writer", monkeypatch, batch, tables, pragmas)
-    assert ours == expected
+    # Commit by commit, the same write statements in the same order (a
+    # statement's place decides when its pages are dirtied and spill).
+    assert len(ours) == len(expected)
+    for n, (a, b) in enumerate(zip(ours, expected, strict=True)):
+        assert a == b, f"commit {n}"
     # Every table the indexer wrote is one the benchmark builds or the
     # writer creates, and the writer creates exactly the rest.
-    written = set().union(*expected)
+    written = {w.split()[1] for writes in expected for w in writes}
     assert written - set(_TABLES) == set(_WRITER_TABLES) == set(bench.WRITER_TABLES)
     # The cadence the docs state: per message one enqueue, then charge,
     # phase 1 and refund, a charge and refund around chunking, and the
@@ -534,7 +544,9 @@ def _traced_rows(path: Path, root: str | None) -> dict:
         return out
 
 
-@pytest.mark.parametrize("case", ["typical", "ascii998_worst_shallow", "cardinality"])
+@pytest.mark.parametrize(
+    "case", ["typical", "ascii998_worst_shallow", "cardinality", "cardinality_names"]
+)
 def test_wal_writer_writes_the_rows_the_indexer_writes(bench, tmp_path, monkeypatch, case):
     identity, records, _pm, _c, _w, references, _n = CASES[case]
     if case.endswith("_shallow"):
@@ -587,6 +599,8 @@ def test_wal_writer_writes_the_rows_the_indexer_writes(bench, tmp_path, monkeypa
     )
     db.close()
     expected_fts = [s for s in statements if s.startswith(_FTS_WRITES)]
+    tables = set(_TABLES) | set(_WRITER_TABLES)
+    expected_writes = _writes(statements, tables)
     expected = _traced_rows(tmp_path / "indexer.db", str(maildir))
 
     ours_db = tmp_path / "writer.db"
@@ -607,6 +621,8 @@ def test_wal_writer_writes_the_rows_the_indexer_writes(bench, tmp_path, monkeypa
     timer.join()
     ours = _traced_rows(ours_db, None)
     ours_fts = [s for s in ours_statements if s.startswith(_FTS_WRITES)]
+    # Commit by commit, the same write statements in the same order.
+    assert _writes(ours_statements, tables) == expected_writes
     if case != "typical":
         # These threads' bodies pass ``THREAD_BODY_TEXT_MAX_TOKENS``,
         # which the indexer counts with its BPE tokenizer and the writer

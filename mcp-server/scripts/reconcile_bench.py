@@ -1789,36 +1789,29 @@ def _writer_phase1(
     )
     conn.execute(_INSERT_MESSAGE, _message_values(rec, now, None, folder="Trash"))
     conn.execute("DELETE FROM message_participants WHERE claimant_id = ?", (rec.cid,))
-    for (role, address), name in rec.parts.items():
-        conn.execute(
-            "INSERT OR IGNORE INTO message_participants (claimant_id, role, address, name) "
-            "VALUES (?, ?, ?, ?)",
-            (rec.cid, role, address, name),
-        )
-    for address in rec.entity_addresses:
-        domain = address.rpartition("@")[2]
-        conn.execute(
-            "INSERT INTO entities (entity_id, kind, canonical_key, organization_id, "
-            "authority_class, authority_rule) VALUES (?, 'organization', ?, NULL, "
-            "'unclassified', NULL) ON CONFLICT(entity_id) DO UPDATE SET "
-            "authority_class = excluded.authority_class, "
-            "authority_rule = excluded.authority_rule",
-            (f"org:{domain}", domain),
-        )
-        conn.execute(
-            "INSERT INTO entities (entity_id, kind, canonical_key, organization_id, "
-            "authority_class, authority_rule) VALUES (?, 'person', ?, ?, ?, ?) "
-            "ON CONFLICT(entity_id) DO UPDATE SET "
-            "authority_class = excluded.authority_class, "
-            "authority_rule = excluded.authority_rule",
-            (f"person:{address}", address, f"org:{domain}", *authority(address)),
-        )
+    # indexer/src/database.py ``_write_message_record``: every header
+    # address in order, each followed by its entity writes the first time
+    # it is seen, within the per-message entity cap.
+    entity_addresses = set(rec.entity_addresses)
+    written: set[str] = set()
+    people = [*rec.shape["people"], *rec.shape.get("extra_names", [])]
+    for role in ("from", "to", "cc"):
+        for r, address, name in people:
+            if r != role:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO message_participants (claimant_id, role, address, name) "
+                "VALUES (?, ?, ?, ?)",
+                (rec.cid, role, address, name),
+            )
+            if address in entity_addresses and address not in written:
+                written.add(address)
+                _write_entity(conn, address)
     conn.executemany(
         "INSERT INTO message_participant_names (claimant_id, role, address, name) "
         "VALUES (?, ?, ?, ?)",
         [(rec.cid, *row) for row in rec.names],
     )
-    entity_addresses = set(rec.entity_addresses)
     conn.executemany(
         "INSERT OR IGNORE INTO entity_aliases (entity_id, alias) VALUES (?, ?)",
         [(f"person:{a}", name) for _, a, name in rec.names if a in entity_addresses],
@@ -1840,6 +1833,28 @@ def _writer_phase1(
     )
     _write_thread_vector(conn, thread)
     return thread
+
+
+def _write_entity(conn: sqlite3.Connection, address: str) -> None:
+    """indexer/src/database.py ``_write_entity``: the organization, then
+    the person."""
+    domain = address.rpartition("@")[2]
+    conn.execute(
+        "INSERT INTO entities (entity_id, kind, canonical_key, organization_id, "
+        "authority_class, authority_rule) VALUES (?, 'organization', ?, NULL, "
+        "'unclassified', NULL) ON CONFLICT(entity_id) DO UPDATE SET "
+        "authority_class = excluded.authority_class, "
+        "authority_rule = excluded.authority_rule",
+        (f"org:{domain}", domain),
+    )
+    conn.execute(
+        "INSERT INTO entities (entity_id, kind, canonical_key, organization_id, "
+        "authority_class, authority_rule) VALUES (?, 'person', ?, ?, ?, ?) "
+        "ON CONFLICT(entity_id) DO UPDATE SET "
+        "authority_class = excluded.authority_class, "
+        "authority_rule = excluded.authority_rule",
+        (f"person:{address}", address, f"org:{domain}", *authority(address)),
+    )
 
 
 def _write_thread_vector(conn: sqlite3.Connection, thread: _WriterThread) -> None:
@@ -1866,9 +1881,11 @@ def _writer_phase2c(
     def chunks(attachment_id: str | None) -> None:
         # indexer/src/database.py ``replace_message_chunks``.
         assert thread.sums is not None
+        added = 0
         for pk, chunk_attachment, kind, c, text, start, end in rec.chunks:
             if chunk_attachment != attachment_id:
                 continue
+            added += 1
             vector = _unit_vector(rng)
             fts_rowid = conn.execute(
                 "INSERT INTO message_chunks_fts (text) VALUES (?)", (text,)
@@ -1885,6 +1902,9 @@ def _writer_phase2c(
             thread.count += 1
             # The thread vector is the chunks' mean; any unit vector has its size.
             thread.vector = vector
+        if not added:
+            # No vector added or removed: the indexer writes no sum.
+            return
         conn.execute(
             "INSERT INTO thread_vector_sums (thread_id, count, encoding_version, sum) "
             "VALUES (?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET "
@@ -1901,8 +1921,12 @@ def _writer_phase2c(
             "INSERT INTO attachments_fts (filename, content_type) VALUES (?, ?)",
             (shape["filename"], shape["content_type"]),
         ).lastrowid
+        # ``upsert_attachment``, the extraction, then
+        # ``set_attachment_text_complete``.
         conn.execute(
-            _INSERT_ATTACHMENT,
+            "INSERT INTO attachments (attachment_occurrence_id, claimant_id, attachment_id, "
+            "thread_id, filename, content_type, size_bytes, seen_at, fts_rowid, "
+            "extractor_module) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 occurrence,
                 rec.cid,
@@ -1913,9 +1937,15 @@ def _writer_phase2c(
                 size,
                 now,
                 fts_rowid,
+                PDF_MODULE,
             ),
         )
         conn.execute(_INSERT_EXTRACTION, (attachment_id, extracted, now))
+        conn.execute(
+            "UPDATE attachments SET text_complete = 1, text_extractor = ?, "
+            "extraction_deferred_at = NULL WHERE attachment_occurrence_id = ?",
+            (PDF_EXTRACTOR, occurrence),
+        )
         chunks(attachment_id)
     _write_thread_vector(conn, thread)
 
