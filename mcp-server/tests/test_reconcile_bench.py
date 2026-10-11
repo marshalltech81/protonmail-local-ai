@@ -1300,13 +1300,29 @@ def test_drain_enqueues_its_backlog_before_it_is_ready_and_drains_it(bench, tmp_
 def test_arrival_never_runs_out(bench, tmp_path):
     # ``arrival`` enqueues new mail whenever nothing is due, so it has no
     # backlog to exhaust.
+    import threading
+
     db = tmp_path / "arrival.db"
     bench.build(db, 8, 1, "typical", "typical")
     stop = tmp_path / "stop"
-    timer = _stop_after_ready(stop, 0.5)
+
+    def stop_after_three_batches() -> None:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if Path(str(stop) + ".ready").exists():
+                with closing(sqlite3.connect(db, timeout=30)) as conn:
+                    if conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] >= 8 + 3:
+                        break
+            time.sleep(0.01)
+        stop.touch()
+
+    timer = threading.Thread(target=stop_after_three_batches)
+    timer.start()
     out = bench.phase_writer(str(db), str(stop), 1, 0.0, shape={"per_message": 1})
     timer.join()
-    assert out["commits"] > 10
+    # Two whole batches of one (ten commits each) and a third under way,
+    # each queued when nothing was due.
+    assert out["commits"] > 2 * 10
     assert out["backlog_exhausted_at"] is None
 
 
@@ -1523,11 +1539,13 @@ def test_writer_wal_size_is_its_logical_end(bench, tmp_path):
     db = tmp_path / "grow.db"
     bench.build(db, 8, 0, "typical", "typical")
     stop = tmp_path / "stop"
-    timer = _stop_after_ready(stop, 0.5)
-    out = bench.phase_writer(str(db), str(stop), 1, 0.0)
+    # One whole batch (a lone message's ten commits), however busy the
+    # host: a fixed delay could see too few commits on a loaded runner.
+    timer = _stop_after_batch(db, stop, 9)
+    out = bench.phase_writer(str(db), str(stop), 1, 3600.0)
     timer.join()
     sizes = [size for _, size in out["commit_times"]]
-    assert len(sizes) > 4
+    assert len(sizes) == 1 + 10
     assert all(b > a for a, b in zip(sizes, sizes[1:]))
 
 
