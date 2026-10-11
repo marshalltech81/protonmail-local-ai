@@ -1,4 +1,4 @@
-"""The differential shape catalogue of #1416 round 5 (owner decision on
+"""The differential shape catalogue of #1416 (owner decision on
 #1416): attachments labelled ``message/*`` under every transfer encoding,
 carrying an OLE2 or ZIP container, a genuine email or a genuine delivery
 report. Shared by ``tests/test_message_label_containers.py``."""
@@ -23,7 +23,7 @@ LABELS = (
 ENCODINGS = ("none", "7bit", "8bit", "binary", "base64", "quoted-printable")
 # The transfer encodings of the attached email around a nested part: the
 # parser reads an identity-encoded one in place and decodes the others
-# into a tree of their own (review round 6 on #1444).
+# into a tree of their own (#1444).
 OUTER_ENCODINGS = ("none", "base64", "quoted-printable")
 
 # Bytes whose first bytes are an OLE2 or ZIP signature: identification
@@ -40,7 +40,8 @@ CONTAINERS = {
     "ole2": make_ole2("WordDocument", trailer=b"\r\n\r\nSYNTHETIC_OLE2_MARKER\r\n"),
 }
 
-# Genuine contents: their parse is pinned as it was before round 5.
+# Genuine contents: their parse is pinned as it was before #1416's
+# change (the parser of ``bd31e37``).
 GENUINE = {
     "email": (
         b"From: a@example.test\r\nSubject: SYNTHETIC_HEADER_MARKER\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"

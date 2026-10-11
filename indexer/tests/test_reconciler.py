@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from src.database import (
-    EMBEDDING_DIM,  # noqa: F401  -- via reuse
+    EMBEDDING_DIM,
     Database,
 )
 from src.reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
@@ -365,7 +365,7 @@ class TestByteIdenticalCopies:
         assert row["folder"] == "Archive"
         assert row["replied"] == 1
 
-    def test_a_trashed_copy_is_remapped_then_tombstoned_as_today(
+    def test_a_trashed_copy_is_remapped_then_tombstoned_by_the_trash_rule(
         self, db, threader, embedder, maildir
     ):
         """The guard only changes which path the claimant maps to; the
@@ -421,7 +421,7 @@ class TestByteIdenticalCopies:
         assert summary["remapped"] == 3
         lookups = [s for s in statements if "FROM indexed_files" in s and "content_hash IN" in s]
         assert len(lookups) == 1, lookups
-        # Codex round 1 on #1134: a join on ``content_hash`` (no index)
+        # #1134: a join on ``content_hash`` (no index)
         # scanned ``indexed_files`` once per missing claimant. The lookup
         # must read ``indexed_files`` once, whatever the count: its plan
         # touches no other table, so nothing drives a per-row rescan.
@@ -445,7 +445,7 @@ class TestByteIdenticalCopies:
         assert not [s for s in statements if "content_hash IN" in s]
 
     def test_a_live_copy_is_preferred_over_a_trashed_one(self, db, threader, embedder, maildir):
-        """Codex round 1 on #1134: the first candidate in path order was
+        """#1134: the first candidate in path order was
         taken even when trashed, so the message was tombstoned and later
         reaped although a live copy remained."""
         trashed = maildir / "1700000000.A1.host:2,ST"
@@ -468,7 +468,7 @@ class TestByteIdenticalCopies:
     def test_remap_onto_a_tombstoned_copy_keeps_one_tombstone(
         self, db, threader, embedder, maildir
     ):
-        """Codex round 1 on #1134: both paths held a tombstone, and moving
+        """#1134: both paths held a tombstone, and moving
         the old one onto the copy hit the primary key and aborted the
         whole sweep on every pass."""
         kept = maildir / "1700000000.M1.host:2,ST"
@@ -490,7 +490,7 @@ class TestByteIdenticalCopies:
         assert _message_row(db, entry["claimant_id"])["filepath"] == str(kept)
 
     def test_remap_keeps_the_copys_own_job(self, db, threader, embedder, maildir):
-        """Codex round 1 on #1134: the rename's ``UPDATE OR REPLACE``
+        """#1134: the rename's ``UPDATE OR REPLACE``
         moved the gone path's dead job onto the copy, replacing the copy's
         runnable one."""
         from src.queue import REASON_INITIAL_SCAN, IndexingQueue
@@ -512,7 +512,7 @@ class TestByteIdenticalCopies:
         assert not queue.is_dead(str(mapped))
 
     def test_reaping_with_every_copy_gone_unmarks_every_copy(self, db, threader, embedder, maildir):
-        """Codex round 1 on #1134: the reap unmarked only the mapped path,
+        """#1134: the reap unmarked only the mapped path,
         so a copy that came back after a transient outage stayed marked
         indexed with no mapping left to repair, and was never re-queued."""
         from src import main
@@ -567,7 +567,7 @@ class TestByteIdenticalCopies:
     def test_remap_keeps_the_runnable_job_when_the_copys_is_dead(
         self, db, threader, embedder, maildir
     ):
-        """Codex round 2 on #1134: the gone path's runnable job was always
+        """#1134: the gone path's runnable job was always
         dropped in favour of the copy's, even when the copy's was dead."""
         from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 
@@ -587,7 +587,7 @@ class TestByteIdenticalCopies:
         assert not queue.has_pending_row(str(mapped))
 
     def test_reap_unmarks_copies_with_one_scan_per_pass(self, db, threader, embedder, maildir):
-        """Codex round 2 on #1134: the unmark scanned ``indexed_files``
+        """#1134: the unmark scanned ``indexed_files``
         (no ``content_hash`` index) once per reaped thread. The pass looks
         the copies up once; each reap transaction then unmarks by path."""
         paths = []
@@ -616,7 +616,7 @@ class TestByteIdenticalCopies:
     def test_a_copy_renamed_before_the_remap_is_followed(
         self, db, threader, embedder, maildir, monkeypatch
     ):
-        """Codex round 2 on #1134: the watcher renamed the chosen copy
+        """#1134: the watcher renamed the chosen copy
         between the sweep resolving it and the remap, which then mapped
         the message to a path that no longer existed."""
         import src.reconciler as reconciler_module
@@ -649,7 +649,7 @@ class TestByteIdenticalCopies:
     def test_a_copy_restored_after_the_cached_listing_is_found_on_retry(
         self, db, threader, maildir, monkeypatch
     ):
-        """Codex round 6 on #1134: a copy absent when the sweep listed its
+        """#1134: a copy absent when the sweep listed its
         folder, and back (flag-renamed) before the copy lookup, was missed
         through the stale listing and no cache-free attempt followed. The
         retry uses one fresh listing for the whole retry phase."""
@@ -706,7 +706,7 @@ class TestByteIdenticalCopies:
         assert db.find_message_entry_by_filepath(str(mapped)) is not None
 
     def test_a_trashed_mapped_copy_moves_to_a_live_copy(self, db, threader, embedder, maildir):
-        """Codex round 3 on #1134: a mapped path still on disk but
+        """#1134: a mapped path still on disk but
         ``T``-flagged skipped the copy lookup, so it was tombstoned and
         reaped while a byte-identical live copy remained."""
         kept = maildir / "1700000000.M1.host:2,S"
@@ -747,7 +747,7 @@ class TestByteIdenticalCopies:
     def test_a_copy_restored_between_sweep_and_reap_keeps_the_message(
         self, db, threader, embedder, maildir, caplog
     ):
-        """Codex round 4 on #1134: a copy whose T flag was removed after
+        """#1134: a copy whose T flag was removed after
         the sweep is not the mapped path, so the watcher cleared nothing
         and the reaper removed the message although the copy was live."""
         kept = maildir / "1700000000.M1.host:2,ST"
@@ -833,7 +833,7 @@ class TestByteIdenticalCopies:
     def test_live_copy_checks_stay_within_the_pass_budget(
         self, db, threader, embedder, maildir, monkeypatch
     ):
-        """Codex rounds 5 and 8 on #1134: each message's copies are
+        """#1134: each message's copies are
         resolved with a listing of its own, and every listing counts
         against one budget per reap pass, so a pass lists at most
         ``_LIVE_COPY_RECHECK_LISTINGS`` directories for these checks."""
@@ -859,7 +859,7 @@ class TestByteIdenticalCopies:
         assert count_pending_deletions(db) == 1
 
     def test_a_kept_thread_is_no_longer_counted_as_blocked(self, db, threader, embedder, maildir):
-        """Codex round 5 on #1134: a thread an earlier pass recorded as
+        """#1134: a thread an earlier pass recorded as
         blocked kept its entry after a live copy cancelled the reap."""
         thread_id, restored = self._thread_of_restorable_copies(db, threader, maildir)
         rec = Reconciler(db, embedder, _default_config())
@@ -876,7 +876,7 @@ class TestByteIdenticalCopies:
     def test_a_copy_restored_after_the_threads_listing_is_kept(
         self, db, threader, embedder, maildir, monkeypatch
     ):
-        """Codex round 7 on #1134: the per-thread listing, taken for an
+        """#1134: the per-thread listing, taken for an
         earlier message, still showed a later message's copy as trashed
         after mbsync restored it, so the thread was reaped although that
         copy was live. A miss is resolved again with a fresh listing."""
@@ -930,9 +930,9 @@ class TestByteIdenticalCopies:
     def test_a_thread_past_the_budget_makes_progress_every_pass(
         self, db, threader, embedder, maildir, monkeypatch, caplog
     ):
-        """Codex round 8 on #1134: a thread needing more re-checks than the
+        """#1134: a thread needing more re-checks than the
         budget was deferred whole, and every pass repeated the same checks,
-        so it was never reaped. Now the checked messages are reaped and the
+        so it was never reaped. The checked messages are reaped and the
         unchecked ones stay, whole, in the rebuilt thread for the next pass."""
         import src.reconciler as reconciler_module
 
@@ -981,7 +981,7 @@ class TestByteIdenticalCopies:
     def test_unchecked_messages_stay_whole_in_the_rebuilt_thread(
         self, db, threader, embedder, maildir, monkeypatch
     ):
-        """The panel's consistency requirement: a message left unchecked is
+        """A message left unchecked is
         a survivor of the rebuild, so its text, chunks and the thread
         vector are computed with it."""
         import src.reconciler as reconciler_module
@@ -1056,7 +1056,7 @@ class TestByteIdenticalCopies:
     def test_a_gone_file_message_past_the_budget_waits_visibly(
         self, db, threader, embedder, maildir, monkeypatch, caplog
     ):
-        """Owner decision, round 9 on #1134: a message whose own file is
+        """Owner decision (#1134): a message whose own file is
         gone is never reaped unchecked. Past the budget it stays
         tombstoned; it cannot be rebuilt as a survivor, so its thread waits
         on the blocked-thread count and WARNING until the budget reaches
@@ -1103,7 +1103,7 @@ class TestByteIdenticalCopies:
     def test_a_message_with_many_copies_in_one_folder_is_checked(
         self, db, threader, embedder, maildir, monkeypatch
     ):
-        """Codex round 9 on #1134: 3 listings reserved per copy made a
+        """#1134: 3 listings reserved per copy made a
         message with 86 or more copies cost more than the whole budget,
         so it was never checked. It reserves its distinct folders."""
         kept = maildir / "1700000000.K0.host:2,S"
@@ -1162,7 +1162,7 @@ class TestByteIdenticalCopies:
     def test_a_refused_remap_is_a_retry_not_a_kept_copy(
         self, db, threader, embedder, maildir, monkeypatch, caplog
     ):
-        """Codex round 9 on #1134: ``kept`` was counted, and the blocked
+        """#1134: ``kept`` was counted, and the blocked
         state cleared, before the remap's result was known."""
         kept = maildir / "1700000000.M1.host:2,ST"
         mapped = maildir / "1700000001.M2.host:2,S"
@@ -1209,7 +1209,7 @@ class TestByteIdenticalCopies:
     def test_remap_onto_an_older_tombstone_restarts_the_grace(
         self, db, threader, embedder, maildir
     ):
-        """Codex round 7 on #1134: the copy's own old tombstone survived
+        """#1134: the copy's own old tombstone survived
         the remap (``add_pending_deletion`` ignores an existing row), so
         the message was reaped a grace period after the copy was trashed,
         not after the live path it was mapped to disappeared."""
@@ -1231,7 +1231,7 @@ class TestByteIdenticalCopies:
         assert db.get_thread(thread_id) is not None
 
     def test_merging_two_tombstones_keeps_the_later_mark(self, db, threader, embedder, maildir):
-        """Codex round 7 on #1134: of two tombstones the copy's was kept
+        """#1134: of two tombstones the copy's was kept
         whatever its age."""
         kept = maildir / "1700000000.M1.host:2,ST"
         mapped = maildir / "1700000001.M2.host:2,S"
@@ -1253,7 +1253,7 @@ class TestByteIdenticalCopies:
         assert db.get_thread(thread_id) is not None
 
     def test_reap_drops_a_copys_dead_job(self, db, threader, embedder, maildir):
-        """Codex round 4 on #1134: the reap unmarked a copy's path but
+        """#1134: the reap unmarked a copy's path but
         kept its dead job, so the walk skipped the copy when it came back
         until an operator requeued dead jobs."""
         from src import main
@@ -1281,7 +1281,7 @@ class TestByteIdenticalCopies:
         )
 
     def test_archive_mode_rename_sweep_remaps_to_the_copy(self, db, threader, maildir, caplog):
-        """Codex round 1 on #1134: archive mode has no reconciler, so the
+        """#1134: archive mode has no reconciler, so the
         message kept the gone path, folder and flags for ever."""
         root = maildir.parent.parent
         kept = root / "Archive" / "cur" / "1700000000.M1.host:2,RS"
@@ -1342,10 +1342,10 @@ class TestSweepPaths:
     def test_lists_each_folder_once_however_many_files_were_renamed(
         self, db, threader, maildir, monkeypatch
     ):
-        """Review (PR #246): the sweep now runs before the startup walk,
-        and it rescanned the whole folder for every stale path — O(N^2)
-        for N files renamed while the indexer was down. Each directory
-        is now listed at most once per sweep."""
+        """The sweep runs before the startup walk; rescanning the whole
+        folder for every stale path would be O(N^2) for N files renamed
+        while the indexer was down (#246). Each directory is listed at
+        most once per sweep."""
         count = 6
         for i in range(count):
             path = maildir / f"17000000{i:02d}.M{i}.host:2,S"
@@ -1426,7 +1426,7 @@ class TestSweepPaths:
     def test_clears_leftover_tombstone_on_restore_seen_at_startup(
         self, db, threader, maildir, caplog
     ):
-        """Review round 1 on #860: a restore (``T`` flag cleared) that
+        """#860: a restore (``T`` flag cleared) that
         mbsync applied while the indexer was down reaches the index only
         through this sweep, which runs in archive mode too, where no
         reconciler would clear the tombstone later. The sweep applies the
@@ -1543,7 +1543,7 @@ class TestReap:
     def test_aba_move_during_sweep_does_not_reap_the_live_message(
         self, db, threader, embedder, maildir, monkeypatch
     ):
-        """#336 review round 1: the sweep resolved path A as missing while
+        """#336: the sweep resolved path A as missing while
         the file was briefly at B, and the watcher moved it back to A
         before the tombstone was written. The map holds A again, so the
         tombstone passes the path check; with a zero grace window the
@@ -1578,7 +1578,7 @@ class TestReap:
     def test_live_checks_list_each_directory_once(
         self, db, threader, embedder, maildir, monkeypatch
     ):
-        """#336 review round 2: each tombstone whose mapped file is gone
+        """#336: each tombstone whose mapped file is gone
         made the live check list the folder again, so a batch of missing
         files in one large folder cost a folder scan per tombstone. The
         reaper shares one listings cache across the pass, as the sweep
@@ -1692,7 +1692,7 @@ class TestReap:
         assert queue.has_pending_row(str(reply))
 
     def _restore_after_snapshot(self, db, monkeypatch, trashed, live):
-        """Review round 3: the watcher restores a message after ``reap()``
+        """The watcher restores a message after ``reap()``
         read its tombstones but before the reap transaction runs."""
         snapshot = db.list_pending_deletions_older_than(datetime.now(UTC).isoformat())
         trashed.rename(live)
@@ -1722,7 +1722,7 @@ class TestReap:
     def test_reap_skips_a_message_re_trashed_after_the_snapshot(
         self, db, threader, embedder, maildir, monkeypatch
     ):
-        """Review round 4: restored and T-flagged again after the snapshot,
+        """Restored and T-flagged again after the snapshot,
         the message has a fresh tombstone, so its grace period restarts;
         matching any tombstone by message ID deleted it at once."""
         from src.queue import REASON_INITIAL_SCAN, IndexingQueue
@@ -1751,10 +1751,10 @@ class TestReap:
     def test_reap_between_restore_steps_keeps_the_message(
         self, db, threader, embedder, maildir, monkeypatch
     ):
-        """Review round 5: ``handle_moved`` committed the rename, then
+        """``handle_moved`` committed the rename, then
         cleared the tombstone in a separate step; a reap on the main thread
         in between still saw the eligible tombstone and deleted the
-        restored message. The rename and the clear are now one write."""
+        restored message. The rename and the clear are one write."""
         from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 
         rec = Reconciler(db, embedder, _default_config())
@@ -1979,9 +1979,9 @@ class TestReap:
     def test_skips_reap_when_survivor_unreadable(self, db, threader, embedder, reconciler, maildir):
         # If a survivor's file is transiently unreadable when the
         # reconciler reparses it (mbsync chmod race, perms regression),
-        # the reaper must skip the pass cleanly — not crash. Equivalent
-        # to the prior None-return behavior, now exercised through the
-        # OSError path that ``parse_email`` propagates.
+        # the reaper must skip the pass cleanly — not crash.
+        # ``parse_email`` propagates the ``OSError``, which the reaper
+        # catches.
         import os
 
         orig_path = maildir / "1700000000.M1.host:2,S"
@@ -2015,13 +2015,11 @@ class TestReap:
     def test_blocked_threads_count_surfaces_in_reap_return(
         self, db, threader, embedder, reconciler, maildir, monkeypatch
     ):
-        # Deterministic parse failures on a survivor will retry forever
-        # under the broadened ``except Exception`` catch. Without a
-        # visibility surface, the only operator signal was a stuck
-        # tombstone count + scattered WARN/ERROR log lines per pass.
-        # ``reap()`` now reports ``blocked_threads`` so a stale
-        # deletion-cleanup state is visible to ``get_mailbox_status``
-        # consumers instead of buried in logs.
+        # Deterministic parse failures on a survivor retry forever under
+        # the reaper's ``except Exception`` catch. ``reap()`` reports
+        # ``blocked_threads``, which the periodic reconcile log line
+        # carries, so a stuck thread shows as a count on every pass and
+        # not only as per-thread WARN/ERROR lines.
         orig_path = maildir / "1700000000.M1.host:2,S"
         _write_eml(orig_path, "bk1@example.com")
         thread_id = _index(orig_path, db, threader)
@@ -2169,10 +2167,10 @@ class TestReap:
     ):
         # ``parse_email`` raises ``OversizedMessageError`` when the file
         # exceeds ``INDEXER_PARSE_MAX_BYTES``. That exception is not an
-        # ``OSError`` subclass, so the reap path must catch it
-        # explicitly — otherwise a single oversized survivor crashes
-        # the whole ``reap()`` call and stalls every other thread's
-        # tombstones behind it.
+        # ``OSError`` subclass; the reap path catches it with
+        # ``OSError`` as a foreseeable failure, so an oversized survivor
+        # skips the pass and the thread stays, without stalling every
+        # other thread's tombstones.
         from src.parser import OversizedMessageError
 
         orig_path = maildir / "1700000000.M1.host:2,S"
@@ -2211,9 +2209,9 @@ class TestReap:
         # exceptions (malformed MIME the email module cannot decompose,
         # html2text blowups, etc.) so the indexer worker can route them
         # through the queue's retry + dead-letter cascade. The reaper has
-        # no equivalent — and the previous narrow ``OSError`` catch let
-        # those exceptions crash ``reap()`` entirely, stalling every
-        # other thread's tombstones. The reaper must log + skip the pass.
+        # no equivalent: an uncaught one would crash ``reap()`` and stall
+        # every other thread's tombstones, so the reaper logs and skips
+        # the pass.
         orig_path = maildir / "1700000000.M1.host:2,S"
         _write_eml(orig_path, "cp1@example.com")
         thread_id = _index(orig_path, db, threader)
@@ -2708,9 +2706,9 @@ class TestMassDeleteBrake:
         return paths
 
     def test_aborts_when_tombstones_exceed_threshold(self, db, threader, embedder, maildir):
-        # Stage past the 10-message absolute floor so the 5% percentage
-        # gate is the binding constraint — max_allowed here is
-        # ``max(10, int(30 * 0.05)) = 10``; 20 tombstones trips the brake.
+        # With 30 messages the 10-message absolute floor is the binding
+        # limit: max_allowed here is ``max(10, int(30 * 0.05)) = 10``, so
+        # 20 tombstones trip the brake.
         paths = self._stage_batch(maildir, db, threader, 30)
         for p in paths[:20]:
             t = p.with_name(p.name + "T")
@@ -2752,7 +2750,7 @@ class TestMassDeleteBrake:
         assert db.count_total_messages() == 4  # 10 - 6 reaped
 
     def test_stale_live_tombstones_do_not_trip_the_brake(self, db, threader, embedder, maildir):
-        """#336 review round 2: tombstones whose message maps to a live,
+        """#336: tombstones whose message maps to a live,
         untrashed file are stale and cleared by the reaper, but they were
         counted against the brake first. Eleven orphans in a small mailbox
         aborted every pass, and no sweep revisits their dead paths, so the
@@ -2872,7 +2870,7 @@ class TestLoadConfig:
     @pytest.mark.parametrize("name", ["INDEXER_DELETION_FORCE"])
     @pytest.mark.parametrize("raw", ["tru", "-5", "nan", "inf"])
     def test_unrecognized_boolean_fails(self, name, raw):
-        """A typo used to read as false without a word (#481)."""
+        """A typo must not read as false without a word (#481)."""
         with pytest.raises(ValueError, match=f"{name}.*not recognized"):
             load_config_from_env({name: raw})
 
@@ -2897,9 +2895,9 @@ class TestLoadConfig:
         "raw", ["tru", "nan", "NaN", "inf", "-inf", "-5", "-0.1", "2.5", "1.0001"]
     )
     def test_invalid_max_batch_pct_fails(self, raw):
-        """NaN used to pass both range checks and then raise inside every
-        reap sweep, so reaping silently never ran (#481); out-of-range
-        values used to be clamped."""
+        """NaN would pass both range checks and then raise inside every
+        reap sweep, so reaping would silently never run (#481);
+        out-of-range values are rejected, not clamped."""
         with pytest.raises(ValueError, match="INDEXER_DELETION_MAX_BATCH_PCT.*between 0 and 1"):
             load_config_from_env({"INDEXER_DELETION_MAX_BATCH_PCT": raw})
 

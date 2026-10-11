@@ -48,7 +48,7 @@ _CORPUS = _HERE.parent / "corpus.py"
 def _corpus_constant(name: str) -> Any:
     """The literal ``corpus.py`` assigns to ``name``, read from its source:
     the corpus reads the committed images at import, so importing it
-    could not run before they exist (review round 1 on #908)."""
+    could not run before they exist (#908)."""
     for node in ast.parse(_CORPUS.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.Assign) and [
             t.id for t in node.targets if isinstance(t, ast.Name)

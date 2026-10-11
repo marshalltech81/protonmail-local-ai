@@ -105,7 +105,7 @@ def _kind_cases(arg):
                 ("ftp://provider.example/v1", False),
                 ("not a url", False),
                 (f"https://user:{_URL_MARK}@provider.example/v1", False),
-                # Review round 3: a query string or fragment could carry a
+                # A query string or fragment could carry a
                 # credential into an error message, and only containers
                 # resolve host.docker.internal.
                 (f"https://provider.example/v1?key={_URL_MARK}", False),
@@ -225,7 +225,7 @@ def test_parse_reads_flags_positionals_and_env(tmp_path):
 
 
 def test_runtime_cap_bounds_the_run_and_reports_inconclusive(tmp_path, monkeypatch, capsys):
-    """Review round 3: the table's runtime cap reaches the deadline, and
+    """The table's runtime cap reaches the deadline, and
     reaching it is inconclusive, never a pass."""
     seen = []
 
@@ -284,8 +284,8 @@ def test_deadline_interrupts_a_response_that_never_finishes():
         thread.join(timeout=5)
         listener.close()
     elapsed = time.monotonic() - started
-    # Bytes kept arriving past the 5 s read timeout's reach, yet the run
-    # ended at the deadline.
+    # Bytes kept arriving, so no read sat idle long enough for the 5 s
+    # read timeout, yet the run ended at the 1 s deadline.
     assert elapsed < 4 and len(trickled) >= 5
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
@@ -331,7 +331,7 @@ def test_meter_notes_requests_without_usage():
 
 
 def test_meter_counts_a_failed_attempt_as_unreported_usage():
-    """Review round 2: an attempt that raised may still have been
+    """An attempt that raised may still have been
     processed (and billed) without returning usage, so the token total
     is no longer complete."""
 
@@ -360,10 +360,10 @@ _IDENTITY = {"endpoint": "http://127.0.0.1/v1", "model": "m", "batch_size": 64}
 
 
 def test_cache_serves_a_repeated_call_and_re_embeds_a_changed_batch(tmp_path):
-    """A chunk vector is cached under the whole call it was sent in
-    (Codex round 1): the provider's output can depend on a text's batch
-    neighbours, so a call that differs in any text, or in order, is
-    sent again whole, as a fresh build would send it."""
+    """A chunk vector is cached under the whole call it was sent in: the
+    provider's output can depend on a text's batch neighbours, so a call
+    that differs in any text, or in order, is sent again whole, as a
+    fresh build would send it."""
     cache = VectorCache(tmp_path / "cache", _IDENTITY)
     inner = _Inner()
     embedder = CachedEmbedder(inner.embed_batch, cache, repeat=1)
@@ -414,7 +414,7 @@ def test_cache_key_covers_text_repeat_and_identity(tmp_path, change):
 )
 def test_identity_endpoint_is_the_whole_accepted_url(tmp_path, url):
     """The cache identity names the endpoint through ``sanitize_endpoint``;
-    every URL the table accepts survives it whole (review rounds 2-3),
+    every URL the table accepts survives it whole,
     so two destinations never share cached vectors."""
     raw = _valid_raw(tmp_path)
     raw["EMBED_BASE_URL"] = url
@@ -502,7 +502,7 @@ def test_query_sender_sends_each_query_alone_as_a_string_unnormalised():
         [],
         [[1.0] * EMBEDDING_DIM, [1.0] * EMBEDDING_DIM],
         [[float("nan")] * EMBEDDING_DIM],
-        # Review round 2: as mcp-server's ``embed_query`` rejects them.
+        # As mcp-server's ``embed_query`` rejects them.
         [[0.0] * EMBEDDING_DIM],
         [[1.0] * (EMBEDDING_DIM - 1)],
     ],

@@ -276,7 +276,7 @@ def test_pdf_rows_before_pypdf_620_are_re_extracted_once(tmp_path, monkeypatch, 
 
 
 def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
-    """Review round 1 on #262: a refresh with OCR off would replace the
+    """#262: a refresh with OCR off would replace the
     row's OCR text with "OCR disabled" and clear the indexed chunks."""
     db = _seed_thread_for_cache_test(tmp_path)
     attachment = _attachment(b"png bytes", filename="scan.png", content_type="image/png")
@@ -328,8 +328,8 @@ def test_cache_row_from_a_newer_extractor_version_is_reused(tmp_path, monkeypatc
 
 def test_stale_row_is_left_to_the_occurrences_that_select_its_module(tmp_path, monkeypatch):
     """#928: the same bytes attached as ``.bin`` select no extractor, so
-    they neither use nor refresh the stale DOCX row (before, they re-ran
-    the DOCX extractor for it). They get their own row, and the DOCX row
+    they neither use nor refresh the stale DOCX row. They get their own
+    row, and the DOCX row
     is left for a ``.docx`` occurrence to refresh."""
     db = _seed_thread_for_cache_test(tmp_path)
     blob = _attachment(b"docx bytes", filename="blob.bin", content_type="application/octet-stream")
@@ -640,7 +640,7 @@ def test_ocr_disabled_row_stays_cached_while_ocr_is_off(tmp_path, monkeypatch):
 
 
 def test_image_ocr_disabled_row_does_not_block_a_pdf_occurrence(tmp_path, monkeypatch):
-    """Review round 2: the PDF extractor reads a digital text layer without
+    """The PDF extractor reads a digital text layer without
     OCR, so an "OCR disabled" row written for the bytes as an image must
     not keep a PDF occurrence of them unextracted while OCR is off. Since
     #928 the row is the image module's, which a PDF occurrence never reads."""
@@ -1108,9 +1108,8 @@ class TestNonSuccessPlanPaths:
 
 class TestExtractedTextCap:
     def test_cap_truncates_text_in_persisted_cache_row(self, tmp_path):
-        """End-to-end through the real dispatcher: a 5,000-char payload
-        with a 128-char cap must result in 128 chars of cached text and
-        only the chunks derivable from that prefix."""
+        """End-to-end through the real dispatcher: a 15,000-char payload
+        with a 128-char cap leaves at most 128 chars of cached text."""
         db = _setup_db_for_attachment(tmp_path)
         long_payload = ("paragraph one. " * 1000).encode()
         attachment = _attachment(payload=long_payload)
@@ -1189,7 +1188,7 @@ def test_batch_results_are_shared_per_extractor_module(tmp_path, monkeypatch):
 
 
 def test_ocr_disabled_row_does_not_block_a_non_ocr_occurrence(tmp_path, monkeypatch):
-    """Review round 1: bytes cached "OCR disabled" from an image must not
+    """Bytes cached "OCR disabled" from an image must not
     block the same bytes attached as text while OCR is off — the text
     extractor does not need OCR. Since #928 the row is the image module's."""
     db = _seed_thread_for_cache_test(tmp_path)
@@ -1389,8 +1388,8 @@ class TestAttachmentOutcomeCounts:
     """#871: the periodic attachments aggregate counts every attachment
     occurrence by outcome, so a broken OCR toolchain or parser shows up
     as a rising ``failed`` / ``ocr_disabled`` count rather than not at
-    all. Occurrences are counted when their message commits (review
-    round 1), so a message re-prepared after an embedder outage is not
+    all. Occurrences are counted when their message commits, so a
+    message re-prepared after an embedder outage is not
     counted twice."""
 
     @staticmethod
@@ -1463,7 +1462,7 @@ class TestAttachmentOutcomeCounts:
             assert marker not in caplog.text
 
     def test_a_message_prepared_twice_is_counted_once(self, tmp_path, monkeypatch):
-        """Review round 1: after an embedder outage the message is
+        """After an embedder outage the message is
         prepared again; only the attempt that commits is counted."""
         self._drain()
         self._run(tmp_path / "first", monkeypatch, "failed")
@@ -1565,7 +1564,7 @@ class TestAttachmentOutcomeCounts:
         ("dropped", False),
         ("dropped_text", True),
         # A page pypdf cannot read may still be OCR-recovered: a
-        # diagnostic count, not lost text (review round 3).
+        # diagnostic count, not lost text.
         ("pdf_pages_failed", False),
         ("pdf_pages_unrecovered", True),
         ("ocr_capped_pdfs", True),
@@ -1595,7 +1594,7 @@ class TestAttachmentOutcomeCounts:
 
     @pytest.mark.parametrize("field, degraded", _DEGRADED_CASES)
     def test_degraded_counts(self, field, degraded):
-        """Review round 1: the line is a WARNING when any count means
+        """The line is a WARNING when any count means
         attachment text is missing from search."""
         counts = self._zero() | {"success": 1, field: 1}
         assert attachment_indexing.attachment_outcomes_degraded(counts) is degraded
@@ -1731,7 +1730,7 @@ class TestLegacyOle2CacheRows:
             extractor.assert_not_called()
 
     def test_row_holds_for_an_ooxml_labelled_occurrence(self, tmp_path, monkeypatch):
-        """Review round 1: the same bytes labelled ``.docx`` / ``.xlsx`` (or
+        """The same bytes labelled ``.docx`` / ``.xlsx`` (or
         ``.pptx``, #936) would be rejected the same way, so the row stands
         in for them."""
         from src.extractors import LEGACY_OLE2_ERROR
@@ -1903,7 +1902,7 @@ class TestLegacyOle2CacheRows:
     def test_stale_docx_row_is_not_refreshed_by_other_labels(self, tmp_path, monkeypatch):
         """#928: a stale ``failed`` DOCX row (migrated under ``docx``) is
         neither used nor refreshed by a ``.bin`` or ``.doc`` occurrence of
-        the bytes (before, a ``.bin`` refresh rewrote it ``unsupported``):
+        the bytes:
         each extracts under its own label's namespace (with #1416, both run
         the ``doc`` extractor the directory names), and the DOCX row is
         left for a ``.docx`` occurrence."""
@@ -2264,7 +2263,10 @@ class TestPermanentFailureCacheRows:
     served to every later occurrence that runs it, instead of a ``failed``
     row the extractor re-runs every 7 days. #1032 adds a deck and a
     document over their pre-open package budgets, decided from the ZIP
-    central directory alone."""
+    central directory alone; #983 an encrypted legacy deck and #1401 an
+    image over the pixel ceiling. The #1416 container cases are decided
+    from the container's directory before any extractor runs, so their
+    rows carry no extractor stamp."""
 
     _CASES = {
         "encrypted-pdf": (_encrypted_pdf_case, "application/pdf", "locked.pdf", "pdf"),
@@ -2384,7 +2386,7 @@ class TestPermanentFailureCacheRows:
             assert marker not in caplog.text
 
     def test_alternating_labels_do_not_overwrite_the_permanent_row(self, tmp_path, monkeypatch):
-        """Review round 4, finding 1: the same bytes under a label that runs
+        """The same bytes under a label that runs
         another extractor (a ``.docx`` occurrence of a workbook over the
         eager-part budget) write their own row, so a later ``.xlsx``
         occurrence is still served the budget row, not a ``failed`` row it
@@ -2422,7 +2424,7 @@ class TestPermanentFailureCacheRows:
         )
 
     def test_a_stale_row_is_refreshed_only_by_its_modules_occurrence(self, tmp_path, monkeypatch):
-        """Review round 4, finding 2: a stale ``xlsx@5`` row is refreshed by
+        """A stale ``xlsx@5`` row is refreshed by
         an occurrence that runs XLSX; a ``.docx`` occurrence of the same
         bytes runs DOCX into its own row and leaves the stale row alone."""
         payload, error, extractor_name = _xlsx_budget_case(monkeypatch)
@@ -2753,7 +2755,7 @@ class TestPerModuleCacheCatalogue:
     def test_labels_that_run_the_same_extractor_share_its_row(
         self, first_label, tmp_path, monkeypatch
     ):
-        """#928 review round 1: OOXML bytes labelled ``.doc`` run the DOCX
+        """#928: OOXML bytes labelled ``.doc`` run the DOCX
         extractor, so they share the ``.docx`` row (extracted once) rather
         than storing a second copy under ``doc``. OLE2 bytes under ``.doc``
         run the legacy extractor and keep their own row."""
@@ -2779,7 +2781,7 @@ class TestPerModuleCacheCatalogue:
     ):
         """#986: a PowerPoint file (OLE2) sent as ``.doc`` cached an empty
         row from the Word extractor. Its directory names PowerPoint, so it
-        now runs the ``.ppt`` extractor under either label (#1416); each
+        runs the ``.ppt`` extractor under either label (#1416); each
         label keeps its own row (#928), so each runs it once, in either
         order. Both extractors are stubbed (no catdoc or Java)."""
         from src import extractors
@@ -3238,7 +3240,7 @@ class TestOccurrenceTextComplete:
     def test_payload_loss_stays_with_its_occurrence_when_bytes_share_a_row(
         self, tmp_path, monkeypatch
     ):
-        """Review round 2 on #1286: a defective decode can yield the same
+        """#1286: a defective decode can yield the same
         bytes as an intact copy, so both use one cached row; the loss is
         the occurrence's, never the row's."""
         db = _setup_db_for_attachment(tmp_path)
@@ -3257,7 +3259,7 @@ class TestOccurrenceTextComplete:
         assert cached["text_complete"] == 1
 
     def test_a_lossy_transport_attached_email_is_zero(self, tmp_path, monkeypatch):
-        """Review round 4 on #1286: a parsed attached email whose base64
+        """#1286: a parsed attached email whose base64
         transport lost bytes is stored ``text_complete = 0`` even when its
         extraction succeeds."""
         import base64

@@ -391,7 +391,7 @@ class TestEntityPruningOnReap:
         assert len(_entities(db)) == total - 2
 
     def test_prune_work_follows_entities_not_recipients(self, db):
-        """Review round 1: a crafted header lists thousands of recipients
+        """A crafted header lists thousands of recipients
         but only ``MAX_ENTITY_PARTICIPANTS_PER_MESSAGE`` get entities.
         The prune issues statements only for addresses that own one, so
         the recipients past the cap cost no per-address work."""
@@ -421,7 +421,7 @@ class TestEntityPruningOnReap:
         # A few statements per entity-owning address (existence check,
         # organization lookup, delete, which the trace reports again for
         # the alias cascade) plus the organization sweep and the mention
-        # read: not one per recipient (over 15,000 before the filter).
+        # read: not one per recipient.
         assert len(entity_statements) <= 4 * MAX_ENTITY_PARTICIPANTS_PER_MESSAGE + 5
         assert set(_entities(db)) == {
             "person:sam@gmail.com",

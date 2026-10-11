@@ -3,9 +3,9 @@ Log lines for the indexer's recurring work: failure recoveries (#873),
 the queue heartbeat and maintenance summaries (#874), and WAL and
 storage (#875).
 
-Each line carries counts, durations, fixed text and type names only, so
-every test also checks that a synthetic marker placed in mail, a path or
-a provider error stays out of the log.
+Each line carries counts, durations, fixed text and type names only;
+tests that place a synthetic marker in mail, a path or a provider error
+check that it stays out of the log.
 """
 
 import logging
@@ -146,7 +146,7 @@ class TestHealthFileRecovery:
         assert len(_messages(caplog, "health file refresh failed")) == (
             extractors._WARNINGS_PER_WINDOW
         )
-        # Codex round 2 on #904: not an attachment line, so it must not
+        # #904: not an attachment line, so it must not
         # turn the attachments aggregate into a WARNING.
         assert extractors.drain_extractor_counts()["warnings_suppressed"] == 0
         assert extractors.drain_suppressed_lines() == 5
@@ -261,7 +261,7 @@ class TestRescanRecovery:
 
 class TestRescanRenameSweepFailure:
     def test_a_sweep_failure_does_not_stop_the_walk(self, tmp_path, monkeypatch, caplog):
-        """Codex round 4 on #1134: the rename sweep shared the walk's
+        """#1134: the rename sweep shared the walk's
         ``try``, so a sweep failure (an unreadable directory) skipped the
         walk that finds missed new mail in every other folder."""
         caplog.set_level(logging.INFO)
@@ -286,7 +286,7 @@ class TestRescanRenameSweepFailure:
         assert MARKER not in caplog.text
 
     def test_fail_then_succeed_logs_one_recovery(self, tmp_path, monkeypatch, caplog, clock):
-        """Codex round 5 on #1134: the sweep's failure had no recovery
+        """#1134: the sweep's failure had no recovery
         line once it ran on its own."""
         caplog.set_level(logging.INFO)
         outcomes = [OSError(13, "denied", MARKER), None]
@@ -923,7 +923,7 @@ class TestOnMovedFailureLogsTypeOnly:
         assert MARKER not in caplog.text
 
     def test_tombstone_lookup_failure(self, tmp_path, monkeypatch, caplog):
-        """Review round 1 on #860: the leftover-tombstone lookup that
+        """#860: the leftover-tombstone lookup that
         precedes ``update_filepath`` on an archive-mode restore runs
         inside the same error boundary. watchdog does not catch handler
         exceptions, so one escaping here would end the observer thread."""

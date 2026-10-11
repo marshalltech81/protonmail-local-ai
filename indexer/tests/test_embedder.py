@@ -553,7 +553,7 @@ class TestEmbedConcurrency:
         assert ticks["n"] <= 1
 
     def test_failure_finished_alongside_a_reported_success_stops_new_requests(self, monkeypatch):
-        # Review round 1: ``wait`` can report one finished request while
+        # ``wait`` can report one finished request while
         # another has already failed. The failure must be seen before the
         # freed slot is refilled. The patched ``wait`` reproduces that
         # interleaving: it waits for both requests but reports only the
@@ -595,7 +595,7 @@ class TestEmbedConcurrency:
         assert sorted(calls) == ["0", "1"]
 
     def test_failure_during_the_progress_callback_stops_new_requests(self):
-        # Review round 2: a request that fails while ``on_batch_complete``
+        # A request that fails while ``on_batch_complete``
         # runs (the indexer's writes SQLite) must be seen before the
         # freed slot is refilled. Request "1" fails only once the
         # callback for request "0" has started, and the callback returns
@@ -695,7 +695,7 @@ class TestEmbedConcurrency:
         assert sorted(calls) == ["0", "1"]
 
     def test_a_retry_after_another_request_failed_is_not_sent(self):
-        """Codex round 2 on #749: the failure check runs right before
+        """#749: the failure check runs right before
         every provider call, retries included. Request "1" hits a
         transient error and backs off; while it waits, request "0"
         fails. When "1" wakes, its retry must not reach the provider."""
@@ -809,7 +809,7 @@ class TestWaitForReady:
         emb.wait_for_ready(timeout=2)
 
     def test_retries_on_connect_error_then_succeeds(self, monkeypatch):
-        # Skip the embedder's 3 s sleep between probes so the test runs fast.
+        # Skip the embedder's sleep between probes so the test runs fast.
         monkeypatch.setattr(time, "sleep", lambda _s: None)
         emb = _make_embedder()
         attempts = {"n": 0}
@@ -931,10 +931,10 @@ def _assert_scrubbed(exc: BaseException, caplog, status_code: int) -> None:
 
 
 class TestWaitForReadyScrubsProviderText:
-    """``wait_for_ready`` is the one startup embed call that reached the
-    container log without ``scrub_embed_error``: a non-transient status
-    error propagated with the provider's response body, and the deadline
-    error embedded the last error's repr (#686)."""
+    """``wait_for_ready``'s errors reach the container log, so the
+    non-transient status error and the deadline error carry only
+    ``scrub_embed_error``'s type and status, never the provider's
+    response body (#686)."""
 
     def test_non_transient_status_error_keeps_only_type_and_status(self, caplog):
         caplog.set_level(logging.DEBUG)
@@ -1152,7 +1152,7 @@ class TestRetryLogging:
     def test_a_request_that_succeeds_after_retrying_logs_recovery(self, caplog):
         """A retried request that then succeeds logs exactly one recovery
         line, so a retry line is never the last word on that request
-        (Codex round 1 on #904)."""
+        (#904)."""
         caplog.set_level(logging.DEBUG)
         emb = _make_embedder()
         attempts = {"n": 0}
@@ -1179,7 +1179,7 @@ class TestRetryLogging:
         assert self._MARKER not in caplog.text
 
     def test_recovery_is_logged_whenever_its_retry_line_was(self, caplog):
-        """Codex round 3 on #904: with the shared budget spent by the
+        """#904: with the shared budget spent by the
         retry line itself, the recovery must still follow it, or the
         retry line is the last word on a request that went through. A
         request whose retry line was withheld has nothing to answer."""
@@ -1267,7 +1267,7 @@ class TestRetryLogging:
 
         logged = [r for r in caplog.records if r.getMessage().startswith("embed retry")]
         assert len(logged) == extractors._WARNINGS_PER_WINDOW
-        # Codex round 2 on #904: suppressed embed lines are counted apart
+        # #904: suppressed embed lines are counted apart
         # from the attachment WARNINGs, so they never make the attachments
         # aggregate a WARNING.
         assert extractors.drain_extractor_counts()["warnings_suppressed"] == 0
