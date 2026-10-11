@@ -5,8 +5,10 @@
 protonmail-local-ai is a containerised, privacy-first AI search and
 intelligence layer for ProtonMail. The official Proton Mail Bridge app
 runs on the host (see [Bridge](#bridge)) and three containers (mbsync,
-indexer, mcp-server) run beside it; storage, sync, and indexing never
-leave the host. Embedding and inference are operator-supplied
+indexer, mcp-server) run beside it; storage, sync and the index never
+leave the host, while the text sent for embedding, inference and
+reranking goes to whichever endpoints the operator configures.
+Embedding and inference are operator-supplied
 external dependencies — the project itself ships no model-serving
 components, and whether they run on the host (LM Studio, vLLM,
 `mlx_lm.server`, etc.) or against a remote provider is a deployment
@@ -212,7 +214,7 @@ The stack uses two isolated bridge networks:
 - `app-net` for `indexer` ↔ `mcp-server`. Both reach the
   operator-supplied embedder, inference, and (optional) reranker —
   either at remote URLs or, when the operator runs a host-side server,
-  via OrbStack's `host.docker.internal`.
+  via `host.docker.internal`.
 
 For stricter deployments, `docker-compose.hardened.yml` marks `app-net`
 as `internal: true`. This is compatible with operator-installed
@@ -462,8 +464,8 @@ the official `cohere` SDK against the Cohere rerank API
 (default) returns RRF order directly.
 
 When operator-installed servers run on the host, they should bind to
-`127.0.0.1` only. Containers reach them via OrbStack's
-`host.docker.internal` — this is the project's expectation. Binding a
+`127.0.0.1` only. Containers reach them via `host.docker.internal`
+(OrbStack and Docker Desktop) — this is the project's expectation. Binding a
 host-side server to `0.0.0.0` or a LAN IP exposes it to the network
 beyond what the project intends.
 
@@ -4016,17 +4018,18 @@ and exporter were present.
 | Operation | Local only | Leaves machine |
 |---|---|---|
 | Embedding — `EMBED_BASE_URL` points at a host-side server | ✅ | Never |
-| Embedding — `EMBED_BASE_URL` points at a remote provider | Retrieval queries + indexed content | Email body chunks → provider |
+| Embedding — `EMBED_BASE_URL` points at a remote provider | The index | Every message's subject, body text and extracted attachment text at index time; search-query text at retrieval time → provider |
 | Reranking — `RERANK_BASE_URL` points at a host-side server | ✅ | Never |
-| Reranking — `RERANK_BASE_URL` points at a remote provider | Retrieval queries | Candidate thread subjects, up to five changed reply subjects each, and retrieved chunks → provider |
+| Reranking — `RERANK_BASE_URL` points at a remote provider | Retrieval | The search query, candidate thread subjects, up to five changed reply subjects each, and retrieved chunks → provider |
 | Q&A — `INFERENCE_MODE=openai`, host-side `INFERENCE_BASE_URL` | Retrieval local | Never |
-| Q&A — `INFERENCE_MODE=openai`, remote `INFERENCE_BASE_URL` | Retrieval local | Retrieved chunks → OpenAI-compatible provider |
-| Q&A — `INFERENCE_MODE=anthropic` | Retrieval local | Retrieved chunks → Anthropic-compatible provider |
+| Q&A — `INFERENCE_MODE=openai`, remote `INFERENCE_BASE_URL` | Retrieval local | Retrieved chunks with their subject, participants, dates and attachment names → OpenAI-compatible provider |
+| Q&A — `INFERENCE_MODE=anthropic` | Retrieval local | Retrieved chunks with their subject, participants, dates and attachment names → Anthropic-compatible provider |
 | Q&A — `INFERENCE_MODE=none` (default) | ✅ | Never (intelligence tools not registered) |
 
 > **Note on remote providers.** Pointing any of these at a remote
-> provider ships data over the network: every email body chunk
-> through the embedder at index time, every search-query string
+> provider ships data over the network: every message's subject,
+> body text and extracted attachment text through the embedder at
+> index time, every search-query string
 > through the embedder at retrieval time, and every retrieved chunk
 > through the inference and reranker endpoints. This is a deliberate
 > departure from a fully-local posture; choose the provider URLs

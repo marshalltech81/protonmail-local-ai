@@ -264,8 +264,9 @@ require_private_optional_file() {
 }
 
 # API keys are wired as Docker secrets (see ``secrets:`` in
-# docker-compose.yml). Putting them in ``.env`` would surface them in
-# ``docker inspect`` and is therefore disallowed.
+# docker-compose.yml), so a key in ``.env`` is refused: Compose passes
+# no ``*_API_KEY`` variable to the containers, so it would never be
+# used, and it would sit in ``.env``, which is not held to mode 600.
 reject_secret_in_env() {
     local key_name="$1"
     local secret_path="$2"
@@ -452,9 +453,11 @@ env_value() {
 
 # env_value with surrounding whitespace removed, for the values the
 # Python services read with ``.strip()``: every number, boolean and mode
-# below. SYNC_INTERVAL and SYNC_DEADLINE_SECONDS (mbsync's shell),
-# MCP_PORT (also Compose's port mapping), URLs and model names are
-# passed on unstripped, so they are read with env_value.
+# below, and EMBED_MODEL and RERANK_MODEL. SYNC_INTERVAL and
+# SYNC_DEADLINE_SECONDS (mbsync's shell), MCP_PORT (also Compose's port
+# mapping) and URLs are passed on unstripped, so they are read with
+# env_value (resolve_base_url trims a URL itself); INFERENCE_MODEL is
+# read both ways, since only an empty value takes Compose's default.
 env_value_stripped() {
     local value
 
@@ -520,10 +523,9 @@ check_mcp_token
 # fallback: choosing a mode without its required vars is a startup error.
 #
 # *_API_KEY values must never appear in .env: they are wired as Docker
-# secrets in docker-compose.yml. A key pasted into .env would leak into
-# ``docker inspect`` output and silently mask the secret-file value,
-# since both services read the secret file first and only fall back to
-# the env var.
+# secrets in docker-compose.yml (see reject_secret_in_env). Under
+# Compose the secret file always exists, and both services read it
+# first, falling back to the env var only when the file is absent.
 reject_secret_in_env "INFERENCE_API_KEY" "$INFERENCE_KEY_FILE"
 reject_secret_in_env "EMBED_API_KEY" "$EMBED_KEY_FILE"
 reject_secret_in_env "RERANK_API_KEY" "$RERANK_KEY_FILE"

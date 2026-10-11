@@ -47,7 +47,7 @@ from tests.answer_eval.cases import (
     thread_id_of,
 )
 from tests.answer_eval.cli_judge import CliJudgeError
-from tests.answer_eval.config import ConfigError, LayerConfig, load_layer
+from tests.answer_eval.config import CLI_MODES, ENABLED_MODES, ConfigError, LayerConfig, load_layer
 from tests.answer_eval.graders import (
     CHRONOLOGY_CHECKS,
     FAIL,
@@ -379,6 +379,16 @@ class TestConfig:
     def test_answerer_is_required(self):
         with pytest.raises(ConfigError, match="INFERENCE_MODE"):
             load_layer("INFERENCE", {"INFERENCE_MODE": "none"})
+
+    @pytest.mark.parametrize("layer", ["INFERENCE", "JUDGE"])
+    def test_unknown_mode_error_lists_every_accepted_mode(self, layer):
+        """The refusal names every mode ``load_layer`` accepts for the
+        layer, so a judge CLI mode is not left out of it (#1505)."""
+        accepted = {"none", *ENABLED_MODES} | (set(CLI_MODES) if layer == "JUDGE" else set())
+        with pytest.raises(ConfigError, match=f"{layer}_MODE must be one of") as e:
+            load_layer(layer, {f"{layer}_MODE": "bogus"})
+        listed = set(str(e.value).split(": ", 1)[1].split(", "))
+        assert listed == accepted
 
     def test_answerer_mode_defaults_to_none(self):
         """#750: INFERENCE_MODE defaults to none, as for the server."""

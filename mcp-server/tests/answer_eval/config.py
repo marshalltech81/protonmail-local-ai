@@ -217,7 +217,9 @@ def load_layer(
         return _load_cli_judge(mode, env)
     if mode not in ENABLED_MODES:
         modes = (
-            "anthropic, claude-cli, none, openai" if layer == "JUDGE" else "anthropic, none, openai"
+            "anthropic, claude-cli, codex-cli, none, openai"
+            if layer == "JUDGE"
+            else "anthropic, none, openai"
         )
         raise ConfigError(f"{layer}_MODE must be one of: {modes}")
     base_url = env.get(f"{layer}_BASE_URL", "").strip()

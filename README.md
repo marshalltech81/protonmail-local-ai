@@ -1,11 +1,11 @@
 # protonmail-local-ai
 
 A privacy-first AI search and intelligence layer for ProtonMail. Ask
-questions about your inbox in plain English. Email storage, sync, and
-indexing always stay on your machine; whether the LLM and embedder
-calls are local or remote is your choice — point them at an
-OpenAI-compatible or Anthropic-compatible provider, including a
-host-side server you install yourself.
+questions about your inbox in plain English. Email storage, sync and
+the search index always stay on your machine; whether the LLM and
+embedder calls, which carry mail text, are local or remote is your
+choice — point them at an OpenAI-compatible or Anthropic-compatible
+provider, including a host-side server you install yourself.
 
 ## What It Does
 
@@ -97,7 +97,7 @@ Edit `.env` to point at the providers you want to use:
 - `EMBED_BASE_URL` + `EMBED_MODEL` — OpenAI-compatible
   embedder. Remote (DeepInfra, OpenRouter) or a host-side server you
   install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`). Containers
-  reach a host-side server via OrbStack's `host.docker.internal`.
+  reach a host-side server via `host.docker.internal`.
   The schema reserves a fixed 4096-dim vector — pick a model that
   produces 4096-dim vectors (Qwen3-Embedding-8B variants) or run a
   schema migration.
@@ -201,9 +201,9 @@ Once connected, ask Claude Desktop:
 
 ## Privacy Boundaries
 
-Email storage, sync, and indexing always stay on your machine. Whether
-embeddings, inference, and your *conversations* leave the host depends
-on four independent choices: which embedder URL you wire up, which
+Email storage, sync and the search index always stay on your machine.
+Whether the text sent for embedding, inference and reranking, and your
+*conversations*, leave the host depends on four independent choices: which embedder URL you wire up, which
 `INFERENCE_MODE` you select, whether you enable reranking with
 `RERANK_MODE`, and which MCP client you connect. Be deliberate about
 all four layers. At startup the indexer and the MCP server log one
@@ -211,12 +211,12 @@ all four layers. At startup the indexer and the MCP server log one
 endpoint is not host-local (`127.0.0.1`, `::1`, `localhost`,
 `host.docker.internal`), naming the mode and the endpoint's host.
 
-### 1. Storage and indexing layer — always local
+### 1. Storage and indexing layer — local except the embedder
 
 | Data | Where it lives |
 |---|---|
 | Your emails (Maildir) | Local Docker volume — never leaves your machine |
-| Embeddings | Wherever `EMBED_BASE_URL` points. A host-side server (LM Studio, vLLM, `mlx_lm.server`, TEI, etc.) keeps email body chunks on your machine; a remote provider (DeepInfra, OpenRouter, etc.) ships chunks to that provider at index time and search-query strings at retrieval time. |
+| Embeddings | Wherever `EMBED_BASE_URL` points. A host-side server (LM Studio, vLLM, `mlx_lm.server`, TEI, etc.) keeps the embedded text on your machine; a remote provider (DeepInfra, OpenRouter, etc.) receives every message's subject, body text and extracted attachment text at index time, and search-query strings at retrieval time. |
 | Search index (SQLite FTS5 + sqlite-vec) | Local Docker volume |
 | Bridge ↔ Proton traffic | The only mandatory path off your machine for mail data |
 
@@ -255,7 +255,7 @@ Reranking is a separate, opt-in stage of hybrid search, controlled by
 | Mode | What happens to retrieved email content |
 |---|---|
 | `none` (default) | No reranking; nothing is sent anywhere for this stage. |
-| `cohere` | The search query and each candidate thread's subject, up to five changed reply subjects from its messages, and its best-matching passage (or snippet) are sent to the Cohere rerank API, or to `RERANK_BASE_URL` if set. Requires `RERANK_MODEL` and `.secrets/rerank_api_key.txt`. |
+| `cohere` | The search query and each candidate thread's subject, up to five changed reply subjects from its messages, and its best-matching passage (or snippet) are sent to `RERANK_BASE_URL` (`default` = the Cohere rerank API at api.cohere.com). Requires `RERANK_MODEL` and `.secrets/rerank_api_key.txt`. |
 
 These settings only govern what the MCP server does *internally* during a tool
 call. They do not govern what your MCP *client* does with the result.

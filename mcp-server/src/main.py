@@ -1023,10 +1023,9 @@ def main():
     if inference_client is not None:
         # Surface the resolved wire endpoint, not "(SDK default)". In a
         # privacy-sensitive deployment retrieved email excerpts go to
-        # whatever URL the SDK resolves to, so the operator-facing log
-        # must name it explicitly. ``InferenceClient.base_url`` reads
-        # the URL back from the SDK after fallback resolution — same
-        # pattern as ``EmbedClient.base_url`` above.
+        # this URL, so the operator-facing log must name it explicitly.
+        # ``InferenceClient.base_url`` reads the URL back from the SDK
+        # client — same pattern as ``EmbedClient.base_url`` above.
         log.info(f"  Inference:      {inference_client.base_url} (model={INFERENCE_MODEL})")
     log.info(f"  Rerank mode:    {RERANK_MODE}")
     if reranker is not None:

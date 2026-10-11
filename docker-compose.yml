@@ -345,8 +345,9 @@ services:
       MCP_EXPERIMENTAL_TOOLS: ${MCP_EXPERIMENTAL_TOOLS:-false}
       # OpenAI-compatible embedder for query-time embedding via the
       # openai SDK. Must point at the same provider + model as the
-      # indexer; otherwise query and indexed vectors are produced by
-      # different models and hybrid search degrades.
+      # indexer: query and indexed vectors from different embedders are
+      # not comparable, so mcp-server refuses to start on a mismatch
+      # with the embedder recorded in the index.
       EMBED_MODE: ${EMBED_MODE:-openai}
       EMBED_BASE_URL: ${EMBED_BASE_URL}
       EMBED_MODEL: ${EMBED_MODEL}
@@ -420,7 +421,8 @@ secrets:
   # (LM Studio, vLLM, mlx_lm.server) write any placeholder string
   # (e.g. ``unauthenticated``); the compat server ignores the bearer
   # header. Leave the file empty only when INFERENCE_MODE=none.
-  # Never put this value in .env (it appears in docker inspect output).
+  # Never put this value in .env: under Compose the services read it
+  # only from this file, and `make up` refuses an API key in .env.
   inference_api_key:
     file: ./.secrets/inference_api_key.txt
   # Embed API key — always required non-empty because EMBED_MODE has
