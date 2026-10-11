@@ -710,7 +710,7 @@ sync_loop_counts_failures_but_not_unopenable_far_boxes() {
     ((rc == 1)) || return 1
     [[ "$(wc -l <"$calls_file")" -eq 10 ]] || return 1
     [[ "$(wc -l <"$stamps_file")" -eq 1 ]] || return 1
-    grep -q 'exceeded 5 consecutive failures' "$WORK/loop-log" || return 1
+    grep -q 'failed 5 syncs in a row — exiting' "$WORK/loop-log" || return 1
     SYNC_LOG="$WORK/loop-log"
     marker_not_logged
 }
@@ -1275,7 +1275,7 @@ stalled_syncs_count_to_the_exit_without_a_stamp() {
     ((rc == 1)) || return 1
     [[ "$(grep -c started "$CHILD_LOG")" -eq 2 ]] || return 1
     [[ ! -s "$stamps_file" ]] || return 1
-    grep -q 'exceeded 2 consecutive failures' "$SYNC_LOG" || return 1
+    grep -q 'failed 2 syncs in a row — exiting' "$SYNC_LOG" || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
