@@ -242,6 +242,40 @@ def _claimant(path: Path) -> str:
     return msg.claimant_id
 
 
+# Every ``Message`` field, none of them a provider identity (#1316, T1).
+_MESSAGE_FIELDS = [
+    "message_id",
+    "in_reply_to",
+    "references",
+    "subject",
+    "from_addr",
+    "to_addrs",
+    "cc_addrs",
+    "date",
+    "body_text",
+    "folder",
+    "filepath",
+    "attachments",
+    "has_attachments",
+    "from_addrs",
+    "size",
+    "mtime_ns",
+    "content_hash",
+    "date_status",
+    "first_indexed_at",
+    "occurred_at",
+    "sender_ambiguous",
+    "participant_names",
+    "participant_names_complete",
+    "subject_complete",
+    "from_addresses_complete",
+    "to_addresses_complete",
+    "cc_addresses_complete",
+    "attachments_manifest_complete",
+    "body_complete",
+    "parse_caps",
+]
+
 _SOURCE = parser.SourceMetadata(
     folder="INBOX", flags=frozenset("S"), size=0, mtime_ns=None, path="synthetic://1"
 )
@@ -302,6 +336,10 @@ class TestParserIgnoresIdentityHeaders:
         else:
             assert tagged.claimant_id != plain.claimant_id
         assert all(marker not in repr(tagged) for marker in _ID_MARKERS)
+        # Pinned, so a new ``Message`` field (a provider identity among
+        # them, even one equal on both messages) fails here until it is
+        # classified and this claim rechecked.
+        assert [f.name for f in dataclasses.fields(parser.Message)] == _MESSAGE_FIELDS
         assert all(marker not in caplog.text for marker in _ID_MARKERS)
 
     @pytest.mark.parametrize("identity_first", [False, True], ids=["after-ids", "top"])
@@ -528,12 +566,21 @@ class TestClaimantsStayIndependent:
         ).fetchone()
         assert tombstones == [(str(trashed), a, thread_a)]
         held_a = idx.rows_of(a)
-        assert held_a["pending_deletions"] == [(str(trashed), a, thread_a, mock.ANY)]
-        assert all(held_a[t] for t in populated)
+        assert held_a.pop("pending_deletions") == [(str(trashed), a, thread_a, mock.ANY)]
+        # Every other row of the first claimant is as it was, apart from
+        # the sweep following the flag rename to the trashed path.
+        renamed = {
+            table: sorted(
+                tuple(str(trashed) if v == str(first) else v for v in row) for row in rows
+            )
+            for table, rows in rows_a.items()
+            if table != "pending_deletions"
+        }
+        assert held_a == renamed
         assert idx.rows_of(b) == rows_b
         assert not idx.db._conn.execute("SELECT 1 FROM reaped_messages").fetchall()
         assert idx.tables_holding(_ID_MARKERS) == set()
-        observed |= {t for t, r in held_a.items() if r}
+        observed |= {t for t, r in held_a.items() if r} | {"pending_deletions"}
 
         idx.reconciler(grace_days=0).reap()
 
@@ -596,6 +643,7 @@ class TestClaimantsStayIndependent:
         assert not rows_b["message_participants"] and not rows_b["message_participant_names"]
         assert "betaword" in " ".join(idx.chunks_of(b).values())
         assert idx.rows_of(a) == rows_a
+        assert idx.tables_holding(_ID_MARKERS) == set()
 
         idx.reap(capped)
 
