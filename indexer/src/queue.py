@@ -320,8 +320,10 @@ class IndexingQueue:
         ``last_stage = 'interrupted'``, so a process that dies mid-step
         leaves the row counted and marked. ``end_attempt`` or any outcome
         method refunds it and clears the mark. A marked row whose
-        attempts are exhausted got there only through such deaths, so it
-        is dead-lettered here rather than run again; an unmarked row over
+        attempts are exhausted was interrupted (a charged step, or
+        batch-wide work, which charges nothing) with no attempt left;
+        earlier attempts may be ordinary failures. It is dead-lettered
+        here rather than run again; an unmarked row over
         the limit (``INDEXER_MAX_ATTEMPTS`` lowered) still runs, and
         ``mark_failed`` decides.
         """
@@ -335,7 +337,7 @@ class IndexingQueue:
         ):
             warn_rate_limited(
                 log,
-                "dead-letter: %s interrupted mid-processing on every attempt",
+                "dead-letter: %s interrupted mid-processing with its attempts exhausted",
                 filepath,
                 level=logging.ERROR,
                 attachment=False,
@@ -649,7 +651,9 @@ class IndexingQueue:
         trashed (#1331) and ``reparse_dead`` the dead ones (#1078).
         ``oldest_due_age``
         is how long, in seconds, the longest-waiting due row has been due
-        (0 when none is due): it grows while draining is stalled.
+        (0 when none is due): it grows while draining is stalled. During
+        the initial index it is not a wait: that backlog is queued due at
+        each message's own date (``oldest_first``).
         """
         now = now or datetime.now(UTC)
         counts, oldest_due = self.db.queue_heartbeat_counts(

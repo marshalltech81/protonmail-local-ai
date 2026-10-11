@@ -28,8 +28,8 @@ python-pptx as an opaque part and never read: only slide and notes
 text is. This route depends on python-pptx 1.0.2's ``Package`` /
 ``PartFactory`` API; ``test_python_pptx_route_for_variants_still_holds``
 fails if an upgrade breaks it. Legacy binary ``.ppt`` is an OLE2
-compound file, which the dispatcher records ``unsupported`` before this
-module runs.
+compound file, which the dispatcher sends to the ``ppt`` extractor
+(#957, #1416), never here.
 
 The work is bounded per extraction, counted as the walk goes:
 

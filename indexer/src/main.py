@@ -659,9 +659,8 @@ INDEXER_ATTACHMENT_MAX_BYTES = _int_env(
     "INDEXER_ATTACHMENT_MAX_BYTES", _DEFAULT_ATTACHMENT_MAX_BYTES, minimum=1
 )
 INDEXER_OCR_MAX_PAGES = _int_env("INDEXER_OCR_MAX_PAGES", 20, minimum=1)
-# Per-page OCR time ceiling. Tesseract is single-threaded and a
-# crafted high-noise image (still inside ``INDEXER_ATTACHMENT_MAX_BYTES``)
-# can keep it busy for minutes; combined with ``INDEXER_OCR_MAX_PAGES``
+# Per-page OCR time ceiling. A crafted high-noise image (still inside
+# ``INDEXER_ATTACHMENT_MAX_BYTES``) can keep Tesseract busy for minutes; combined with ``INDEXER_OCR_MAX_PAGES``
 # that pins the worker for tens of minutes per PDF. Set to 0 to
 # disable the timeout. Image and PDF OCR keep a CPU limit derived from it
 # (``extractors.image.child_cpu_seconds``, ``extractors.pdf

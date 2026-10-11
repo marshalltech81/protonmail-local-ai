@@ -3,8 +3,9 @@
 Shared by the ``doc`` extractor (catdoc), the ``ppt`` extractor, which
 runs Apache POI in a Java process (#957), and the extractors that run
 in the Python extractor child (``extractor_child.py``: the OOXML
-formats, ``xls``, ``eml``, ``image`` and ``html``, which also converts
-message bodies) through ``run_child`` below. Every tool is
+formats, ``xls``, ``eml``, ``image``, ``pdf``, ``container``
+identification and ``html``, which also converts message bodies)
+through ``run_child`` below. Every tool is
 attacker-reachable parsing code, so the run is bounded and its output
 is treated as data:
 
@@ -427,9 +428,10 @@ def run_child(
     the result's ``name``. ``on_report`` (when set) is called once the
     output has parsed, with the caps, counts and recovered errors,
     before the text is returned or the child's error raised; not when
-    the run failed or its output broke the protocol. The wall-clock
-    timeout is past the CPU limit, so a CPU-bound child meets that
-    first."""
+    the run failed or its output broke the protocol. Each caller sizes
+    the wall-clock timeout from its own allowance; it is not always past
+    the CPU limit, so a CPU-bound child may end as ``ToolTimeoutError``
+    rather than ``ToolCrashError`` (both are ``failed``)."""
     global _launches
     frames = _Frames(caps, counts | {CHILD_LAUNCHES}, on_progress, names)
     try:
