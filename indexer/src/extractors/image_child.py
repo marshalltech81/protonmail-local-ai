@@ -40,9 +40,9 @@ run and restores it after:
   and its ``DecompressionBombError`` above twice it reject the image
   from the header alone.
 * A frame at or under the ceiling is decoded and OCR'd at full
-  resolution, as before.
-* A JPEG or MPO over it is decoded at the smallest scale (1/2, 1/4 or
-  1/8, up to ``MAX_DRAFT_FACTOR``, which is 2) that fits, through
+  resolution.
+* A JPEG or MPO over it is decoded at the largest scale (1/2, then 1/4
+  or 1/8, up to ``MAX_DRAFT_FACTOR``, which is 2) that fits, through
   ``Image.draft`` before any decode or rotation; the returned size is
   checked, and the factor is recorded for the parent
   (``record_image_scale_factor``), which reports it as an extractor cap.

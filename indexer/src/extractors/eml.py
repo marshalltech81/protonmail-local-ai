@@ -228,7 +228,7 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
     # The walk reads each nested email where it meets it, in document
     # order under one decoded-bytes budget, and renders an inline one the
     # body chose under an alternative or related in place, with the same
-    # label and headers (review round 12).
+    # label and headers.
     walk.max_depth = _MAX_DEPTH
     walk.decode = lambda part: _read_nested(part, decodable)
     walk.render = lambda inner, depth: _section_head(inner, depth, caps, degraded)
@@ -281,8 +281,8 @@ def _section_head(
     msg: email.message.Message, depth: int, caps: dict[str, None], degraded: Counter[str]
 ) -> str:
     """A message's section head: its depth label (below the root) and
-    header lines. A header line the parse dropped is reported (review
-    round 10), since its text is not indexed."""
+    header lines. A header line the parse dropped is reported, since its
+    text is not indexed."""
     if any(isinstance(d, parser.DROPPED_HEADER_DEFECTS) for d in msg.defects):
         caps["eml_header_lines"] = None
     lines = [f"[Attached message, depth {depth}]"] if depth > 1 else []
@@ -320,7 +320,7 @@ def _read_nested(
     carries (``_inner_message``), whether text was or may have been lost,
     and whether an unread one still shows its depth label: one in
     uuencode, its aliases or anything else has no decoder, so its
-    transport text is never indexed (review round 3)."""
+    transport text is never indexed."""
     encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
     if encoding not in _READ_ENCODINGS:
         return None, True, True
@@ -352,9 +352,9 @@ def _inner_message(
         if decoded is None:
             return None, True
         # A lenient decode can drop bytes and still succeed: the email
-        # is rendered, but its text is not whole (base64 review round 1,
+        # is rendered, but its text is not whole (base64, and
         # quoted-printable #1288). A transport line the parse dropped is
-        # lost too (review round 8).
+        # lost too.
         lossy = parser._transport_decode_lost(transport, encoding) or (
             parser._transport_lines_dropped(part)
         )

@@ -33,8 +33,7 @@ fixed tokens and counts only (#1293):
   name of what the extraction raised.
 
 The caps, counts and the OCR failure are applied and logged here, from
-``_report``, whether the child then returned text or raised, as the
-in-process extractor applied them before it returned or raised. The
+``_report``, whether the child then returned text or raised. The
 child's ``FileNotDecryptedError`` or ``LimitReachedError`` (pypdf,
 matched by exact type name) is raised here as ``PdfEncryptedError`` or
 ``PdfLimitError``, so the dispatcher records it ``unsupported`` (#931)
@@ -330,8 +329,8 @@ def extract(
 
 
 def _report(child: ChildReport, *, max_ocr_pages: int, max_pdf_pages: int | None) -> None:
-    """Apply and log what the child reported besides its text, as the
-    in-process extractor did where it happened: its degradation counts,
+    """Apply and log what the child reported besides its text: its
+    degradation counts,
     the OCR DPI it lowered, the caps that cut it and an OCR fallback that
     failed. Only fixed text, the configured limits and the child's counts
     and type names are logged."""

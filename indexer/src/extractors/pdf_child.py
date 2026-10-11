@@ -53,8 +53,8 @@ always fail the same way (#931). The child reports either by type name
 and the parent raises it again. One raised by a single page's text
 extraction is a per-page failure like any other, below.
 
-What the in-process extractor logged here crosses to the parent as
-fixed tokens instead (``pdf``): the caps that cut (``report_cap``), the
+The caps, the lowered OCR DPI and an OCR failure cross to the parent as
+fixed tokens (``pdf``), which logs them: the caps that cut (``report_cap``), the
 lowered OCR DPI (``record_pdf_ocr_dpi``) and the type name of an OCR
 fallback that failed (``record_recovered_error``); the counters and the
 text loss cross as the child's degradation counts. Nothing here logs
@@ -237,7 +237,7 @@ def extract(
     """
     # Pages pypdf could not read, and the ones OCR then recovered: the
     # difference is counted for the attachments aggregate as
-    # ``pdf_pages_unrecovered`` (review round 4 on #884), on every return
+    # ``pdf_pages_unrecovered`` (#884), on every return
     # and raise below.
     failed: set[int] = set()
     digital_pages = _extract_digital_pages(
@@ -320,8 +320,8 @@ def _text_from_pages(
         # reported (#257), and the parent logs it.
         record_recovered_error(type(exc).__name__)
         if len(digital_text) >= _MIN_DIGITAL_CHARS:
-            # A mixed PDF keeps its digital text, as before page-level
-            # OCR; its unread pages are lost, as past the cap.
+            # A mixed PDF keeps its digital text; its unread pages are
+            # lost, as past the cap.
             note_text_lost()
             return digital_text, EXTRACTOR_DIGITAL
         # The digital text layer was below the usable threshold, so
@@ -401,7 +401,7 @@ def _extract_ocr(
     ``pdf._PAGES_PER_RENDER`` pages, so no page outside ``pages`` is
     rendered. The render timeout is one budget shared by
     the runs, counting only time spent in Poppler, so the whole render
-    stays bounded as when it was one call; Tesseract time is bounded per
+    stays within one OCR timeout; Tesseract time is bounded per
     page by its own timeout. pdf2image's own page count before each
     render takes no timeout; see the comment at the page-count guard.
     Each call's pages are OCR'd before the next call renders, and each
@@ -421,7 +421,7 @@ def _extract_ocr(
     per-call ``TemporaryDirectory`` in the run's scratch directory
     (``TMPDIR``, on the ``/tmp`` tmpfs), as are pdf2image's copies of the
     payload. ``pdf2image`` writes one PPM per rendered page (a US-letter
-    page at 200 dpi is ~6 MB), and the tmpfs counts against the
+    page at 200 dpi is ~11 MB), and the tmpfs counts against the
     container's memory, so the directory is removed once the call's
     pages are OCR'd, on success and exception; the runner removes the scratch directory
     whatever is left in it once the child's process group is dead, a
@@ -504,7 +504,7 @@ def _extract_ocr(
                 # the parent logs it as an extractor cap. Reported once a
                 # render at it has run, not when it is chosen, so a
                 # Poppler failure before any render is only the failure
-                # (review round 3 on #917).
+                # (#917).
                 record_pdf_ocr_dpi(dpi)
             for index, image in zip(run, images, strict=False):
                 try:

@@ -254,12 +254,12 @@ def _identify_ole2(payload: bytes) -> str:
     # 1,536 as a file name.
     with _BoundedOleFile(io.BytesIO(payload)) as ole:
         # Streams only: a storage named like a format's stream names
-        # nothing (Codex round 1 on #1444).
+        # nothing (#1444).
         names = {_ole2_name(kid) for kid in ole.root.kids if kid.entry_type == olefile.STGTY_STREAM}
     kinds = {_OLE2_STREAMS[name] for name in names if name in _OLE2_STREAMS}
     # An encrypted package is a kind of its own: beside a legacy stream it
     # makes the container ambiguous, so a decoy stream is never read
-    # instead of it (Codex round 3 on #1444).
+    # instead of it (#1444).
     if _OLE2_ENCRYPTION_STREAMS <= names:
         kinds.add(OLE2_ENCRYPTED)
     if len(kinds) > 1:
