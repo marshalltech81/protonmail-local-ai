@@ -2543,9 +2543,12 @@ mail a population run will read; the steps are not sent to clients:
    that count of rows before paging (rows carry private metadata to the
    calling model); before reading attachment text, the number of
    occurrences `get_attachment` will read (each page states the text's
-   total length); and before extracting, the number of enumerated
-   threads and calls (each extracted thread is one model call whose
-   passages reach the inference provider).
+   total length); and before extracting, the number of calls planned
+   (windows times folder scopes) and the most threads they can send to
+   the inference provider, 50 per call (each extracted thread is one
+   model call whose passages reach the provider; threads outside the
+   population take slots too, and a thread spanning several windows is
+   sent once per window).
 2. Enumerate the population, paging each query to the end with
    `next_cursor`:
    - For occurrences backed by an attachment (every invoice line for
@@ -2580,9 +2583,13 @@ mail a population run will read; the steps are not sent to clients:
    no extracted text (any status but `success`): keep them in the
    population as unread, their relevance undecided, not as not
    matching.
-3. Run `extract_from_emails` with `participant` set to the vendor's
-   address (the tool has no `sender`) and a schema that declares its
-   own `invoice_date` and `invoice_number`, splitting the period into
+3. Run `extract_from_emails` with a `query` and schema for the
+   population's records and the filters that match how it was
+   enumerated: for the vendor example, `participant` set to the
+   vendor's address (the tool has no `sender`) and a schema that
+   declares its own `invoice_date` and `invoice_number`; a body-backed
+   population from several senders takes no `participant`. Split the
+   period into
    date windows that share no instant (with date-only bounds, end one
    window the day before the next begins), with `limit=50` (its
    maximum). Run it once per folder
@@ -2610,10 +2617,9 @@ mail a population run will read; the steps are not sent to clients:
    - Senders: `participant` puts in scope every message with the
      vendor in From, To or Cc, so attachments on messages others sent
      to the vendor are extracted too, though the enumeration's `sender`
-     leaves them out: check a record's sender from its citation's
-     `sender` before counting it.
+     leaves them out; step 4 sets aside records that rely on them.
 
-   That `sender`, like the `sender` and `participant` filters, is the
+   A citation's `sender`, like the `sender` and `participant` filters, is the
    claimed From address: the index does not authenticate senders and
    Spam stays searchable (`docs/architecture.md`, "Known limitation"),
    so a forged From matches too. Counting a record as the vendor's mail
@@ -2629,17 +2635,23 @@ mail a population run will read; the steps are not sent to clients:
    `attachment_id` together, as `query_attachments` rows carry them
    (`attachment_id` is the payload's content hash, shared by every
    message carrying the same bytes, and `claimant_id` names the
-   message), and a message by `claimant_id`, and mark each enumerated
-   item a record cites as covered. Each call marks a thread's messages
-   in or out of its own scope (its window and folders) and tells the
+   message), and a message by `claimant_id`.
+   Count a record only when every field that places it in the
+   population (here the invoice number and the line's product code and
+   amounts) cites passages that are all `in_scope` (each citation's
+   `scope`) and all from enumerated items; mark those items covered.
+   Set aside for review any other record, including one with a
+   `context_only_fields` or `uncited_fields` problem in
+   `citation_problems`: the server reports these problems but keeps
+   the record. Each call marks a thread's messages in or out of its
+   own scope (its window, folders and `participant`) and tells the
    model to extract only from in-scope messages, so calls that search
    one thread can return different, valid records. With windows that
    share no instant and one call per folder scope, each message is in
-   scope for one call only: keep every record from every remaining
-   call, identical ones included (one invoice can repeat a line), and
-   never merge records across calls.
-   Set aside for review a record that cites no enumerated item, and
-   report each enumerated item no record cites (its stored text can be
+   scope for one call only: keep every counted record from every
+   remaining call, identical ones included (one invoice can repeat a
+   line), and never merge records across calls.
+   Report each enumerated item no counted record cites (its stored text can be
    read with `get_attachment` or `get_message`, following each
    `next_offset`, after telling the user how much). Copies of the same
    bytes attached twice to one message share both IDs, so they cannot
