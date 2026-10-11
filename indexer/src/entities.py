@@ -1,8 +1,9 @@
 """Deterministic entity resolution.
 
-Every participant address becomes a **person** entity keyed by its
+Each participant address (up to ``MAX_ENTITY_PARTICIPANTS_PER_MESSAGE``
+per message, ``database.py``) becomes a **person** entity keyed by its
 canonical address (``threader.canonical_addr``); each display name seen
-for that address is recorded as an alias of that one entity. Two
+for it in such a message is recorded as an alias of that one entity. Two
 different addresses are never merged, however similar their names: a
 display name is sender-controlled, so name similarity is not identity.
 
