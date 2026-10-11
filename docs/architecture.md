@@ -2580,8 +2580,7 @@ English language data (`eng`, plus `osd`), and the extractors pass no
 language to Tesseract, so it uses its English default. Scans in a
 non-Latin script or with heavy accents extract poorly, and installing
 another `tesseract-ocr-*` language pack would not change that by
-itself, since nothing selects it. There is no setting for this today;
-issue #490 tracks it.
+itself, since nothing selects it. There is no setting for this.
 
 With OCR off, images, and PDFs whose whole text layer is below the
 threshold, are recorded as "OCR disabled". When the indexer starts

@@ -108,9 +108,10 @@ readonly PROTON_CHANNEL_NAME="${PROTON_CHANNEL_NAME:-$PROTON_DEFAULT_CHANNEL_NAM
 # app; see verify_expected_fingerprint.
 readonly BRIDGE_CERT_FINGERPRINT="${BRIDGE_CERT_FINGERPRINT:-}"
 readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-false}"
-# Proton provider policy: Bridge's virtual folders All Mail, Labels/* and
-# the top-level Starred, which list each message again (never synced,
-# AGENTS.md). Substituted by render_mbsync_config; not configuration.
+# Proton provider policy: Bridge's virtual All Mail and top-level Starred,
+# and Labels/* (excluded by project policy), which list each message again
+# (never synced, AGENTS.md; see the template's Channel comment).
+# Substituted by render_mbsync_config; not configuration.
 readonly PROTON_FOLDER_EXCLUSIONS='!"All Mail" !"Labels/*" !"Starred"'
 readonly BRIDGE_PASS_FILE="/run/secrets/bridge_pass"
 readonly CERT_FILE="${RUNTIME_DIR}/bridge-cert.pem"

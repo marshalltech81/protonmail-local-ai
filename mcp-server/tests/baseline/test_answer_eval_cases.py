@@ -764,11 +764,11 @@ _LATE_DISPOSITION_SHAPES = {
     "ask-dispenser-position-june": {("t100.8", "body"), ("t100.11", "body")},
     "brief-dispenser-hire-charge": {("t100.3", "body"), ("t100.8", "body"), ("t100.11", "body")},
 }
-# Known gap (#974, #858): each thread's passages are chosen by vector
-# distance to the question alone, and t100.11 shares no word with
-# either question, so six closer t100 passages take its place. A fix
-# makes the strict xfail below pass and must move these cases out of
-# the known gap.
+# Known gap (#974): each thread's passages are chosen by the question's
+# words (#858) and then by vector distance to it, and t100.11 shares no
+# word with either question, so six closer t100 passages take its
+# place. A fix makes the strict xfail below pass and must move these
+# cases out of the known gap.
 _LATE_DISPOSITION_GAP = ("t100.11", "body")
 # #291's #975-shaped chronology cases, which lose t100.11 to the same gap.
 _CHRONOLOGY_GAP = ("ask-dispenser-position-june", "brief-dispenser-hire-charge")

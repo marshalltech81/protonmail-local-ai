@@ -11,6 +11,9 @@
 #                            Bridge app on the host
 #   ${BRIDGE_USER}         — Bridge IMAP username (from the Bridge app's
 #                            IMAP details)
+#   MBSYNC_IMAP_ACCOUNT, MBSYNC_REMOTE_STORE, MBSYNC_LOCAL_STORE,
+#   MBSYNC_CHANNEL         — isync's account, store and channel names,
+#                            from the PROTON_*_NAME settings
 #   MBSYNC_PROVIDER_EXCLUSIONS, MBSYNC_LAYOUT_EXCLUSIONS — the Channel's
 #                            Patterns exclusions (see the Channel comment);
 #                            named without the dollar-brace form here so
@@ -66,9 +69,7 @@ SubFolders Legacy
 # membership apart from physical folders, so a label copy would add
 # duplicates it could not describe. Upstream Bridge source reviewed at
 # commit b9c5dac (point-in-time evidence, not a pin: Bridge updates are
-# managed by the app) does not restrict label mailboxes. Expunge None
-# avoids the IMAP CLOSE error that Gluon reports under Expunge Both or
-# Far (gluon#426).
+# managed by the app) does not restrict label mailboxes.
 # It excludes the top-level Starred folder too, which is also virtual: a
 # second copy of each starred message, whose star already arrives as the
 # F flag on the real copy (#692). A custom folder named Starred is
@@ -85,7 +86,9 @@ SubFolders Legacy
 #   such as /maildir/.mbsyncstate would name each file after the folder
 #   with "/" written as "!", so Folders/A/B and Folders/A!B would collide
 #   (#275).
-# Expunge None — never permanently deletes on either side.
+# Expunge None — never permanently deletes on either side, and avoids the
+#   IMAP CLOSE error that Gluon reports under Expunge Both or Far
+#   (gluon#426).
 # CopyArrivalDate yes — a new near file's mtime is the message's IMAP
 #   INTERNALDATE, the arrival time Bridge reports, instead of the time
 #   mbsync wrote the file (#1081). Read-side only: it adds INTERNALDATE
