@@ -62,7 +62,7 @@ help:
 # requires of every secret file. The file must be NON-EMPTY when its
 # matching layer is enabled (EMBED_MODE is always enabled;
 # INFERENCE_MODE != none; RERANK_MODE == cohere). For unauthenticated
-# host-side servers (LM Studio, vLLM, mlx_lm.server) write any
+# host-side servers (LM Studio, vLLM, TEI, mlx_lm.server for inference) write any
 # placeholder string (e.g. ``unauthenticated``). Leave the file empty
 # only when the matching layer's *_MODE=none.
 # The MCP bearer token (.secrets/mcp_auth_token.txt) is generated here

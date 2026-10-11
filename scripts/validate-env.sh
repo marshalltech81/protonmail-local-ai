@@ -957,7 +957,7 @@ require_private_optional_file "$IDENTITY_FILE"
 
 # Every enabled layer requires a non-empty API key — uniform rule
 # across the three operator-supplied layers. Operators pointing at an
-# unauthenticated host-side server (LM Studio, vLLM, ``mlx_lm.server``,
+# unauthenticated host-side server (LM Studio, vLLM, ``mlx_lm.server`` for inference only,
 # TEI) supply any placeholder string (e.g. ``unauthenticated``); the
 # compat server ignores the bearer header, but the no-fallback startup
 # contract requires the value to be non-empty so a missing key

@@ -4,7 +4,7 @@
 A single client class talks to any provider that speaks the OpenAI
 embeddings wire format: a remote provider (DeepInfra, OpenRouter,
 etc.) or a host-side server the operator installs themselves
-(LM Studio, vLLM, ``mlx_lm.server``, TEI, etc.). The choice of
+(LM Studio, vLLM, TEI, etc.). The choice of
 backend is purely a base-URL + model + API key configuration question
 — there is no per-provider code path.
 
@@ -345,8 +345,8 @@ class OpenAIEmbedder:
 
     # First-call model warmup may include a model load on a host-side
     # server (and a HuggingFace download on first run). Empirical
-    # cold-start observations: Qwen3-Embedding-8B mxfp8 served via
-    # ``mlx_lm.server`` ≈ 4 min from a cold HF cache, <30 s warm. Remote
+    # cold-start observations: Qwen3-Embedding-8B mxfp8 served by
+    # a host-side MLX server ≈ 4 min from a cold HF cache, <30 s warm. Remote
     # providers usually respond in <1 s. The timeout (per-operation,
     # not a total deadline) sits comfortably above the cold-start case; operators on slow links can raise it
     # via ``EMBED_WARMUP_TIMEOUT_SECS``.

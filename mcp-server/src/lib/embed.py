@@ -6,7 +6,7 @@ indexer uses, so query vectors and indexed vectors come from the same
 provider + model.
 
 ``EMBED_MODE=openai`` is the only valid mode. Operator-supplied compat
-servers (LM Studio, vLLM, ``mlx_lm.server``, TEI, DeepInfra, OpenRouter,
+servers (LM Studio, vLLM, TEI, DeepInfra, OpenRouter,
 etc.) target the OpenAI SDK as their reference client by design, so
 pointing the SDK at them via ``base_url`` is the supported path.
 """
@@ -55,7 +55,7 @@ class EmbedClient:
         # ``api_key`` is required (non-empty) — startup validation in
         # ``main.py`` rejects an empty value before reaching here.
         # For unauthenticated host-side servers (LM Studio, vLLM,
-        # ``mlx_lm.server``, TEI) the operator supplies any placeholder
+        # TEI) the operator supplies any placeholder
         # string in the secret file; compat servers ignore the bearer
         # header. Keeping the substitution out of this constructor
         # means the credential actually sent is exactly what the

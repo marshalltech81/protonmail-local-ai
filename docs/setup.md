@@ -270,7 +270,7 @@ endpoint (OpenAI proper for `openai`/`embed` modes, Anthropic API for
 any request: an API key is not a choice of provider, because the
 request (with mail text) reaches the provider before it checks the key
 (#750). Operators pointing at an unauthenticated host-side server (LM
-Studio, vLLM, `mlx_lm.server`, TEI) set `{LAYER}_BASE_URL` to the host
+Studio, vLLM, TEI, `mlx_lm.server` for inference only) set `{LAYER}_BASE_URL` to the host
 endpoint and supply any non-empty placeholder string (e.g.
 `unauthenticated`) for `{LAYER}_API_KEY`.
 
@@ -292,9 +292,10 @@ server running a 4096-dim model (Qwen3-Embedding-8B family), reached
 from the containers via `host.docker.internal`:
 
 ```bash
-# Edit .env — host-side server (mlx_lm.server, LM Studio, vLLM, TEI):
+# Edit .env — host-side server (LM Studio, vLLM, TEI):
 EMBED_BASE_URL=http://host.docker.internal:8001/v1
-EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
+# the model name your server serves the 4096-dim model under
+EMBED_MODEL=Qwen/Qwen3-Embedding-8B
 # write any placeholder string to .secrets/embed_api_key.txt (chmod 600);
 # unauthenticated compat servers ignore the bearer header but the
 # secret must be non-empty so the startup contract holds.
@@ -341,7 +342,7 @@ When pointing at a host-side server, bind it to `127.0.0.1` and use
 `http://host.docker.internal:<port>/v1` from the container's
 perspective. The project does not provision these servers — install
 them with the tool of your choice (LM Studio, vLLM, TEI,
-`mlx_lm.server`, etc.).
+`mlx_lm.server` for inference only, etc.).
 
 **Reranker** — optional; off by default.
 
@@ -426,7 +427,7 @@ You should see:
 Operator-supplied inference / embed / rerank endpoints are not in
 this list — they run wherever you choose (a remote provider, or a
 host-side OpenAI-compatible server such as LM Studio, vLLM,
-`mlx_lm.server`, or TEI). If a layer's container fails to start with a
+TEI, or `mlx_lm.server` for inference only). If a layer's container fails to start with a
 connection error, see "Embedder or inference endpoint unreachable from
 containers" in `docs/troubleshooting.md`.
 
@@ -613,11 +614,12 @@ OpenAI-compatible `/v1/embeddings` shape, so any compliant provider is
 a single env change away. Examples:
 
 ```bash
-# Host-side server (mlx_lm.server, LM Studio, vLLM, TEI, etc.) —
+# Host-side server (LM Studio, vLLM, TEI, etc.) —
 # the privacy-preserving option; embedding requests stay on the host.
 # (EMBED_BASE_URL=default selects OpenAI proper; empty fails startup.)
+# EMBED_MODEL is the name your server serves the 4096-dim model under.
 EMBED_BASE_URL=http://host.docker.internal:8001/v1
-EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
+EMBED_MODEL=Qwen/Qwen3-Embedding-8B
 # put any placeholder string (e.g. `unauthenticated`) in
 # .secrets/embed_api_key.txt — compat servers ignore the bearer header
 

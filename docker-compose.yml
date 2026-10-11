@@ -173,8 +173,8 @@ services:
       # EMBED_API_KEY and EMBED_BASE_URL are required. The value
       # ``default`` selects the SDK default (``https://api.openai.com/v1``)
       # and an empty value fails startup (#750). Otherwise set it to
-      # any provider that speaks /v1/embeddings (DeepInfra, OpenRouter, LM Studio, vLLM, TEI, or
-      # a host-side mlx_lm.server). Indexer + mcp-server must point at
+      # any provider that speaks /v1/embeddings (DeepInfra, OpenRouter,
+      # or a host-side LM Studio, vLLM or TEI). Indexer + mcp-server must point at
       # the same provider + model so vectors are comparable.
       # ``EMBED_MODE=openai`` is the only valid value.
       EMBED_MODE: ${EMBED_MODE:-openai}
@@ -192,9 +192,10 @@ services:
       # into one embed call.
       INDEXER_STEADY_STATE_BATCH_SIZE: ${INDEXER_STEADY_STATE_BATCH_SIZE:-8}
       # How often the main loop runs PRAGMA wal_checkpoint(TRUNCATE).
-      # The single shared sqlite3 connection pins a WAL read snapshot for
-      # the duration of the indexer process; without an explicit
-      # truncate-checkpoint the WAL grows monotonically.
+      # SQLite's automatic checkpoint reuses the WAL but never shrinks it,
+      # and an open transaction on any connection (an open connection
+      # alone pins nothing) lets it grow further; without an explicit
+      # truncate-checkpoint the file stays at its high-water size.
       INDEXER_WAL_CHECKPOINT_INTERVAL_SECS: ${INDEXER_WAL_CHECKPOINT_INTERVAL_SECS:-600}
       # How often the main loop re-runs the chunkless-zero-vector
       # recovery sweep. Both startup and periodic sweeps respect the

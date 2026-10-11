@@ -2528,81 +2528,168 @@ inflated values fan out into that many model calls.
 **Building a population
 ([#976](https://github.com/marshalltech81/protonmail-local-ai/issues/976)).**
 The threads searched are the top `limit` hits for `query`, not every
-match, and nothing names the threads left out. For every occurrence
-backed by an attachment (every invoice line for one product code from
-one vendor, say; a body-only population such as RSVPs has nothing to
-enumerate and uses `extract_from_emails` alone), follow this recipe.
-It covers an unscoped, non-Trash population only: `search_attachments`
-has no folder filter and always leaves out Trash, so it cannot
-reconcile a run scoped with `folders` or one that includes Trash;
-reconcile those by hand.
+match, and nothing names the threads left out. No tool extracts from an
+explicit list of messages or attachments yet
+([#976](https://github.com/marshalltech81/protonmail-local-ai/issues/976),
+[#1382](https://github.com/marshalltech81/protonmail-local-ai/issues/1382)),
+so a population run enumerates the population with the exact tools
+first and then reconciles the extraction against that list.
 The tool description says only that the top `limit` threads are
 searched, points here, and asks the model to tell the user how much
 mail a population run will read; the steps are not sent to clients:
 
-1. Before the first call, say the date windows, the most attachment
-   previews and the most threads the run will read:
-   `search_attachments` already returns extracted-text previews to
-   the calling model, and each extracted thread is one model call
-   whose passages reach the inference provider.
-2. Enumerate the attachments with `search_attachments`, a lexical
-   match on the product code or its description, plus `sender` (the
-   vendor's address, matched on the message carrying each attachment;
-   `from_addr` would take every attachment in the vendor's threads)
-   and `content_type` where they help, and `limit=50` (the default,
-   20, would look like a window under the cap). There is no
-   pagination, so split the period into `date_from` / `date_to`
-   windows narrow enough that each returns fewer than 50 results.
-   Before narrowing a window that returns 50, tell the user the added
-   windows and previews, as in step 1. Every hit is dated by its
-   carrying message, so 50 or more matching attachments with one
-   effective time (one message carrying them all, or several messages
-   with the same timestamp) cannot be separated by any window: when a
-   window at the smallest interval the bounds can express still
-   returns 50, report the population as truncated rather than
-   narrowing further.
-3. Run `extract_from_emails` per window, with `participant` set to
-   the vendor's address (the tool has no `from_addr`) and a schema
-   that declares its own `invoice_date` and `invoice_number`. The
-   windows do not select the same set:
-   `search_attachments` dates the message carrying the attachment,
-   while `extract_from_emails` takes any thread whose span overlaps the
-   window, so a January invoice in a thread with a June reply is listed
-   for January but can be extracted (and take one of the `limit`
-   slots) in June. Set `limit` to at least the window's thread count.
-   `participant` selects whole threads, so attachments carried by
-   other people's messages in the vendor's threads are extracted too,
-   though step 2's `sender` leaves them out of the enumeration: check
-   a record's sender from its citation's `sender` before counting it.
-   That `sender`, like the `sender` and `participant` filters, is the
-   claimed From address:
-   the index does not authenticate senders and Spam stays searchable
-   (`docs/architecture.md`, "Known limitation"), so a forged From
-   matches too. Counting a record as the vendor's mail needs
-   provenance these results do not give (the vendor's own records, or
-   checking the message by hand). An occurrence with no record has no
-   sender in these results; report it as unverified rather than
-   reading each message with `get_message`.
-4. Reconcile across all windows, not per window. A record links to
-   its source through its `_evidence` labels: look each label up by
-   `label` in that call's top-level `citations` list, whose entries
-   carry `thread_id`, `claimant_id`, `attachment_id`, `sent_at` and
-   `occurred_at`. Key each occurrence by `claimant_id` and
-   `attachment_id` together: `attachment_id` is the payload's content
-   hash, shared by every message carrying the same bytes, and
-   `claimant_id` names the message. Count a record once, against the
-   enumerated occurrence its citations name; drop duplicates, set
-   aside for review a record that cites no enumerated occurrence, and
-   report each enumerated occurrence with no record. Copies of the
-   same bytes attached twice to one message share both IDs, so they
-   cannot be reconciled one by one.
+1. Size each step before running it, and tell the user what it will
+   read: a first call with `limit=1` returns `total_matches`, so state
+   that count of rows before paging (rows carry private metadata to the
+   calling model); before reading attachment text, the number of
+   occurrences `get_attachment` will read (each page states the text's
+   total length); and before extracting, the number of calls planned
+   (windows times folder scopes) and the most threads they can send to
+   the inference provider, 50 per call (each extracted thread is one
+   model call whose passages reach the provider; threads outside the
+   population take slots too, and a thread spanning several windows is
+   sent once per window). With reranking on (`RERANK_MODE` not
+   `none`), each call also sends the text of up to
+   `max(50, RERANK_CANDIDATES)` candidate threads to the rerank
+   provider. No tool reports either setting
+   ([#1578](https://github.com/marshalltech81/protonmail-local-ai/issues/1578)),
+   and `RERANK_CANDIDATES` has no upper limit: ask the user, who runs
+   the server, for both, and do not extract until they are known.
+2. Enumerate the population, paging each query to the end with
+   `next_cursor`:
+   - For occurrences backed by an attachment (every invoice line for
+     one product code from one vendor, say), use
+     [`query_attachments`](#query_attachments) with `sender` (the
+     vendor's address, matched on the message carrying each
+     attachment), `content_type` or `filename` where they help, the
+     date bounds, and `folder="Trash"` in a separate query for
+     attachments on messages in Trash. It has no text filter: whether
+     an occurrence holds the product code is read from its stored text
+     with [`get_attachment`](#get_attachment), following each
+     `next_offset` until it is null. Stored text without the code does
+     not show the file lacks it, since no tool reports whether a cap
+     cut the stored text
+     ([#1261](https://github.com/marshalltech81/protonmail-local-ai/issues/1261)):
+     keep such an occurrence undecided.
+     [`search_attachments`](#search_attachments) matches extracted
+     text, but it ranks, stops at 50 results and has no cursor, so it
+     can suggest candidates, not enumerate them.
+   - For a body-backed population (RSVPs, say), use
+     [`query_messages`](#query_messages) with `sender` or `text`, the
+     same bounds, and `folder="Trash"` in a separate query for messages
+     in Trash; a broad one needs several lanes (its multi-lane recipe).
+     A population defined by `subject` cannot be compared in step 4:
+     the model sees the thread's subject outside every citable
+     passage, so no record can cite it.
+
+   The list is complete for its filters only when `indeterminate` is
+   0; otherwise report both counts. Both counts cover only the mail
+   indexed now: call [`get_mailbox_status`](#get_mailbox_status) and
+   report `current` and the `queue` counts with them, since a message
+   pending, retrying, deferred or `dead` can be missing from both, and
+   `dead` does not make `current` false. For attachments, the counts
+   cover only the stored occurrences: an attachment the parser left out of an
+   incomplete manifest has no row and is in neither count
+   ([#1282](https://github.com/marshalltech81/protonmail-local-ai/issues/1282)).
+   In `query_attachments`, `status_counts` counts the occurrences with
+   no extracted text (any status but `success`): keep them in the
+   population as unread, their relevance undecided, not as not
+   matching.
+3. Run `extract_from_emails` with a `query` and schema for the
+   population's records and the filters that match how it was
+   enumerated: for the vendor example, `participant` set to the
+   vendor's address (the tool has no `sender`) and a schema that
+   declares its own `invoice_date` and `invoice_number`; a body-backed
+   population from several senders takes no `participant`. Split the
+   period into
+   date windows that share no instant (with date-only bounds, end one
+   window the day before the next begins), with `limit=50` (its
+   maximum). Run it once per folder
+   scope the enumeration used, with `folders` to match
+   (`folders=["Trash"]` for the Trash query: without it, threads filed
+   only in Trash are left out). A call's `threads`
+   output lists the threads it searched: check that each enumerated
+   item's thread is in the output of the call for that item's own
+   window and folder scope (another call shows the item only as
+   context), and replace a window whose call left one out with
+   narrower windows, discarding its call's records.
+   Before running the replacements, tell the user the added calls and
+   the updated totals (calls, threads and any rerank bound, as in step 1), the discarded
+   call included, since its threads were already sent.
+   Other threads that rank for `query` take slots too,
+   and a thread falls in every window its span overlaps, so narrowing
+   can fail: when a window at the smallest interval the bounds can
+   express still leaves enumerated threads unsearched, report them as
+   not extracted rather than narrowing further. The two tools do not
+   select the same set:
+   - Dates: the enumeration dates the carrying message, while
+     `extract_from_emails` takes any thread whose span overlaps the
+     window, so a January invoice in a thread with a June reply is
+     listed for January, and the June call also searches that thread
+     (taking one of its `limit` slots) with the January message as
+     context, whose data the model is told to leave out.
+   - Folders: `folders` takes every thread with a message in a named
+     folder, but puts in scope only the messages filed there now, the
+     folder `query_attachments` and `query_messages` filter on.
+   - Senders: `participant` puts in scope every message with the
+     vendor in From, To or Cc, so attachments on messages others sent
+     to the vendor are extracted too, though the enumeration's `sender`
+     leaves them out; a record citing only them is set aside in step 4.
+
+   A citation's `sender`, like the `sender` and `participant` filters, is the
+   claimed From address: the index does not authenticate senders and
+   Spam stays searchable (`docs/architecture.md`, "Known limitation"),
+   so a forged From matches too. Counting a record as the vendor's mail
+   needs provenance these results do not give (the vendor's own
+   records, or checking the message by hand).
+4. Compare the records with the enumeration across all calls, not per
+   call. The comparison finds gaps; it cannot certify a count. A
+   record names its sources through its `_evidence` labels: look each
+   label up by `label` in that call's top-level `citations` list, whose
+   entries carry `thread_id`, `claimant_id`, `attachment_id`, `source`,
+   `scope`, `extraction_deferred`, `sent_at` and `occurred_at`. Match
+   an attachment occurrence by `claimant_id` and `attachment_id`
+   together (`attachment_id` is the payload's content hash, shared by
+   every message carrying the same bytes), and a message by
+   `claimant_id` on a `source` `body` citation (an attachment passage
+   carries its message's `claimant_id` too). Then, in this order:
+   - set aside for review a record that cites no enumerated item,
+     cites a `context` passage, cites a passage with
+     `extraction_deferred` true (text indexed before a pending
+     re-extraction, so not the occurrence's current text), or has an
+     entry in `citation_problems` (the server reports a problem but
+     keeps the record);
+   - keep every other record from every call, identical ones included
+     (one invoice can repeat a line). With windows that share no
+     instant and one call per folder scope, each message is in scope
+     for one call only, and the model is told to extract only from
+     in-scope messages;
+   - report each enumerated item no kept record cites, and which of
+     them only a set-aside record cites (their stored text can be read
+     with `get_attachment` or `get_message`, following each
+     `next_offset`, after telling the user how much).
+
+   No output ties a record to the one item it came from: a field can
+   cite several items, a value found in two items is found in both,
+   absent fields and values that are not strings are not checked, and
+   an item a record cites can still be missing other records. Report
+   the result as model output compared by citation, not as a verified
+   total
+   ([#976](https://github.com/marshalltech81/protonmail-local-ai/issues/976),
+   [#1382](https://github.com/marshalltech81/protonmail-local-ai/issues/1382)).
+   Copies of the same bytes attached twice to one message share both
+   IDs, so they cannot be told apart.
 
 Limits the recipe does not remove:
 
-- `search_attachments` leaves out Trash and attachments whose text
-  extraction did not succeed and whose filename and MIME type do not
-  match; its `from_addr` filter (not `sender`) runs after a bounded
-  candidate scan, so a window under 50 filtered by it can miss matches.
+- The enumeration covers its filters, not the topic: an item sent from
+  another address, or under a filename or type the filters leave out,
+  is not listed, and nothing shows it is missing. A listed occurrence
+  with no extracted text stays an unread candidate; its relevance
+  cannot be decided from these results.
+- Each page is read in a fresh snapshot, so mail indexed or moved while
+  paging can be missed ([`query_messages`](#query_messages) paging,
+  [#1218](https://github.com/marshalltech81/protonmail-local-ai/issues/1218)).
 - Each thread's passages are chosen by similarity to `query` (with
   the exceptions under `ask_mailbox`) and cut to a budget, so an invoice page whose line is not near the query
   can be missing from a searched thread

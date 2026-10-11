@@ -16,7 +16,7 @@ dependencies = [
     # Inference, embed, and rerank SDKs. ``openai`` covers both
     # ``INFERENCE_MODE=openai`` (chat completions) and ``EMBED_MODE=openai``
     # (the ``/v1/embeddings`` wire format every operator-supplied compat
-    # server — LM Studio, vLLM, mlx_lm.server, TEI, DeepInfra,
+    # server — LM Studio, vLLM, TEI, DeepInfra,
     # OpenRouter — already speaks). The embed client is a thin wrapper
     # around ``AsyncOpenAI`` so the project does not maintain its own
     # HTTP/retry plumbing for a wire format the SDK already handles.
