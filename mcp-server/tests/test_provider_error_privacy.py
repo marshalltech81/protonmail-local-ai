@@ -1,7 +1,9 @@
 """Provider errors are classified before they are logged or returned (#257).
 
-The five tools that call an embed or inference provider log and return
-the failure through ``safe_provider_exception_text``. A response parse,
+The five default tools that call an embed or inference provider log and
+return the failure through ``safe_provider_exception_text`` (the
+experimental ``brief_issue`` and ``check_conclusion`` use it too but are
+not covered here). A response parse,
 validation or conversion error can quote the provider's response, which
 can echo the prompt and so the mail, so only its type may leave the
 handler. SDK status errors keep their status; connection and timeout

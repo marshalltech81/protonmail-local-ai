@@ -2,7 +2,7 @@
 
 The reranker wraps the official ``cohere`` SDK. Tests monkey-patch
 ``client.rerank`` so the public contract (``[(orig_index, score), ...]``
-sorted descending, empty list on failure) is exercised without
+in the provider's response order, empty list on failure) is exercised without
 hitting Cohere's hosted API.
 """
 
@@ -186,9 +186,9 @@ class TestRerank:
         assert DEFAULT_RERANK_TIMEOUT_SECS == 60.0
 
     def test_malformed_score_returns_empty(self):
-        # If the SDK ever returns a score that can't be coerced to
-        # float, fall back to RRF order rather than propagating a
-        # ValueError up through hybrid_search.
+        # If the SDK ever returns a score that is not a number, fall back
+        # to RRF order rather than propagating an error up through
+        # hybrid_search.
         r = _make_reranker()
 
         def fake_rerank(**_kwargs):

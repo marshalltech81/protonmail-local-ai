@@ -174,7 +174,7 @@ class TestReport:
     def test_timing_line_counts_matches_and_saturation(
         self, tmp_path, tool, caplog, senders, capped
     ):
-        """Review round 1: the count and whether it saturated reach the
+        """The count and whether it saturated reach the
         call's timing line as numbers; the addresses never do."""
         many = [
             (f"t-{n:02d}", f"Jordan {n:02d} <jordan{n:02d}@{_ADDRESS_MARKER}.example>", "INBOX")
@@ -198,7 +198,7 @@ def test_an_explicit_from_addr_leaves_from_name_unused(tmp_path, tool):
 
 @pytest.mark.parametrize("tool", FROM_NAME_TOOLS)
 def test_output_schema_suggests_only_arguments_the_tool_takes(empty_db, tool):
-    """Review round 1: extract_from_emails takes no from_addr, so its
+    """extract_from_emails takes no from_addr, so its
     schema must not tell the client to pass one."""
     wire = _wire_tools(_server(empty_db))[tool]
     description = wire["outputSchema"]["properties"]["from_name_matches"]["description"]

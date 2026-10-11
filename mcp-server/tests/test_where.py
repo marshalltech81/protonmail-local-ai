@@ -123,7 +123,7 @@ class TestModel:
         ],
     )
     def test_lists_are_capped_before_their_items_are_built(self, where):
-        # Codex round 2: an oversized all or any list is refused by the
+        # An oversized all or any list is refused by the
         # argument model without validating every item (each item here
         # lacks its value, so a built item would add an error).
         with pytest.raises(ValidationError) as exc:
@@ -693,7 +693,7 @@ def test_leaf_counts_evaluate_each_leaf_a_bounded_number_of_times_per_row(tmp_pa
     # Owner, 2026-10-08: measure the per-row leaf evaluation of the
     # leaf-count statement (SQLite may flatten the projection into the
     # aggregates) at two sizes; it must be linear in rows × leaves, on
-    # one connection and a fixed number of statements (Codex round 2).
+    # one connection and a fixed number of statements.
     items = [_leaf("address_is", "b@two.test", role="to"), _leaf("body_words", "budget")]
     shape = []
     for size in (40, 400):
@@ -721,7 +721,7 @@ def test_database_is_unchanged_without_where(messages_db: Database):
 
 
 def test_a_where_value_sqlite_cannot_encode_is_answered_by_type(fake_server, messages_db, caplog):
-    # Codex round 1: an unpaired surrogate reaches the FTS tokenizer
+    # An unpaired surrogate reaches the FTS tokenizer
     # while where is normalized; the handler's error boundary answers
     # and logs it by type, as it does for the flat text filter.
     handler = _handlers(fake_server, messages_db)["query_messages"]

@@ -310,7 +310,7 @@ _COUNTING_FAILURES: list[tuple[str, Callable[[dict], None], str]] = [
     # alone, their bodies never read; only the long notice is paged (#804).
     ("cites-after-listing-only", lambda t: _drop_reads_except(t, "t41.1"), "answer_messages_exact"),
     # Every get_message result answers ``body: null`` (no indexed body):
-    # the pages came back empty, so nothing was read (#804, review round 1).
+    # the pages came back empty, so nothing was read (#804).
     ("reads-return-no-body", _null_bodies, "answer_messages_exact"),
 ]
 
@@ -362,7 +362,7 @@ def _list_instead_of_reading(trace: dict) -> None:
 def test_citing_after_a_listing_only_is_caught(scenario_id: str, failure: str) -> None:
     """A listing names a message but returns no content, so citing the
     right messages after only listing them fails (#804), as it does for
-    outstanding items (#799). The citations stay valid: the IDs were returned."""
+    outstanding items (#798). The citations stay valid: the IDs were returned."""
     trace = copy.deepcopy(TRACE_BY_SCENARIO[scenario_id])
     _list_instead_of_reading(trace)
     score = score_trace(SCENARIOS[scenario_id], trace)
@@ -626,7 +626,7 @@ _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
         ["completeness_claim_truthful"],
     ),
     ("stops-a-long-message-at-page-one", _stop_long_message_at_page_one, ["full_read_recall"]),
-    # Review round 1: listings name messages but return no content, so
+    # Listings name messages but return no content, so
     # dropping the reads while keeping the citations must fail.
     (
         "cites-bodies-it-never-read",
@@ -638,7 +638,7 @@ _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
         _drop_tool_calls("get_evidence", "search_attachments"),
         ["required_evidence_coverage", "conclusion_citation_support"],
     ),
-    # Review round 2: the top-level and per-conclusion citation lists must
+    # The top-level and per-conclusion citation lists must
     # agree, and every citation metric reads both.
     ("empties-the-top-level-citations", _empty_top_level_citations, ["citations_consistent"]),
     (

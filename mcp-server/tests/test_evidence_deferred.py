@@ -161,7 +161,7 @@ def _steps_for_flags(tmp_path, parts: int, *, drop_index: bool = False) -> int:
 
 class TestFlagCost:
     def test_the_per_chunk_flag_grows_linearly(self, tmp_path):
-        """Codex round 11 on #1355: the flag's EXISTS runs once per chunk;
+        """#1355: the flag's EXISTS runs once per chunk;
         the partial composite index keeps each probe constant, so the
         work grows with the chunks, not with chunks times attachments."""
         small = _steps_for_flags(tmp_path, 300)

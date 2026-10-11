@@ -184,7 +184,7 @@ class TestSearchAttachments:
         assert MARKER in by_name["report-2.txt"].text_snippet
 
     def test_the_timing_line_counts_deferred_results(self, db, caplog):
-        """Codex round 11 on #1355: a deferred result has no preview, so
+        """#1355: a deferred result has no preview, so
         the call's timing line counts such results."""
         from src.tools.search import register_search_tools
 
@@ -205,11 +205,11 @@ class TestSearchAttachments:
         assert names == {"report-2.txt"}
 
     def test_text_lane_reports_no_payload_with_a_deferred_copy(self, tmp_path):
-        """Codex rounds 6 and 8 on #1355: while any copy of a payload in a
+        """#1355: while any copy of a payload in a
         message is deferred, the message's chunk slice for it is kept whole
         and can hold an older text, so a hit on it is reported through no
         copy, the deferred one or a resolved one. A payload with no
-        deferred copy is reported as before."""
+        deferred copy is reported normally."""
         conn, path = _open_built_db_conn(tmp_path, "deferred-lane.db")
         _insert_message(
             conn,

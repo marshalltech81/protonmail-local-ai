@@ -3,12 +3,12 @@ Retrieval-quality eval harness — opt-in, runs against a real index.
 
 Why this is separate from the unit suite:
 
-The chunker / threader / search-knob discussions in this repo keep hitting
-the same wall: there's no held-out set of "query → expected message"
-mappings to measure whether a change actually helped retrieval. Without
-that signal, every change to chunking, ``THREAD_BODY_TEXT_MAX_TOKENS``,
-the embedding model, or the RRF fusion in ``hybrid_search`` is shipped
-on faith. The harness measures retrieval only (the thread ids and ranks
+``make baseline`` measures retrieval on the synthetic corpus; this
+harness measures it on a real index with the operator's own "query →
+expected thread" mappings, so a change to chunking,
+``THREAD_BODY_TEXT_MAX_TOKENS``, the embedding model, or the RRF fusion
+in ``hybrid_search`` can be checked there too. The harness measures
+retrieval only (the thread ids and ranks
 ``keyword_search`` / ``hybrid_search`` return); prompt-side settings such
 as ``PER_THREAD_CHAR_BUDGET`` never reach it.
 
@@ -167,14 +167,11 @@ def eval_queries() -> list[EvalQuery]:
 def eval_embedder(eval_db: Database):
     """Return a callable that embeds a query string for the hybrid lane.
 
-    Codex P2: the prior placeholder ``[0.0] * 768`` lied about hybrid
-    coverage on two counts — the dim was wrong (schema is 4096) so
-    ``_vector_search`` swallowed an OperationalError and returned an
-    empty lane, and an all-zeros query against unit-normalised vectors
-    is semantically meaningless anyway. Skip the hybrid path entirely
-    unless the operator wired up a real embedder, so a green run
-    actually means hybrid retrieval is working — not "keyword-only
-    silently passing as hybrid."
+    The hybrid cases skip unless the operator wired up a real embedder.
+    A placeholder vector of the wrong dimension leaves the vector lanes
+    empty (``_vector_search`` swallows the sqlite error), and an
+    all-zeros query is meaningless against unit-normalised vectors, so
+    either would let keyword-only results pass as hybrid.
     """
     model = os.environ.get("EMBED_MODEL")
     api_key = os.environ.get("EMBED_API_KEY")

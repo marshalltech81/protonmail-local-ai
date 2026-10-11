@@ -190,8 +190,9 @@ def test_filtered_certificate_counts_what_a_page_counts(report):
 def test_request_shapes_count_their_elements(report):
     shapes = report["request_shapes"]
     assert shapes["packed"]["elements"] == shapes["hex_array"]["elements"] == 1000
-    # The same byte budget as the hex array holds five times the
-    # elements as two-character strings, all parsed before any check.
+    # The same byte budget as the hex array holds one element per five
+    # bytes (about 13 times as many) as two-character strings, all parsed
+    # before any check.
     assert shapes["short_array"]["bytes"] <= shapes["hex_array"]["bytes"]
     # A packed envelope with an ignored member is as small as the packed
     # upload of the same digests yet builds one object per junk string.
@@ -225,8 +226,8 @@ def extracted(bench, tmp_path_factory):
 
 
 def test_occurrence_rounds_read_rows_with_extracted_text(extracted):
-    # Every extraction row carries 100 four-byte characters of text the
-    # round never returns: a record still costs well under its text.
+    # Every extraction row carries 100 four-byte characters (400 bytes)
+    # of text the round never returns; each record stays under 1,600 bytes.
     assert extracted["config"]["extracted_chars"] == 100
     for round_ in extracted["reconcile"]["occurrences"]["stream"].values():
         assert round_["returned"] > 0
@@ -424,7 +425,7 @@ def all_extras(bench, tmp_path_factory):
 def test_cardinality_corpus_stores_names_for_every_participant(bench, cardinality):
     built = cardinality["build"]
     assert built["participant_rows"] == 40 * bench.MAX_MESSAGE_ADDRESSES
-    # A first name per participant, plus the extra names of one address.
+    # One name per participant: ``cardinality`` carries no further names.
     assert built["name_rows"] == 40 * bench.MAX_MESSAGE_ADDRESSES
 
 
@@ -639,7 +640,7 @@ def test_alternate_names_trade_participants_within_the_address_budget(bench, tmp
     assert built["name_rows"] == 3 * bench.MAX_MESSAGE_ADDRESSES
 
 
-def test_threads_of_four_start_at_a_root_without_a_reply_chain(bench, tmp_path):
+def test_threads_of_four_chain_each_reply_to_the_previous_message(bench, tmp_path):
     db = tmp_path / "threads.db"
     bench.build(db, 12, 1, "typical", "typical")
     with closing(sqlite3.connect(db)) as conn:
@@ -760,7 +761,8 @@ def test_upload_total_takes_two_values(bench, value):
 @pytest.mark.parametrize(
     ("changes", "name", "absent", "zero"),
     [
-        # Absent and zero differ: absent takes the stated default.
+        # Absent takes the default the table states; zero is taken as given,
+        # or refused where the table's bound excludes it (``--repeat``).
         ({}, "extras", 100, 0),
         ({"--missing": None, "--messages": "6000"}, "missing", 5000, 0),
         ({"--repeat": None}, "repeat", 2, None),

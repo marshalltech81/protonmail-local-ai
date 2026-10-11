@@ -858,7 +858,7 @@ class TestRetrievalAndStatusCompletionLines:
             assert _logged_cause(caplog, cause)
             assert MARKER not in caplog.text
 
-    def test_decorator_leaves_every_tool_schema_unchanged(self, monkeypatch, empty_db):
+    def test_decorator_leaves_each_completion_tool_schema_unchanged(self, monkeypatch, empty_db):
         """FastMCP builds each tool's schemas and description from the
         handler: the listing with ``timed_tool`` must equal the listing
         with it replaced by a no-op."""

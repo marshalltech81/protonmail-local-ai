@@ -141,7 +141,7 @@ class TestReadToken:
 
 class TestServerUrl:
     def test_default_port_on_ipv4_loopback(self):
-        # Review round 1: the server is published on 127.0.0.1 only, and
+        # The server is published on 127.0.0.1 only, and
         # ``localhost`` can resolve to ::1 first, where another local
         # account could listen and collect the bearer token.
         assert adapter.server_url("3000") == "http://127.0.0.1:3000/mcp"
@@ -249,7 +249,7 @@ class TestProxyInProcess:
 
 
 class TestAmbientProxyIgnored:
-    """Review round 1: proxy settings in the environment must not route
+    """Proxy settings in the environment must not route
     the token and tool traffic away from the loopback connection."""
 
     def test_proxy_environment_is_not_used(self, stub, monkeypatch):

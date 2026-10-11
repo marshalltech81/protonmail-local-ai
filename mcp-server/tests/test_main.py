@@ -1,14 +1,14 @@
 """
 Tests for src/main.py.
 
-The MCP service entrypoint mostly assembles config and registers tool
-groups, which is hard to exercise in unit tests without spinning up the
-Streamable HTTP transport. The two pieces that DO have unit-testable behavior live
-here:
+Configuration parsing and validation (secrets, transport, bearer token,
+timeouts, token budget, provider endpoints and privacy warnings, flags),
+``main()``'s startup checks, the logging filters and telemetry. Among
+them:
 
 - ``_read_secret`` — prefers Docker secret files over env vars; a
   silent fallthrough to env would mean an attacker with ``docker
-  inspect`` access could read the Anthropic key.
+  inspect`` access could read the API keys or the MCP bearer token.
 - The ``/health`` custom route — used by the docker healthcheck to
   decide if the container is up. A regression here would make every
   failed DB connect look "healthy" or vice versa.
@@ -295,8 +295,9 @@ class TestSessionIdleTimeout:
 
 class TestContextTokens:
     """#285: ``INFERENCE_CONTEXT_TOKENS`` is the model window prompts are
-    fitted into; it defaults to 32,768, and a window that leaves too
-    little room after ``INFERENCE_MAX_TOKENS`` fails startup."""
+    fitted into; it defaults to 32,768 (48,000 in anthropic mode, #764),
+    and a window that leaves too little room after
+    ``INFERENCE_MAX_TOKENS`` fails startup."""
 
     class _FakeDatabase:
         def __init__(self, _path):
@@ -466,7 +467,9 @@ class TestRejectUrlUserinfo:
     """
 
     def test_empty_value_passes_through(self):
-        # Empty ``*_BASE_URL`` is contract-supported (use SDK default).
+        # This guard passes an empty value through; ``_resolve_base_url``
+        # rejects it at startup (#750). ``default``, not empty, selects
+        # the SDK's endpoint.
         assert _reject_url_userinfo("INFERENCE_BASE_URL", "") == ""
 
     def test_clean_url_passes_through(self):
@@ -502,7 +505,7 @@ _INHERITED_URL = (
 
 class TestDefaultIgnoresAmbientEndpoints:
     """``*_BASE_URL=default`` pins each SDK to its official endpoint
-    (Codex round 1 on #773). The SDKs' own variables (``OPENAI_BASE_URL``,
+    (#773). The SDKs' own variables (``OPENAI_BASE_URL``,
     ``ANTHROPIC_BASE_URL``, ``CO_API_URL``) would otherwise choose the
     destination when no ``base_url`` is passed, so a stray one, even one
     carrying a credential, must neither redirect mail nor reach a log."""
@@ -624,7 +627,7 @@ class TestRemoteEndpointWarning:
         assert _PLACEHOLDER_KEY not in caplog.text
         return [r.getMessage() for r in self._warnings(caplog)]
 
-    def test_main_checks_the_embedder_identity_before_serving(self, monkeypatch, caplog):
+    def test_main_checks_the_embedder_identity_with_the_embed_settings(self, monkeypatch, caplog):
         import src.main as main_mod
 
         calls = []
@@ -797,7 +800,7 @@ class TestExplicitProviderEndpoint:
     ):
         built = self._record_sdk_clients(monkeypatch)
         # A stray SDK endpoint variable must not redirect ``default``
-        # (Codex round 1 on #773).
+        # (#773).
         for name in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "CO_API_URL"):
             monkeypatch.setenv(name, "https://ambient.example/v1")
         main_mod = self._configure(
@@ -865,7 +868,7 @@ class TestExplicitProviderEndpoint:
 class TestRequireEnv:
     @pytest.mark.parametrize("var", ["EMBED_MODEL", "INFERENCE_MODEL", "RERANK_MODEL"])
     def test_whitespace_only_value_is_missing_and_values_are_trimmed(self, var):
-        """Codex round 2 on #773: required values are non-empty after
+        """#773: required values are non-empty after
         trimming, and the trimmed value is what reaches the client."""
         with pytest.raises(ValueError, match=var):
             _require_env("X_MODE", "openai", var, "   ")
@@ -887,10 +890,9 @@ class TestRequireEnv:
         assert "anthropic" in msg
 
     def test_inference_openai_mode_requires_api_key(self):
-        # Tightened contract: every enabled inference layer requires a
-        # non-empty key, including ``openai`` mode. Pre-fix an operator
-        # pointing at a remote OpenAI-compatible provider could start
-        # cleanly and only fail at first intelligence call with a 401.
+        # Every enabled inference layer requires a non-empty key,
+        # including ``openai`` mode, so a missing key fails at startup
+        # rather than as a 401 on the first intelligence call.
         # Operators pointing at an unauthenticated host-side server
         # supply any placeholder string (``unauthenticated``) so the
         # startup contract holds uniformly.
@@ -903,9 +905,8 @@ class TestRequireEnv:
     def test_embed_mode_requires_api_key(self):
         # ``EMBED_MODE=openai`` is the only valid embed mode (no ``none``
         # mode exists), and the contract is the same across layers:
-        # non-empty key required. Pre-fix the indexer + mcp-server would
-        # accept an empty embed key and silently send an empty bearer
-        # token on first call.
+        # non-empty key required, so an empty embed key fails at startup
+        # rather than being sent as an empty bearer token.
         with pytest.raises(ValueError) as excinfo:
             _require_env("EMBED_MODE", "openai", "EMBED_API_KEY", "")
         msg = str(excinfo.value)
@@ -915,8 +916,9 @@ class TestRequireEnv:
 
 class TestExperimentalToolsFlag:
     """``MCP_EXPERIMENTAL_TOOLS`` gates experimental tools (``brief_issue``,
-    ``check_conclusion``; PLAN.md Resolved decisions 12): off unless exactly ``true``, an
-    unrecognized value fails startup, and the tools need inference."""
+    ``check_conclusion``; PLAN.md Resolved decisions 12): off unless ``true``
+    (case-insensitive), an unrecognized value fails startup, and the tools need
+    inference."""
 
     class _FakeDatabase:
         def __init__(self, _path):
@@ -1076,9 +1078,9 @@ class TestHealthEndpoint:
     """The /health route delegates to ``_health_response``, which the
     tests call directly with a stub DB.
 
-    This mirrors how the docker healthcheck calls it (one HTTP GET) and
-    catches regressions in the 200/503 split that would otherwise only
-    show up when the container goes unhealthy in production.
+    The docker healthcheck GETs that route; pinning the 200/503 split
+    here catches regressions that would otherwise only show up when the
+    container goes unhealthy in production.
     """
 
     def test_health_returns_ok_when_db_reachable(self):

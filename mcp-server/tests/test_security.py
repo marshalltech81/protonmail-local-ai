@@ -80,16 +80,16 @@ class TestSafeProviderExceptionText:
     stringification can echo the provider's response body — and for
     intelligence/rerank calls the request body contains retrieved
     email content. ``safe_provider_exception_text`` short-circuits any
-    exception with a ``status_code`` attribute so the body never
+    exception with an int ``status_code`` attribute so the body never
     reaches logs or MCP callers.
     """
 
     def test_status_error_returns_type_and_status_only(self):
-        # Synthesize an SDK-shaped status error: any exception with a
-        # ``status_code`` attribute is treated as a provider error.
+        # Synthesize an SDK-shaped status error: any exception with an
+        # int ``status_code`` attribute is treated as a provider error.
         # The duck-typed check covers OpenAI APIStatusError,
         # Anthropic APIStatusError, and Cohere errors uniformly without
-        # importing the SDKs at test time.
+        # the security module importing the SDKs.
         class FakeSDKStatusError(Exception):
             def __init__(self, status_code: int, body: str) -> None:
                 super().__init__(body)
@@ -244,7 +244,7 @@ class TestLogToolCall:
 
     def test_size_bounds_log_only_values_the_tool_accepts(self, caplog):
         """``size_min`` / ``size_max`` are logged only inside
-        ``normalize_size_bound``'s range (Codex round 4 on #1125): a
+        ``normalize_size_bound``'s range (#1125): a
         negative or oversized value, which the tool rejects, is withheld
         by name."""
         import logging
@@ -288,7 +288,7 @@ class TestLogToolCall:
         assert text.count("withheld=['fields']") == 2
 
     def test_long_repeated_fields_list_is_withheld(self, caplog):
-        # Review round 1: a list of valid names longer than the row has
+        # A list of valid names longer than the row has
         # fields (repeats add nothing) is withheld by name, so the line
         # stays bounded.
         import logging

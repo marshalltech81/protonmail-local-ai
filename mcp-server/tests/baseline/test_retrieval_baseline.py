@@ -391,7 +391,7 @@ def _cutoff_exchanges(rows: list, k: int, window: int = _CUTOFF_WINDOW) -> list[
     """Pairs ``(i, j)`` of a kept row ``i < k`` and an excluded row
     ``j >= k`` of different threads whose distances are near-tied, so
     another platform could admit ``j`` in place of ``i``. The band runs
-    past the first excluded row (review round 4): the chunk lane repeats
+    past the first excluded row: the chunk lane repeats
     threads, so the first different thread can sit further out."""
     edge = rows[k - 1].score
     kept = [i for i in range(k) if edge - rows[i].score < _NEAR_TIE]
@@ -402,7 +402,7 @@ def _cutoff_exchanges(rows: list, k: int, window: int = _CUTOFF_WINDOW) -> list[
         beyond.append(j)
     else:
         # A full window may hide more of the band; a shorter result means
-        # the lane is exhausted and the band was seen whole (review round 8).
+        # the lane is exhausted and the band was seen whole.
         if len(rows) >= k + window:
             raise AssertionError("near-tie band runs past the fetched window")
     return [
@@ -414,7 +414,7 @@ def _cutoff_exchanges(rows: list, k: int, window: int = _CUTOFF_WINDOW) -> list[
 
 
 def test_cutoff_exchange_admits_the_row_at_the_displaced_rank() -> None:
-    """Review round 5: an excluded row that rounds ahead of kept row ``i``
+    """An excluded row that rounds ahead of kept row ``i``
     takes rank ``i``; the rows after it move down and the last kept row
     drops out, so the admitted thread gets the RRF credit of rank ``i``."""
     rows = list("abcdef")
@@ -433,8 +433,8 @@ def _band_moves(lane: list) -> list[tuple[int, int]]:
     """Single moves ``(src, dst)`` another platform could produce inside a
     vector lane: within each run of rows whose adjacent distances are
     near-tied, any row may land at any other position in the run, and
-    every move of a row past a row of another thread is probed (review
-    round 6: with ``A, A, B`` tied, ``B`` can rank above both ``A`` rows,
+    every move of a row past a row of another thread is probed (with
+    ``A, A, B`` tied, ``B`` can rank above both ``A`` rows,
     and RRF credits only a thread's first row)."""
     moves: list[tuple[int, int]] = []
     start = 0
@@ -470,7 +470,7 @@ def test_band_moves_cover_a_thread_passing_repeated_rows() -> None:
 
 
 def test_cutoff_exchanges_scan_past_same_thread_rows() -> None:
-    """Review round 4: rows k and k+1 share the cutoff row's thread, and a
+    """Rows k and k+1 share the cutoff row's thread, and a
     different thread two rows out is still in the near-tie band."""
     rows = [
         SimpleNamespace(thread_id=thread, score=score)
@@ -487,7 +487,7 @@ def test_cutoff_exchanges_scan_past_same_thread_rows() -> None:
     assert _cutoff_exchanges(rows, 1) == []  # the band past "a" holds nothing
     with pytest.raises(AssertionError, match="past the fetched window"):
         _cutoff_exchanges(rows[:5], 2, window=3)  # the search filled its window
-    # Review round 8: a lane shorter than its window is exhausted, so a
+    # A lane shorter than its window is exhausted, so a
     # band reaching its end was fully seen.
     assert _cutoff_exchanges(rows[:5], 2, window=10) == [(1, 4)]
 
@@ -501,7 +501,7 @@ def test_rank_snapshot_survives_near_tied_vector_distances(
     near-tie are tried, one at a time, and the snapshot order must hold:
     an adjacent pair of different threads inside a vector lane is
     swapped, and, since another platform can also admit a different row
-    at a lane's ``k`` cutoff (review round 2), each search fetches one
+    at a lane's ``k`` cutoff, each search fetches one
     extra row and a near-tied pair across the cutoff is exchanged. Such
     an edit then fails here on any platform rather than only in CI."""
     vectors = json.loads(
@@ -566,7 +566,8 @@ def test_rank_snapshot_survives_near_tied_vector_distances(
             if run() != expected:
                 flips.append((q["id"], *tie))
     # The hashed embedder leaves near-ties in many lanes; check some were
-    # tried, and that every full lane was compared across its cutoff.
+    # tried, and that at least one lane ran past its cutoff, so the
+    # cutoff exchanges were searched for.
     assert probes > 0
     assert state["cutoffs"] > 0
     assert flips == [], f"snapshot order depends on a near-tied distance: {flips}"

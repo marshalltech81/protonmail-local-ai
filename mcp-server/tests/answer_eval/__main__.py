@@ -349,7 +349,7 @@ def _report_shape_ok(data: dict[str, Any]) -> bool:
             return False
         # compare keys cases by ID, so a duplicate would hide a row (#771).
         seen.add(case["id"])
-        # The flags ``_case_flags`` compares (#677, Codex round 2 on #761).
+        # The flags ``_case_flags`` compares (#677).
         judge = case["judge"]
         if not (
             _is_flag(case["deterministic"].get("passed"))
@@ -422,7 +422,10 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--preflight",
         action="store_true",
-        help="check the arguments and report paths, then exit before opening the index",
+        help=(
+            "check the arguments, report paths, case selection and "
+            "EVAL_MAX_CALLS, then exit before opening the index"
+        ),
     )
     cmp = sub.add_parser("compare", help="compare two run reports")
     cmp.add_argument("baseline", type=Path)

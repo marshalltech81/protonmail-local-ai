@@ -5,8 +5,8 @@ Retrieval tools are how the LLM follows up on a search hit (or addresses
 a thread by id directly). The handlers are thin formatters around the
 read-only Database, so the tests focus on:
 
-- the body_text vs snippet fallback used when the indexer has not yet
-  populated body_text on legacy threads;
+- the fallback to the thread's indexed text (``body_text``, else
+  ``snippet``) when no per-message body is indexed;
 - the attachment-metadata gating;
 - not-found and invalid-input paths raising ``ToolError``, which the
   client receives as an ``isError`` result;
@@ -583,7 +583,7 @@ def _long_list(prefix: str) -> list[str]:
     ],
 )
 def test_long_header_lists_keep_their_omitted_count(fake_server, tmp_path, tool, args):
-    """Review round 2 (#489): the "+N more" note was appended before the
+    """#489: the "+N more" note was appended before the
     500-character cut of the joined list, so a list of long entries lost
     its count. Every prose list (From / To / Cc, References) keeps it."""
     with _open_fixture_db(tmp_path) as (conn, db):
@@ -653,7 +653,7 @@ class TestReapedSources:
         assert "Message not found" in message
 
     def test_reaped_claimant_id_is_not_taken_over_by_a_bare_message_id(self, fake_server, tmp_path):
-        """Review round 2: a live message whose sender-chosen Message-ID
+        """A live message whose sender-chosen Message-ID
         equals a reaped claimant ID must not answer a lookup of that
         claimant ID; before the reap the collision read as ambiguous."""
         with _open_fixture_db(tmp_path) as (conn, db):
@@ -680,7 +680,7 @@ class TestReapedSources:
         assert "zqxcrafted body" in _text(out)
 
     def test_message_states_only_what_the_record_shows(self, fake_server, tmp_path):
-        """Review round 1: the stored time is the local reap, not the
+        """The stored time is the local reap, not the
         upstream deletion, and a file missing from the Maildir is reaped
         too, so the text must not claim an upstream deletion date."""
         db, claimant = self._db(tmp_path)
@@ -711,7 +711,7 @@ class TestReapedSources:
     def test_live_and_reaped_state_read_in_one_snapshot(
         self, fake_server, tmp_path, monkeypatch, tool, kwargs
     ):
-        """Review round 1: a restore landing between a live miss and a
+        """A restore landing between a live miss and a
         separate reap lookup would report a live message as reaped."""
         db, _ = self._db(tmp_path)
         opened = self._count_connections(db, monkeypatch)
@@ -720,7 +720,7 @@ class TestReapedSources:
         assert len(opened) == 1
 
     def test_bare_message_id_reap_lookup_reads_one_row(self, tmp_path, monkeypatch):
-        """Review round 1: many reaped files claiming one sender-chosen
+        """Many reaped files claiming one sender-chosen
         Message-ID must not make each lookup visit all of them."""
         _RECENT = datetime.fromisoformat(RECENT_REAP_AT)
         with _open_fixture_db(tmp_path) as (conn, db):
@@ -1569,7 +1569,7 @@ class TestQueryMessages:
         text = _text(out)
         assert "total_matches: 1\nindeterminate: 1 (messages the filters could neither" in text
         assert "in neither total_matches nor the pages)" in text
-        # The timing line says so too (Codex round 3), so the log never
+        # The timing line says so too, so the log never
         # shows a call that could not decide every message as complete.
         timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
         assert len(timing) == 1 and "outcome=ok" in timing[0]
@@ -1579,7 +1579,7 @@ class TestQueryMessages:
         assert out.structured_content["indeterminate"] == 0
         assert "indeterminate" not in _text(out)
         # An empty page is not stated as a definite "no match" while some
-        # messages are undecided (Codex round 5): u2 might still match.
+        # messages are undecided: u2 might still match.
         out = asyncio.run(handler(size_min=10_000))
         assert (
             out.structured_content["total_matches"],

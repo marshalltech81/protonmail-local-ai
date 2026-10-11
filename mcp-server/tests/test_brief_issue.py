@@ -400,7 +400,7 @@ class TestBrief:
         assert data["as_of"] is None
 
 
-class TestReviewRound2:
+class TestChronologyOrderAndEvidenceGuards:
     def test_chronology_is_returned_oldest_first_with_undated_last(self, brief_db):
         def reversed_reply(user: str) -> str:
             good = json.loads(_good_brief(user))
@@ -588,7 +588,7 @@ class TestIssue471:
             "\u0662\u0660\u0662\u0664-\u0660\u0662-\u0660\u0661",  # Arabic-Indic digits
             "",
             "April 2024",
-            # Review round 1: the right shape but not a calendar date.
+            # The right shape but not a calendar date.
             "2024-13-40",
             "2023-02-29",
             "2024-00-10",
@@ -755,7 +755,7 @@ def assert_strict(schema: dict, model: type | None = None) -> None:
 class TestStructuredOutput:
     """#808: with structured outputs on, brief_issue sends its constant
     strict schema on every call (the repair call too); with them off, it
-    sends none and the request is today's."""
+    sends none."""
 
     def test_schema_is_strict_and_matches_the_brief_model(self):
         from src.tools.brief import BRIEF_JSON_SCHEMA
@@ -788,7 +788,7 @@ class TestStructuredOutput:
 
     @pytest.mark.parametrize("structured", [True, False])
     def test_evidence_budget_reserves_the_schema(self, brief_db, monkeypatch, structured):
-        """#809 round 2: Anthropic adds a system prompt for the schema,
+        """#809: Anthropic adds a system prompt for the schema,
         billed as input, so the budget reserves room for it only when the
         schema is sent."""
         from src.tools import brief

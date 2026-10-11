@@ -1,12 +1,14 @@
 """
 #243: sender-controlled header values (subject, display names, attachment
-filename and MIME type) must be cut in every tool response and inference
-prompt, not only in get_thread.
+filename and MIME type) must be cut in tool responses and inference
+prompts, not only in get_thread.
 
 One thread carries a 140K-character subject, participants whose display
 names are 50K characters, and an attachment with a 50K-character
-filename and MIME type, next to a tiny body. Each tool's serialized
-result, and each prompt sent to the model, must stay small.
+filename and MIME type, next to a tiny body. The serialized results of
+search_emails, get_evidence, search_attachments and list_threads, and
+the prompts of ask_mailbox, summarize_thread and extract_from_emails,
+must stay small.
 """
 
 import asyncio

@@ -22,7 +22,7 @@ its text is kept or logged.
 
 Both CLIs get an allowlisted environment (``_ENV_ALLOWLIST``: the
 path, home, user, locale, temporary directory, proxy and certificate
-variables) and nothing else of the caller's. A strip list kept missing
+variables) and nothing else of the caller's: a strip list would miss
 variables that change the call: ``ANTHROPIC_API_KEY`` takes it off the
 subscription (a bad one hangs the CLI), a ``CLAUDE_CODE_USE_*`` switch
 routes it through a cloud account, ``CLAUDE_CODE_EFFORT_LEVEL`` or
@@ -110,7 +110,7 @@ EXECUTABLE = EXECUTABLES["claude-cli"]
 VERSION_TIMEOUT_SECS = 30.0
 # How long the timeout cleanup waits for a killed CLI to be reaped. A
 # SIGKILLed process exits at once; the bound only guarantees the cleanup
-# itself can never hang (review round 9 P1).
+# itself can never hang.
 KILL_WAIT_SECS = 5.0
 
 # The only caller variables a CLI judge call inherits (plus ``LC_*``):
