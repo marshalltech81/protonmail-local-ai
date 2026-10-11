@@ -2,8 +2,11 @@
 
 Each participant address (up to ``MAX_ENTITY_PARTICIPANTS_PER_MESSAGE``
 per message, ``database.py``) becomes a **person** entity keyed by its
-canonical address (``threader.canonical_addr``); each display name seen
-for it in such a message is recorded as an alias of that one entity. Two
+canonical address (``threader.canonical_addr``); each display name the
+parser kept for it in such a message (the per-message name budget,
+``parser.MAX_EXTRA_PARTICIPANT_NAMES`` and
+``MAX_EXTRA_PARTICIPANT_NAME_BYTES``, drops later ones) is recorded as an
+alias of that one entity. Two
 different addresses are never merged, however similar their names: a
 display name is sender-controlled, so name similarity is not identity.
 

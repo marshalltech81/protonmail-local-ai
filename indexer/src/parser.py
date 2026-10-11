@@ -790,7 +790,8 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     not already caught locally) propagate; an HTML conversion failure is
     caught, and counted as ``html_body`` when the failed part could have
     contributed to the body; only ``OSError`` from starting the HTML
-    child propagates. They are not collapsed into the
+    child, or a ``MemoryError`` in this process (host pressure),
+    propagates. They are not collapsed into the
     ``None`` channel of a missing Message-ID, which would silently
     un-index the file with no dead-letter visibility: letting the
     exception escape routes the row through the queue's retry +
@@ -1454,7 +1455,7 @@ def _parse_transport_form(decoded: bytes, content_type: str) -> email.message.Me
     ``content_type`` (the part's own), so an attached email is one nested
     message and a delivery report its blocks, exactly as the parser reads
     an identity-encoded part. ``None`` when they nest too deeply for the
-    parser or the label is not ASCII."""
+    parser or the full ``Content-Type`` value is not ASCII."""
     try:
         return email.message_from_bytes(_transport_form_bytes(decoded, content_type))
     except RecursionError, UnicodeError:
@@ -1466,8 +1467,8 @@ def _decode_transport_form(
 ) -> email.message.Message | None:
     """``_decode_transport_bytes`` then ``_parse_transport_form``: the
     transfer-encoded text parsed as a container of ``content_type``, or
-    ``None`` when it does not decode, nests too deeply or has a non-ASCII
-    label. The body-only
+    ``None`` when it does not decode, nests too deeply or its full
+    ``Content-Type`` value is not ASCII. The body-only
     walk (``extractors.eml``) reads an attached email's text this way."""
     decoded = _decode_transport_bytes(data, encoding)
     return None if decoded is None else _parse_transport_form(decoded, content_type)

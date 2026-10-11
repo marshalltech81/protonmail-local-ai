@@ -22,8 +22,8 @@ Input contract:
   upstream: ``chunk_segments`` takes the ``(kind, text)`` segments and
   chunks each on its own, so a chunk never spans kinds (#646).
 - ``char_start`` / ``char_end`` are offsets into the *normalized* body the
-  chunker produced (CRLF → LF, runs of two or more blank lines collapsed
-  to one, leading and trailing newlines dropped;
+  chunker produced (CRLF → LF, runs of three or more newlines collapsed
+  to two, leading and trailing newlines dropped;
   for several segments, the normalized segments joined by a blank
   line). Offsets are stable across runs for the same input but are not
   offsets into the raw ``.eml`` source — map back through the same
@@ -261,7 +261,7 @@ def normalize_body(body_text: str) -> str:
     if not body_text:
         return ""
     text = body_text.replace("\r\n", "\n").replace("\r", "\n")
-    # Runs of two or more blank lines are almost always formatting noise
+    # Runs of three or more newlines are almost always formatting noise
     # (signature padding, Outlook-style spacing). Collapsing them keeps
     # paragraph detection simple and offsets stable.
     text = re.sub(r"\n{3,}", "\n\n", text)
