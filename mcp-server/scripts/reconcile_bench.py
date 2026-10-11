@@ -2204,20 +2204,46 @@ def _writer_phase2c(
 VECTOR_POOL = 64
 
 
+def _sign_mask(cycle: int) -> int:
+    """A pseudo-random pattern of float32 sign bits for ``cycle``, as an
+    integer over a packed vector's bytes (native order, as ``struct``
+    packs them)."""
+    flips = random.Random(cycle).getrandbits(EMBEDDING_DIM)
+    raw = bytearray(4 * EMBEDDING_DIM)
+    top = 3 if sys.byteorder == "little" else 0
+    for k in range(EMBEDDING_DIM):
+        if flips >> k & 1:
+            raw[4 * k + top] = 0x80
+    return int.from_bytes(raw, sys.byteorder)
+
+
 def _chunk_vectors(pool: list[bytes], start: int = 0) -> Iterator[bytes]:
     """Distinct unit vectors for the writer's chunks, one each, as each
     chunk's own text has its own embedding (repeated vectors would make
     a thread's encoded sum shorter): every vector of ``pool`` at each
     rotation of its components in turn, from entry ``start`` (the chunks
     the index already holds, so a writer on the WAL baseline goes on
-    after the vectors the baseline's own drain stored), so ``len(pool)
-    * EMBEDDING_DIM`` vectors pass before any repeats. A rotation is a
-    16 KB copy, the work of the indexer's own packing of each vector in
-    its transaction; no random vector is made after ``pool``."""
+    after the vectors the baseline's own drain stored). Past
+    ``len(pool) * EMBEDDING_DIM`` entries each further cycle flips the
+    signs of a pseudo-random set of components (``_sign_mask``), so the
+    stream does not repeat for any accepted corpus. A rotation is a
+    16 KB copy and a flip one XOR of it, the work of the indexer's own
+    packing of each vector in its transaction; no random vector is made
+    after ``pool``, and a cycle's mask once per cycle."""
+    size = len(pool) * EMBEDDING_DIM
+    mask_cycle, mask = 0, 0
     for j in itertools.count(start):
-        vector = pool[j % len(pool)]
-        cut = 4 * ((j // len(pool)) % EMBEDDING_DIM)
-        yield vector[cut:] + vector[:cut]
+        cycle, rest = divmod(j, size)
+        vector = pool[rest % len(pool)]
+        cut = 4 * (rest // len(pool))
+        rotated = vector[cut:] + vector[:cut]
+        if cycle:
+            if cycle != mask_cycle:
+                mask_cycle, mask = cycle, _sign_mask(cycle)
+            rotated = (int.from_bytes(rotated, sys.byteorder) ^ mask).to_bytes(
+                4 * EMBEDDING_DIM, sys.byteorder
+            )
+        yield rotated
 
 
 # indexer/src/chunker.py ``_UNIT_NORM_TOLERANCE``.

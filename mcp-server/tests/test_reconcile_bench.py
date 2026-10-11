@@ -1644,6 +1644,32 @@ def test_writer_vectors_stay_distinct_from_the_baselines(bench, baseline, tmp_pa
     assert len(set(blobs)) == len(blobs)
 
 
+def test_chunk_vectors_never_repeat_past_the_rotations(bench):
+    # Past every rotation of the pool the stream goes on with distinct
+    # unit vectors (sign patterns), so no accepted thread's chunk count
+    # repeats an embedding. One pool vector: 4,096 rotations a cycle.
+    import hashlib
+    import random
+    import struct
+
+    pool = [bench._unit_vector(random.Random(1))]
+    seen = set()
+    for n, vector in enumerate(bench._chunk_vectors(pool)):
+        if n == 3 * bench.EMBEDDING_DIM + 50:
+            break
+        seen.add(hashlib.sha256(vector).digest())
+        if n % 1000 == 0:
+            values = struct.unpack(f"{bench.EMBEDDING_DIM}f", vector)
+            assert abs(math.sqrt(sum(v * v for v in values)) - 1.0) < 1e-5
+    assert len(seen) == 3 * bench.EMBEDDING_DIM + 50
+    # ``start`` resumes the same stream.
+    tail = bench._chunk_vectors(pool, 2 * bench.EMBEDDING_DIM + 7)
+    whole = bench._chunk_vectors(pool)
+    for _ in range(2 * bench.EMBEDDING_DIM + 7):
+        next(whole)
+    assert next(tail) == next(whole)
+
+
 def test_writer_goes_on_from_the_next_corpus_message(bench, tmp_path):
     # A corpus that ends mid-thread (nine messages: 8 starts a thread)
     # is continued at message 9, a reply in that thread, not at 12.
