@@ -1176,6 +1176,23 @@ def _ordered(order: str) -> Iterator[None]:
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+def _worst_targets(conn: sqlite3.Connection, kind: str, k: int) -> list[str]:
+    """The lowest ``k`` worst-case identities (``bench_worst``) of this
+    kind in the matching set, in byte order, as the scan orders them."""
+    _, scan, params = scan_sql(kind)
+    # ``scan`` is the server compiler's SQL; values stay bound.
+    sql = f"SELECT identity FROM bench_worst WHERE identity IN ({scan})"  # nosec B608
+    return [row[0] for row in conn.execute(sql + " ORDER BY identity LIMIT ?", [*params, k])]
+
+
+def _selection_digest(identities: Iterable[str]) -> str:
+    """A digest of a set of identities (sorted, length-prefixed)."""
+    digest = hashlib.sha256()
+    for b in sorted(i.encode() for i in identities):
+        digest.update(len(b).to_bytes(8, "big") + b)
+    return digest.hexdigest()
+
+
 def phase_reconcile(
     db_path: str,
     kind: str,
@@ -1213,11 +1230,8 @@ def phase_reconcile(
     # this kind in the matching set (byte order, as the scan's).
     targets: list[str] = []
     if worst_first:
-        # ``scan`` is the server compiler's SQL; values stay bound.
-        sql = f"SELECT identity FROM bench_worst WHERE identity IN ({scan})"  # nosec B608
         with closing(_ro(db_path)) as conn:
-            rows = conn.execute(sql + " ORDER BY identity LIMIT ?", [*params, k])
-            targets = [row[0] for row in rows]
+            targets = _worst_targets(conn, kind, k)
     t0 = time.perf_counter()
     client = set(unpack_hashes(request_body))
     t_parse = time.perf_counter()
@@ -1281,11 +1295,16 @@ def phase_reconcile(
     # Sampled before the per-record sizes below serialize each record
     # again, work the response path does not do.
     rss = _rss_kib()
+    # Which records the round returned, for the WAL phase's check
+    # (``expected_round``), after every timing.
+    key = "claimant_id" if kind == "messages" else "attachment_occurrence_id"
+    selected = _selection_digest(r[key] for r in records)
     return {
         "count": count,
         "scanned": scanned,
         "certificate": response["certificate"],
         "complete": response["complete"],
+        "selected": selected,
         "missing_total": missing_total,
         "returned": len(records),
         **read,
@@ -2799,14 +2818,24 @@ def _visible_at(visible: list, when: float) -> tuple[int, int]:
     return rows[0], rows[1]
 
 
-def expected_round(db_path: str, kind: str, request: str, rows: tuple[int, int]) -> dict:
+def expected_round(
+    db_path: str,
+    kind: str,
+    request: str,
+    rows: tuple[int, int],
+    k: int = 0,
+    worst_first: bool = False,
+) -> dict:
     """What a round's snapshot must hold: every identity the round's
     scan (the server's predicate) matches among the ``messages`` and
     ``attachments`` rows at or below ``rows`` (``_visible_at``), in the
     round's order, with its certificate and its diff against the
     upload ``request``. Run after the writer stops, outside every
     window: the rows are only inserted, so the bound selects exactly
-    what the round's snapshot could see."""
+    what the round's snapshot could see. ``selected`` digests the
+    records a round of ``k`` must return: the lowest missing
+    identities, after the worst-case ones when ``worst_first``, as
+    ``phase_reconcile`` picks them."""
     _, scan, params = scan_sql(kind)
     table, column, limit = (
         ("messages", "claimant_id", rows[0])
@@ -2820,6 +2849,7 @@ def expected_round(db_path: str, kind: str, request: str, rows: tuple[int, int])
     client = set(unpack_hashes(Path(request).read_bytes()))
     digest = hashlib.sha256(CERT_DOMAIN)
     count = missing_total = 0
+    first: list[str] = []
     with closing(_ro(db_path)) as conn:
         for (identity,) in conn.execute(sql, [*params, limit]):
             b = identity.encode()
@@ -2830,7 +2860,13 @@ def expected_round(db_path: str, kind: str, request: str, rows: tuple[int, int])
                 client.discard(h)
             else:
                 missing_total += 1
+                if len(first) < k:
+                    first.append(identity)
+        targets = _worst_targets(conn, kind, k) if worst_first else []
+    chosen = set(targets)
+    selected = (targets + [m for m in first if m not in chosen])[:k]
     return {
+        "selected": _selection_digest(selected),
         "count": count,
         "certificate": digest.hexdigest(),
         "missing_total": missing_total,
@@ -2849,6 +2885,8 @@ def _round_problems(result: dict, expected: dict, k: int) -> list[str]:
         # At most K records, every one of them when they fit.
         "returned": min(k, expected["missing_total"]),
         "complete": expected["missing_total"] <= k,
+        # Which records: the ones the round must pick.
+        "selected": expected["selected"],
     }
     return [name for name, value in want.items() if result[name] != value]
 
@@ -2998,7 +3036,7 @@ def run_wal(
         # the writer stopped, outside the window.
         corpus_rows = _visible_at(writer_out["visible"], float("-inf"))
         snapshot_rows = _visible_at(writer_out["visible"], result["started_at"])
-        expected = expected_round(db_path, kind, request, snapshot_rows)
+        expected = expected_round(db_path, kind, request, snapshot_rows, k, worst_first)
         problems = _round_problems(result, expected, k)
         if problems:
             raise RuntimeError("the round's result is not its snapshot's: " + ", ".join(problems))

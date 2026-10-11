@@ -1710,7 +1710,13 @@ def test_visibility_selects_the_rows_committed_before_the_snapshot(bench):
 
 
 def test_round_problems_name_every_field_that_differs(bench):
-    expected = {"count": 10, "certificate": "c", "missing_total": 4, "extras": 2}
+    expected = {
+        "count": 10,
+        "certificate": "c",
+        "missing_total": 4,
+        "extras": 2,
+        "selected": "s",
+    }
     good = {
         "count": 10,
         "scanned": 10,
@@ -1719,6 +1725,7 @@ def test_round_problems_name_every_field_that_differs(bench):
         "extras": 2,
         "returned": 3,
         "complete": False,
+        "selected": "s",
     }
     assert bench._round_problems(good, expected, 3) == []
     assert bench._round_problems({**good, "returned": 4, "complete": True}, expected, 5) == []
@@ -1730,6 +1737,7 @@ def test_round_problems_name_every_field_that_differs(bench):
         ("extras", 1),
         ("returned", 2),
         ("complete", True),
+        ("selected", "t"),
     ):
         assert bench._round_problems({**good, field: wrong}, expected, 3) == [field]
 
@@ -1761,6 +1769,34 @@ def test_expected_round_holds_the_new_mail_committed_before_the_snapshot(bench, 
         assert (
             before["certificate"] == bench.phase_certificate(str(corpus), kind, "stream")["digest"]
         )
+
+
+@pytest.mark.parametrize("worst_first", [False, True])
+def test_a_round_that_returns_other_records_fails(bench, tmp_path, monkeypatch, worst_first):
+    # The same number of records, but not the ones the round must pick
+    # (the lowest missing identities, worst-case ones first when asked):
+    # the selection's digest differs, and the measurement fails.
+    db = tmp_path / "pick.db"
+    bench.build(db, 300, 1, "typical", "mixed")
+    request = tmp_path / "request.json"
+    bench.write_request(str(db), "messages", 6, 0, request, missing_from="worst")
+    real = bench._materialize
+
+    def other(conn, kind, missing):
+        # The highest missing identities instead of the chosen ones.
+        rows = conn.execute(
+            "SELECT claimant_id FROM messages ORDER BY claimant_id DESC LIMIT ?", (len(missing),)
+        )
+        return real(conn, kind, [r[0] for r in rows])
+
+    out = bench.phase_reconcile(str(db), "messages", 3, str(request), worst_first=worst_first)
+    expected = bench.expected_round(
+        str(db), "messages", str(request), (10**9, 10**9), k=3, worst_first=worst_first
+    )
+    assert bench._round_problems(out, expected, 3) == []
+    monkeypatch.setattr(bench, "_materialize", other)
+    out = bench.phase_reconcile(str(db), "messages", 3, str(request), worst_first=worst_first)
+    assert bench._round_problems(out, expected, 3) == ["selected"]
 
 
 def test_a_round_whose_result_is_not_its_snapshot_fails(bench, tmp_path, monkeypatch):
