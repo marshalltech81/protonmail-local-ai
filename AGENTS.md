@@ -809,7 +809,11 @@ under about 80 characters.
   review thread is resolved under the thread rule above, with that
   issue's link in the reply, and the PR's "Not done" lists it. Nothing
   found stays only in a thread, a PR body or a commit message.
-- Merge (squash) only on the owner's explicit go-ahead.
+- Merge (squash) only on the owner's explicit go-ahead. GitHub enforces
+  the mechanics on `main` (2026-10-11): squash is the only merge method,
+  history must be linear, the CI checks listed as required in the
+  repository rulesets must pass, and line review threads must be
+  resolved. Repository admins can bypass both rulesets.
 
 ## Review guidelines
 
