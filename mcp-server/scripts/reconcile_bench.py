@@ -2427,6 +2427,11 @@ def phase_writer(
                 for path, stage, error in rows
             ]
 
+        def idle() -> None:
+            # Nothing left to do: wait for the round to end.
+            while not os.path.exists(stop):
+                time.sleep(0.05)
+
         try:
             while not os.path.exists(stop):
                 jobs = claim()
@@ -2453,8 +2458,7 @@ def phase_writer(
                 if not jobs:
                     # A drain's backlog is done: the indexer goes idle.
                     exhausted_at = time.monotonic()
-                    while not os.path.exists(stop):
-                        time.sleep(0.05)
+                    idle()
                     break
                 paths = [path for _, path, _ in jobs]
                 for i, path, _ in jobs:
@@ -2497,6 +2501,13 @@ def phase_writer(
                         refund(path)
                     with transaction():
                         conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (path,))
+                if lifecycle == "drain" and not claim():
+                    # The backlog's last job is done: idle from its last
+                    # commit, not from the next claim after the pause,
+                    # which ``stop`` can pre-empt.
+                    exhausted_at = time.monotonic()
+                    idle()
+                    break
                 resume = time.monotonic() + interval
                 while not os.path.exists(stop):
                     remaining = resume - time.monotonic()

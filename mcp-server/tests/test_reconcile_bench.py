@@ -1297,6 +1297,23 @@ def test_drain_enqueues_its_backlog_before_it_is_ready_and_drains_it(bench, tmp_
     assert ids == [bench.message_id(i, "typical") for i in due]
 
 
+def test_drain_records_exhaustion_at_its_last_commit_whatever_the_pause(bench, tmp_path):
+    # The backlog's last job deleted, the writer is idle at once: the
+    # time is recorded then, not at the next claim after the pause,
+    # which ``stop`` can pre-empt (an exhausted drain then passed).
+    db = tmp_path / "pause.db"
+    bench.build(db, 8, 1, "typical", "typical")
+    stop = tmp_path / "stop"
+    timer = _stop_after_batch(db, stop, 8 + 1)
+    out = bench.phase_writer(
+        str(db), str(stop), 1, 3600.0, shape={"per_message": 1}, lifecycle="drain", backlog=1
+    )
+    timer.join()
+    assert out["jobs_left"] == 0
+    assert out["backlog_exhausted_at"] is not None
+    assert out["backlog_exhausted_at"] >= out["commit_times"][-1][0]
+
+
 def test_arrival_never_runs_out(bench, tmp_path):
     # ``arrival`` enqueues new mail whenever nothing is due, so it has no
     # backlog to exhaust.
