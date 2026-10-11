@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import functools
 import hashlib
 import json
 import math
@@ -1666,15 +1667,45 @@ def _dedupe(mailboxes: list[str]) -> list[str]:
     return out
 
 
+# The indexer's tokenizer asset (indexer/src/data/qwen3-embedding/
+# tokenizer.json), read only: beside this script in the repository, or
+# mounted at /app/tokenizer in the mcp-server image (docs/mcp-tools.md).
+# ``tokenizers`` is in the image already (through cohere), at the version
+# the indexer pins (a test checks it). ``--wal`` is refused without it.
+TOKENIZER_PATHS = (
+    Path(__file__).resolve().parents[2] / "indexer/src/data/qwen3-embedding/tokenizer.json",
+    Path("/app/tokenizer/tokenizer.json"),
+)
+
+
+def tokenizer_path() -> Path | None:
+    return next((p for p in TOKENIZER_PATHS if p.is_file()), None)
+
+
+@functools.cache
+def _tokenizer():
+    from tokenizers import Tokenizer
+
+    path = tokenizer_path()
+    if path is None:
+        raise RuntimeError("the indexer's tokenizer asset is not available")
+    return Tokenizer.from_file(str(path))
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """indexer/src/chunker.py ``truncate_to_tokens``: ``text`` cut to at
+    most ``max_tokens`` BPE tokens on a token boundary."""
+    if not text or max_tokens <= 0:
+        return ""
+    encoding = _tokenizer().encode(text, add_special_tokens=False)
+    if len(encoding.ids) <= max_tokens:
+        return text
+    return text[: encoding.offsets[max_tokens][0]]
+
+
 def _thread_body(text: str) -> str:
-    """``text`` cut to ``THREAD_BODY_TEXT_MAX_TOKENS``, counted with
-    ``token_estimate`` (exact for this benchmark's words)."""
-    words, tokens = text.split(" "), 0
-    for n, word in enumerate(words):
-        tokens += token_estimate(word)
-        if tokens > THREAD_BODY_TEXT_MAX_TOKENS:
-            return " ".join(words[:n])
-    return text
+    """The thread body cut to ``THREAD_BODY_TEXT_MAX_TOKENS``."""
+    return _truncate_to_tokens(text, THREAD_BODY_TEXT_MAX_TOKENS)
 
 
 @dataclass
@@ -2952,6 +2983,13 @@ _RULES: tuple = (
     (
         lambda a: len(set(a.k)) != len(a.k),
         lambda a: "--k values must be distinct (each K is one result)",
+    ),
+    (
+        lambda a: a.wal and tokenizer_path() is None,
+        lambda a: (
+            "--wal needs the indexer's tokenizer asset: run from the repository, or mount "
+            "indexer/src/data/qwen3-embedding at /app/tokenizer (docs/mcp-tools.md)"
+        ),
     ),
     (
         lambda a: not a.wal and a.explicit_wal,

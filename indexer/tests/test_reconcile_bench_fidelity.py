@@ -463,6 +463,22 @@ def test_wal_writer_commits_what_the_indexer_commits_per_batch(bench, tmp_path, 
     assert len(expected) == (10 if batch == 1 else 8 * batch + 1)
 
 
+def test_wal_writer_truncates_thread_bodies_as_the_indexer_does(bench):
+    # The thread body cap counts real BPE tokens, with the indexer's
+    # tokenizer asset, so a cut body is the indexer's byte for byte.
+    from src.chunker import truncate_to_tokens
+
+    texts = [
+        "",
+        "plain words " * 3000,
+        bench._WIDE * 9000,
+        "Participants: " + ", ".join(f"Person {n} <p{n}@x.example>" for n in range(2000)),
+    ]
+    for text in texts:
+        for cap in (0, 1, 7, bench.THREAD_BODY_TEXT_MAX_TOKENS):
+            assert bench._truncate_to_tokens(text, cap) == truncate_to_tokens(text, cap)
+
+
 def test_wal_writer_constants_are_the_indexers(bench):
     import random
     import struct
@@ -623,16 +639,6 @@ def test_wal_writer_writes_the_rows_the_indexer_writes(bench, tmp_path, monkeypa
     ours_fts = [s for s in ours_statements if s.startswith(_FTS_WRITES)]
     # Commit by commit, the same write statements in the same order.
     assert _writes(ours_statements, tables) == expected_writes
-    if case != "typical":
-        # These threads' bodies pass ``THREAD_BODY_TEXT_MAX_TOKENS``,
-        # which the indexer counts with its BPE tokenizer and the writer
-        # with ``token_estimate`` (the mcp-server image has no
-        # tokenizer), exact only for the benchmark's words: the writer
-        # keeps more of the body. Everything else matches.
-        for a, b in zip(ours["threads"], expected["threads"], strict=True):
-            assert len(a.pop("body_text")) > len(b.pop("body_text"))
-        ours_fts = [s for s in ours_fts if not s.startswith("INSERT INTO threads_fts")]
-        expected_fts = [s for s in expected_fts if not s.startswith("INSERT INTO threads_fts")]
     problems = []
     for table in _WRITER_ROWS:
         problems += _differences(table, ours[table], expected[table])

@@ -1196,6 +1196,27 @@ def test_writer_holds_one_message_at_a_time(bench, tmp_path, monkeypatch):
     assert threads[-1].participants
 
 
+def test_writer_tokenizer_is_the_indexers_pinned_version():
+    # The writer cuts thread bodies with the indexer's tokenizer; the
+    # ``tokenizers`` this environment resolves (through cohere) must be
+    # the version the indexer pins, or the cut could differ.
+    import importlib.metadata
+    import tomllib
+
+    pyproject = Path(__file__).resolve().parents[2] / "indexer" / "pyproject.toml"
+    deps = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+    pins = [d.split("==", 1)[1] for d in deps if d.startswith("tokenizers==")]
+    assert pins == [importlib.metadata.version("tokenizers")]
+
+
+def test_wal_is_refused_without_the_tokenizer_asset(bench, tmp_path, monkeypatch):
+    monkeypatch.setattr(bench, "TOKENIZER_PATHS", (tmp_path / "missing.json",))
+    with pytest.raises(SystemExit, match="tokenizer"):
+        bench.parse_args(_argv({"--wal": None, "--workdir": str(tmp_path)}))
+    assert not list(tmp_path.iterdir())
+    bench.parse_args(_argv({"--workdir": str(tmp_path)}))  # without --wal: not needed
+
+
 def test_each_wal_configuration_starts_from_the_built_index(bench, tmp_path):
     # Deleting a writer's rows would restore row counts, not the file
     # (freelist, B-tree splits, FTS segments, vector chunks), so each

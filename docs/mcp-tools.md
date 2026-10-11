@@ -1662,12 +1662,14 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
   content as the indexer does. `indexer/tests/test_reconcile_bench_fidelity.py`
   traces the indexer's own commits and checks the writer's sequence, the
   tables of each commit, and the rows and full-text entries it writes.
-  Two writes are known to differ: a thread body past the indexer's
-  4,000-token cap is cut by the benchmark's own token count (the
-  mcp-server image has no tokenizer), which keeps more of it than the
-  indexer does; and a message whose fresh attachments outrun the
-  indexer's per-pass extraction budget, which the indexer finishes over
-  further passes, is written in one pass. The writer's tables start
+  It cuts thread bodies at the indexer's 4,000-token cap with the
+  indexer's own tokenizer asset (`indexer/src/data/qwen3-embedding`,
+  read only; `tokenizers` is already in the image at the indexer's
+  pinned version), so `--wal` is refused when the asset is not found
+  beside the script or mounted at `/app/tokenizer`. One write is known
+  to differ: a message whose fresh attachments outrun the indexer's
+  per-pass extraction budget, which the indexer finishes over further
+  passes, is written in one pass. The writer's tables start
   empty, its bytes are not calibrated against the live indexer, and the
   pace is a parameter
   ([#1469](https://github.com/marshalltech81/protonmail-local-ai/issues/1469)).
@@ -1681,7 +1683,8 @@ server's; `--help` lists every option:
 ```bash
 docker build -t mcp-bench mcp-server
 docker run --rm --entrypoint python \
-  -v "$PWD/mcp-server/scripts:/app/scripts:ro" mcp-bench \
+  -v "$PWD/mcp-server/scripts:/app/scripts:ro" \
+  -v "$PWD/indexer/src/data/qwen3-embedding:/app/tokenizer:ro" mcp-bench \
   scripts/reconcile_bench.py --messages 50000 --identity typical --wal --filtered
 ```
 
