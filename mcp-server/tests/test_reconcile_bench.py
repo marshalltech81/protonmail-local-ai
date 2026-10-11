@@ -1431,6 +1431,43 @@ def test_writer_rolls_back_a_transaction_during_which_stop_appeared(bench, tmp_p
         assert conn.execute("SELECT attempts FROM indexing_jobs").fetchall() == [(1,)]
 
 
+def test_writer_chunk_vectors_stay_distinct_past_the_pool(bench, tmp_path):
+    # Each chunk has its own text, so its own embedding: repeated vectors
+    # would make the thread's encoded sum shorter than independent ones.
+    # A thread of four messages with 20 attachments each has 84 chunks,
+    # more than the pool's 64 vectors.
+    import struct
+
+    db = tmp_path / "distinct.db"
+    bench.build(db, 8, 1, "typical", "typical")
+    stop = tmp_path / "stop"
+    timer = _stop_after_batch(db, stop, 8 + 4)
+    bench.phase_writer(str(db), str(stop), 4, 3600.0, shape={"per_message": 20})
+    timer.join()
+    with closing(sqlite3.connect(db)) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        blobs = [r[0] for r in conn.execute("SELECT embedding FROM message_chunks_vec")]
+    assert len(blobs) == 4 * 21 > bench.VECTOR_POOL
+    assert len(set(blobs)) == len(blobs)
+    for blob in blobs:
+        norm = math.sqrt(sum(v * v for v in struct.unpack(f"{bench.EMBEDDING_DIM}f", blob)))
+        assert abs(norm - 1.0) < 1e-5
+
+
+def test_run_wal_publishes_stop_under_the_order_lock(bench):
+    # A commit under way when the round ends either finishes before
+    # ``stop`` exists or sees it (and rolls back): the marker is
+    # published under the lock that serializes the writer's commits.
+    import inspect
+
+    src = inspect.getsource(bench.run_wal)
+    end = src[src.index("finally:") :]
+    lock = end.index("with _ordered(order):")
+    assert lock < end.index("stop.touch()") < end.index("writer.communicate")
+    assert src.count("stop.touch()") == 1
+
+
 def test_writer_tokenizer_is_the_indexers_pinned_version():
     # The writer cuts thread bodies with the indexer's tokenizer; the
     # ``tokenizers`` this environment resolves (through cohere) must be

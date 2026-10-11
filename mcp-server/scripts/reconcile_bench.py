@@ -2172,9 +2172,23 @@ def _writer_phase2c(
     return deferred
 
 
-# Distinct random unit vectors the writer's chunks take in turn (made
-# once, before it is ready).
+# Random unit vectors the writer makes once, before it is ready
+# (``_chunk_vectors``).
 VECTOR_POOL = 64
+
+
+def _chunk_vectors(pool: list[bytes]) -> Iterator[bytes]:
+    """Distinct unit vectors for the writer's chunks, one each, as each
+    chunk's own text has its own embedding (repeated vectors would make
+    a thread's encoded sum shorter): every vector of ``pool`` at each
+    rotation of its components in turn, so ``len(pool) *
+    EMBEDDING_DIM`` vectors pass before any repeats. A rotation is a
+    16 KB copy, the work of the indexer's own packing of each vector in
+    its transaction; no random vector is made after ``pool``."""
+    for shift in itertools.cycle(range(EMBEDDING_DIM)):
+        cut = 4 * shift
+        for vector in pool:
+            yield vector[cut:] + vector[:cut]
 
 
 def _message_number(path: str) -> int:
@@ -2295,10 +2309,11 @@ def phase_writer(
     stress = shape.get("extracted_chars", 0)
     # One stress text for every record (it can be 40 MB).
     stress_text = _WIDE * stress if stress else None
-    # The embeddings: a fixed pool of random unit vectors made now, so
-    # no transaction spends time on them (``_writer_phase2c``).
+    # The embeddings: a pool of random unit vectors made now, so no
+    # transaction spends time on them (``_writer_phase2c``), rotated into
+    # distinct ones (``_chunk_vectors``).
     rng = random.Random(7)
-    vectors = itertools.cycle([_unit_vector(rng) for _ in range(VECTOR_POOL)])
+    vectors = _chunk_vectors([_unit_vector(rng) for _ in range(VECTOR_POOL)])
 
     def record(i: int) -> _Record:
         # Made where it is used and dropped after, so memory holds one
@@ -2732,7 +2747,10 @@ def run_wal(
             except RuntimeError as exc:  # raised after the writer stops (finally)
                 raise RuntimeError("reconcile round failed") from exc
         finally:
-            stop.touch()
+            # Published under the order lock: a commit under way finishes
+            # before ``stop`` exists, or sees it and rolls back.
+            with _ordered(order):
+                stop.touch()
             try:
                 out, _ = writer.communicate(timeout=60)
             except subprocess.TimeoutExpired:
