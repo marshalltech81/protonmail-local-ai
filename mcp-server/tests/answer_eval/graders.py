@@ -35,6 +35,7 @@ import re
 from dataclasses import dataclass, field
 
 from src.tools.intelligence import (
+    _NO_RETRIEVAL_PREFIX,
     _NOT_FOUND_PREFIX,
     _PROVENANCE_FIELDS,
     _TRUNCATED_NOTICE_SUFFIXES,
@@ -49,7 +50,7 @@ PASS, FAIL, NA = "pass", "fail", "not_applicable"
 
 # What ask_mailbox says when nothing matched, and the prefix its prompt
 # asks the model to open with when the evidence holds no answer.
-_NO_RESULTS = "No relevant emails found"
+_NO_RESULTS = _NO_RETRIEVAL_PREFIX
 
 # Checks whose failure points at what the model did with its evidence.
 SYNTHESIS_CHECKS = (
