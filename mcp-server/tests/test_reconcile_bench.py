@@ -72,6 +72,10 @@ def report(bench, tmp_path_factory):
             "4",
             "--writer-interval",
             "0.005",
+            # Enough for the round and its warm-up at this pace; the
+            # default (20,000) only costs setup time here.
+            "--writer-backlog",
+            "2000",
             # Keeps the tiny round's transaction open long enough for
             # the writer to commit inside it.
             "--wal-hold",
@@ -173,14 +177,22 @@ def test_cardinality_records_read_every_stored_row(bench, cardinality):
         assert int(k) * 1000 <= round_["references"] <= int(k) * 1001
 
 
-def test_wal_is_reclaimed_after_the_round(report):
-    # Both scan methods, so the WAL figures size whichever one ships.
-    assert [(w["kind"], w["method"]) for w in report["wal"]] == [
-        ("messages", "stream"),
-        ("messages", "collect"),
-        ("occurrences", "stream"),
-        ("occurrences", "collect"),
+def test_wal_is_reclaimed_after_the_round(bench, report):
+    # Both scan methods, so the WAL figures size whichever one ships,
+    # each under both writer lifecycles (absent: arrival and drain).
+    assert [(w["kind"], w["method"], w["writer_lifecycle"]) for w in report["wal"]] == [
+        (kind, method, lifecycle)
+        for kind in ("messages", "occurrences")
+        for method in ("stream", "collect")
+        for lifecycle in ("arrival", "drain")
     ]
+    for wal in report["wal"]:
+        drain = wal["writer_lifecycle"] == "drain"
+        # A drain reports its backlog and what it had left (it did not
+        # run out: that fails the measurement); arrival has none.
+        assert wal["writer_backlog"] == (2000 if drain else None)
+        assert (0 < wal["writer_jobs_left"] < 2000) if drain else wal["writer_jobs_left"] >= 0
+        assert wal["writer_extract_s"] == bench.PDF_EXTRACT_SECONDS
     for wal in report["wal"]:
         # The explicit checkpoint found the retained frames still in the
         # WAL: no last-connection close reclaimed them first.
@@ -778,6 +790,8 @@ _WITH = {
     },
     "writer_batch": {"*": {"--wal": None}},
     "writer_interval": {"*": {"--wal": None}},
+    "writer_backlog": {"*": {"--wal": None}},
+    "writer_extract_seconds": {"*": {"--wal": None}},
     "wal_hold": {"*": {"--wal": None}},
 }
 
@@ -885,6 +899,10 @@ def test_upload_total_takes_two_values(bench, value):
         # The indexer's steady-state and first-index batch sizes.
         ({"--wal": None}, "writer_batch", [8, 50], None),
         ({"--wal": None}, "writer_interval", [0.0, 0.1], [0.0]),
+        ({"--wal": None}, "writer_backlog", 20_000, None),
+        ({"--wal": None, "--writer-lifecycle": "arrival"}, "writer_backlog", None, None),
+        ({"--wal": None}, "writer_extract_seconds", 0.1, 0.0),
+        ({"--wal": None}, "writer_lifecycle", ["arrival", "drain"], None),
         ({}, "extracted_chars", 0, 0),
         ({}, "request_shapes", 0, 0),
     ],
@@ -942,6 +960,16 @@ def test_absent_and_zero_are_resolved_as_the_table_says(bench, changes, name, ab
         ({"--writer-batch": "5"}, "need --wal"),
         ({"--writer-interval": "0.5"}, "need --wal"),
         ({"--wal-hold": "1"}, "need --wal"),
+        ({"--writer-lifecycle": "drain"}, "need --wal"),
+        ({"--writer-backlog": "5"}, "need --wal"),
+        ({"--writer-extract-seconds": "1"}, "need --wal"),
+        (
+            {"--wal": None, "--writer-lifecycle": "arrival", "--writer-backlog": "5"},
+            "needs --writer-lifecycle drain",
+        ),
+        ({"--wal": None, "--writer-lifecycle": "drain,drain"}, "distinct"),
+        ({"--wal": None, "--writer-lifecycle": "steady"}, "arrival or drain"),
+        ({"--wal": None, "--writer-lifecycle": ""}, "arrival or drain"),
         ({"--wal": None, "--writer-batch": "4,4"}, "distinct"),
         ({"--wal": None, "--writer-interval": "0,0.0"}, "distinct"),
         ({"--repeat": "3"}, "cannot balance"),
@@ -1150,9 +1178,9 @@ def test_a_writer_that_fails_before_it_is_ready_fails_the_measurement(bench, tmp
 
 def test_writer_holds_one_message_at_a_time(bench, tmp_path, monkeypatch):
     # A batch's records are made where each is used, not all before the
-    # first commit, share one stress text, and a finished thread keeps
-    # only what phase 2c reads: memory does not grow with the batch's
-    # messages.
+    # first commit and share one stress text, and thread state is read
+    # back from the index as the indexer does: memory does not grow with
+    # the batch's messages.
     import weakref
 
     db = tmp_path / "memory.db"
@@ -1171,16 +1199,6 @@ def test_writer_holds_one_message_at_a_time(bench, tmp_path, monkeypatch):
         return rec
 
     monkeypatch.setattr(bench, "_record", counted)
-    threads = []
-    real_phase1 = bench._writer_phase1
-
-    def phase1(*args):
-        thread = real_phase1(*args)
-        if thread not in threads:
-            threads.append(thread)
-        return thread
-
-    monkeypatch.setattr(bench, "_writer_phase1", phase1)
     stop = tmp_path / "stop"
     timer = _stop_after_batch(db, stop, 8 + 50)
     shape = {"per_message": 2, "extracted_chars": 5}
@@ -1189,11 +1207,117 @@ def test_writer_holds_one_message_at_a_time(bench, tmp_path, monkeypatch):
     # The record in use and the one being made.
     assert most <= 2
     assert len(stress) == 1
-    # Of each finished thread only phase 2c's state is kept: 50 messages
-    # in threads of four, the last one still open.
-    assert len(threads) == 13
-    assert all(t.participants == [] and t.body == "" for t in threads[:-1])
-    assert threads[-1].participants
+
+
+def test_writer_prepares_each_message_before_its_transactions(bench, tmp_path, monkeypatch):
+    # The indexer parses, chunks and embeds before its write
+    # transactions, so the writer renders each message, builds its
+    # chunks and makes its vectors outside every transaction (and the
+    # order lock): a transaction's span is its writes only.
+    from contextlib import contextmanager
+
+    db = tmp_path / "prepare.db"
+    bench.build(db, 8, 1, "typical", "typical")
+    inside = False
+    real_ordered = bench._ordered
+
+    @contextmanager
+    def ordered(order):
+        nonlocal inside
+        with real_ordered(order):
+            inside = True
+            try:
+                yield
+            finally:
+                inside = False
+
+    made: list[bool] = []
+    real_record, real_vector = bench._record, bench._unit_vector
+
+    def record(*args):
+        made.append(inside)
+        return real_record(*args)
+
+    def vector(rng):
+        made.append(inside)
+        return real_vector(rng)
+
+    monkeypatch.setattr(bench, "_ordered", ordered)
+    monkeypatch.setattr(bench, "_record", record)
+    monkeypatch.setattr(bench, "_unit_vector", vector)
+    stop = tmp_path / "stop"
+    timer = _stop_after_batch(db, stop, 8 + 4)
+    bench.phase_writer(str(db), str(stop), 4, 3600.0, shape={"per_message": 2, "chunks": 2})
+    timer.join()
+    # Two records a message (phase 1, phase 2c) and the vector pool.
+    assert len(made) == 2 * 4 + bench.VECTOR_POOL
+    assert not any(made)
+
+
+def test_drain_enqueues_its_backlog_before_it_is_ready_and_drains_it(bench, tmp_path, monkeypatch):
+    # Owner decision 3's ``drain`` (a first index): the backlog is
+    # enqueued before the writer is ready, so its commit is outside any
+    # window, then drained oldest first, a batch at a time, with no
+    # enqueue commit; once none is due the writer records the time and
+    # commits nothing more.
+    db = tmp_path / "drain.db"
+    bench.build(db, 8, 1, "typical", "typical")
+    enqueued_at: list[float] = []
+    real_backlog = bench._writer_backlog
+
+    def backlog(*args):
+        real_backlog(*args)
+        enqueued_at.append(time.monotonic())
+
+    monkeypatch.setattr(bench, "_writer_backlog", backlog)
+    stop = tmp_path / "stop"
+    timer = _stop_after_batch(db, stop, 8 + 6)
+    out = bench.phase_writer(
+        str(db),
+        str(stop),
+        4,
+        0.0,
+        shape={"per_message": 1},
+        lifecycle="drain",
+        backlog=6,
+    )
+    timer.join()
+    # The backlog was written before the first stamp (the ready state).
+    assert len(enqueued_at) == 1 and enqueued_at[0] <= out["commit_times"][0][0]
+    # A batch of four, then one of two: per message charge, phase 1,
+    # refund, charge, refund, phase 2c, delete; each batch's mark.
+    assert out["commits"] == (7 * 4 + 1) + (7 * 2 + 1)
+    assert out["jobs_left"] == 0
+    assert out["backlog_exhausted_at"] >= out["commit_times"][-1][0]
+    with closing(sqlite3.connect(db)) as conn:
+        ids = [r[0] for r in conn.execute("SELECT message_id FROM messages WHERE rowid > 8")]
+    due = sorted(range(8, 14), key=lambda i: (bench.sent_at(i), i))
+    assert ids == [bench.message_id(i, "typical") for i in due]
+
+
+def test_arrival_never_runs_out(bench, tmp_path):
+    # ``arrival`` enqueues new mail whenever nothing is due, so it has no
+    # backlog to exhaust.
+    db = tmp_path / "arrival.db"
+    bench.build(db, 8, 1, "typical", "typical")
+    stop = tmp_path / "stop"
+    timer = _stop_after_ready(stop, 0.5)
+    out = bench.phase_writer(str(db), str(stop), 1, 0.0, shape={"per_message": 1})
+    timer.join()
+    assert out["commits"] > 10
+    assert out["backlog_exhausted_at"] is None
+
+
+def test_a_drain_that_runs_out_before_the_round_ends_fails_the_measurement(bench, tmp_path):
+    # An idle writer for part of the window would understate the WAL
+    # growth, so a backlog that runs out before the round ends fails.
+    db = tmp_path / "short.db"
+    bench.build(db, 20, 0, "typical", "typical")
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"hashes": ""}))
+    with pytest.raises(RuntimeError, match="backlog ran out before the round ended"):
+        bench.run_wal(str(db), "messages", 5, str(request), 1, 0.0, lifecycle="drain", backlog=1)
+    assert not (tmp_path / ("short.db" + bench.WAL_COPY_SUFFIX + ".stop")).exists()
 
 
 def test_writer_tokenizer_is_the_indexers_pinned_version():

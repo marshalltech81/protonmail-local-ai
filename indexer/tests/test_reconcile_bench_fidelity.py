@@ -249,6 +249,8 @@ def _schema(conn, table: str) -> dict:
     ).fetchone()
     return {
         "columns": columns,
+        # Foreign keys too: the WAL writer writes, and a cascade is a write.
+        "foreign_keys": sorted(conn.execute(f"PRAGMA foreign_key_list({table})")),
         "indexes": indexes,
         "virtual": re.sub(r"\s+", " ", virtual[0]) if virtual else None,
     }
@@ -265,8 +267,9 @@ def _with_vec(conn):
 def test_benchmark_schema_is_the_indexers(bench, tmp_path, table):
     # Columns (type, NOT NULL, default, key) and indexes (columns,
     # uniqueness, partial condition) as the indexer creates them, so the
-    # planner has the same choices. Foreign keys and CHECK constraints
-    # are left out: they act on writes, and the measured statements read.
+    # planner has the same choices, and foreign keys (their cascades are
+    # writes the WAL writer makes as the indexer does). CHECK
+    # constraints are left out: they write nothing.
     Database(tmp_path / "indexer.db").close()
     with (
         closing(_with_vec(sqlite3.connect(tmp_path / "indexer.db"))) as prod,
@@ -489,6 +492,15 @@ def test_wal_writer_constants_are_the_indexers(bench):
     assert bench.SUM_ENCODING_VERSION == vector_sums.ENCODING_VERSION
     assert bench.PER_MESSAGE_BODY_CAP_CHARS == threader.PER_MESSAGE_BODY_CAP_CHARS
     assert bench.THREAD_BODY_TEXT_MAX_TOKENS == threader.THREAD_BODY_TEXT_MAX_TOKENS
+    from src import attachment_indexing, queue
+    from src.extractors import CONTAINER_SIGNATURE_VERSION
+
+    assert bench.EXTRACTION_TURN_LAUNCHES == attachment_indexing.EXTRACTION_TURN_LAUNCHES
+    assert bench.EXTRACTION_TURN_SECONDS == attachment_indexing.EXTRACTION_TURN_SECONDS
+    assert bench.STAGE_EXTRACT == queue.STAGE_EXTRACT
+    assert bench.EXTRACTION_DEFERRED_ERROR == queue.EXTRACTION_DEFERRED_ERROR
+    assert bench._INTERRUPTED == (queue.INTERRUPTED_STAGE, queue._INTERRUPTED_ERROR)
+    assert bench.CONTAINER_SIGNATURE_VERSION == CONTAINER_SIGNATURE_VERSION
     assert bench._SUBJECT_PREFIX_RE.pattern == threader._SUBJECT_PREFIX_RE.pattern
     assert bench._SUBJECT_PREFIX_RE.flags == threader._SUBJECT_PREFIX_RE.flags
     assert (
@@ -644,3 +656,261 @@ def test_wal_writer_writes_the_rows_the_indexer_writes(bench, tmp_path, monkeypa
         problems += _differences(table, ours[table], expected[table])
     assert problems == []
     assert ours_fts == expected_fts
+
+
+# --- attachment continuation passes (owner decision 2, 2026-10-11) ------
+
+
+def _occurrence_states(conn, claimant_id: str) -> list[tuple]:
+    """A message's occurrences after one pass: whether each is complete
+    or deferred, and how many chunks and cached results it has."""
+    return [
+        tuple(r)
+        for r in conn.execute(
+            "SELECT a.attachment_occurrence_id, a.text_complete, "
+            "a.extraction_deferred_at IS NOT NULL, "
+            "(SELECT COUNT(*) FROM message_chunks c WHERE c.claimant_id = a.claimant_id "
+            " AND c.attachment_id = a.attachment_id), "
+            "(SELECT COUNT(*) FROM attachment_extractions e "
+            " WHERE e.attachment_id = a.attachment_id) "
+            "FROM attachments a WHERE a.claimant_id = ? ORDER BY a.attachment_occurrence_id",
+            (claimant_id,),
+        )
+    ]
+
+
+def _seed_cache(bench, conn, per_message: int) -> None:
+    # Message 0's first payload already extracted (by another message,
+    # say): its occurrence is a cache hit, which costs no budget.
+    _occurrence, attachment_id, _size, text = bench._record(
+        0, "typical", "typical", 0, 1, 40, per_message, None
+    ).attachments[0]
+    conn.execute(bench._INSERT_EXTRACTION, (attachment_id, text, "2026-01-01T00:00:00+00:00"))
+    conn.commit()
+
+
+def _indexer_passes(bench, tmp_path, monkeypatch, n, batch, per_message, seconds, seed):
+    """The indexer's first index of ``n`` messages of ``per_message``
+    PDFs at batch size ``batch``, each extraction taking ``seconds`` on
+    the budget's clock: its statements, its index and each pass's
+    occurrence states."""
+    import functools
+
+    from src import attachment_indexing
+
+    maildir = tmp_path / "maildir"
+    for i in range(n):
+        path = Path(bench.maildir_path(i, "typical", "typical", str(maildir)))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(
+            bench.render_eml(i, "typical", "typical", chunks=1, words=40, per_message=per_message)
+        )
+    # The benchmark's authority rules, as the writer applies them.
+    vendors = {
+        address: bench.authority(address)[0]
+        for i in range(n)
+        for _, address, _ in bench._shape(i, "typical", "typical", 0)["people"]
+        if bench.authority(address)[0] != "unclassified"
+    }
+    now = [0.0]
+
+    def clock() -> float:
+        # Read once before and once after each extraction
+        # (``_resolve_extracted_text``): every reading advances by
+        # ``seconds``, so each extraction's difference is ``seconds``.
+        now[0] += seconds
+        return now[0]
+
+    monkeypatch.setattr(
+        main,
+        "ExtractionBudget",
+        functools.partial(attachment_indexing.ExtractionBudget, clock=clock),
+    )
+    statements: list[str] = []
+    real = Database._connect
+
+    def traced(self):
+        conn = real(self)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(Database, "_connect", traced)
+    db = Database(tmp_path / "indexer.db")
+    db.set_authority_rules(AuthorityRules(addresses=vendors))
+    if seed:
+        _seed_cache(bench, db._conn, per_message)
+    passes: list[list[tuple]] = []
+    real_2c = main._phase2c_commit_vectors
+
+    def phase2c(entry, db_, *args, **kwargs):
+        out = real_2c(entry, db_, *args, **kwargs)
+        passes.append(_occurrence_states(db_._conn, entry.msg.claimant_id))
+        return out
+
+    monkeypatch.setattr(main, "_phase2c_commit_vectors", phase2c)
+    monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+    monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", batch)
+    statements.clear()
+    main.initial_index(
+        db,
+        make_mock_embedder([0.0] * EMBEDDING_DIM),
+        Threader(db),
+        IndexingQueue(db, max_attempts=3),
+    )
+    db.close()
+    monkeypatch.undo()
+    return statements, tmp_path / "indexer.db", str(maildir), passes
+
+
+def _writer_passes(bench, tmp_path, monkeypatch, n, batch, per_message, seconds, seed):
+    """The writer's batches for the same ``n`` messages (numbered from 0
+    on an empty corpus) and the same per-extraction ``seconds``, until
+    every job is done."""
+    tmp_path.mkdir()
+    db = tmp_path / "writer.db"
+    bench.build(db, 0, per_message, "typical", "typical")
+    if seed:
+        with closing(sqlite3.connect(db)) as conn:
+            _seed_cache(bench, conn, per_message)
+    statements: list[str] = []
+    real = bench.sqlite3.connect
+
+    def traced(*args, **kwargs):
+        conn = real(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(bench.sqlite3, "connect", traced)
+    passes: list[list[tuple]] = []
+    real_2c = bench._writer_phase2c
+
+    def phase2c(conn, rec, *args):
+        out = real_2c(conn, rec, *args)
+        passes.append(_occurrence_states(conn, rec.cid))
+        return out
+
+    monkeypatch.setattr(bench, "_writer_phase2c", phase2c)
+    stop = tmp_path / "stop"
+    timer = _stop_after_batch(db, stop, n)
+    shape = {**_SHAPE, "per_message": per_message}
+    # A first index, as the indexer's: the backlog enqueued before the
+    # writer is ready, drained with no pause, then idle.
+    bench.phase_writer(
+        str(db),
+        str(stop),
+        batch,
+        0.0,
+        shape=shape,
+        extract_seconds=seconds,
+        lifecycle="drain",
+        backlog=n,
+    )
+    timer.join()
+    monkeypatch.undo()
+    return statements, db, passes
+
+
+@pytest.mark.real_extractor_child
+@pytest.mark.parametrize(
+    ("n", "batch", "per_message", "seconds", "seed", "pass_count"),
+    [
+        # The launches bind (the clock stands still): 64 extracted, 2 left.
+        pytest.param(1, 1, 66, 0.0, False, 2, id="launch_limited"),
+        # The seconds bind: three 2 s extractions reach 5 s, one left.
+        pytest.param(1, 1, 4, 2.0, False, 2, id="time_limited"),
+        # A cached payload costs nothing: three extracted, one deferred.
+        pytest.param(1, 1, 5, 2.0, True, 2, id="cache_hit"),
+        # Two messages of seven, three passes each, the continuations
+        # taking turns in batches of their own.
+        pytest.param(2, 2, 7, 2.0, False, 6, id="multi_pass"),
+        # A first index of several batches (owner decision 3's drain):
+        # without continuations, then with them, where each continuation
+        # (due when its pass ends) is claimed behind the backlog's jobs
+        # already due (due at their message time).
+        pytest.param(4, 2, 1, 0.0, False, 4, id="several_batches"),
+        pytest.param(4, 2, 4, 2.0, False, 8, id="continuations_behind_due"),
+    ],
+)
+def test_wal_writer_continues_messages_as_the_indexer_does(
+    bench, tmp_path, monkeypatch, n, batch, per_message, seconds, seed, pass_count
+):
+    # The expected passes are the indexer's own, traced with its budget's
+    # clock injected so each extraction takes ``seconds``: the deferral
+    # in the phase 2c transaction, the queue and phase 1 writes of every
+    # further pass (no body re-appended), resolved occurrences left as
+    # they are, the job's delete on the last pass only, and the state
+    # each pass leaves.
+    expected, prod_db, root, prod_passes = _indexer_passes(
+        bench, tmp_path / "indexer", monkeypatch, n, batch, per_message, seconds, seed
+    )
+    ours, ours_db, our_passes = _writer_passes(
+        bench, tmp_path / "writer", monkeypatch, n, batch, per_message, seconds, seed
+    )
+    assert len(prod_passes) == pass_count
+    assert our_passes == prod_passes
+    tables = set(_TABLES) | set(_WRITER_TABLES)
+    theirs_writes, ours_writes = _writes(expected, tables), _writes(ours, tables)
+    # The walk: the indexer enqueues each message in a commit of its own,
+    # the writer's backlog in one, both before any measured window.
+    assert theirs_writes[:n] == [["INSERT indexing_jobs"]] * n
+    assert ours_writes[:1] == [["INSERT indexing_jobs"]]
+    theirs_writes, ours_writes = theirs_writes[n:], ours_writes[1:]
+    assert len(ours_writes) == len(theirs_writes)
+    for k, (a, b) in enumerate(zip(ours_writes, theirs_writes, strict=True)):
+        assert a == b, f"commit {k}"
+    assert [s for s in ours if s.startswith(_FTS_WRITES)] == [
+        s for s in expected if s.startswith(_FTS_WRITES)
+    ]
+    theirs_rows, ours_rows = _traced_rows(prod_db, root), _traced_rows(ours_db, None)
+    problems = []
+    for table in _WRITER_ROWS:
+        problems += _differences(table, ours_rows[table], theirs_rows[table])
+    assert problems == []
+
+
+@pytest.mark.real_extractor_child
+def test_wal_writer_counts_the_launches_of_the_benchmark_pdf(bench):
+    from src.extractors import extract
+    from src.extractors._runner import process_launches
+
+    for i in range(3):
+        before = process_launches()
+        result = extract(
+            content_type="application/pdf",
+            filename="file.pdf",
+            payload=bench.pdf_payload(bench.attachment_text(i, 0)),
+            ocr_enabled=False,
+            max_bytes=50_000_000,
+            max_ocr_pages=10,
+        )
+        assert result.status == "success"
+        assert process_launches() - before == bench.PDF_LAUNCHES
+
+
+@pytest.mark.serial
+@pytest.mark.real_extractor_child
+def test_wal_writer_extraction_seconds_are_a_plain_timing(bench):
+    # ``PDF_EXTRACT_SECONDS`` is the writer's default cost of one
+    # extraction against the per-pass budget: a plain timing of the
+    # indexer's extractor on the benchmark's PDF, here within a factor of
+    # three (the live indexer's figure is #1469).
+    import statistics
+    import time
+
+    from src.extractors import extract
+
+    timings = []
+    for i in range(9):
+        payload = bench.pdf_payload(bench.attachment_text(i, 0))
+        started = time.perf_counter()
+        extract(
+            content_type="application/pdf",
+            filename="file.pdf",
+            payload=payload,
+            ocr_enabled=False,
+            max_bytes=50_000_000,
+            max_ocr_pages=10,
+        )
+        timings.append(time.perf_counter() - started)
+    median = statistics.median(timings)
+    assert median / 3 <= bench.PDF_EXTRACT_SECONDS <= median * 3

@@ -1648,30 +1648,47 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
 - with `--wal`, after every other step, WAL growth while a second
   process commits during one round's snapshot (largest K, each kind
   and scan method), and whether a `TRUNCATE` checkpoint then reclaims
-  it. The writer makes the indexer's commits for new mail, a batch of
-  `--writer-batch` messages at a time (absent: 8 and 50, the indexer's
-  steady-state and first-index batch sizes), pausing
-  `--writer-interval` seconds after each batch. For each message it
-  commits a queue job, a charge, the message's thread and message rows,
-  a refund, a charge and refund around chunking, its chunks, vectors
-  and attachments, and the job's deletion; each batch adds one more
-  commit, the lone message's charge and refund at batch size 1 or one
-  mark on every message at larger sizes. Its tables are the ones the
+  it. The writer makes the indexer's commits while it indexes mail,
+  claiming up to `--writer-batch` due jobs at a time (absent: 8 and 50,
+  the indexer's steady-state and first-index batch sizes) in the
+  indexer's order and pausing `--writer-interval` seconds after each
+  batch. `--writer-lifecycle` says how jobs reach its queue (absent:
+  both, each a result of its own): `arrival`, the steady state, queues
+  a batch of new mail, one commit a message, whenever no job is due;
+  `drain`, a first index, queues `--writer-backlog` messages (absent:
+  20,000) before the round, in one commit outside the measured window,
+  due at their message time as the indexer's walk queues them, and
+  drains them. A drain that runs out before the round ends fails the
+  measurement, and each drain result reports the jobs it had left.
+  For each message it commits a charge, the message's thread and
+  message rows, a refund, a charge and refund around chunking, its
+  chunks, vectors and attachments, and the job's deletion; each batch
+  adds one more commit, the lone message's charge and refund at batch
+  size 1 or one mark on every message at larger sizes. Like the
+  indexer it extracts a message's fresh attachments only within the
+  per-pass budget (64 process launches or 5 seconds, each extraction
+  counting `--writer-extract-seconds`, absent 0.1, a plain timing of
+  the benchmark's PDF); the rest are marked deferred in the same
+  commit as the pass's chunks, and the job is continued on a later
+  pass, due at once behind the jobs already due, which repeats the
+  queue and thread commits, keeps the occurrences already resolved and
+  deletes the job only on its last pass. Each message is rendered and
+  chunked, and its vectors made, before the commits that write it, as
+  the indexer parses and embeds before it writes. Its tables are the ones the
   indexer writes and its messages have the corpus's shape, stored in
   Trash so the round's set does not change; it overwrites deleted
   content as the indexer does. `indexer/tests/test_reconcile_bench_fidelity.py`
   traces the indexer's own commits and checks the writer's sequence, the
-  tables of each commit, and the rows and full-text entries it writes.
+  tables and statements of each commit, the rows and full-text entries
+  it writes, and each continuation pass, with the indexer's extraction
+  budget clock driven so each extraction takes the writer's seconds.
   It cuts thread bodies at the indexer's 4,000-token cap with the
   indexer's own tokenizer asset (`indexer/src/data/qwen3-embedding`,
   read only; `tokenizers` is already in the image at the indexer's
   pinned version), so `--wal` is refused when the asset is not found
-  beside the script or mounted at `/app/tokenizer`. One write is known
-  to differ: a message whose fresh attachments outrun the indexer's
-  per-pass extraction budget, which the indexer finishes over further
-  passes, is written in one pass. The writer's tables start
-  empty, its bytes are not calibrated against the live indexer, and the
-  pace is a parameter
+  beside the script or mounted at `/app/tokenizer`. The writer's tables
+  (but a drain's queue) start empty, its bytes and extraction time are not calibrated against
+  the live indexer, and the pace is a parameter
   ([#1469](https://github.com/marshalltech81/protonmail-local-ai/issues/1469)).
   The writer runs with automatic checkpoints off, so the WAL file's
   size is the WAL's end. Each configuration runs on a fresh copy of the

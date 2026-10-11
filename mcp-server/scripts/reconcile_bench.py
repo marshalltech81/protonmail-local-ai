@@ -44,6 +44,7 @@ import base64
 import fcntl
 import functools
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -105,7 +106,8 @@ CREATE TABLE messages (
     cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
     attachments_manifest_complete INTEGER CHECK (attachments_manifest_complete IN (0, 1)),
     body_complete INTEGER CHECK (body_complete IN (0, 1)),
-    caps_json TEXT
+    caps_json TEXT,
+    FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
 CREATE INDEX idx_messages_message_effective ON messages(message_id, effective_at, claimant_id);
@@ -118,7 +120,8 @@ CREATE TABLE message_participants (
     role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
     address     TEXT NOT NULL,
     name        TEXT,
-    PRIMARY KEY (claimant_id, role, address)
+    PRIMARY KEY (claimant_id, role, address),
+    FOREIGN KEY (claimant_id) REFERENCES messages(claimant_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_message_participants_address ON message_participants(address, role);
 CREATE TABLE message_participant_names (
@@ -126,7 +129,9 @@ CREATE TABLE message_participant_names (
     role        TEXT NOT NULL,
     address     TEXT NOT NULL,
     name        TEXT NOT NULL,
-    PRIMARY KEY (claimant_id, role, address, name)
+    PRIMARY KEY (claimant_id, role, address, name),
+    FOREIGN KEY (claimant_id, role, address)
+        REFERENCES message_participants(claimant_id, role, address) ON DELETE CASCADE
 );
 CREATE INDEX idx_message_participant_names_address_name
     ON message_participant_names(address, name);
@@ -142,7 +147,9 @@ CREATE TABLE message_chunks (
     chunked_at    TEXT NOT NULL,
     fts_rowid     INTEGER,
     attachment_id TEXT,
-    kind          TEXT NOT NULL
+    kind          TEXT NOT NULL,
+    FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id) ON DELETE CASCADE,
+    FOREIGN KEY (thread_id) REFERENCES threads(thread_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_message_chunks_claimant ON message_chunks(claimant_id);
 CREATE INDEX idx_message_chunks_thread ON message_chunks(thread_id);
@@ -155,7 +162,7 @@ CREATE TABLE entities (
     entity_id       TEXT PRIMARY KEY,
     kind            TEXT NOT NULL,
     canonical_key   TEXT NOT NULL,
-    organization_id TEXT,
+    organization_id TEXT REFERENCES entities(entity_id),
     authority_class TEXT NOT NULL DEFAULT 'unclassified',
     authority_rule  TEXT
 );
@@ -174,7 +181,9 @@ CREATE TABLE attachments (
     extractor_module          TEXT NOT NULL DEFAULT '',
     text_complete             INTEGER CHECK (text_complete IN (0, 1)),
     text_extractor            TEXT,
-    extraction_deferred_at    TEXT
+    extraction_deferred_at    TEXT,
+    FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id) ON DELETE CASCADE,
+    FOREIGN KEY (thread_id) REFERENCES threads(thread_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_attachments_deferred ON attachments(claimant_id, attachment_id)
     WHERE extraction_deferred_at IS NOT NULL;
@@ -665,6 +674,29 @@ _INSERT_MESSAGE = (
     "cc_addresses_complete, attachments_manifest_complete, body_complete, caps_json) "
     "VALUES (?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, "
     "1, 1, 1, 1, 1, 1, ?, '{}')"
+)
+
+
+# The writer's message write (indexer/src/database.py
+# ``_write_message_record``): an upsert, so a continuation pass rewrites
+# the row in place, keeping ``first_indexed_at`` and clearing
+# ``body_complete`` until phase 2c sets it again.
+_UPSERT_MESSAGE = _INSERT_MESSAGE + (
+    " ON CONFLICT(claimant_id) DO UPDATE SET thread_id = excluded.thread_id, "
+    "filepath = excluded.filepath, folder = excluded.folder, subject = excluded.subject, "
+    "sent_at = excluded.sent_at, sent_at_status = excluded.sent_at_status, "
+    "occurred_at = excluded.occurred_at, in_reply_to = excluded.in_reply_to, "
+    "references_json = excluded.references_json, has_attachments = excluded.has_attachments, "
+    "size_bytes = excluded.size_bytes, content_hash = excluded.content_hash, "
+    "indexed_at = excluded.indexed_at, seen = excluded.seen, flagged = excluded.flagged, "
+    "replied = excluded.replied, sender_ambiguous = excluded.sender_ambiguous, "
+    "participant_names_complete = excluded.participant_names_complete, "
+    "subject_complete = excluded.subject_complete, "
+    "from_addresses_complete = excluded.from_addresses_complete, "
+    "to_addresses_complete = excluded.to_addresses_complete, "
+    "cc_addresses_complete = excluded.cc_addresses_complete, "
+    "attachments_manifest_complete = excluded.attachments_manifest_complete, "
+    "body_complete = NULL, caps_json = excluded.caps_json"
 )
 
 
@@ -1473,13 +1505,15 @@ CREATE TABLE IF NOT EXISTS thread_vector_sums (
     thread_id        TEXT PRIMARY KEY,
     count            INTEGER NOT NULL CHECK (count >= 0),
     encoding_version INTEGER NOT NULL,
-    sum              BLOB NOT NULL
+    sum              BLOB NOT NULL,
+    FOREIGN KEY (thread_id) REFERENCES threads(thread_id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS message_thread_map (
     claimant_id TEXT PRIMARY KEY,
     message_id  TEXT NOT NULL,
     thread_id   TEXT NOT NULL,
-    filepath    TEXT NOT NULL
+    filepath    TEXT NOT NULL,
+    FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
 );
 CREATE INDEX IF NOT EXISTS idx_message_thread_map_message ON message_thread_map(message_id);
 CREATE INDEX IF NOT EXISTS idx_message_thread_map_filepath ON message_thread_map(filepath);
@@ -1492,7 +1526,7 @@ CREATE TABLE IF NOT EXISTS indexed_files (
     content_hash TEXT
 );
 CREATE TABLE IF NOT EXISTS entity_aliases (
-    entity_id TEXT NOT NULL,
+    entity_id TEXT NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
     alias     TEXT NOT NULL,
     PRIMARY KEY (entity_id, alias)
 );
@@ -1556,7 +1590,44 @@ FTS_SUBJECT_SCAN_CHARS = 500
 MAX_WRITER_BATCH = 1000
 # The queue's marker for a message whose step is running
 # (indexer/src/queue.py ``INTERRUPTED_STAGE`` and its error text).
-_INTERRUPTED = ("interrupted", "interrupted mid-processing; charged one attempt")
+_INTERRUPTED = (
+    "interrupted",
+    "indexer stopped while processing this message (crash, out-of-memory kill, or "
+    "stall-guard exit)",
+)
+# indexer/src/queue.py: a job continued because its message's attachment
+# extraction reached the per-pass budget.
+STAGE_EXTRACT = "extract"
+EXTRACTION_DEFERRED_ERROR = (
+    "attachment extraction deferred: per-message budget reached; continued on a later pass"
+)
+# indexer/src/attachment_indexing.py: the per-message, per-pass
+# extraction budget (#1236), in process launches and seconds.
+EXTRACTION_TURN_LAUNCHES = 64
+EXTRACTION_TURN_SECONDS = 5.0
+# Process launches one extraction of this benchmark's PDF makes
+# (``_runner.process_launches``; the fidelity test counts them), and the
+# seconds it takes: a plain timing in the indexer's test environment
+# (the fidelity test's serial calibration); the live indexer's is #1469.
+PDF_LAUNCHES = 1
+PDF_EXTRACT_SECONDS = 0.1
+# indexer/src/extractors/__init__.py ``CONTAINER_SIGNATURE_VERSION``.
+CONTAINER_SIGNATURE_VERSION = 2
+# indexer/src/queue.py: the reasons a watcher arrival and a first
+# index's walk enqueue a job with.
+REASON_ON_CREATED = "on_created"
+REASON_INITIAL_SCAN = "initial_scan"
+# How the writer's jobs reach the queue (``phase_writer``): ``arrival``,
+# the steady state, enqueues a batch of new mail whenever the queue is
+# empty; ``drain``, a first index, enqueues a backlog before it is
+# ready and drains it.
+WRITER_LIFECYCLES = ("arrival", "drain")
+# The largest ``--writer-backlog``: its rows are written before the
+# round, in one transaction, sorted by SQLite (a temporary table), so
+# memory does not grow with it; the bound keeps that setup and the
+# temporary file to minutes and a few hundred megabytes.
+MAX_WRITER_BACKLOG = 200_000
+WRITER_BACKLOG = 20_000
 
 
 def _unit_vector(rng: random.Random) -> bytes:
@@ -1708,76 +1779,94 @@ def _thread_body(text: str) -> str:
     return _truncate_to_tokens(text, THREAD_BODY_TEXT_MAX_TOKENS)
 
 
-@dataclass
-class _WriterThread:
-    """What the writer keeps of the thread it is adding messages to (the
-    indexer reads it back from ``threads`` and ``thread_vector_sums``)."""
-
-    tid: str
-    # The matching key, and the root's own subject (``display_subject``).
-    subject: str
-    display_subject: str
-    participants: list
-    senders: list
-    message_ids: list
-    # Each message's subject, oldest first (the FTS subject column's input).
-    subjects: list
-    body: str
-    date_first: str
-    has_attachments: bool = False
-    fts_rowid: int | None = None
-    sums: list | None = None
-    count: int = 0
-    vector: bytes = bytes(4 * EMBEDDING_DIM)
-
-    def release(self) -> None:
-        """Drop what only a later message's phase 1 would read."""
-        self.participants, self.senders, self.message_ids, self.subjects = [], [], [], []
-        self.body = ""
+def _decode_sum(blob: bytes) -> list[int]:
+    """indexer/src/vector_sums.py ``decode``: a stored thread sum."""
+    if not blob:
+        return [0] * EMBEDDING_DIM
+    total: list[int] = []
+    i = 0
+    while i < len(blob):
+        values = []
+        for _ in range(2):
+            value = shift = 0
+            while True:
+                byte = blob[i]
+                i += 1
+                value |= (byte & 0x7F) << shift
+                shift += 7
+                if byte < 0x80:
+                    break
+            values.append(value)
+        k, n = values
+        total.append(int.from_bytes(blob[i : i + n], "big", signed=True) << k)
+        i += n
+    return total
 
 
-def _writer_phase1(
-    conn: sqlite3.Connection, rec: _Record, thread: _WriterThread | None, now: str
-) -> _WriterThread:
+def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
     """Message ``rec``'s phase 1 writes (indexer/src/database.py
-    ``upsert_thread``: the thread row, its new sum, the thread map, the
-    indexed file, the message and its participants, entities and
-    aliases, the thread's FTS row and seed vector), in the open
-    transaction. The message is stored in Trash, so the round's
-    unfiltered predicate leaves it out. Returns the thread."""
+    ``upsert_thread``: the thread row, a new thread's sum, the thread
+    map, the indexed file, the message and its participants, entities
+    and aliases, the thread's FTS row and seed vector), in the open
+    transaction. Like the indexer it reads the thread back and merges
+    into it; a message already in the thread (a continuation pass) adds
+    no body text. The message is stored in Trash, so the round's
+    unfiltered predicate leaves it out."""
     authors, addresses = _addresses(rec)
     sender = authors[0] if authors else ""
+    subject_in = rec.shape["subject"]
     body = "\n\n".join(text for _, _, kind, _, text, _, _ in rec.chunks if kind == "body")
     block = f"From: {sender}\nDate: {rec.at}\n{body[:PER_MESSAGE_BODY_CAP_CHARS]}"
-    new = thread is None
-    if thread is None:
-        subject = _normalize_subject(rec.shape["subject"])
+    snippet = body[:200].replace("\n", " ")
+    row = conn.execute(
+        "SELECT subject, participants, senders, message_ids, body_text, snippet, date_first, "
+        "date_last, display_subject, has_attachments, fts_rowid FROM threads WHERE thread_id = ?",
+        (rec.tid,),
+    ).fetchone()
+    if row is None:
+        subject = _normalize_subject(subject_in)
+        participants = addresses
+        senders = _dedupe([sender] if sender else [])
+        ids = [rec.cid]
+        date_first, display, has_attachments, fts_rowid = rec.at, subject_in, False, None
         # indexer/src/threader.py ``Thread.build_body_text``.
-        thread = _WriterThread(
-            tid=rec.tid,
-            subject=subject,
-            display_subject=rec.shape["subject"],
-            participants=addresses,
-            senders=[sender] if sender else [],
-            message_ids=[rec.cid],
-            subjects=[rec.shape["subject"]],
-            body=_thread_body(
+        body_text = _thread_body(
+            "\n".join(
+                [f"Subject: {subject}", f"Participants: {', '.join(addresses)}", "", block, ""]
+            )
+        )
+        vector = bytes(4 * EMBEDDING_DIM)
+    else:
+        (subject, old_participants, old_senders, old_ids, old_body, old_snippet, old_first,
+         old_last, old_display, old_attachments, fts_rowid) = row  # fmt: skip
+        old = json.loads(old_ids)
+        participants = _dedupe(json.loads(old_participants) + addresses)
+        senders = _dedupe(json.loads(old_senders) + ([sender] if sender else []))
+        ids = list(dict.fromkeys([*old, rec.cid]))
+        has_attachments = bool(old_attachments)
+        date_first = min(old_first, rec.at)
+        if not old_display:
+            display = subject_in
+        elif rec.at < old_first:
+            display = subject_in or old_display
+        else:
+            display = old_display
+        # ``_compute_body``: only a message new to the thread adds text.
+        if old_body:
+            body_text = old_body if rec.cid in old else _thread_body(old_body + "\n" + block)
+        else:
+            body_text = _thread_body(
                 "\n".join(
                     [f"Subject: {subject}", f"Participants: {', '.join(addresses)}", "", block, ""]
                 )
-            ),
-            date_first=rec.at,
-            sums=[0] * EMBEDDING_DIM,
-        )
-    else:
-        # indexer/src/database.py ``upsert_thread`` and ``_compute_body``.
-        thread.participants = _dedupe(thread.participants + addresses)
-        thread.senders = _dedupe(thread.senders + ([sender] if sender else []))
-        thread.message_ids.append(rec.cid)
-        thread.subjects.append(rec.shape["subject"])
-        thread.body = _thread_body(thread.body + "\n" + block)
-    thread.has_attachments = thread.has_attachments or bool(rec.attachments)
-    participants = json.dumps(thread.participants)
+            )
+        if old_snippet and rec.at < old_last:
+            snippet = old_snippet
+        vector = conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (rec.tid,)
+        ).fetchone()[0]
+    has_attachments = has_attachments or bool(rec.attachments)
+    participants_json = json.dumps(participants)
     conn.execute(
         "INSERT INTO threads (thread_id, subject, participants, senders, folder, "
         "date_first, date_last, message_ids, snippet, has_attachments, body_text, "
@@ -1788,37 +1877,37 @@ def _writer_phase1(
         "snippet = excluded.snippet, has_attachments = excluded.has_attachments, "
         "body_text = excluded.body_text, display_subject = excluded.display_subject",
         (
-            thread.tid,
-            thread.subject,
-            participants,
-            json.dumps(thread.senders),
-            thread.date_first,
+            rec.tid,
+            subject,
+            participants_json,
+            json.dumps(senders),
+            date_first,
             rec.at,
-            json.dumps(thread.message_ids),
-            body[:200].replace("\n", " "),
-            1 if thread.has_attachments else 0,
-            thread.body,
-            thread.display_subject,
+            json.dumps(ids),
+            snippet,
+            1 if has_attachments else 0,
+            body_text,
+            display,
         ),
     )
-    if new:
+    if row is None:
         conn.execute(
             "INSERT INTO thread_vector_sums (thread_id, count, encoding_version, sum) "
             "VALUES (?, 0, ?, ?) ON CONFLICT(thread_id) DO NOTHING",
-            (thread.tid, SUM_ENCODING_VERSION, b""),
+            (rec.tid, SUM_ENCODING_VERSION, b""),
         )
     conn.execute(
         "INSERT INTO message_thread_map (claimant_id, message_id, thread_id, filepath) "
         "VALUES (?, ?, ?, ?) ON CONFLICT(claimant_id) DO UPDATE SET "
         "thread_id = excluded.thread_id, filepath = excluded.filepath",
-        (rec.cid, rec.mid, thread.tid, rec.path),
+        (rec.cid, rec.mid, rec.tid, rec.path),
     )
     conn.execute(
         "INSERT OR REPLACE INTO indexed_files (filepath, indexed_at, size, mtime_ns, "
         "content_hash) VALUES (?, ?, ?, ?, ?)",
         (rec.path, now, len(rec.raw), time.time_ns(), hashlib.sha256(rec.raw).hexdigest()),
     )
-    conn.execute(_INSERT_MESSAGE, _message_values(rec, now, None, folder="Trash"))
+    conn.execute(_UPSERT_MESSAGE, _message_values(rec, now, None, folder="Trash"))
     conn.execute("DELETE FROM message_participants WHERE claimant_id = ?", (rec.cid,))
     # indexer/src/database.py ``_write_message_record``: every header
     # address in order, each followed by its entity writes the first time
@@ -1851,19 +1940,24 @@ def _writer_phase1(
         "UPDATE threads SET date_first = COALESCE((SELECT MIN(effective_at) FROM messages "
         "WHERE thread_id = :t), date_first), date_last = COALESCE((SELECT MAX(effective_at) "
         "FROM messages WHERE thread_id = :t), date_last) WHERE thread_id = :t",
-        {"t": thread.tid},
+        {"t": rec.tid},
     )
-    if thread.fts_rowid is not None:
-        conn.execute("DELETE FROM threads_fts WHERE rowid = ?", (thread.fts_rowid,))
-    thread.fts_rowid = conn.execute(
+    subjects = [
+        r[0]
+        for r in conn.execute(
+            "SELECT substr(subject, 1, ?) FROM messages WHERE thread_id = ? "
+            "ORDER BY effective_at LIMIT ?",
+            (FTS_SUBJECT_SCAN_CHARS, rec.tid, FTS_SUBJECT_SCAN_ROWS),
+        )
+    ]
+    if fts_rowid is not None:
+        conn.execute("DELETE FROM threads_fts WHERE rowid = ?", (fts_rowid,))
+    fts_rowid = conn.execute(
         "INSERT INTO threads_fts (subject, participants, body) VALUES (?, ?, ?)",
-        (_fts_subject_text(thread.subject, thread.subjects), participants, thread.body),
+        (_fts_subject_text(subject, subjects), participants_json, body_text),
     ).lastrowid
-    conn.execute(
-        "UPDATE threads SET fts_rowid = ? WHERE thread_id = ?", (thread.fts_rowid, thread.tid)
-    )
-    _write_thread_vector(conn, thread)
-    return thread
+    conn.execute("UPDATE threads SET fts_rowid = ? WHERE thread_id = ?", (fts_rowid, rec.tid))
+    _write_thread_vector(conn, rec.tid, vector)
 
 
 def _write_entity(conn: sqlite3.Connection, address: str) -> None:
@@ -1888,36 +1982,99 @@ def _write_entity(conn: sqlite3.Connection, address: str) -> None:
     )
 
 
-def _write_thread_vector(conn: sqlite3.Connection, thread: _WriterThread) -> None:
+def _write_thread_vector(conn: sqlite3.Connection, tid: str, vector: bytes) -> None:
     # vec0 has no upsert: the indexer deletes, then inserts.
-    conn.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.tid,))
-    conn.execute(
-        "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
-        (thread.tid, thread.vector),
-    )
+    conn.execute("DELETE FROM threads_vec WHERE thread_id = ?", (tid,))
+    conn.execute("INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)", (tid, vector))
+
+
+# What one pass does with an occurrence (``_writer_plan``).
+_KEPT, _CACHED, _EXTRACTED, _DEFERRED = "kept", "cached", "extracted", "deferred"
+
+
+def _writer_plan(
+    conn: sqlite3.Connection, rec: _Record, continuation: bool, extract_seconds: float
+) -> list[tuple[str, bool, bool, int | None]]:
+    """One pass's outcome for each of ``rec``'s occurrences, as phase 2a
+    decides it (indexer/src/main.py ``_phase2a_collect_chunks`` and
+    indexer/src/attachment_indexing.py ``_resolve_extracted_text``):
+    ``(action, stored, was_deferred, text_complete)``. A continuation
+    keeps the occurrences already resolved; a cached payload costs
+    nothing; any other is extracted while the pass's budget lasts (the
+    first always, then until ``EXTRACTION_TURN_LAUNCHES`` launches or
+    ``EXTRACTION_TURN_SECONDS`` seconds, each extraction counting
+    ``PDF_LAUNCHES`` and ``extract_seconds``) and deferred after."""
+    states = {
+        occurrence: (complete, deferred)
+        for occurrence, complete, deferred in conn.execute(
+            "SELECT attachment_occurrence_id, text_complete, extraction_deferred_at IS NOT NULL "
+            "FROM attachments WHERE claimant_id = ?",
+            (rec.cid,),
+        )
+    }
+    launches, seconds, dispatched = 0, 0.0, 0
+    plan = []
+    for occurrence, attachment_id, _size, _text in rec.attachments:
+        complete, was_deferred = states.get(occurrence, (None, False))
+        if continuation and complete is not None and not was_deferred:
+            plan.append((_KEPT, True, False, complete))
+            continue
+        cached = conn.execute(
+            "SELECT 1 FROM attachment_extractions WHERE attachment_id = ? AND extractor_module = ?",
+            (attachment_id, PDF_MODULE),
+        ).fetchone()
+        if cached:
+            action = _CACHED
+        elif dispatched and (
+            launches >= EXTRACTION_TURN_LAUNCHES or seconds >= EXTRACTION_TURN_SECONDS
+        ):
+            action = _DEFERRED
+        else:
+            dispatched += 1
+            launches += PDF_LAUNCHES
+            seconds += extract_seconds
+            action = _EXTRACTED
+        plan.append((action, occurrence in states, was_deferred, complete))
+    return plan
 
 
 def _writer_phase2c(
-    conn: sqlite3.Connection, rec: _Record, thread: _WriterThread, rng: random.Random, now: str
-) -> None:
+    conn: sqlite3.Connection,
+    rec: _Record,
+    plan: list[tuple[str, bool, bool, int | None]],
+    continuation: bool,
+    vectors: Iterator[bytes],
+    now: str,
+) -> bool:
     """Message ``rec``'s phase 2c writes (indexer/src/main.py
-    ``_phase2c_commit_vectors``), in the open transaction and the
-    indexer's order: the body chunks with their FTS rows and vectors and
-    the thread's sum, the body's completeness, then per occurrence its
-    FTS row, row and extraction, its chunks and the sum again, and last
-    the thread's vector. Vectors are random unit vectors: their bytes,
-    not their values, are what the WAL keeps."""
+    ``_phase2c_commit_vectors``) for one pass's ``plan``, in the open
+    transaction and the indexer's order: the body chunks (the first pass
+    only; a continuation's are stored) with their FTS rows and vectors
+    and the thread's sum, the body's completeness, then per occurrence
+    its row, its result or its deferral mark, its chunks and the sum
+    again, and last the thread's vector. Returns whether an occurrence
+    was deferred (the caller then continues the job). Vectors come from
+    ``vectors``, made before the transaction as the indexer's come from
+    its embed request (phase 2b): their bytes, not their values, are
+    what the WAL keeps."""
     shape = rec.shape
+    count, blob = conn.execute(
+        "SELECT count, sum FROM thread_vector_sums WHERE thread_id = ?", (rec.tid,)
+    ).fetchone()
+    total = _decode_sum(blob)
+    vector = conn.execute(
+        "SELECT embedding FROM threads_vec WHERE thread_id = ?", (rec.tid,)
+    ).fetchone()[0]
 
     def chunks(attachment_id: str | None) -> None:
         # indexer/src/database.py ``replace_message_chunks``.
-        assert thread.sums is not None
+        nonlocal count, total, vector
         added = 0
         for pk, chunk_attachment, kind, c, text, start, end in rec.chunks:
             if chunk_attachment != attachment_id:
                 continue
             added += 1
-            vector = _unit_vector(rng)
+            vector = next(vectors)
             fts_rowid = conn.execute(
                 "INSERT INTO message_chunks_fts (text) VALUES (?)", (text,)
             ).lastrowid
@@ -1929,10 +2086,8 @@ def _writer_phase2c(
                 (values[0], vector),
             )
             conn.execute(_INSERT_CHUNK, values)
-            thread.sums = [a + b for a, b in zip(thread.sums, _vector_units(vector), strict=True)]
-            thread.count += 1
-            # The thread vector is the chunks' mean; any unit vector has its size.
-            thread.vector = vector
+            total = [a + b for a, b in zip(total, _vector_units(vector), strict=True)]
+            count += 1
         if not added:
             # No vector added or removed: the indexer writes no sum.
             return
@@ -1941,44 +2096,121 @@ def _writer_phase2c(
             "VALUES (?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET "
             "count = excluded.count, encoding_version = excluded.encoding_version, "
             "sum = excluded.sum",
-            (thread.tid, thread.count, SUM_ENCODING_VERSION, _encode_sum(thread.sums)),
+            (rec.tid, count, SUM_ENCODING_VERSION, _encode_sum(total)),
         )
 
-    chunks(None)
+    if not continuation:
+        chunks(None)
     conn.execute("UPDATE messages SET body_complete = 1 WHERE claimant_id = ?", (rec.cid,))
-    for occurrence, attachment_id, size, extracted in rec.attachments:
+    deferred = False
+    for (occurrence, attachment_id, size, extracted), (
+        action,
+        stored,
+        was_deferred,
+        complete,
+    ) in zip(rec.attachments, plan, strict=True):
         # indexer/src/attachment_indexing.py ``apply_attachment_writes``.
-        fts_rowid = conn.execute(
-            "INSERT INTO attachments_fts (filename, content_type) VALUES (?, ?)",
-            (shape["filename"], shape["content_type"]),
-        ).lastrowid
-        # ``upsert_attachment``, the extraction, then
+        if action == _KEPT:
+            continue
+        if action == _DEFERRED:
+            deferred = True
+            if was_deferred and complete == 0:
+                continue  # deferred again: its mark is already written
+        if not stored:
+            # ``upsert_attachment`` (a stored row is left as it is).
+            fts_rowid = conn.execute(
+                "INSERT INTO attachments_fts (filename, content_type) VALUES (?, ?)",
+                (shape["filename"], shape["content_type"]),
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO attachments (attachment_occurrence_id, claimant_id, attachment_id, "
+                "thread_id, filename, content_type, size_bytes, seen_at, fts_rowid, "
+                "extractor_module) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    occurrence,
+                    rec.cid,
+                    attachment_id,
+                    rec.tid,
+                    shape["filename"],
+                    shape["content_type"],
+                    size,
+                    now,
+                    fts_rowid,
+                    PDF_MODULE,
+                ),
+            )
+        if action == _DEFERRED:
+            # ``mark_attachment_extraction_deferred``.
+            conn.execute(
+                "UPDATE attachments SET text_complete = 0, extraction_deferred_at = ? "
+                "WHERE attachment_occurrence_id = ?",
+                (now, occurrence),
+            )
+            continue
+        if action == _EXTRACTED:
+            conn.execute(_INSERT_EXTRACTION, (attachment_id, extracted, now))
+        else:
+            # A cache hit on a payload with no container signature.
+            conn.execute(
+                "UPDATE attachment_extractions SET identifier = ? "
+                "WHERE attachment_id = ? AND extractor_module = ? AND (identifier IS NULL "
+                "OR (substr(identifier, 1, 5) = 'none@' "
+                "AND CAST(substr(identifier, 6) AS INTEGER) < ?))",
+                (PDF_IDENTIFIER, attachment_id, PDF_MODULE, CONTAINER_SIGNATURE_VERSION),
+            )
         # ``set_attachment_text_complete``.
-        conn.execute(
-            "INSERT INTO attachments (attachment_occurrence_id, claimant_id, attachment_id, "
-            "thread_id, filename, content_type, size_bytes, seen_at, fts_rowid, "
-            "extractor_module) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                occurrence,
-                rec.cid,
-                attachment_id,
-                rec.tid,
-                shape["filename"],
-                shape["content_type"],
-                size,
-                now,
-                fts_rowid,
-                PDF_MODULE,
-            ),
-        )
-        conn.execute(_INSERT_EXTRACTION, (attachment_id, extracted, now))
         conn.execute(
             "UPDATE attachments SET text_complete = 1, text_extractor = ?, "
             "extraction_deferred_at = NULL WHERE attachment_occurrence_id = ?",
             (PDF_EXTRACTOR, occurrence),
         )
         chunks(attachment_id)
-    _write_thread_vector(conn, thread)
+    # The thread vector is the chunks' mean; any unit vector has its size.
+    _write_thread_vector(conn, rec.tid, vector)
+    return deferred
+
+
+# Distinct random unit vectors the writer's chunks take in turn (made
+# once, before it is ready).
+VECTOR_POOL = 64
+
+
+def _message_number(path: str) -> int:
+    """The message number ``i`` of ``maildir_path(i, ...)``: the UID in
+    its file name (``file_name``) less one."""
+    return int(path.rsplit(",U=", 1)[1].split(":", 1)[0]) - 1
+
+
+def _writer_backlog(
+    conn: sqlite3.Connection, numbers: Iterable[int], identity: str, records: str
+) -> None:
+    """A first index's walk (indexer/src/main.py
+    ``_enqueue_unindexed_messages`` with ``oldest_first``): one job per
+    message, due at its message time capped at the walk's start, in
+    (due time, path) order, so equal due times are claimed in path
+    order. SQLite sorts them in a temporary table, so memory does not
+    grow with the backlog; one transaction, before any measured
+    window."""
+    started = datetime.now(UTC)
+    conn.execute("CREATE TEMP TABLE bench_backlog (due TEXT NOT NULL, filepath TEXT NOT NULL)")
+    conn.execute("BEGIN")
+    conn.executemany(
+        "INSERT INTO temp.bench_backlog (due, filepath) VALUES (?, ?)",
+        (
+            (min(sent_at(i), started).isoformat(), maildir_path(i, identity, records))
+            for i in numbers
+        ),
+    )
+    now = started.isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO indexing_jobs (filepath, reason, status, attempts, last_error, "
+        "last_stage, last_error_class, created_at, updated_at, next_attempt_at) "
+        "SELECT filepath, ?, 'queued', 0, NULL, NULL, NULL, ?, ?, due "
+        "FROM temp.bench_backlog ORDER BY due, filepath",
+        (REASON_INITIAL_SCAN, now, now),
+    )
+    conn.execute("COMMIT")
+    conn.execute("DROP TABLE temp.bench_backlog")
 
 
 class _WriterStopped(Exception):
@@ -1993,30 +2225,56 @@ def phase_writer(
     interval: float,
     order: str = "",
     shape: dict | None = None,
+    extract_seconds: float = PDF_EXTRACT_SECONDS,
+    lifecycle: str = "arrival",
+    backlog: int = WRITER_BACKLOG,
 ) -> dict:
     """A concurrent writer that commits what the indexer commits while
-    it indexes new mail (indexer/src/main.py ``_drain_queue_batched``),
-    until ``stop`` exists, ``batch`` messages at a time, pausing
-    ``interval`` seconds after each batch. Per batch of B:
+    it indexes mail (indexer/src/main.py ``_drain_queue_batched``), until
+    ``stop`` exists, claiming up to ``batch`` due jobs at a time from
+    ``indexing_jobs`` in the indexer's order (due time, then insertion)
+    and pausing ``interval`` seconds after each batch. ``lifecycle``
+    says how jobs reach the queue:
 
-    - B enqueue commits, one job row each (indexer/src/queue.py);
+    - ``arrival`` (the steady state): whenever no job is due, ``batch``
+      new messages are enqueued, one commit each, as the watcher does;
+    - ``drain`` (a first index): ``backlog`` messages are enqueued before
+      the writer is ready, in one transaction outside any measured
+      window, due at their message time as the walk queues them, and
+      drained; once none is due the writer records the time and makes
+      no further commit (``backlog_exhausted_at``).
+
+    Per batch of B claimed jobs:
+
     - per message: a charge, phase 1 (``_writer_phase1``), a refund;
     - per message: a charge and a refund around chunking (phase 2a);
     - a lone message's charge (B = 1), or one commit marking every
       message interrupted (B > 1);
-    - per message: phase 2c (``_writer_phase2c``), the lone message's
-      refund (B = 1), and the job row's delete.
+    - per message: phase 2c (``_writer_phase2c``) for this pass's plan
+      (``_writer_plan``: each extraction counts ``PDF_LAUNCHES`` launches
+      and ``extract_seconds`` seconds against the per-pass budget), then
+      either the job's deferral in the same transaction (an attachment
+      left for a later pass: the job is due at once, behind the jobs
+      already due) or the lone message's refund (B = 1) and the job
+      row's delete.
 
-    The messages have ``shape`` (``build``'s arguments) and continue the
-    corpus's numbering in threads of four; they are stored in Trash.
-    indexer/tests/test_reconcile_bench_fidelity.py traces the indexer's
-    own commits and checks this sequence and the tables of every
-    commit. The pace is a parameter, not the indexer's own, and the
-    phase 2b embed request it waits for is not modelled.
+    A job deferred at the extract stage is a continuation: its message's
+    resolved occurrences are kept and its body is not appended again.
+
+    Each message's record and its vectors are made before the
+    transactions that write them, as the indexer parses, chunks and
+    embeds before it writes. The messages have ``shape`` (``build``'s
+    arguments) and continue the corpus's numbering in threads of four;
+    they are stored in Trash. indexer/tests/test_reconcile_bench_fidelity.py
+    traces the indexer's own commits and checks this sequence, the
+    tables and statements of every commit and each pass's occurrence
+    states. The pace is a parameter, not the indexer's own, and the
+    extraction and phase 2b embed time it would spend are not.
 
     First it creates the indexer's tables the corpus lacks
-    (``_WRITER_SCHEMA``), records that state and creates
-    ``stop + ".ready"``. It applies the indexer's connection settings.
+    (``_WRITER_SCHEMA``), enqueues a drain's backlog, records that state
+    and creates ``stop + ".ready"``. It applies the indexer's connection
+    settings.
 
     After each commit it records the time and the WAL file's size, so a
     window's commit count and its WAL sizes come from the same records:
@@ -2034,7 +2292,10 @@ def phase_writer(
     stress = shape.get("extracted_chars", 0)
     # One stress text for every record (it can be 40 MB).
     stress_text = _WIDE * stress if stress else None
+    # The embeddings: a fixed pool of random unit vectors made now, so
+    # no transaction spends time on them (``_writer_phase2c``).
     rng = random.Random(7)
+    vectors = itertools.cycle([_unit_vector(rng) for _ in range(VECTOR_POOL)])
 
     def record(i: int) -> _Record:
         # Made where it is used and dropped after, so memory holds one
@@ -2053,6 +2314,7 @@ def phase_writer(
     wal = db_path + "-wal"
     commits = 0
     times: list[tuple[float, int]] = []
+    exhausted_at: float | None = None
     with closing(sqlite3.connect(db_path, isolation_level=None, timeout=30)) as conn:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
@@ -2069,6 +2331,9 @@ def phase_writer(
         conn.executescript(_WRITER_SCHEMA)
         corpus = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM messages")
         next_i = -(-corpus.fetchone()[0] // 4) * 4
+        if lifecycle == "drain":
+            _writer_backlog(conn, range(next_i, next_i + backlog), identity, records)
+            next_i += backlog
         # The state before any measured commit: it can only be the start.
         times.append((time.monotonic(), os.stat(wal).st_size))
         Path(stop + ".ready").touch()
@@ -2114,43 +2379,87 @@ def phase_writer(
                     (path, _INTERRUPTED[0]),
                 )
 
+        def defer(path: str, charged: bool, now: str) -> None:
+            # indexer/src/queue.py ``defer(in_transaction=True)``: the job
+            # continues on a later pass, due at once (behind the jobs
+            # already due), with a lone message's charge refunded in the
+            # same write.
+            attempts, stage = conn.execute(
+                "SELECT attempts, last_stage FROM indexing_jobs WHERE filepath = ?", (path,)
+            ).fetchone()
+            if charged and stage == _INTERRUPTED[0] and attempts > 0:
+                attempts -= 1
+            conn.execute(
+                "UPDATE indexing_jobs SET attempts = ?, last_stage = ?, last_error = ?, "
+                "last_error_class = 'retryable', updated_at = ?, next_attempt_at = ?, "
+                "status = 'queued' WHERE filepath = ?",
+                (attempts, STAGE_EXTRACT, EXTRACTION_DEFERRED_ERROR, now, now, path),
+            )
+
+        def claim() -> list[tuple[int, str, bool]]:
+            # indexer/src/database.py ``queue_fetch_due_batch``: the due
+            # jobs, oldest due first (equal due times in insertion
+            # order), each with whether it continues a deferred pass.
+            rows = conn.execute(
+                "SELECT filepath, last_stage, last_error FROM indexing_jobs "
+                "WHERE status = 'queued' AND next_attempt_at <= ? "
+                "ORDER BY next_attempt_at ASC LIMIT ?",
+                (datetime.now(UTC).isoformat(), batch),
+            ).fetchall()
+            return [
+                (
+                    _message_number(path),
+                    path,
+                    (stage, error) == (STAGE_EXTRACT, EXTRACTION_DEFERRED_ERROR),
+                )
+                for path, stage, error in rows
+            ]
+
         try:
-            thread: _WriterThread | None = None
             while not os.path.exists(stop):
-                numbers = range(next_i, next_i + batch)
-                next_i += batch
-                paths = [maildir_path(i, identity, records) for i in numbers]
-                for path in paths:
-                    # indexer/src/database.py ``queue_enqueue``.
+                jobs = claim()
+                if not jobs and lifecycle == "arrival":
+                    for i in range(next_i, next_i + batch):
+                        # indexer/src/database.py ``queue_enqueue``.
+                        now = datetime.now(UTC).isoformat()
+                        with transaction():
+                            conn.execute(
+                                "INSERT OR REPLACE INTO indexing_jobs (filepath, reason, "
+                                "status, attempts, last_error, last_stage, last_error_class, "
+                                "created_at, updated_at, next_attempt_at) "
+                                "VALUES (?, ?, 'queued', 0, NULL, NULL, NULL, ?, ?, ?)",
+                                (
+                                    maildir_path(i, identity, records),
+                                    REASON_ON_CREATED,
+                                    now,
+                                    now,
+                                    now,
+                                ),
+                            )
+                    next_i += batch
+                    jobs = claim()
+                if not jobs:
+                    # A drain's backlog is done: the indexer goes idle.
+                    exhausted_at = time.monotonic()
+                    while not os.path.exists(stop):
+                        time.sleep(0.05)
+                    break
+                paths = [path for _, path, _ in jobs]
+                for i, path, _ in jobs:
+                    rec = record(i)
+                    charge(path)
                     now = datetime.now(UTC).isoformat()
                     with transaction():
-                        conn.execute(
-                            "INSERT OR REPLACE INTO indexing_jobs (filepath, reason, status, "
-                            "attempts, last_error, last_stage, last_error_class, created_at, "
-                            "updated_at, next_attempt_at) "
-                            "VALUES (?, 'on_created', 'queued', 0, NULL, NULL, NULL, ?, ?, ?)",
-                            (path, now, now, now),
-                        )
-                threads = []
-                for i, path in zip(numbers, paths, strict=True):
-                    charge(path)
-                    if i % 4 == 0 and thread is not None:
-                        # No later message joins it: only phase 2c's
-                        # state is kept.
-                        thread.release()
-                    with transaction():
-                        thread = _writer_phase1(
-                            conn,
-                            record(i),
-                            thread if i % 4 else None,
-                            datetime.now(UTC).isoformat(),
-                        )
-                    threads.append(thread)
+                        _writer_phase1(conn, rec, now)
                     refund(path)
+                    del rec
                 for path in paths:
                     charge(path)
                     refund(path)
-                if batch == 1:
+                # ``len(survivors) == 1``: the batch's own size, which the
+                # due jobs can bring below ``batch``.
+                lone = len(jobs) == 1
+                if lone:
                     charge(paths[0])
                 else:
                     # indexer/src/database.py ``queue_mark_interrupted``.
@@ -2160,12 +2469,19 @@ def phase_writer(
                             "WHERE filepath = ? AND status = 'queued'",
                             [(*_INTERRUPTED, path) for path in paths],
                         )
-                for i, path, rec_thread in zip(numbers, paths, threads, strict=True):
+                for i, path, continuation in jobs:
+                    # Phase 2a's decisions (reads) before the transaction.
+                    rec = record(i)
+                    plan = _writer_plan(conn, rec, continuation, extract_seconds)
+                    now = datetime.now(UTC).isoformat()
                     with transaction():
-                        _writer_phase2c(
-                            conn, record(i), rec_thread, rng, datetime.now(UTC).isoformat()
-                        )
-                    if batch == 1:
+                        deferred = _writer_phase2c(conn, rec, plan, continuation, vectors, now)
+                        if deferred:
+                            defer(path, lone, now)
+                    del rec
+                    if deferred:
+                        continue
+                    if lone:
                         refund(path)
                     with transaction():
                         conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (path,))
@@ -2177,7 +2493,13 @@ def phase_writer(
                     time.sleep(min(0.05, remaining))
         except _WriterStopped:
             pass
-    return {"commits": commits, "commit_times": times}
+        left = conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0]
+    return {
+        "commits": commits,
+        "commit_times": times,
+        "backlog_exhausted_at": exhausted_at,
+        "jobs_left": left,
+    }
 
 
 # --- orchestration ------------------------------------------------------
@@ -2292,11 +2614,17 @@ def run_wal(
     worst_first: bool = False,
     method: str = "stream",
     shape: dict | None = None,
+    extract_seconds: float = PDF_EXTRACT_SECONDS,
+    lifecycle: str = "arrival",
+    backlog: int = WRITER_BACKLOG,
 ) -> dict:
     """WAL growth while one reconcile round holds its snapshot under a
     concurrent writer that commits as the indexer does at batch size
-    ``batch`` (messages of ``shape``, ``build``'s arguments), and whether
-    a TRUNCATE checkpoint then reclaims it. Every size and count comes from the writer's own post-commit
+    ``batch`` (messages of ``shape``, ``build``'s arguments; ``lifecycle``,
+    ``backlog`` and ``extract_seconds`` as ``phase_writer`` takes them),
+    and whether a TRUNCATE checkpoint then reclaims it. A drain whose
+    backlog runs out before the round ends fails the measurement: the
+    writer was idle for part of the window. Every size and count comes from the writer's own post-commit
     records (``phase_writer``), split at the round's window by the same
     timestamps, so no commit is counted without its frames or the
     reverse; the order lock (``_ordered``) keeps every commit wholly on
@@ -2344,6 +2672,9 @@ def run_wal(
                         "interval": interval,
                         "order": order,
                         "shape": shape or {},
+                        "extract_seconds": extract_seconds,
+                        "lifecycle": lifecycle,
+                        "backlog": backlog,
                     }
                 ),
             ],
@@ -2392,6 +2723,11 @@ def run_wal(
         if writer.returncode != 0:
             raise RuntimeError(f"the WAL writer exited with status {writer.returncode}")
         writer_out = json.loads(out)
+        exhausted = writer_out["backlog_exhausted_at"]
+        if exhausted is not None and exhausted <= result["ended_at"]:
+            raise RuntimeError(
+                "the WAL writer's backlog ran out before the round ended: raise --writer-backlog"
+            )
         at_start, at_end, overlapping = wal_window(
             writer_out["commit_times"], result["started_at"], result["ended_at"]
         )
@@ -2405,6 +2741,12 @@ def run_wal(
             "k": k,
             "writer_batch": batch,
             "writer_interval_s": interval,
+            "writer_lifecycle": lifecycle,
+            "writer_backlog": backlog if lifecycle == "drain" else None,
+            "writer_extract_s": extract_seconds,
+            # Jobs still queued when the writer stopped: what a drain's
+            # backlog had left (a backlog that ran out fails above).
+            "writer_jobs_left": writer_out["jobs_left"],
             "hold_s": hold_s,
             "wal_at_transaction_start_bytes": at_start,
             "wal_max_during_transaction_bytes": at_end,
@@ -2543,10 +2885,14 @@ def run(args: argparse.Namespace) -> dict:
                         "per_message": args.per_message,
                         "extracted_chars": args.extracted_chars,
                     },
+                    args.writer_extract_seconds,
+                    lifecycle,
+                    args.writer_backlog,
                 ),
             }
             for kind in ("messages", "occurrences")
             for method in ("stream", "collect")
+            for lifecycle in args.writer_lifecycle
             for batch in args.writer_batch
             for interval in args.writer_interval
         ]
@@ -2679,9 +3025,10 @@ MAX_UPLOAD = 10_000_000
 class Arg:
     """One command-line argument: ``kind`` is ``int``, ``float``,
     ``ints`` or ``floats`` (comma-separated, ``length`` values when
-    set), ``choice``, ``flag`` or ``path``; ``low`` and ``high`` bound
-    each number (``None``: no bound of its own; ``_RULES`` may bound it
-    by the corpus); ``absent`` says what leaving it out means."""
+    set), ``choice``, ``choices`` (comma-separated ``choices``), ``flag``
+    or ``path``; ``low`` and ``high`` bound each number (``None``: no
+    bound of its own; ``_RULES`` may bound it by the corpus); ``absent``
+    says what leaving it out means."""
 
     name: str
     kind: str
@@ -2825,6 +3172,38 @@ ARGS: tuple[Arg, ...] = (
         help="seconds the writer pauses after each batch (--wal only)",
     ),
     Arg(
+        "writer_lifecycle",
+        "choices",
+        None,
+        choices=WRITER_LIFECYCLES,
+        absent="arrival,drain with --wal",
+        help="how the writer's jobs reach its queue: arrival (the steady state: new mail "
+        "whenever the queue is empty) or drain (a first index: a backlog enqueued before "
+        "the round) (--wal only)",
+    ),
+    Arg(
+        "writer_backlog",
+        "int",
+        None,
+        1,
+        MAX_WRITER_BACKLOG,
+        absent=f"{WRITER_BACKLOG:,} with drain",
+        help="messages a drain enqueues before the round; one that runs out before the "
+        "round ends fails the measurement (--writer-lifecycle drain only)",
+    ),
+    Arg(
+        "writer_extract_seconds",
+        "float",
+        None,
+        0,
+        # Any larger cost is the same: the first extraction of a pass is
+        # always admitted, and this one alone reaches the budget.
+        EXTRACTION_TURN_SECONDS,
+        absent=f"{PDF_EXTRACT_SECONDS} with --wal (a plain timing of the benchmark's PDF)",
+        help="seconds one extraction counts against the indexer's per-pass budget "
+        "(attachments past it are continued on later passes) (--wal only)",
+    ),
+    Arg(
         "wal_hold",
         "float",
         None,
@@ -2836,6 +3215,10 @@ ARGS: tuple[Arg, ...] = (
         "(--wal only; smoke test)",
     ),
 )
+
+
+def _choice_list(text: str) -> list[str]:
+    return text.split(",")
 
 
 def _number_list(kind: str):
@@ -2993,15 +3376,23 @@ _RULES: tuple = (
     ),
     (
         lambda a: not a.wal and a.explicit_wal,
-        lambda a: "--writer-batch, --writer-interval and --wal-hold need --wal",
+        lambda a: (
+            "--writer-batch, --writer-interval, --writer-lifecycle, --writer-backlog, "
+            "--writer-extract-seconds and --wal-hold need --wal"
+        ),
+    ),
+    (
+        lambda a: a.explicit_backlog and "drain" not in a.writer_lifecycle,
+        lambda a: "--writer-backlog needs --writer-lifecycle drain",
     ),
     (
         lambda a: (
             len(set(a.writer_batch)) != len(a.writer_batch)
             or len(set(a.writer_interval)) != len(a.writer_interval)
+            or len(set(a.writer_lifecycle)) != len(a.writer_lifecycle)
         ),
         lambda a: (
-            "--writer-batch and --writer-interval values must be distinct "
+            "--writer-batch, --writer-interval and --writer-lifecycle values must be distinct "
             "(each value is one WAL result)"
         ),
     ),
@@ -3077,6 +3468,10 @@ def check_args(args: argparse.Namespace) -> argparse.Namespace:
     first problem; nothing has been built."""
     for arg in ARGS:
         value = getattr(args, arg.name)
+        if arg.kind == "choices" and value is not None:
+            if any(v not in arg.choices for v in value):
+                raise SystemExit(f"{arg.flag} takes {' or '.join(arg.choices)}")
+            continue
         if value is None or arg.kind in ("path", "flag", "choice"):
             continue
         values = value if arg.kind in ("ints", "floats") else [value]
@@ -3093,8 +3488,17 @@ def check_args(args: argparse.Namespace) -> argparse.Namespace:
     args.explicit_missing = args.missing is not None
     args.explicit_references = args.references is not None
     args.explicit_wal = any(
-        getattr(args, n) is not None for n in ("writer_batch", "writer_interval", "wal_hold")
+        getattr(args, n) is not None
+        for n in (
+            "writer_batch",
+            "writer_interval",
+            "writer_lifecycle",
+            "writer_backlog",
+            "writer_extract_seconds",
+            "wal_hold",
+        )
     )
+    args.explicit_backlog = args.writer_backlog is not None
     if args.extras is None:
         args.extras = 0 if args.upload_total is not None else 100
     if args.missing is None:
@@ -3109,10 +3513,22 @@ def check_args(args: argparse.Namespace) -> argparse.Namespace:
         args.writer_interval = [0.0, 0.1]
     if args.wal_hold is None:
         args.wal_hold = 0.0
+    if args.writer_lifecycle is None:
+        args.writer_lifecycle = list(WRITER_LIFECYCLES)
+    if args.writer_backlog is None and "drain" in args.writer_lifecycle:
+        args.writer_backlog = WRITER_BACKLOG
+    if args.writer_extract_seconds is None:
+        args.writer_extract_seconds = PDF_EXTRACT_SECONDS
     for applies, problem in _RULES:
         if applies(args) and (message := problem(args)):
             raise SystemExit(message)
-    for name in ("explicit_extras", "explicit_missing", "explicit_references", "explicit_wal"):
+    for name in (
+        "explicit_extras",
+        "explicit_missing",
+        "explicit_references",
+        "explicit_wal",
+        "explicit_backlog",
+    ):
         delattr(args, name)
     return args
 
@@ -3128,9 +3544,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         elif arg.kind == "choice":
             p.add_argument(arg.flag, choices=arg.choices, default=arg.default, help=help_text)
         else:
-            convert = {"int": int, "float": float, "path": str}.get(arg.kind) or _number_list(
+            convert = {"int": int, "float": float, "path": str, "choices": _choice_list}.get(
                 arg.kind
-            )
+            ) or _number_list(arg.kind)
             p.add_argument(arg.flag, type=convert, default=arg.default, help=help_text)
     return check_args(p.parse_args(argv))
 
