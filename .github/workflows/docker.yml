@@ -1,7 +1,7 @@
 name: Docker
 
 # Runs when a build input changes: the three build contexts, the
-# Compose files, .env.example (copied to .env), the Makefile (make
+# docker-compose*.yml files, .env.example (copied to .env), the Makefile (make
 # init-secrets) and this file, and weekly, like security.yml, so the
 # image scan below sees advisories published since the last build. The
 # main ruleset requires no status checks, so a skipped run blocks no

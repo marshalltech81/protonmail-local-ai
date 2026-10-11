@@ -2021,8 +2021,9 @@ def register_retrieval_tools(server, db):
         ``empty`` one returns "". Otherwise ``text`` is null and
         ``unavailable_reason`` says why (no extraction recorded yet,
         extraction failed, no extractor could read the file (unsupported
-        type, missing extractor, encrypted PDF or work cap), OCR off, or
-        the file over the size limit): report it as unread text, not as
+        type, missing extractor, encrypted PDF or work cap), OCR off, the
+        file over the size limit, or extraction deferred to a later
+        indexer pass): report it as unread text, not as
         an attachment that says nothing relevant.
 
         Args:

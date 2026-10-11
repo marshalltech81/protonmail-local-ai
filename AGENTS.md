@@ -633,12 +633,14 @@ Every open issue carries, on GitHub (owner, 2026-10-07):
   leads to it), `documentation`, `test` (a test, fixture or eval-harness
   gap; nothing shipped changes) or `chore` (tooling, CI, build,
   housekeeping, or an investigation with no product change)
-- exactly one **priority** label, `P0`–`P3`, as the review rules above
-  use them
+- exactly one **priority** label: `P0` (fix now; blocks the live
+  deployment or leaks data), `P1` (next; a real defect or risk on live
+  mail), `P2` (planned; part of the current phase or a live-use gap)
+  or `P3` (backlog); the review rules below use these levels
 - one or more **area** labels, `area/mbsync`, `area/indexer`,
   `area/parser`, `area/extractors`, `area/database`, `area/mcp-server`,
   `area/mcp-tools`, `area/eval`, `area/docker`, `area/ci`,
-  `area/tooling`, `area/docs`, matching the commit scopes below
+  `area/tooling`, `area/docs`, named like the commit scopes above
 - one **milestone**: a PLAN.md phase, *Corpus and contract follow-ups*
   (Phase 0 and 1 follow-ups), *Operations and hardening* or *Evidence
   model*
@@ -668,7 +670,7 @@ under about 80 characters.
 
 ## Pull Requests and Review
 
-- When a PR first lands, one test-first commit per issue, with a
+- When a PR is opened, one test-first commit per issue, with a
   `Fixes #N` line for each issue the PR closes; behaviour-changing or
   schema-adjacent fixes get their own PR.
 - Every push starts a Codex code and security review. A round is done
@@ -1073,7 +1075,8 @@ Notes:
   of `make test`, no Trivy or Docker needed) fails when they differ, so
   a change to one is made in both.
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
-- prefer real `.eml` fixtures for parser tests
+- prefer `.eml` file fixtures for parser tests (synthetic, never
+  derived from real mail; see "Do not export mail in bulk")
 - a fixture generated with an office application (Word, PowerPoint,
   LibreOffice) records the creating user in its metadata (OLE2
   SummaryInformation, `docProps/core.xml`); set a synthetic author and
@@ -1136,8 +1139,8 @@ Notes:
 - Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - a PR that adds or removes baseline-corpus messages also regenerates the parser pin (`cd indexer && PARSER_PIN_UPDATE=1 uv run pytest tests/test_parser_pin.py`); its diff must be only the added or removed records, plus the corpus messages after the change renumbered under new file names with no other field changed, since corpus files are numbered in sequence (#1124)
-- `ask_mailbox`, `summarize_thread` or `extract_from_emails` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)
-- before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
+- `ask_mailbox`, `summarize_thread`, `extract_from_emails` or experimental `brief_issue` / `check_conclusion` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)
+- before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `uvx --from bandit==1.9.4 bandit -r src/ -ll` in each changed service (bandit is not a service dependency; this is the version and flag CI uses) and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
 
 Run tests with:
 
@@ -1200,7 +1203,7 @@ signature or a real result. When a claim draws a review finding, prefer
 cutting it to qualifying it; #307, #1014 and #1100 each spent five or
 more rounds qualifying claims.
 
-If a change may stale `README.md`, `PLAN.md`, `docs/`, or `AGENTS.md`, update it or proactively suggest the follow-up. Contributor-facing defaults (`CONTRIBUTING.md`, `SECURITY.md`, issue/PR templates) live in the org-level `marshalltech81/.github` repo; flag follow-ups there when a change in this repo makes them stale.
+If a change may stale `README.md`, `PLAN.md`, `docs/`, or `AGENTS.md`, update it or proactively suggest the follow-up. Contributor-facing defaults (`CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `CODE_OF_CONDUCT.md`, `GOVERNANCE.md`, issue/PR templates) live in the account-level `marshalltech81/.github` repo, since this repository has no copies of its own; flag follow-ups there when a change in this repo makes them stale.
 
 ## When to Stop and Ask
 
@@ -1234,7 +1237,6 @@ The following should live elsewhere instead of this file:
 
 Suggested companion files:
 
-- `docs/ops-notes.md`
 - `docs/troubleshooting.md`
 - `PLAN.md`
 

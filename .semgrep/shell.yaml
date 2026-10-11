@@ -6,17 +6,18 @@
 #
 # The rules are line regexes (`languages: [regex]`) rather than bash
 # patterns: Semgrep's bash parser rejects several of the repo's scripts
-# (validate-env.sh, part of mbsync/entrypoint.sh), and a structural rule silently skips what it
-# cannot parse. A regex reads every line.
+# (validate-env.sh, part of mbsync/entrypoint.sh), and a structural
+# rule silently skips what it cannot parse. A regex reads every line.
 #
 # The TLS and pipe-to-shell rules skip only lines that start with `#`
 # (`^(?![ \t]*#)`) and let `#` appear anywhere else, because a regex
 # cannot tell a `#` inside quotes (`-H "X-Note: # release"`) from one
 # that starts a comment. A trailing comment that mentions an unsafe
 # flag is reported too; reword it. The other rules use `^[^#\n]*`
-# before each match, and in the gap between a command and its flag `#`
-# counts only where bash would start a comment (at the start of a
-# word). Gaps may cross backslash-continued lines.
+# before each match. In the mkdir/install rule, the gap between the
+# command and its mode flag may cross backslash-continued lines, and
+# `#` in it counts only where bash would start a comment (at the start
+# of a word).
 #
 # Tests: .semgrep/shell.sh (run `semgrep test .semgrep`).
 rules:
@@ -47,7 +48,8 @@ rules:
     message: >-
       xtrace prints every command after expansion, including secrets read
       from Docker secrets or the environment, to stderr and so into the
-      container log. AGENTS.md: never print secrets to logs.
+      container, terminal or CI log. AGENTS.md: never print secrets to
+      logs.
     paths:
       include:
         - "*.sh"
