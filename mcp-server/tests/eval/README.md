@@ -44,9 +44,9 @@ arguments.
      `required_evidence: [["A", "B"]]`.
 
    Give one form per entry, not both. Other keys (such as `notes`) are
-   ignored. Keep the file in `.gitignore` if your queries or
-   thread ids are sensitive (the example file is tracked, your real
-   queries file is not).
+   ignored. `tests/eval/queries.json` is git-ignored, since queries
+   and thread ids from a real index are sensitive; only the example
+   file is tracked.
 
 ## Metrics
 
@@ -74,7 +74,11 @@ MCP_EVAL_DB=/path/to/mail.db uv run pytest -o addopts= -m eval tests/eval -s
 exclude `tests/eval` (`--ignore=tests/eval`) and enforce the coverage
 floor; with them, a plain `pytest -m eval` selects no tests. `-s` keeps
 pytest from capturing the summary block printed by `test_eval_summary`.
-Without `MCP_EVAL_DB`, every test skips.
+Without `MCP_EVAL_DB`, every test skips. The hybrid tests and the
+summary also need `EMBED_MODEL`, `EMBED_API_KEY` and `EMBED_BASE_URL`
+(a URL, or `default`) in the environment, set to the embedder that
+built the index; without them only the keyword tests run. Each query
+is sent to that embedder.
 
 Each query with expected evidence costs one embed call and one hybrid
 search per run: the per-query hybrid test and the summary share the
@@ -244,7 +248,7 @@ separately.
 
 - The reference trace is scripted. It shows the scorers catch these
   mistakes, not that a live agent avoids them; no recorder for a live
-  client's trace exists yet (#283).
+  client's trace exists yet (#283, #1269).
 - Whether the answer explains its reading of "TOFU", and how confident
   it sounds, are prose, which the agent scorers do not grade. The
   answer-quality judge grades the intelligence tools' own answers
@@ -397,9 +401,10 @@ reading one does not cover a citation of the other's claimant ID or
 passage, while a citation of the bare Message-ID names both.
 A source whose decisive text is in an attachment (an `attachment` item
 in the truth's `evidence`) is read only through a `get_evidence`
-passage with `source: attachment`: no tool returns a whole attachment
-(#796), and a `search_attachments` snippet is a preview the scorer
-cannot check holds the evidence, since traces carry IDs, not text.
+passage with `source: attachment`. The scorer does not yet credit a
+`get_attachment` read of the whole extracted text (#1527), and a
+`search_attachments` snippet is a preview the scorer cannot check holds
+the evidence, since traces carry IDs, not text.
 
 The answer's top-level `cited` and its conclusions' own `cited` lists
 must be the same set (*citations consistent*), and citation validity
@@ -462,11 +467,12 @@ the reference traces are the only traces scored today.
 
 ### Live agent runs (layer C): not implemented
 
-No live tool-using agent harness exists (#283, #775, #798). Every
-scored trace is scripted, so nothing here measures what a real agent
-does with the tools; `make eval-answers` runs only the intelligence
-tools' own model (`ask_mailbox`, `summarize_thread` and the experimental tools), not an agent
-choosing tools.
+No live tool-using agent harness exists (#283; recorder and live
+drivers #1269, blind annotation #1270). Every scored trace is
+scripted, so nothing here measures what a real agent does with the
+tools; `make eval-answers` runs only the intelligence tools' own model
+(`ask_mailbox`, `summarize_thread`, `extract_from_emails` and the
+experimental tools), not an agent choosing tools.
 
 The smallest extension, proposed and not built:
 
@@ -702,10 +708,10 @@ make eval-answers EVAL_MAX_CALLS=27 EVAL_ARGS="--case ask-hedge-price-as-of-marc
 
 - No paid baseline run has been recorded yet (#1369), so nothing
   here says how well either tool does on them.
-- Undated mail is not a case: the indexer stamps a message without a
-  `Date:` header with the time it indexes it, so the corpus cannot hold
-  a reproducible undated message until #1080 keeps that date unknown
-  (#1370).
+- Undated mail is not a case: the indexer stores a missing `Date:` as
+  unknown (#1080), but the runner's synthetic-index check compares each
+  message's stored sent date with its file's `Date:` header, so it
+  cannot accept an undated corpus message yet (#1370).
 - A delayed delivery (a receiving time different from the sent date)
   is not a case either: the runner's synthetic-index check requires
   every `occurred_at` to be null, as for the outstanding-items cases
@@ -767,7 +773,7 @@ call, it prints how many calls it will make and to which models (the
 `INFERENCE_MODEL` and `JUDGE_MODEL` settings), for example:
 
 ```text
-Planned provider calls: 49 answer calls to <model> (up to 49 more for citation repairs) and 49 judge calls to <model>; at most 147 provider calls.
+Planned provider calls: <A> answer calls to <model> (up to <R> more for citation repairs) and <J> judge calls to <model>; at most <A+R+J> provider calls.
 ```
 
 That is one answer call per selected case, plus a second (a citation
@@ -896,10 +902,12 @@ cap below, count launches, not model requests.
   thinking as well as the verdict, so it defaults to 16000 as in
   anthropic mode (#862). When a reply reaches it, the CLI makes its own continuation attempts (up to
   about four times the cap) before failing, which counts as
-  `judge_truncated`. `ANSWER_EVAL_LIVE_CLAUDE=1 uv run pytest
-  tests/test_answer_eval_cli_judge.py -k live_canaries` makes one real
-  call to check that planted `CLAUDE.md`/`AGENTS.md` files and an
-  `ANTHROPIC_API_KEY` never reach it.
+  `judge_truncated`. `cd mcp-server && ANSWER_EVAL_LIVE_CLAUDE=1 uv run
+  pytest --no-cov tests/test_answer_eval_cli_judge.py -k live_canaries`
+  makes one real call (to `ANSWER_EVAL_LIVE_CLAUDE_MODEL`, default
+  `claude-haiku-4-5-20251001`, not `JUDGE_MODEL`) to check that planted
+  `CLAUDE.md`/`AGENTS.md` files and an `ANTHROPIC_API_KEY` never reach
+  it.
 - **`codex-cli`** runs `codex exec` (Codex CLI, logged in with ChatGPT).
   The shell and every tool or extension that could read the disk or
   reach the network are turned off (`--disable shell_tool`,
@@ -932,10 +940,12 @@ cap below, count launches, not model requests.
   the keyring instead of `auth.json` is refused, since it cannot be
   linked. Codex has no output-token setting, so `JUDGE_MAX_TOKENS` is not
   read (the identity records `max_tokens: null`) and the timeout
-  bounds the call. `ANSWER_EVAL_LIVE_CODEX=1 uv run pytest
-  tests/test_answer_eval_cli_judge.py -k live_codex` makes one real call
-  to check that planted `AGENTS.md` files, the global `AGENTS.md` and an
-  `OPENAI_API_KEY` never reach it and that it cannot read a file.
+  bounds the call. `cd mcp-server && ANSWER_EVAL_LIVE_CODEX=1 uv run
+  pytest --no-cov tests/test_answer_eval_cli_judge.py -k live_codex`
+  makes one real call (to `ANSWER_EVAL_LIVE_CODEX_MODEL`, default
+  `gpt-5.5`, not `JUDGE_MODEL`) to check that planted `AGENTS.md`
+  files, the global `AGENTS.md` and an `OPENAI_API_KEY` never reach it
+  and that it cannot read a file.
   **Known limitation (#827):** Codex also registers tools that a model's
   catalog entry advertises, and no setting turns those off. In Codex
   0.160.1, `gpt-6-astra`, `gpt-6-sol` and `gpt-6-luna` advertise `clock`
@@ -1036,7 +1046,8 @@ be cited, and a group retrieval never found is never excused (the note
 reports only budget omissions). Each evidence group is also scored as retrieved, supplied to
 the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
-`answer_infrastructure` (several may apply; `unknown` otherwise).
+`answer_infrastructure` (several may apply; `skipped` for a case the
+runtime budget skipped; `unknown` otherwise).
 For `extract_from_emails`, "records conform" also checks each record's
 shape: the provenance fields the server adds (`_source_thread` and
 `_date` strings, an `_evidence` object), the schema's declared
