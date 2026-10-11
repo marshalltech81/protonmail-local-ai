@@ -173,6 +173,16 @@ Do not make any of the following changes unless the repository owner explicitly 
   no-host-networking and no-published-port rules apply. Do not rebind
   the app beyond `127.0.0.1` or add `network_mode: host` to make it
   reachable (for example on Linux, which is not supported).
+- The Bridge stays on this Mac (PLAN.md decision 46): `BRIDGE_HOST` is
+  an exact allowlist of names that forward to the Mac's `127.0.0.1`
+  (`host.docker.internal`, OrbStack's `host.orb.internal` and
+  `host.internal`), and `BRIDGE_CERT_HOST` an exact list of loopback
+  names, both in `mbsync/proton-settings.sh`. Add a host name only with
+  `make test-mbsync-host-aliases` passing for it on the runtime it
+  names, and a certificate name only with a `make test-mbsync-tls` case
+  (a matching certificate syncs, another is refused before `LOGIN`). A
+  Bridge elsewhere, a LAN name or address, `gateway.docker.internal` or
+  `extra_hosts` on mbsync needs #1499's decision first.
 
 ### Mail sync and safety constraints
 
@@ -277,9 +287,10 @@ Important facts:
 - Bridge is the official Proton Mail Bridge app on the host, outside
   Compose (#497; the only mode since the Bridge container was removed,
   owner, 2026-10-04). It binds IMAP to the host's `127.0.0.1`; login,
-  credentials and updates are managed in the app. `docker-compose.yml`
-  sets mbsync's `BRIDGE_HOST=host.docker.internal` and
-  `BRIDGE_CERT_HOST=127.0.0.1`. The app's certificate names only
+  credentials and updates are managed in the app. mbsync's `BRIDGE_HOST`
+  defaults to `host.docker.internal` and `BRIDGE_CERT_HOST` to
+  `127.0.0.1` (settings since PLAN.md decision 46, limited to this Mac;
+  see Network and exposure constraints). The app's certificate names only
   `127.0.0.1` and isync (1.5.1 in the image) checks Bridge's self-signed
   CA certificate against `Host`, so the entrypoint keeps `Host 127.0.0.1`
   and connects
@@ -932,9 +943,21 @@ Notes:
 - this is the only container that should speak IMAP directly to Bridge
 - keep sync pull-only
 - preserve TLS cert extraction behavior
-- `BRIDGE_HOST`, `BRIDGE_IMAP_PORT` and `BRIDGE_CERT_HOST` are validated
-  as a plain host name or IPv4 address and a port before they reach
-  `mbsyncrc` or the tunnel's shell command
+- `BRIDGE_HOST` (a plain host name, and one of the allowlisted names),
+  `BRIDGE_IMAP_PORT` (a port) and `BRIDGE_CERT_HOST` (an exact loopback
+  name) are validated before they reach `mbsyncrc` or the tunnel's
+  shell command
+- the Proton settings (`BRIDGE_HOST`, `BRIDGE_CERT_HOST` and the
+  `PROTON_*_NAME` isync names) have one implementation of their
+  defaults and validators, `mbsync/proton-settings.sh` (Bash 3.2
+  compatible), run by `scripts/validate-env.sh` and by the entrypoint's
+  `require_prerequisites` before rendering or any network use; a
+  refusal is fixed text that never repeats the value. Change it in that
+  file only, and keep `mbsync/tests/entrypoint_test.sh`'s table, which
+  runs every value at both sites, in step
+- the output filter's patterns take the channel and far store names
+  from the same values the template renders, as literal text; a channel
+  line no rule matches is cut, never passed on (#1498)
 - do not add writeback behavior
 
 ### `indexer/`

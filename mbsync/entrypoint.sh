@@ -76,14 +76,32 @@ mkdir -p "$RUNTIME_DIR"
 # persistent pin with its rotation, and Proton's folder exclusions. The
 # transport below calls only validate_bridge_endpoint,
 # expected_fingerprint, bridge_imap_host, bridge_imap_connect,
-# warn_if_pin_rotation_enabled and extract_bridge_cert.
+# warn_if_pin_rotation_enabled, extract_bridge_cert and
+# validate_proton_settings, and reads the isync names below.
 
-# The Bridge app runs on the host; mbsync connects to it here.
-readonly BRIDGE_HOST="${BRIDGE_HOST:-host.docker.internal}"
+# The defaults and validators of the Proton settings, one implementation
+# shared with scripts/validate-env.sh (PLAN.md decision 46): copied from
+# mbsync/proton-settings.sh by the Dockerfile.
+readonly PROTON_SETTINGS_FILE="/usr/local/lib/proton-settings.sh"
+# shellcheck source=mbsync/proton-settings.sh disable=SC1091 # linted on its own
+source "$PROTON_SETTINGS_FILE"
+
+# The Bridge app runs on this Mac; mbsync connects to it here, through a
+# name that forwards to the host's 127.0.0.1 (validate_proton_settings).
+# Compared and used without surrounding whitespace, in lower case.
+BRIDGE_HOST="$(proton_normalize_bridge_host "${BRIDGE_HOST:-$PROTON_DEFAULT_BRIDGE_HOST}")"
+readonly BRIDGE_HOST
 readonly BRIDGE_IMAP_PORT="${BRIDGE_IMAP_PORT:-1143}"
 # The name the app's certificate is checked against (its CN). See
 # bridge_imap_host.
-readonly BRIDGE_CERT_HOST="${BRIDGE_CERT_HOST:-127.0.0.1}"
+readonly BRIDGE_CERT_HOST="${BRIDGE_CERT_HOST:-$PROTON_DEFAULT_BRIDGE_CERT_HOST}"
+# isync's account, store and channel names (#1498): substituted into
+# mbsyncrc by render_mbsync_config and matched by filter_mbsync_output,
+# from these values only, once validate_proton_settings has accepted them.
+readonly PROTON_IMAP_ACCOUNT_NAME="${PROTON_IMAP_ACCOUNT_NAME:-$PROTON_DEFAULT_IMAP_ACCOUNT_NAME}"
+readonly PROTON_REMOTE_STORE_NAME="${PROTON_REMOTE_STORE_NAME:-$PROTON_DEFAULT_REMOTE_STORE_NAME}"
+readonly PROTON_LOCAL_STORE_NAME="${PROTON_LOCAL_STORE_NAME:-$PROTON_DEFAULT_LOCAL_STORE_NAME}"
+readonly PROTON_CHANNEL_NAME="${PROTON_CHANNEL_NAME:-$PROTON_DEFAULT_CHANNEL_NAME}"
 # Required: the SHA-256 fingerprint the operator took from the Bridge
 # app; see verify_expected_fingerprint.
 readonly BRIDGE_CERT_FINGERPRINT="${BRIDGE_CERT_FINGERPRINT:-}"
@@ -102,10 +120,26 @@ readonly STATE_DIR="/state"
 readonly PIN_FILE="${STATE_DIR}/bridge-cert.fingerprint"
 readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 
+validate_proton_settings() {
+    # The shared validators (proton-settings.sh), the ones
+    # scripts/validate-env.sh runs: the Bridge host and certificate name
+    # must be this Mac's, and the isync names a safe set of characters.
+    # Fixed text: a refused value is never printed.
+    local problem
+    if ! problem="$(proton_settings_problem "$BRIDGE_HOST" "$BRIDGE_CERT_HOST" \
+        "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" "$PROTON_LOCAL_STORE_NAME" \
+        "$PROTON_CHANNEL_NAME")"; then
+        printf '>>> ERROR: %s\n' "$problem" >&2
+        return 1
+    fi
+}
+
 validate_bridge_endpoint() {
     # These values are written into mbsyncrc and, with a tunnel, into the
     # shell command isync runs for it, so only a plain host name or IPv4
-    # address and a decimal port are accepted.
+    # address and a decimal port are accepted. Checked here on their own,
+    # after validate_proton_settings has checked the hosts against their
+    # allowlists.
     local host_re='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'
 
     if [[ ! "$BRIDGE_HOST" =~ $host_re ]]; then
@@ -116,8 +150,11 @@ validate_bridge_endpoint() {
         echo ">>> ERROR: BRIDGE_IMAP_PORT must be a port number from 1 to 65535." >&2
         return 1
     fi
-    if [[ ! "$BRIDGE_CERT_HOST" =~ $host_re ]]; then
-        echo ">>> ERROR: BRIDGE_CERT_HOST must be a host name or IPv4 address." >&2
+    # The certificate name is never connected to, so it has its own exact
+    # check instead of the host name pattern (PLAN.md decision 46): one of
+    # the loopback names proton_cert_host_allowed lists, ::1 included.
+    if ! proton_cert_host_allowed "$BRIDGE_CERT_HOST"; then
+        echo ">>> ERROR: BRIDGE_CERT_HOST must be a loopback name (see validate_proton_settings)." >&2
         return 1
     fi
     # The expected fingerprint is required (verify_expected_fingerprint).
@@ -350,6 +387,9 @@ warn_if_pin_rotation_enabled() {
 # --- Proton provider integration: end ---
 
 require_prerequisites() {
+    # First: nothing is rendered or connected with a refused value.
+    validate_proton_settings || exit 1
+
     if [[ -z "${BRIDGE_USER:-}" ]]; then
         echo ">>> ERROR: BRIDGE_USER is empty. Populate it from the Bridge app's IMAP details before starting mbsync." >&2
         exit 1
@@ -378,8 +418,8 @@ log_startup_identity() {
     # One line naming what is running (#887): the source commit baked into
     # the image (GIT_COMMIT; anything but a plain token is "unknown"), a
     # random ID for this start, and the first 12 hex digits of a SHA-256
-    # over the non-secret settings named below: the endpoint, the sync
-    # timing, the expected certificate fingerprint (not secret; in the
+    # over the non-secret settings named below: the endpoint, isync's
+    # account, store and channel names, the sync timing, the expected certificate fingerprint (not secret; in the
     # form verify_expected_fingerprint compares) and whether pin rotation
     # is on. BRIDGE_USER and the password are not inputs. It runs before
     # validation: values are hashed as configured, never parsed or printed,
@@ -398,8 +438,9 @@ log_startup_identity() {
     [[ "$port" != *@* ]] || port="<value-with-credentials>"
     [[ "$cert_host" != *@* ]] || cert_host="<value-with-credentials>"
     boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
-    config="$(printf 'BRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nBRIDGE_CERT_PIN_ROTATE=%s\n' \
-        "$host" "$port" "$cert_host" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
+    config="$(printf 'BRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nPROTON_IMAP_ACCOUNT_NAME=%s\nPROTON_REMOTE_STORE_NAME=%s\nPROTON_LOCAL_STORE_NAME=%s\nPROTON_CHANNEL_NAME=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nBRIDGE_CERT_PIN_ROTATE=%s\n' \
+        "$host" "$port" "$cert_host" "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" \
+        "$PROTON_LOCAL_STORE_NAME" "$PROTON_CHANNEL_NAME" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
         "$(expected_fingerprint)" "$rotate" | sha256sum)"
     printf '>>> Startup identity: service=mbsync commit=%s boot=%s config=%s\n' \
         "$commit" "$boot" "${config:0:12}"
@@ -450,13 +491,19 @@ render_mbsync_config() {
 
     # Only the named variables are substituted. BRIDGE_PASS is never one:
     # mbsyncrc's PassCmd reads it from the Docker secret. The two Patterns
-    # exclusion sets come from their constants, whatever the environment
-    # holds under the substituted names.
+    # exclusion sets come from their constants, and isync's account,
+    # store and channel names (MBSYNC_IMAP_ACCOUNT, MBSYNC_REMOTE_STORE,
+    # MBSYNC_LOCAL_STORE, MBSYNC_CHANNEL) from the PROTON_*_NAME settings
+    # filter_mbsync_output matches, whatever the environment holds under
+    # the substituted names.
     # shellcheck disable=SC2016 # the list names variables for envsubst
     MBSYNC_IMAP_HOST="$imap_host" MBSYNC_IMAP_CONNECT="$imap_connect" \
+        MBSYNC_IMAP_ACCOUNT="$PROTON_IMAP_ACCOUNT_NAME" \
+        MBSYNC_REMOTE_STORE="$PROTON_REMOTE_STORE_NAME" \
+        MBSYNC_LOCAL_STORE="$PROTON_LOCAL_STORE_NAME" MBSYNC_CHANNEL="$PROTON_CHANNEL_NAME" \
         MBSYNC_PROVIDER_EXCLUSIONS="$PROTON_FOLDER_EXCLUSIONS" \
         MBSYNC_LAYOUT_EXCLUSIONS="$ISYNC_LAYOUT_EXCLUSIONS" \
-        envsubst '${MBSYNC_IMAP_HOST} ${MBSYNC_IMAP_CONNECT} ${BRIDGE_USER} ${MBSYNC_PROVIDER_EXCLUSIONS} ${MBSYNC_LAYOUT_EXCLUSIONS}' \
+        envsubst '${MBSYNC_IMAP_HOST} ${MBSYNC_IMAP_CONNECT} ${BRIDGE_USER} ${MBSYNC_IMAP_ACCOUNT} ${MBSYNC_REMOTE_STORE} ${MBSYNC_LOCAL_STORE} ${MBSYNC_CHANNEL} ${MBSYNC_PROVIDER_EXCLUSIONS} ${MBSYNC_LAYOUT_EXCLUSIONS}' \
         <"$TEMPLATE_FILE" >"$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" # protect the file because it contains credentials
 }
@@ -580,10 +627,12 @@ filter_mbsync_output() {
     # may name a folder too, becomes "(server text withheld)". A
     # sys_error path keeps its ": <strerror>" tail, which holds
     # no colon. A box named exactly INBOX, a fixed IMAP name, is kept. A
-    # line matching no rule, or whose kept tail would still hold a path
-    # under the Maildir, is cut at the first such path. Any other line is
-    # passed on unchanged. A fixed set of anchored matches per line, each
-    # linear in the line's length.
+    # channel line (Error, Warning or Notice: channel) matching no rule
+    # is cut after "channel " (see below). Any other line matching no
+    # rule, or whose kept tail would still hold a path under the Maildir,
+    # is cut at the first such path. Any other line is passed on
+    # unchanged. A fixed set of anchored matches per line, each linear in
+    # the line's length.
     #
     # On stderr, a line saying a far-side box other than INBOX cannot be
     # opened (1.5.1 adds "anymore" when the box synced before) is
@@ -595,19 +644,45 @@ filter_mbsync_output() {
     # error: INBOX cannot be renamed or deleted, so Bridge refusing it
     # means Bridge is refusing boxes.
     #
+    # The channel and far store names in these shapes are the configured
+    # ones (PROTON_CHANNEL_NAME, PROTON_REMOTE_STORE_NAME, the values
+    # render_mbsync_config writes, #1498), each matched as literal text.
+    # A channel line that no rule matches, whatever the channel's name, is
+    # cut after "channel " (on stderr it still counts as another error,
+    # so the sync fails), so a shape this filter does not know fails
+    # closed instead of passing a folder name on.
+    #
     # The image's awk is mawk, which reads a pipe in blocks and would hold
     # lines back until mbsync exits; -W interactive makes it read lines.
     local awk_cmd=(awk)
     if command -v mawk >/dev/null; then
         awk_cmd=(mawk -W interactive)
     fi
+    # The names reach awk through ENVIRON, which keeps them as written
+    # (-v would process backslash escapes).
     # shellcheck disable=SC2016 # an awk program: its $ are awk's
-    "${awk_cmd[@]}" -v stream="$1" -v counts="$2" -v maildir="${MAILDIR_PATH}/" \
-        -v far_box='^Error: channel protonmail: far side box .+ cannot be opened( anymore)?[.]$' \
-        -v inbox='^Error: channel protonmail: far side box INBOX cannot be opened( anymore)?[.]$' '
+    FILTER_CHANNEL="$PROTON_CHANNEL_NAME" FILTER_FAR_STORE="$PROTON_REMOTE_STORE_NAME" \
+        "${awk_cmd[@]}" -v stream="$1" -v counts="$2" -v maildir="${MAILDIR_PATH}/" '
         function rule(prefix, suffix, replacement, keep_inbox) {
             n++
             pre[n] = prefix; suf[n] = suffix; rep[n] = replacement; inbox_ok[n] = keep_inbox
+        }
+        # s as a regular expression matching itself: every character
+        # other than a letter, digit or _ is matched by a bracket
+        # expression (\ and ^, which cannot stand alone in one, by an
+        # escape). The names are validated to [A-Za-z0-9_-] already.
+        function lit(s,    i, c, out) {
+            out = ""
+            for (i = 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (c ~ /[A-Za-z0-9_]/)
+                    out = out c
+                else if (c == "\\" || c == "^")
+                    out = out "\\" c
+                else
+                    out = out "[" c "]"
+            }
+            return out
         }
         function redact(line,    i, head, rest, name, tail, at) {
             for (i = 1; i <= n; i++) {
@@ -627,6 +702,8 @@ filter_mbsync_output() {
                     return line
                 return head rep[i] tail
             }
+            if (match(line, "^(Error|Warning|Notice): channel "))
+                return substr(line, 1, RLENGTH) "(rest of line withheld)"
             at = index(line, maildir)
             if (at > 0)
                 return substr(line, 1, at - 1) "<path>"
@@ -634,7 +711,10 @@ filter_mbsync_output() {
         }
         BEGIN {
             q = "\047"; F = "<folder>"; P = "<path>"
-            ch = "^Error: channel protonmail"
+            channel = lit(ENVIRON["FILTER_CHANNEL"])
+            ch = "^Error: channel " channel
+            far_box = ch ": far side box .+ cannot be opened( anymore)?[.]$"
+            inbox = ch ": far side box INBOX cannot be opened( anymore)?[.]$"
             cut = q " (rest of line withheld)"
             srv = "(server text withheld)"
             sys = ": [^:]*$"
@@ -642,9 +722,9 @@ filter_mbsync_output() {
             # drv_imap.c, drv_maildir.c.
             rule(ch ": (far|near) side box ", " cannot be opened( anymore)?[.]$", F, 1)
             rule(ch ": both far side ", " cannot be opened[.]$", F " and near side " F, 0)
-            rule("^Warning: channel protonmail: far side box ", " is not empty[.]$",
+            rule("^Warning: channel " channel ": far side box ", " is not empty[.]$",
                  F " cannot be opened anymore, and near side box " F, 0)
-            rule("^Warning: channel protonmail: near side box ", " is not empty[.]$",
+            rule("^Warning: channel " channel ": near side box ", " is not empty[.]$",
                  F " cannot be opened anymore, and far side box " F, 0)
             rule(ch ": UIDVALIDITY of both far side ", " changed[.]$", F " and near side " F, 0)
             rule(ch ", (far|near) side box ",
@@ -655,10 +735,10 @@ filter_mbsync_output() {
             rule(ch ", (far|near) side box ",
                  " [(]at UID [0-9]+[)]: Unable to recover from both-sided UIDVALIDITY change, as it is genuine on at least one side[.]$",
                  F, 1)
-            rule("^Notice: channel protonmail, (far|near) side box ",
+            rule("^Notice: channel " channel ", (far|near) side box ",
                  ": Recovered from change of UIDVALIDITY[.]$", F, 1)
             rule("^(Opening|Creating|Deleting) (far|near) side box ", "[.][.][.]$", F, 1)
-            rule("^Error: channel :protonmail-remote:", " is locked$", "<folders>", 0)
+            rule("^Error: channel :" lit(ENVIRON["FILTER_FAR_STORE"]) ":", " is locked$", "<folders>", 0)
             rule("^Error: canonical mailbox name " q, q " contains flattened hierarchy delimiter$", F, 0)
             rule("^Error: flattened mailbox name " q, q " contains canonical hierarchy delimiter$", F, 0)
             rule("^IMAP warning: ignoring unreasonably long mailbox name " q, "[[][.][.][.]." q "$", F, 0)

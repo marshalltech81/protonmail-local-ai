@@ -84,8 +84,10 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
   and mcp-server, `_IDENTITY_SETTINGS` in `src/main.py`, with everything
   else the service reads listed with its reason in
   `_IDENTITY_EXCLUDED`; a test fails when a new setting is in neither),
-  or `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
-  `BRIDGE_CERT_HOST`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
+  or `BRIDGE_HOST` (trimmed, in lower case), `BRIDGE_IMAP_PORT`,
+  `BRIDGE_CERT_HOST`, `PROTON_IMAP_ACCOUNT_NAME`,
+  `PROTON_REMOTE_STORE_NAME`, `PROTON_LOCAL_STORE_NAME`,
+  `PROTON_CHANNEL_NAME`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
   `BRIDGE_CERT_FINGERPRINT` (normalized, and not secret) and
   `BRIDGE_CERT_PIN_ROTATE` (mbsync). It changes when one of those
   settings changes and is otherwise stable across restarts. API keys,
@@ -261,14 +263,39 @@ and the connection.
   certificate changed on purpose (reinstall, reset), update
   `BRIDGE_CERT_FINGERPRINT` and rotate the pin as in
   [Switching to another Bridge installation](setup.md#switching-to-another-bridge-installation).
-- **`certificate owner does not match hostname host.docker.internal`.**
-  mbsync runs with `BRIDGE_CERT_HOST` changed from `127.0.0.1` (a
-  modified `docker-compose.yml` or an overlay). Restore it and
-  `make up`.
-- **`certificate owner does not match hostname 127.0.0.1`.** The app
-  presents a certificate not issued for `127.0.0.1`, such as one
-  imported into Bridge by hand. Use a certificate for `127.0.0.1`; there
-  is no option to skip the check.
+- **`certificate owner does not match hostname <name>`.** The app
+  presents a certificate not issued for `BRIDGE_CERT_HOST` (`<name>`).
+  With the default, `127.0.0.1`, the app holds a certificate imported by
+  hand for another name. With `localhost`, another `127.x.y.z` or `::1`,
+  the app still presents its own certificate, which names only
+  `127.0.0.1`: import a certificate issued for that name into the app,
+  or unset `BRIDGE_CERT_HOST`. There is no option to skip the check.
+  The check is isync's, on each sync: certificate extraction at startup
+  checks the certificate against the expected fingerprint and the pin,
+  not its name, so this error comes after `Bridge cert extracted
+  successfully` and before any login.
+- **`BRIDGE_HOST must be one of ...`, `BRIDGE_CERT_HOST must be ...`,
+  or `PROTON_..._NAME must be ...`** (from `make validate-env` or at
+  mbsync's startup, before it renders its config or connects). These
+  settings are checked by `mbsync/proton-settings.sh` at both places
+  (PLAN.md decision 46); the message names the setting, never the value.
+  `BRIDGE_HOST` takes only names that forward to this Mac's
+  `127.0.0.1`: `host.docker.internal` (the default), or OrbStack's
+  `host.orb.internal` or `host.internal`, in any case and without
+  surrounding spaces. `gateway.docker.internal`, an IP address, a LAN
+  or `.local` name, or a name with a trailing dot is refused: a Bridge on
+  another machine waits on
+  [#1499](https://github.com/marshalltech81/protonmail-local-ai/issues/1499).
+  `BRIDGE_CERT_HOST` takes `127.0.0.1`, `localhost`, another
+  `127.x.y.z` written without leading zeros, or `::1`, exactly as
+  written. The four isync names take 1 to 64 of `A-Z a-z 0-9 _ -`,
+  starting with a letter or digit, and the two store names must differ.
+  Unset a setting, or leave it empty, for its default.
+  These names are not resolved to check them: DNS cannot show that a
+  name is local, so the container engine and its resolver are trusted
+  to send `BRIDGE_HOST` to this Mac's loopback. To see where a name
+  goes from the container:
+  `docker exec mbsync getent hosts host.docker.internal`.
 - **`Bridge cert fingerprint does not match pinned value` after
   reinstalling the app or resetting it.** Expected once: the app
   presents a different certificate. Verify it and rotate the pin as in
@@ -302,7 +329,8 @@ error in the same run, exits with any status other than 1, or cannot open
 `INBOX` (which cannot be renamed or deleted, so Bridge refusing it means
 Bridge is refusing folders, not that one went away). The match is the exact
 line isync 1.5.1 prints, `Error: channel protonmail: far side box <name>
-cannot be opened anymore.`, or the one isync 1.4.4 printed, without
+cannot be opened anymore.` (with `PROTON_CHANNEL_NAME` in place of
+`protonmail` when it is set), or the one isync 1.4.4 printed, without
 `anymore`; a different isync version that words it differently falls back
 to counting the run as a failure.
 
@@ -336,7 +364,15 @@ message kept:
 - text Bridge itself returns, which may name a folder too, is withheld
   after the fixed part, for example
   `Error from IMAP server: (server text withheld)` or
-  `IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: (server text withheld)`.
+  `IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: (server text withheld)`;
+- a message about the channel that the filter does not recognise (a
+  wording another isync version uses, or a channel or store name other
+  than the configured `PROTON_CHANNEL_NAME` and
+  `PROTON_REMOTE_STORE_NAME`) is cut whole:
+  `Error: channel (rest of line withheld)` (#1498).
+
+The filter matches the channel and store names mbsync's config holds,
+so changing them changes nothing here.
 
 Redaction does not change how a sync is counted: these errors still fail
 it, and only the far-side `cannot be opened` line

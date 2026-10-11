@@ -25,7 +25,10 @@
 
 The stack syncs from the Proton Mail Bridge app running on the host.
 mbsync, the indexer and the MCP server run in containers; mbsync reaches
-the app through `host.docker.internal`.
+the app through `host.docker.internal` (`BRIDGE_HOST`; on OrbStack,
+`host.orb.internal` and `host.internal` also work). The engine and its
+resolver are trusted to send that name to this Mac's loopback: the name
+is not resolved to check it.
 
 - **macOS** (OrbStack or Docker Desktop): tested. There
   `host.docker.internal` forwards to the Mac's loopback interface, which
@@ -194,7 +197,20 @@ is back. Freshness is reported by `make status` as usual.
    `sha256 Fingerprint=…` line are all accepted. The value is not
    secret. The app's certificate must be issued for `127.0.0.1`, which
    is what Bridge generates; a certificate you imported into Bridge
-   yourself must be too.
+   yourself must be too, unless you set `BRIDGE_CERT_HOST` to the name
+   it is issued for: `localhost`, another `127.x.y.z` or `::1`, nothing
+   else.
+
+   Optional settings in the same `.env` block (PLAN.md decision 46;
+   `.env.example` lists them): `BRIDGE_HOST`, the container's name for
+   this Mac (`host.docker.internal` by default; OrbStack's
+   `host.orb.internal` or `host.internal` also work), and isync's
+   account, store and channel names (`PROTON_IMAP_ACCOUNT_NAME`,
+   `PROTON_REMOTE_STORE_NAME`, `PROTON_LOCAL_STORE_NAME`,
+   `PROTON_CHANNEL_NAME`). Leave them unset unless you need them.
+   `make validate-env` and mbsync both refuse any other value; the
+   Bridge must run on this Mac, and a Bridge elsewhere waits on
+   [#1499](https://github.com/marshalltech81/protonmail-local-ai/issues/1499).
 
 #### How TLS is checked
 
@@ -206,7 +222,7 @@ app's certificate names only `127.0.0.1`, and the isync shipped in the
 image (1.5.1) checks a self-signed CA certificate like Bridge's against
 the configured host name, so connecting to `host.docker.internal`
 directly fails with `certificate owner does not match hostname`.
-`docker-compose.yml` therefore sets `BRIDGE_CERT_HOST=127.0.0.1`: the
+`BRIDGE_CERT_HOST` therefore defaults to `127.0.0.1`: the
 generated `mbsyncrc` keeps `Host 127.0.0.1` for the certificate check
 and reaches `host.docker.internal:<port>` through an isync `Tunnel`
 (`socat`), which only relays bytes. TLS still runs end to end between

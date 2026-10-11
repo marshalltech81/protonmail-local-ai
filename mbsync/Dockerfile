@@ -37,6 +37,9 @@ RUN groupadd --gid 1001 mbsync && \
 # Config and entrypoint
 # -----------------------------------------------------------------------------
 COPY mbsyncrc.template /etc/mbsyncrc.template
+# The Proton settings' defaults and validators, sourced by the entrypoint
+# (scripts/validate-env.sh sources the same file on the host).
+COPY --chmod=644 proton-settings.sh /usr/local/lib/proton-settings.sh
 COPY --chmod=755 --chown=mbsync:mbsync entrypoint.sh /entrypoint.sh
 COPY --chmod=755 --chown=mbsync:mbsync healthcheck.sh /healthcheck.sh
 
