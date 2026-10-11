@@ -30,7 +30,7 @@
 # Leave TLSVersions unset so isync/OpenSSL can negotiate the strongest
 # supported protocol instead of pinning the connection to TLS 1.2.
 # CertificateFile: extracted automatically at container startup by entrypoint.sh.
-IMAPAccount protonmail
+IMAPAccount ${MBSYNC_IMAP_ACCOUNT}
 Host ${MBSYNC_IMAP_HOST}
 ${MBSYNC_IMAP_CONNECT}
 User ${BRIDGE_USER}
@@ -39,8 +39,8 @@ TLSType IMAPS
 CertificateFile /tmp/mbsync/bridge-cert.pem
 
 # Remote store — maps IMAPAccount to a named store for use in Channel.
-IMAPStore protonmail-remote
-Account protonmail
+IMAPStore ${MBSYNC_REMOTE_STORE}
+Account ${MBSYNC_IMAP_ACCOUNT}
 
 # Local store — where emails are written in Maildir format.
 # SubFolders Legacy: a top-level folder is the directory of that name, and
@@ -50,7 +50,7 @@ Account protonmail
 # SubFolders Verbatim (#281), and names keep their dots, which
 # SubFolders Maildir++ refuses. The indexer reads the folder name back
 # from the path (indexer/src/parser.py _derive_folder).
-MaildirStore protonmail-local
+MaildirStore ${MBSYNC_LOCAL_STORE}
 Path /maildir/
 Inbox /maildir/INBOX
 SubFolders Legacy
@@ -93,9 +93,9 @@ SubFolders Legacy
 #   Pull nothing is stored on the far side. Files synced before the
 #   option keep the mtime of their first sync (docs/architecture.md,
 #   "Message time").
-Channel protonmail
-Far :protonmail-remote:
-Near :protonmail-local:
+Channel ${MBSYNC_CHANNEL}
+Far :${MBSYNC_REMOTE_STORE}:
+Near :${MBSYNC_LOCAL_STORE}:
 Patterns * ${MBSYNC_PROVIDER_EXCLUSIONS} ${MBSYNC_LAYOUT_EXCLUSIONS}
 Create Near
 SyncState *

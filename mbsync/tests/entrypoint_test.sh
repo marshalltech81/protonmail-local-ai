@@ -76,6 +76,19 @@ check() {
     fi
 }
 
+# The Proton settings' defaults and validators, which the entrypoint
+# sources from its image path (PLAN.md decision 46).
+PROTON_SETTINGS="$(dirname "$ENTRYPOINT")/proton-settings.sh"
+readonly PROTON_SETTINGS
+# shellcheck source=mbsync/proton-settings.sh disable=SC1091 # linted on its own
+source "$PROTON_SETTINGS"
+# isync's names as the entrypoint resolves them when none is set; a case
+# that needs others sets them.
+PROTON_IMAP_ACCOUNT_NAME="$PROTON_DEFAULT_IMAP_ACCOUNT_NAME"
+PROTON_REMOTE_STORE_NAME="$PROTON_DEFAULT_REMOTE_STORE_NAME"
+PROTON_LOCAL_STORE_NAME="$PROTON_DEFAULT_LOCAL_STORE_NAME"
+PROTON_CHANNEL_NAME="$PROTON_DEFAULT_CHANNEL_NAME"
+
 # Synthetic fingerprints in the pin's format: 64 lowercase hex digits.
 FP_OLD="$(printf 'a%.0s' {1..64})"
 FP_NEW="$(printf 'b%.0s' {1..64})"
@@ -862,10 +875,32 @@ filter_one_line() {
     filter_mbsync_output "$1" "$WORK/filter-counts" <<<"$2" 2>&1
 }
 
+# Prints line $1 of the catalogue with the default channel and store names
+# replaced by $2 (channel), $3 (far store) and $4 (near store), as isync
+# writes them for a config with those names (#1498).
+with_names() {
+    local line="$1" far=":${PROTON_DEFAULT_REMOTE_STORE_NAME}:" near=":${PROTON_DEFAULT_LOCAL_STORE_NAME}:"
+    local quoted="'${PROTON_DEFAULT_LOCAL_STORE_NAME}'" channel="channel ${PROTON_DEFAULT_CHANNEL_NAME}"
+    local new_far=":$3:" new_near=":$4:" new_quoted="'$4'" new_channel="channel $2"
+    line="${line//$far/$new_far}"
+    line="${line//$near/$new_near}"
+    line="${line//$quoted/$new_quoted}"
+    printf '%s\n' "${line//$channel/$new_channel}"
+}
+
+# Every shape, on both streams, for the channel and store names $1, $2 and
+# $3 (the defaults when none are given): the filter matches the configured
+# names, so each shape is redacted as with the defaults and the synthetic
+# folder marker never reaches the output.
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 catalogue_shapes_are_redacted_by_class() {
     local entry template expected input path stream got count=0
-    sync_setup catalogue
+    local channel="${1:-$PROTON_DEFAULT_CHANNEL_NAME}" far="${2:-$PROTON_DEFAULT_REMOTE_STORE_NAME}"
+    local near="${3:-$PROTON_DEFAULT_LOCAL_STORE_NAME}"
+    sync_setup "catalogue-$channel"
+    PROTON_CHANNEL_NAME="$channel" PROTON_REMOTE_STORE_NAME="$far" PROTON_LOCAL_STORE_NAME="$near"
+    proton_settings_problem "$PROTON_DEFAULT_BRIDGE_HOST" "$PROTON_DEFAULT_BRIDGE_CERT_HOST" \
+        "$PROTON_IMAP_ACCOUNT_NAME" "$far" "$near" "$channel" || return 1
     path="${MAILDIR_PATH}/.mbsyncstateFolders!MarkerZq9: a 'b' (c)/cur/1:2,S"
     while IFS= read -r entry; do
         template="${entry%%$'\t'*}"
@@ -875,11 +910,13 @@ catalogue_shapes_are_redacted_by_class() {
             expected="${template//@F@/<folder>}"
             expected="${expected//@P@/<path>}"
         fi
+        template="$(with_names "$template" "$channel" "$far" "$near")"
+        expected="$(with_names "$expected" "$channel" "$far" "$near")"
         input="${template//@F@/$SHAPE_FOLDER}"
         input="${input//@P@/$path}"
         for stream in err out; do
             got="$(filter_one_line "$stream" "$input")"
-            if [[ "$got" != "$expected" ]]; then
+            if [[ "$got" != "$expected" || "$got" == *MarkerZq9* ]]; then
                 printf 'stream %s, shape: %s\n  got:      %s\n  expected: %s\n' \
                     "$stream" "$template" "$got" "$expected"
                 return 1
@@ -888,6 +925,70 @@ catalogue_shapes_are_redacted_by_class() {
         count=$((count + 1))
     done <<<"$FOLDER_SHAPES"
     ((count == 112)) || return 1
+}
+
+# Lines naming a channel that match no rule: a shape this filter does not
+# know, or a known shape under a channel or far store name other than the
+# configured one. Each is cut after "channel " on both streams, so no
+# folder name passes, and on stderr it counts as another error, so the
+# sync fails (#1498).
+UNMATCHED_CHANNEL_LINES="$(cat <<'EOF'
+Error: channel @C@: a shape this filter does not know names @F@
+Warning: channel @C@, far side box @F@: a reworded warning.
+Notice: channel @C@ @F@
+Error: channel @O@: near side box @F@ cannot be opened.
+Error: channel @O@: far side box @F@ cannot be opened anymore.
+Warning: channel @O@: far side box @F@ cannot be opened anymore, and near side box @F@ is not empty.
+Notice: channel @O@, near side box @F@: Recovered from change of UIDVALIDITY.
+Error: channel :@O@:@F@-:@C@:@F@ is locked
+Error: channel @C@x: near side box @F@ cannot be opened.
+EOF
+)"
+readonly UNMATCHED_CHANNEL_LINES
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unmatched_channel_lines_fail_closed() {
+    local channel="$1" other="$2" line input got stream
+    sync_setup "unmatched-$channel"
+    PROTON_CHANNEL_NAME="$channel" PROTON_REMOTE_STORE_NAME="${channel}-far"
+    PROTON_LOCAL_STORE_NAME="${channel}-near"
+    while IFS= read -r line; do
+        input="${line//@C@/$channel}"
+        input="${input//@O@/$other}"
+        input="${input//@F@/$SHAPE_FOLDER}"
+        for stream in err out; do
+            got="$(filter_one_line "$stream" "$input")"
+            if [[ "$got" != "${input%%channel *}channel (rest of line withheld)" ]]; then
+                printf 'stream %s: %s\n  got: %s\n' "$stream" "$input" "$got"
+                return 1
+            fi
+        done
+        # Never withheld as a tolerated far box: counted as another error.
+        [[ "$(cat "$WORK/filter-counts")" == "0 1" ]] || return 1
+    done <<<"$UNMATCHED_CHANNEL_LINES"
+}
+
+# The far-side box line is withheld and tolerated only under the
+# configured channel name; the same line under any other name fails the
+# sync, cut, with the marker absent.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unopenable_far_box_follows_the_channel_name() {
+    sync_setup far-box-names
+    mbsync() { mock_mbsync_output; }
+    find() { :; }
+    PROTON_CHANNEL_NAME="Alt_9-chan"
+    MOCK_RC=1
+    MOCK_STDOUT=""
+    MOCK_STDERR="Error: channel Alt_9-chan: far side box ${FAR_BOX_MARKER} cannot be opened anymore."
+    run_sync_logged far-box-names
+    ((SYNC_RC == 0)) || return 1
+    grep -q 'WARNING: 1 far-side folder(s) could not be opened' "$SYNC_LOG" || return 1
+    marker_not_logged || return 1
+    MOCK_STDERR="${FAR_BOX_LINE}"
+    run_sync_logged far-box-default-name
+    ((SYNC_RC == 1)) || return 1
+    grep -qxF "Error: channel (rest of line withheld)" "$SYNC_LOG" || return 1
+    marker_not_logged
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -1188,7 +1289,7 @@ invalid_deadlines_are_refused_at_startup() {
     BRIDGE_IMAP_PORT=1143
     BRIDGE_CERT_HOST="127.0.0.1"
     BRIDGE_CERT_FINGERPRINT="$FP_OLD"
-    load expected_fingerprint validate_bridge_endpoint require_prerequisites
+    load expected_fingerprint validate_proton_settings validate_bridge_endpoint require_prerequisites
     SYNC_DEADLINE_SECONDS=86400
     (require_prerequisites) || return 1
     for value in "" 0 -5 08 1.5 abc " 60" 1000000000; do
@@ -2046,6 +2147,19 @@ check "other errors are streamed while mbsync runs" other_errors_are_streamed_wh
 check "the sync loop counts failures but not unopenable far boxes" \
     sync_loop_counts_failures_but_not_unopenable_far_boxes
 check "every isync folder-naming shape is redacted" catalogue_shapes_are_redacted_by_class
+check "every shape is redacted under other channel and store names" \
+    catalogue_shapes_are_redacted_by_class Alt_9-chan far-Store_2 near-Store_3
+check "every shape is redacted under one-character names" \
+    catalogue_shapes_are_redacted_by_class c f n
+check "every shape is redacted under 64-character names" \
+    catalogue_shapes_are_redacted_by_class "$(printf 'c%.0s' {1..64})" \
+    "$(printf 'f%.0s' {1..63})-" "$(printf 'n%.0s' {1..63})_"
+check "channel lines no rule matches fail closed (default names)" \
+    unmatched_channel_lines_fail_closed protonmail Other_1
+check "channel lines no rule matches fail closed (other names)" \
+    unmatched_channel_lines_fail_closed Alt_9-chan protonmail
+check "an unopenable far box is tolerated only under the configured channel" \
+    unopenable_far_box_follows_the_channel_name
 check "lines naming no folder pass through unchanged" unrelated_lines_pass_through_unchanged
 check "a Maildir path in a kept tail is cut" a_path_in_a_kept_tail_is_cut
 check "UIDVALIDITY errors are redacted and still fail the sync" \
@@ -2176,20 +2290,38 @@ rendered_config_varies_only_in_the_substituted_values() {
             return 1
         fi
     done
+    # isync's names are substituted too (#1498): no setting line of the
+    # template holds one.
+    if grep -v '^#' "$TEMPLATE" | grep -q "$PROTON_DEFAULT_CHANNEL_NAME"; then
+        echo "the template's settings hold a literal account, store or channel name"
+        return 1
+    fi
     endpoint_setup variation
     BRIDGE_HOST="bridge.example"
     BRIDGE_IMAP_PORT=2993
     BRIDGE_CERT_HOST="localhost"
+    PROTON_IMAP_ACCOUNT_NAME="acct-2" PROTON_REMOTE_STORE_NAME="far_2"
+    PROTON_LOCAL_STORE_NAME="near_2" PROTON_CHANNEL_NAME="Chan-2"
     export BRIDGE_USER="other-synthetic@example.net"
     render_mbsync_config
     expected="$(cat "$GOLDEN")"
     expected="${expected//host.docker.internal:1143/bridge.example:2993}"
     expected="${expected//127.0.0.1/localhost}"
     expected="${expected//synthetic@example.com/other-synthetic@example.net}"
+    expected="$(sed -e 's/^IMAPAccount protonmail$/IMAPAccount acct-2/' \
+        -e 's/^Account protonmail$/Account acct-2/' \
+        -e 's/^IMAPStore protonmail-remote$/IMAPStore far_2/' \
+        -e 's/^MaildirStore protonmail-local$/MaildirStore near_2/' \
+        -e 's/^Channel protonmail$/Channel Chan-2/' \
+        -e 's/^Far :protonmail-remote:$/Far :far_2:/' \
+        -e 's/^Near :protonmail-local:$/Near :near_2:/' <<<"$expected")"
     if [[ "$(cat "$CONFIG_FILE")" != "$expected" ]]; then
         diff <(printf '%s\n' "$expected") "$CONFIG_FILE" || true
         return 1
     fi
+    # The seven name lines and the six endpoint and user lines (three in
+    # the header comment), and nothing else.
+    [[ "$(diff "$GOLDEN" "$CONFIG_FILE" | grep -c '^>')" == 13 ]] || return 1
 }
 
 check "the rendered config matches the golden file byte for byte" \
@@ -2308,10 +2440,11 @@ order_setup() {
         -e "s|^readonly BRIDGE_PASS_FILE=\"/run/secrets/bridge_pass\"\$|readonly BRIDGE_PASS_FILE=\"$ORDER_DIR/secrets/bridge_pass\"|" \
         -e "s|^readonly STATE_DIR=\"/state\"\$|readonly STATE_DIR=\"$ORDER_DIR/state\"|" \
         -e "s|^readonly MAILDIR_PATH=\"/maildir\"\$|readonly MAILDIR_PATH=\"$ORDER_DIR/maildir\"|" \
+        -e "s|^readonly PROTON_SETTINGS_FILE=\"/usr/local/lib/proton-settings.sh\"\$|readonly PROTON_SETTINGS_FILE=\"$PROTON_SETTINGS\"|" \
         "$ENTRYPOINT" >"$ORDER_ENTRYPOINT"
-    # The five paths moved and nothing else changed; otherwise a run could
+    # The six paths moved and nothing else changed; otherwise a run could
     # touch the real paths.
-    if [[ "$(diff "$ENTRYPOINT" "$ORDER_ENTRYPOINT" | grep -c '^>')" != 5 ]]; then
+    if [[ "$(diff "$ENTRYPOINT" "$ORDER_ENTRYPOINT" | grep -c '^>')" != 6 ]]; then
         echo "the entrypoint's fixed paths changed; update order_setup"
         return 1
     fi
@@ -2501,6 +2634,244 @@ check "startup order: a pin mismatch stops before mbsync" \
 check "startup order: an approved rotation stores the pin before mbsync" \
     approved_rotation_stores_the_pin_before_mbsync
 
+# --- the Proton settings at both sites (PLAN.md decision 46, #1497) ---------
+#
+# One table of values for the settings mbsync/proton-settings.sh checks.
+# Each row runs through the whole entrypoint (the order_run copy above,
+# with the values in its environment as Compose passes them) and through
+# scripts/validate-env.sh (a scratch root with a passing .env, the values
+# exported as a shell would). Both sites must accept or refuse the row
+# alike. A refusal comes before anything is rendered or connected, with
+# the same fixed text at both sites. An accepted value is the one the
+# rendered config holds. Each row, tab-separated: accept, refuse (the
+# refusal of the first setting named) or refuse-stores (the two store
+# names are the same), then one or two NAME=VALUE assignments.
+
+SIXTY_FOUR="$(printf 'n%.0s' {1..64})"
+readonly SIXTY_FOUR
+SETTING_CASES=(
+    $'accept\tBRIDGE_HOST=host.docker.internal'
+    $'accept\tBRIDGE_HOST=host.orb.internal'
+    $'accept\tBRIDGE_HOST=host.internal'
+    $'accept\tBRIDGE_HOST='
+    $'accept\tBRIDGE_HOST=HOST.Docker.INTERNAL'
+    $'accept\tBRIDGE_HOST=  host.orb.internal  '
+    $'accept\tBRIDGE_HOST=host.internal\n'
+    $'refuse\tBRIDGE_HOST=gateway.docker.internal'
+    $'refuse\tBRIDGE_HOST=docker.for.mac.localhost'
+    $'refuse\tBRIDGE_HOST=localhost' # pragma: allowlist secret
+    $'refuse\tBRIDGE_HOST=127.0.0.1'
+    $'refuse\tBRIDGE_HOST=0.250.250.254'
+    $'refuse\tBRIDGE_HOST=192.168.1.20'
+    $'refuse\tBRIDGE_HOST=::1'
+    $'refuse\tBRIDGE_HOST=[::1]'
+    $'refuse\tBRIDGE_HOST=bridge-zq9marker.local'
+    $'refuse\tBRIDGE_HOST=macbook.lan'
+    $'refuse\tBRIDGE_HOST=bridge.example'
+    $'refuse\tBRIDGE_HOST=host.docker.internal.'
+    $'refuse\tBRIDGE_HOST=zq9marker.host.docker.internal'
+    $'refuse\tBRIDGE_HOST=host.docker.internal.zq9marker'
+    $'refuse\tBRIDGE_HOST=host.docker.internalzq9marker'
+    $'refuse\tBRIDGE_HOST=host.docker.internal:1143'
+    $'refuse\tBRIDGE_HOST=host docker internal'
+    $'refuse\tBRIDGE_HOST= '
+    $'refuse\tBRIDGE_HOST=host.docker.internal;zq9marker'
+    $'refuse\tBRIDGE_HOST=host.docker.internal$(zq9marker)'
+    $'refuse\tBRIDGE_HOST=host.docker.internal\nPort zq9marker'
+    $'refuse\tBRIDGE_HOST=host.docker.internal host.orb.internal'
+    $'accept\tBRIDGE_CERT_HOST=127.0.0.1'
+    $'accept\tBRIDGE_CERT_HOST='
+    $'accept\tBRIDGE_CERT_HOST=localhost'
+    $'accept\tBRIDGE_CERT_HOST=127.0.0.2'
+    $'accept\tBRIDGE_CERT_HOST=127.0.0.0'
+    $'accept\tBRIDGE_CERT_HOST=127.255.255.255'
+    $'accept\tBRIDGE_CERT_HOST=127.10.200.9'
+    $'accept\tBRIDGE_CERT_HOST=::1'
+    $'refuse\tBRIDGE_CERT_HOST=LOCALHOST'
+    $'refuse\tBRIDGE_CERT_HOST=Localhost' # pragma: allowlist secret
+    $'refuse\tBRIDGE_CERT_HOST= 127.0.0.1'
+    $'refuse\tBRIDGE_CERT_HOST=127.0.0.1 '
+    $'refuse\tBRIDGE_CERT_HOST=127.0.0.1\n'
+    $'refuse\tBRIDGE_CERT_HOST=localhost.'
+    $'refuse\tBRIDGE_CERT_HOST=127.0.0.01'
+    $'refuse\tBRIDGE_CERT_HOST=127.00.0.1'
+    $'refuse\tBRIDGE_CERT_HOST=127.0.0.256'
+    $'refuse\tBRIDGE_CERT_HOST=127.0.0'
+    $'refuse\tBRIDGE_CERT_HOST=127.0.0.1.1'
+    $'refuse\tBRIDGE_CERT_HOST=128.0.0.1'
+    $'refuse\tBRIDGE_CERT_HOST=0.0.0.0'
+    $'refuse\tBRIDGE_CERT_HOST=192.168.1.20'
+    $'refuse\tBRIDGE_CERT_HOST=0:0:0:0:0:0:0:1'
+    $'refuse\tBRIDGE_CERT_HOST=::ffff:127.0.0.1'
+    $'refuse\tBRIDGE_CERT_HOST=[::1]'
+    $'refuse\tBRIDGE_CERT_HOST=::2'
+    $'refuse\tBRIDGE_CERT_HOST=host.docker.internal'
+    $'refuse\tBRIDGE_CERT_HOST=bridge-zq9marker.local'
+    $'refuse\tBRIDGE_CERT_HOST=localhost;zq9marker'
+    $'refuse\tBRIDGE_CERT_HOST=127.0.0.1\nPort zq9marker'
+    $'refuse\tBRIDGE_CERT_HOST= '
+    $'accept\tPROTON_IMAP_ACCOUNT_NAME='
+    $'accept\tPROTON_IMAP_ACCOUNT_NAME=a'
+    $'accept\tPROTON_IMAP_ACCOUNT_NAME=Acct_2-x'
+    $'accept\tPROTON_REMOTE_STORE_NAME=9far'
+    $'accept\tPROTON_REMOTE_STORE_NAME=protonmail'
+    $'accept\tPROTON_LOCAL_STORE_NAME=near_store-1'
+    $'accept\tPROTON_CHANNEL_NAME=Chan-9_x'
+    "accept"$'\t'"PROTON_CHANNEL_NAME=${SIXTY_FOUR}"
+    "refuse"$'\t'"PROTON_CHANNEL_NAME=${SIXTY_FOUR}x"
+    $'refuse\tPROTON_CHANNEL_NAME=-chan'
+    $'refuse\tPROTON_CHANNEL_NAME=_chan'
+    $'refuse\tPROTON_CHANNEL_NAME= chan'
+    $'refuse\tPROTON_CHANNEL_NAME=chan '
+    $'refuse\tPROTON_CHANNEL_NAME=chan\n'
+    $'refuse\tPROTON_CHANNEL_NAME=zq9marker chan'
+    $'refuse\tPROTON_CHANNEL_NAME=zq9marker.chan'
+    $'refuse\tPROTON_CHANNEL_NAME=zq9marker:chan'
+    $'refuse\tPROTON_CHANNEL_NAME=zq9marker*'
+    $'refuse\tPROTON_CHANNEL_NAME=zq9marker(x)'
+    $'refuse\tPROTON_CHANNEL_NAME=zq9marker\\x' # pragma: allowlist secret
+    $'refuse\tPROTON_CHANNEL_NAME=zq9marker$(id)'
+    $'refuse\tPROTON_CHANNEL_NAME=zq9marker;id'
+    $'refuse\tPROTON_CHANNEL_NAME=zq9marker\nChannel x'
+    $'refuse\tPROTON_CHANNEL_NAME=zq9marker\xc3\xa4' # pragma: allowlist secret
+    $'refuse\tPROTON_IMAP_ACCOUNT_NAME=zq9marker/acct' # pragma: allowlist secret
+    $'refuse\tPROTON_IMAP_ACCOUNT_NAME=-'
+    $'refuse\tPROTON_REMOTE_STORE_NAME=zq9marker:far'
+    $'refuse\tPROTON_REMOTE_STORE_NAME=zq9marker\'far'
+    $'refuse\tPROTON_LOCAL_STORE_NAME=zq9marker"near'
+    $'refuse\tPROTON_LOCAL_STORE_NAME=zq9marker{near}'
+    $'refuse-stores\tPROTON_REMOTE_STORE_NAME=protonmail-local' # pragma: allowlist secret
+    $'refuse-stores\tPROTON_LOCAL_STORE_NAME=protonmail-remote' # pragma: allowlist secret
+    $'refuse-stores\tPROTON_REMOTE_STORE_NAME=same-store\tPROTON_LOCAL_STORE_NAME=same-store'
+    $'accept\tPROTON_REMOTE_STORE_NAME=protonmail-local\tPROTON_LOCAL_STORE_NAME=protonmail-remote' # pragma: allowlist secret
+)
+readonly SETTING_CASES
+
+# The line the rendered config holds for an accepted NAME=VALUE.
+expected_config_line() {
+    local name="${1%%=*}" value="${1#*=}"
+    case "$name" in
+        BRIDGE_HOST)
+            printf 'Tunnel "exec socat - TCP:%s:1143"\n' \
+                "$(proton_normalize_bridge_host "${value:-$PROTON_DEFAULT_BRIDGE_HOST}")"
+            ;;
+        BRIDGE_CERT_HOST) printf 'Host %s\n' "${value:-$PROTON_DEFAULT_BRIDGE_CERT_HOST}" ;;
+        PROTON_IMAP_ACCOUNT_NAME) printf 'IMAPAccount %s\n' "${value:-$PROTON_DEFAULT_IMAP_ACCOUNT_NAME}" ;;
+        PROTON_REMOTE_STORE_NAME) printf 'Far :%s:\n' "${value:-$PROTON_DEFAULT_REMOTE_STORE_NAME}" ;;
+        PROTON_LOCAL_STORE_NAME) printf 'Near :%s:\n' "${value:-$PROTON_DEFAULT_LOCAL_STORE_NAME}" ;;
+        PROTON_CHANNEL_NAME) printf 'Channel %s\n' "${value:-$PROTON_DEFAULT_CHANNEL_NAME}" ;;
+    esac
+}
+
+# The fixed refusal for a setting, from the shared function itself.
+fixed_refusal() {
+    local host="$PROTON_DEFAULT_BRIDGE_HOST" cert="$PROTON_DEFAULT_BRIDGE_CERT_HOST"
+    local account="$PROTON_DEFAULT_IMAP_ACCOUNT_NAME" far="$PROTON_DEFAULT_REMOTE_STORE_NAME"
+    local near="$PROTON_DEFAULT_LOCAL_STORE_NAME" channel="$PROTON_DEFAULT_CHANNEL_NAME"
+    case "$1" in
+        BRIDGE_HOST) host="refused" ;;
+        BRIDGE_CERT_HOST) cert="refused" ;;
+        PROTON_IMAP_ACCOUNT_NAME) account="-" ;;
+        PROTON_REMOTE_STORE_NAME) far="-" ;;
+        PROTON_LOCAL_STORE_NAME) near="-" ;;
+        PROTON_CHANNEL_NAME) channel="-" ;;
+        stores) far="$near" ;;
+    esac
+    proton_settings_problem "$host" "$cert" "$account" "$far" "$near" "$channel" || true
+}
+
+# Runs scripts/validate-env.sh from a scratch root with a passing .env and
+# the NAME=VALUE arguments exported; sets VALIDATE_RC and VALIDATE_OUT.
+validate_env_with() {
+    local root="$WORK/validate-env-root"
+    if [[ ! -d "$root" ]]; then
+        mkdir -p "$root/scripts" "$root/mbsync" "$root/.secrets"
+        cp "$REPO_ROOT/scripts/validate-env.sh" "$root/scripts/validate-env.sh"
+        cp "$PROTON_SETTINGS" "$root/mbsync/proton-settings.sh"
+        printf '%s\n' 'BRIDGE_USER=placeholder@example.invalid' \
+            "BRIDGE_CERT_FINGERPRINT=$FP_OLD" 'EMBED_BASE_URL=default' \
+            'EMBED_MODEL=placeholder-embed-model' >"$root/.env"
+        printf 'placeholder\n' >"$root/.secrets/bridge_pass.txt"
+        : >"$root/.secrets/inference_api_key.txt"
+        printf 'placeholder\n' >"$root/.secrets/embed_api_key.txt"
+        : >"$root/.secrets/rerank_api_key.txt"
+        printf 'placeholder-mcp-token-xxxxxxxxxxxxxxxx\n' >"$root/.secrets/mcp_auth_token.txt"
+        chmod 600 "$root"/.secrets/*.txt
+    fi
+    VALIDATE_RC=0
+    VALIDATE_OUT="$(env -i PATH="$PATH" "$@" "$BASH" "$root/scripts/validate-env.sh" 2>&1)" \
+        || VALIDATE_RC=$?
+}
+
+# One row at both sites.
+setting_row_agrees() {
+    local row="$1" verdict assignments=() rest refusal entry_error
+    verdict="${row%%$'\t'*}"
+    rest="${row#*$'\t'}"
+    while [[ "$rest" == *$'\t'* ]]; do
+        assignments+=("${rest%%$'\t'*}")
+        rest="${rest#*$'\t'}"
+    done
+    assignments+=("$rest")
+
+    validate_env_with "${assignments[@]}"
+    order_setup "settings-$2"
+    printf '%s\n' "$WORK/cert-a.pem" >"$ORDER_DIR/served"
+    order_run BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-a.pem")" "${assignments[@]}"
+
+    if [[ "$verdict" == accept ]]; then
+        [[ "$VALIDATE_RC" == 0 ]] || {
+            printf 'validate-env refused: %q\n%s\n' "$row" "$VALIDATE_OUT"
+            return 1
+        }
+        order_is "identity render wait probe cert-fetch pin-first-boot cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143 || {
+            printf 'the entrypoint did not accept: %q\n' "$row"
+            return 1
+        }
+        grep -qxF "$(expected_config_line "${assignments[0]}")" "$ORDER_DIR/seen/mbsyncrc" || {
+            printf 'the rendered config does not hold the value: %q\n' "$row"
+            return 1
+        }
+        return 0
+    fi
+
+    if [[ "$verdict" == refuse-stores ]]; then
+        refusal="$(fixed_refusal stores)"
+    else
+        refusal="$(fixed_refusal "${assignments[0]%%=*}")"
+    fi
+    [[ "$VALIDATE_RC" == 1 && "$VALIDATE_OUT" == "ERROR: $refusal" ]] || {
+        printf 'validate-env (exit %s) for %q:\n%s\n' "$VALIDATE_RC" "$row" "$VALIDATE_OUT"
+        return 1
+    }
+    order_is "identity error" 1 || {
+        printf 'the entrypoint did not refuse at startup: %q\n' "$row"
+        return 1
+    }
+    entry_error="$(grep '^>>> ERROR: ' "$ORDER_LOG")"
+    [[ "$entry_error" == ">>> ERROR: $refusal" ]] || {
+        printf 'the entrypoint refused %q with:\n%s\n' "$row" "$entry_error"
+        return 1
+    }
+    [[ ! -e "$ORDER_DIR/runtime/mbsyncrc" ]] || return 1
+    refused_before_mbsync "" || return 1
+    if grep -qi 'zq9marker' "$ORDER_LOG" || grep -qi 'zq9marker' <<<"$VALIDATE_OUT"; then
+        printf 'a refused value reached the output: %q\n' "$row"
+        return 1
+    fi
+}
+
+every_setting_row_agrees_at_both_sites() {
+    local i
+    for ((i = 0; i < ${#SETTING_CASES[@]}; i++)); do
+        setting_row_agrees "${SETTING_CASES[i]}" "$i" || return 1
+    done
+    ((${#SETTING_CASES[@]} == 94)) || return 1
+}
+
+check "the Proton settings: each value is accepted or refused alike at both sites" \
+    every_setting_row_agrees_at_both_sites
+
 # --- startup identity line (#887) -------------------------------------------
 #
 # One line names the image's source commit, a random boot ID and a hash of
@@ -2610,6 +2981,26 @@ fingerprint_and_pin_rotation_change_the_hash() {
     fi
 }
 
+# isync's account, store and channel names change what is rendered and
+# filtered (#1498), so each one is an input.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+isync_names_change_the_hash() {
+    local before name changed
+    identity_setup
+    before="$(identity_fields)"
+    for name in PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME \
+        PROTON_CHANNEL_NAME; do
+        (
+            printf -v "$name" '%s' 'other-name'
+            changed="$(identity_fields)"
+            [[ "${changed##* }" != "${before##* }" ]] || {
+                printf '%s does not change the hash\n' "$name"
+                exit 1
+            }
+        ) || return 1
+    done
+}
+
 # Codex review round 4 on #893: the line is logged before validation, so a
 # refused setting still leaves it in the log.
 the_identity_line_precedes_validation() {
@@ -2641,6 +3032,7 @@ check "the identity line has the expected format" identity_line_has_the_expected
 check "an unusable commit is logged as unknown" unusable_commit_is_logged_as_unknown
 check "secrets do not change the hash or reach the identity line" \
     secrets_do_not_change_the_hash_or_reach_the_line
+check "isync's account, store and channel names change the hash" isync_names_change_the_hash
 check "the fingerprint and pin rotation change the hash" \
     fingerprint_and_pin_rotation_change_the_hash
 # Codex review round 5 on #893: every variable the entrypoint reads from its
@@ -2735,13 +3127,14 @@ check "malformed settings still give the identity line" \
 readonly PROVIDER_BEGIN='# --- Proton provider integration: begin ---'
 readonly PROVIDER_END='# --- Proton provider integration: end ---'
 PROVIDER_ENTRY_POINTS=(bridge_imap_connect bridge_imap_host expected_fingerprint extract_bridge_cert
-    validate_bridge_endpoint warn_if_pin_rotation_enabled)
+    validate_bridge_endpoint validate_proton_settings warn_if_pin_rotation_enabled)
 PROVIDER_INTERNAL=(cert_fingerprint verify_cert_pin verify_expected_fingerprint write_pin)
 PROVIDER_CONSTANTS=(BRIDGE_CERT_FINGERPRINT BRIDGE_CERT_HOST BRIDGE_CERT_PIN_ROTATE BRIDGE_HOST
     BRIDGE_IMAP_PORT BRIDGE_PASS_FILE CERT_EXTRACT_TIMEOUT_SECONDS CERT_FILE PIN_FILE
-    PROTON_FOLDER_EXCLUSIONS STATE_DIR)
+    PROTON_CHANNEL_NAME PROTON_FOLDER_EXCLUSIONS PROTON_IMAP_ACCOUNT_NAME PROTON_LOCAL_STORE_NAME
+    PROTON_REMOTE_STORE_NAME PROTON_SETTINGS_FILE STATE_DIR)
 # Code (not comments) that only the provider section may hold.
-PROVIDER_ONLY_CODE=(socat s_client PIN_FILE CERT_FILE)
+PROVIDER_ONLY_CODE=(socat s_client PIN_FILE CERT_FILE proton_settings_problem)
 readonly PROVIDER_ENTRY_POINTS PROVIDER_INTERNAL PROVIDER_CONSTANTS PROVIDER_ONLY_CODE
 
 # Prints each problem with the provider section of the given entrypoint,
@@ -2760,8 +3153,8 @@ provider_section_problems() {
     expected="$(printf '%s\n' "${PROVIDER_ENTRY_POINTS[@]}" "${PROVIDER_INTERNAL[@]}" | sort)"
     [[ "$defined" == "$expected" ]] || printf 'provider functions differ:\n%s\n' "$(diff <(printf '%s\n' "$expected") <(printf '%s\n' "$defined") || true)"
     for name in "${PROVIDER_CONSTANTS[@]}"; do
-        grep -qE "^readonly ${name}=" <<<"$inside" || printf 'constant not in the provider section: %s\n' "$name"
-        if grep -qE "^readonly ${name}=" <<<"$outside"; then
+        grep -qE "^readonly ${name}(=|$)" <<<"$inside" || printf 'constant not in the provider section: %s\n' "$name"
+        if grep -qE "^readonly ${name}(=|$)" <<<"$outside"; then
             printf 'constant outside the provider section: %s\n' "$name"
         fi
     done

@@ -11,6 +11,7 @@ set -Eeuo pipefail
 # Run: bash scripts/tests/validate_env_test.sh
 
 SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/validate-env.sh"
+PROTON_SETTINGS="$(dirname "$(dirname "$SCRIPT")")/mbsync/proton-settings.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 FAILURES=0
@@ -29,8 +30,9 @@ INFERENCE_BASE_URL=default'
 # (later assignments win), and secret files with placeholder contents.
 setup() {
     ROOT="$(mktemp -d "$WORK/root.XXXXXX")"
-    mkdir -p "$ROOT/scripts" "$ROOT/.secrets"
+    mkdir -p "$ROOT/scripts" "$ROOT/mbsync" "$ROOT/.secrets"
     cp "$SCRIPT" "$ROOT/scripts/validate-env.sh"
+    cp "$PROTON_SETTINGS" "$ROOT/mbsync/proton-settings.sh"
     printf '%s\n' "$BASE_ENV" "$@" >"$ROOT/.env"
     printf 'placeholder-bridge-pass\n' >"$ROOT/.secrets/bridge_pass.txt"
     printf 'placeholder\n' >"$ROOT/.secrets/inference_api_key.txt"
@@ -399,6 +401,33 @@ malformed_bridge_cert_fingerprint_fails() {
         setup "BRIDGE_CERT_FINGERPRINT=$value"
         fails_with 'BRIDGE_CERT_FINGERPRINT'
     done
+}
+
+# The Proton settings read from .env as well as from the shell (PLAN.md
+# decision 46). mbsync/tests/entrypoint_test.sh walks the full value table
+# at both sites; these cases cover the .env path: a refused value is
+# named by its setting only, an accepted one passes, and a quoted or
+# padded line is read as Compose reads it.
+proton_settings_from_env_file() {
+    local line
+    for line in 'BRIDGE_HOST=gateway.docker.internal' 'BRIDGE_HOST=zq9marker.local' \
+        'BRIDGE_CERT_HOST=zq9marker.local' 'BRIDGE_CERT_HOST=127.0.0.01' \
+        'PROTON_CHANNEL_NAME=zq9marker.chan' "PROTON_IMAP_ACCOUNT_NAME='zq9marker acct'" \
+        'PROTON_REMOTE_STORE_NAME=zq9marker:far' 'PROTON_LOCAL_STORE_NAME=-zq9marker' \
+        'PROTON_REMOTE_STORE_NAME=protonmail-local'; do
+        setup "$line"
+        fails_with "${line%%=*}" || {
+            printf 'not refused: %s\n' "$line"
+            return 1
+        }
+        if grep -q 'zq9marker' "$WORK/output"; then
+            printf 'the value reached the output: %s\n' "$line"
+            return 1
+        fi
+    done
+    setup 'BRIDGE_HOST=" HOST.ORB.INTERNAL "' 'BRIDGE_CERT_HOST=::1' 'PROTON_CHANNEL_NAME=Chan_2-x' \
+        'PROTON_IMAP_ACCOUNT_NAME=' 'PROTON_REMOTE_STORE_NAME=far' 'PROTON_LOCAL_STORE_NAME=near'
+    passes
 }
 
 openssl_form_bridge_cert_fingerprint_passes() {
@@ -1122,6 +1151,7 @@ check "an empty embed key fails" empty_embed_key_fails
 check "the placeholder BRIDGE_USER fails" placeholder_bridge_user_fails
 check "a missing BRIDGE_CERT_FINGERPRINT fails" missing_bridge_cert_fingerprint_fails
 check "a malformed BRIDGE_CERT_FINGERPRINT fails" malformed_bridge_cert_fingerprint_fails
+check "the Proton settings are read from .env and checked" proton_settings_from_env_file
 check "a BRIDGE_CERT_FINGERPRINT in openssl's form passes" \
     openssl_form_bridge_cert_fingerprint_passes
 check "a one-sided INFERENCE_MAX_TOKENS fails" one_sided_max_tokens_fails

@@ -5,8 +5,9 @@ set -Eeuo pipefail
 # the shipped mbsync image and a synthetic implicit-TLS IMAP server
 # (imap_stub.py, #638) whose certificate is shaped like the Bridge app's: self-signed,
 # CA:TRUE, issued for 127.0.0.1 only. The real entrypoint runs with
-# Compose's BRIDGE_CERT_HOST=127.0.0.1, reaching the server by another
-# name, as it reaches the app through host.docker.internal.
+# Compose's BRIDGE_CERT_HOST=127.0.0.1 and BRIDGE_HOST=host.docker.internal,
+# which resolves to the server here (--add-host), as it reaches the app
+# on the host.
 #
 # Checks:
 #   0. Without BRIDGE_CERT_FINGERPRINT the first certificate is not
@@ -30,6 +31,12 @@ set -Eeuo pipefail
 #      left in its STARTTLS mode) is refused, with no fallback: the
 #      entrypoint stops at certificate extraction with the fix, and isync
 #      itself fails the handshake; neither sends credentials.
+#   6. Each other certificate name BRIDGE_CERT_HOST accepts (localhost,
+#      127.0.0.2 and 127.255.255.254 for the rest of 127.0.0.0/8, ::1;
+#      PLAN.md decision 46) syncs with a certificate issued for it, and a
+#      certificate for 127.0.0.1 is refused under it before LOGIN.
+#   7. A BRIDGE_HOST outside the accepted names is refused at startup,
+#      before any connection.
 #
 # Needs Docker and openssl. Builds the mbsync image unless MBSYNC_IMAGE
 # names one. Run: bash mbsync/tests/tls_check.sh  (or make test-mbsync-tls)
@@ -66,29 +73,46 @@ fail() {
     FAILURES=$((FAILURES + 1))
 }
 
-# Bridge-shaped certificate (upstream internal/certs/tls.go NewTLSTemplate).
+# Bridge-shaped certificate (upstream internal/certs/tls.go NewTLSTemplate),
+# issued for 127.0.0.1 like the app's own, or for the name $2: a custom
+# certificate an operator imports into the app for another loopback name.
 make_cert() {
+    local name="${2:-127.0.0.1}" san="DNS:${2:-}"
+    if [[ "$name" == *:* || "$name" =~ ^[0-9.]+$ ]]; then
+        san="IP:${name}"
+    fi
     openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
-        -subj "/C=CH/O=Synthetic/OU=Synthetic/CN=127.0.0.1" \
+        -subj "/C=CH/O=Synthetic/OU=Synthetic/CN=${name}" \
         -addext "basicConstraints=critical,CA:TRUE" \
         -addext "keyUsage=keyEncipherment,digitalSignature,keyCertSign" \
         -addext "extendedKeyUsage=serverAuth,clientAuth" \
-        -addext "subjectAltName=IP:127.0.0.1" \
+        -addext "subjectAltName=${san}" \
         -keyout "$WORK/$1.key" -out "$WORK/$1.pem" >"$WORK/openssl-$1.log" 2>&1
     # The containers run as other users.
     chmod 644 "$WORK/$1.key" "$WORK/$1.pem"
 }
 
-# start_stub CERT [MODE]: MODE is implicit (the default) or starttls.
+# start_stub CERT [MODE]: MODE is implicit (the default) or starttls. The
+# stub always has STUB_IP, which mbsync resolves as host.docker.internal.
 start_stub() {
     docker rm -f "$STUB" >/dev/null 2>&1 || true
-    docker run -d --name "$STUB" --network "$NETWORK" -v "$WORK:/work:ro" \
+    docker run -d --name "$STUB" --network "$NETWORK" --ip "$STUB_IP" -v "$WORK:/work:ro" \
         "$PYTHON_IMAGE" python /work/imap_stub.py "/work/$1.pem" "/work/$1.key" 1143 \
         "${2:-implicit}" >/dev/null
 }
 
-# start_mbsync [EXPECTED_FINGERPRINT]
+# start_mbsync [EXPECTED_FINGERPRINT [CERT_HOST [LABEL]]]: Compose's
+# BRIDGE_HOST, host.docker.internal, resolved to the stub (BRIDGE_HOST
+# accepts only the names mbsync/proton-settings.sh lists, PLAN.md
+# decision 46). CERT_HOST defaults to Compose's 127.0.0.1. LABEL names a
+# Maildir and state directory of its own (a first boot).
 start_mbsync() {
+    local maildir="$WORK/maildir" state="$WORK/state"
+    if [[ -n "${3:-}" ]]; then
+        maildir="$WORK/maildir-$3" state="$WORK/state-$3"
+        mkdir -p "$maildir" "$state"
+        chmod 700 "$maildir" "$state"
+    fi
     docker rm -f "$MBSYNC" >/dev/null 2>&1 || true
     # Run as the invoking user so the bind-mounted Maildir and state
     # directories can stay private (700) instead of world-writable. This
@@ -97,13 +121,14 @@ start_mbsync() {
     # userns-remap map UIDs differently, so the test is not supported
     # there.
     docker run -d --name "$MBSYNC" --network "$NETWORK" --init --read-only \
-        --user "$(id -u):$(id -g)" \
+        --user "$(id -u):$(id -g)" --add-host "host.docker.internal:${STUB_IP}" \
         --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
-        -e BRIDGE_HOST="$STUB" -e BRIDGE_IMAP_PORT=1143 -e BRIDGE_CERT_HOST=127.0.0.1 \
+        -e BRIDGE_HOST="${MBSYNC_BRIDGE_HOST:-host.docker.internal}" -e BRIDGE_IMAP_PORT=1143 \
+        -e BRIDGE_CERT_HOST="${2:-127.0.0.1}" \
         -e BRIDGE_CERT_FINGERPRINT="${1:-}" \
         -e BRIDGE_USER=synthetic@example.com -e SYNC_INTERVAL=3600 \
         -v "$WORK/bridge_pass:/run/secrets/bridge_pass:ro" \
-        -v "$WORK/maildir:/maildir" -v "$WORK/state:/state" \
+        -v "$maildir:/maildir" -v "$state:/state" \
         "$IMAGE" >/dev/null
 }
 
@@ -207,7 +232,24 @@ printf 'synthetic-password\n' >"$WORK/bridge_pass"
 mkdir -p "$WORK/maildir" "$WORK/state"
 chmod 644 "$WORK/bridge_pass" "$WORK/imap_stub.py"
 chmod 700 "$WORK/maildir" "$WORK/state"
-docker network create "$NETWORK" >/dev/null
+# A subnet of its own, so the stub keeps one address (STUB_IP) whether or
+# not it is running, and mbsync can resolve host.docker.internal to it
+# from its start (--add-host). Docker refuses a subnet another network
+# holds, so a few are tried.
+STUB_IP=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    octet=$((RANDOM % 250 + 1))
+    if docker network create --subnet "10.231.${octet}.0/24" "$NETWORK" >/dev/null 2>"$WORK/network.err"; then
+        STUB_IP="10.231.${octet}.10"
+        break
+    fi
+done
+if [[ -z "$STUB_IP" ]]; then
+    printf 'could not create a test network:\n' >&2
+    cat "$WORK/network.err" >&2
+    exit 1
+fi
+readonly STUB_IP
 FP_A="$(fingerprint cert-a)"
 FP_B="$(fingerprint cert-b)"
 
@@ -362,6 +404,64 @@ else
     sed 's/^/     /' "$WORK/isync-starttls.log"
     docker logs "$STUB" 2>&1 | tail -n 8 | sed 's/^/     /'
 fi
+
+# 6. The other certificate names BRIDGE_CERT_HOST accepts (PLAN.md
+# decision 46): localhost, another 127.0.0.0/8 address and ::1, none of
+# which the app's own certificate holds, so each needs a certificate
+# issued for it and imported into the app. Through the real entrypoint,
+# isync syncs with a certificate issued for the name, and refuses the
+# app's own certificate (issued for 127.0.0.1) under the name before any
+# LOGIN, although the expected fingerprint and a first-boot pin accept it:
+# the name check is isync's.
+for name in localhost 127.0.0.2 127.255.255.254 ::1; do
+    label="name-${name//[:.]/-}"
+    make_cert "$label" "$name"
+    start_stub "$label"
+    start_mbsync "$(fingerprint "$label")" "$name" "$label"
+    if wait_for_log "$MBSYNC" "Starting sync loop" \
+        && wait_for_log "$STUB" "stub: login over TLS" \
+        && [[ -s "$WORK/maildir-${label}/.mbsync-last-sync.json" ]] \
+        && ! log_has "$MBSYNC" "Initial sync returned a non-zero status"; then
+        pass "BRIDGE_CERT_HOST=${name}: a certificate issued for it syncs"
+    else
+        fail "BRIDGE_CERT_HOST=${name}: a certificate issued for it syncs"
+        docker logs "$MBSYNC" 2>&1 | tail -n 8 | sed 's/^/     /'
+    fi
+    start_stub cert-a
+    start_mbsync "$FP_A" "$name" "${label}-other"
+    if wait_for_log "$MBSYNC" "Initial sync returned a non-zero status" \
+        && log_has "$MBSYNC" "certificate owner does not match hostname ${name}" \
+        && log_has "$MBSYNC" "Bridge cert extracted successfully" \
+        && ! log_has "$STUB" "command=LOGIN" \
+        && ! log_has "$STUB" "command=AUTHENTICATE" \
+        && [[ ! -e "$WORK/maildir-${label}-other/.mbsync-last-sync.json" ]]; then
+        pass "BRIDGE_CERT_HOST=${name}: a certificate for another name is refused before LOGIN"
+    else
+        fail "BRIDGE_CERT_HOST=${name}: a certificate for another name is refused before LOGIN"
+        docker logs "$MBSYNC" 2>&1 | tail -n 8 | sed 's/^/     /'
+        docker logs "$STUB" 2>&1 | tail -n 8 | sed 's/^/     /'
+    fi
+    docker rm -f "$MBSYNC" >/dev/null
+done
+
+# 7. A BRIDGE_HOST outside the list (here the stub's own container name,
+# which would reach it) is refused at startup, naming #1499, before any
+# connection: the stub sees nothing.
+start_stub cert-a
+MBSYNC_BRIDGE_HOST="$STUB" start_mbsync "$FP_A" "" refused-host
+if [[ "$(wait_for_exit "$MBSYNC")" == "1" ]] \
+    && wait_for_log "$MBSYNC" "BRIDGE_HOST must be one of" \
+    && log_has "$MBSYNC" "#1499" \
+    && ! log_has "$MBSYNC" "$STUB" \
+    && ! log_has "$MBSYNC" "Waiting for ProtonBridge IMAP" \
+    && [[ "$(docker logs "$STUB" 2>&1)" == "stub: listening on 1143 (implicit)" ]]; then
+    pass "a BRIDGE_HOST outside the list is refused at startup, before any connection"
+else
+    fail "a BRIDGE_HOST outside the list is refused at startup, before any connection"
+    docker logs "$MBSYNC" 2>&1 | tail -n 5 | sed 's/^/     /'
+    docker logs "$STUB" 2>&1 | tail -n 5 | sed 's/^/     /'
+fi
+docker rm -f "$MBSYNC" >/dev/null
 
 if ((FAILURES > 0)); then
     printf '%d check(s) failed\n' "$FAILURES" >&2

@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead reparse clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead reparse clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-make-status test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -37,6 +37,7 @@ help:
 	@echo "  test-mbsync  Run mbsync entrypoint tests only"
 	@echo "  test-mbsync-tls  Run the mbsync TLS check against a synthetic Bridge (needs Docker)"
 	@echo "  test-mbsync-layout  Run the mbsync Maildir layout and UIDVALIDITY checks with synthetic stores (needs Docker)"
+	@echo "  test-mbsync-host-aliases  Check each accepted BRIDGE_HOST name reaches a 127.0.0.1-only listener on this Mac (needs Docker, python3; not in CI)"
 	@echo "  test-compose Run Compose rendering and merged-hardening tests"
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
 	@echo "  test-index-backup  Run backup-index and restore-index tests against a fake docker (no daemon)"
@@ -264,6 +265,9 @@ test-mbsync:
 
 test-mbsync-tls:
 	bash mbsync/tests/tls_check.sh
+
+test-mbsync-host-aliases:
+	bash mbsync/tests/host_alias_check.sh
 
 test-mbsync-layout:
 	bash mbsync/tests/layout_check.sh

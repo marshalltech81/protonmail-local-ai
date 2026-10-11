@@ -301,6 +301,26 @@ _SHELL_ONLY = {
     "BRIDGE_IMAP_PORT": ("mbsync", "mbsync/entrypoint.sh"),
     "BRIDGE_CERT_FINGERPRINT": ("mbsync", "mbsync/entrypoint.sh"),
     "BRIDGE_CERT_PIN_ROTATE": ("mbsync", "mbsync/entrypoint.sh"),
+    # PLAN.md decision 46: checked by mbsync/proton-settings.sh, which the
+    # entrypoint and scripts/validate-env.sh both source.
+    "BRIDGE_HOST": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
+    "BRIDGE_CERT_HOST": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
+    "PROTON_IMAP_ACCOUNT_NAME": (
+        "mbsync",
+        "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template",
+    ),
+    "PROTON_REMOTE_STORE_NAME": (
+        "mbsync",
+        "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template and matched by its output filter",
+    ),
+    "PROTON_LOCAL_STORE_NAME": (
+        "mbsync",
+        "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template",
+    ),
+    "PROTON_CHANNEL_NAME": (
+        "mbsync",
+        "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template and matched by its output filter",
+    ),
     "SYNC_INTERVAL": ("mbsync", "mbsync/entrypoint.sh and mbsync/healthcheck.sh"),
     "SYNC_DEADLINE_SECONDS": ("mbsync", "mbsync/entrypoint.sh and mbsync/healthcheck.sh"),
 }

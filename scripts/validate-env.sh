@@ -11,6 +11,11 @@ readonly RERANK_KEY_FILE="${ROOT_DIR}/.secrets/rerank_api_key.txt"
 readonly MCP_TOKEN_FILE="${ROOT_DIR}/.secrets/mcp_auth_token.txt"
 readonly AUTHORITY_FILE="${ROOT_DIR}/config/authority.toml"
 readonly IDENTITY_FILE="${ROOT_DIR}/config/identity.toml"
+# The Proton settings' defaults and validators, the file mbsync's
+# entrypoint sources in the image (PLAN.md decision 46).
+readonly PROTON_SETTINGS_FILE="${ROOT_DIR}/mbsync/proton-settings.sh"
+# shellcheck source=mbsync/proton-settings.sh disable=SC1091 # linted on its own
+source "$PROTON_SETTINGS_FILE"
 
 require_file() {
     local path="$1"
@@ -582,6 +587,30 @@ BRIDGE_CERT_FINGERPRINT_HEX="$(printf '%s' "${BRIDGE_CERT_FINGERPRINT_HEX//:/}" 
     echo "ERROR: BRIDGE_CERT_FINGERPRINT in .env must be the SHA-256 fingerprint of the Bridge app's certificate: 64 hex digits, with or without colons (docs/setup.md, step 4.3)." >&2
     exit 1
 }
+
+# The Proton settings, checked by the same function mbsync's entrypoint
+# runs (mbsync/proton-settings.sh) on the values Compose passes it: an
+# empty one takes the default, and BRIDGE_HOST is compared without
+# surrounding whitespace, in lower case. The text is fixed and never
+# repeats the value. As env_value resolves them, except that a value
+# exported in the calling shell is kept as it is: a command substitution
+# would drop its trailing newlines, which the entrypoint refuses.
+for name in BRIDGE_HOST BRIDGE_CERT_HOST PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME \
+    PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME; do
+    if [[ -z "${!name+set}" ]]; then
+        printf -v "$name" '%s' "$(get_env_value "$name")"
+    fi
+done
+BRIDGE_HOST="$(proton_normalize_bridge_host "${BRIDGE_HOST:-$PROTON_DEFAULT_BRIDGE_HOST}")"
+if ! proton_problem="$(proton_settings_problem "$BRIDGE_HOST" \
+    "${BRIDGE_CERT_HOST:-$PROTON_DEFAULT_BRIDGE_CERT_HOST}" \
+    "${PROTON_IMAP_ACCOUNT_NAME:-$PROTON_DEFAULT_IMAP_ACCOUNT_NAME}" \
+    "${PROTON_REMOTE_STORE_NAME:-$PROTON_DEFAULT_REMOTE_STORE_NAME}" \
+    "${PROTON_LOCAL_STORE_NAME:-$PROTON_DEFAULT_LOCAL_STORE_NAME}" \
+    "${PROTON_CHANNEL_NAME:-$PROTON_DEFAULT_CHANNEL_NAME}")"; then
+    printf 'ERROR: %s\n' "$proton_problem" >&2
+    exit 1
+fi
 
 # ----- INFERENCE -----
 INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-none}")"
