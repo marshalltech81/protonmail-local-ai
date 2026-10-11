@@ -127,7 +127,14 @@ IMAP port if it differs); no credential is sent:
 printf 'a1 LOGOUT\r\n' | timeout 20 openssl s_client -connect 127.0.0.1:1143 -quiet -ign_eof
 ```
 
-The `verify error:num=18:self-signed certificate` line is expected: this
+`timeout` is not part of macOS: it comes with GNU coreutils
+(`brew install coreutils`). Without it, leave out `timeout 20`; the
+probe still ends on its own when Bridge answers, and Ctrl-C stops one
+that hangs. macOS's own `/usr/bin/openssl` (LibreSSL) accepts these
+options.
+
+The `verify error:num=18:self-signed certificate` line (`self signed
+certificate` from LibreSSL) is expected: this
 probe only checks that TLS works and IMAP answers, and trusts nothing (mbsync
 checks the certificate against `BRIDGE_CERT_FINGERPRINT` and its pin). If
 IMAP is ready, the TLS lines are followed by the Bridge greeting and the
@@ -143,7 +150,7 @@ A greeting shows the listener and TLS work, not that an account is logged
 in: Bridge greets the same way with no account. A handshake error
 (usually `wrong version number`) means the app's IMAP connection mode is
 STARTTLS rather than SSL; switch it to SSL. A probe that hangs until
-`timeout` stops it means Bridge is still in its initial sync or has
+`timeout` (or Ctrl-C) stops it means Bridge is still in its initial sync or has
 stopped responding — check the app.
 
 ## Verifying mbsync is working
@@ -505,27 +512,14 @@ read part of the Maildir (usually a permission problem); it gives only a
 count of `find`'s errors, for the same reason. Run the `docker exec`
 command it prints to see them in your terminal.
 
-Start the Maildir over. Mail is pulled again from Proton, so nothing is
-lost, but remove the index with it: its rows point at the old files, which
-would otherwise go through
+Back up the Maildir, then start it over together with the index, as in
+[Recover from a genuine change](#recover-from-a-genuine-change): it
+backs the Maildir up and checks the archive before it removes either
+volume. mbsync pulls again only the mail Proton still holds; mail and
+folders deleted in Proton are kept only in this Maildir
+(`Expunge None`), so the archive is their only copy. The index goes
+too: its rows point at the old files, which would otherwise go through
 [deletion reconciliation](#deletion-reconciliation-mirror-vs-archive).
-Run these from the checkout, with the project name the stack runs under:
-
-```bash
-names=$(docker compose config --format json | python3 -c 'import json, sys
-v = json.load(sys.stdin)["volumes"]
-print(v["maildir-volume"]["name"], v["sqlite-volume"]["name"])')
-make down
-docker volume rm $names
-make up
-```
-
-To keep a copy of the old Maildir first, back it up as in
-[Recover from a genuine change](#recover-from-a-genuine-change).
-The Bridge app and mbsync's certificate pin (the `mbsync-state` volume)
-are untouched. mbsync then pulls the whole mailbox, and the indexer
-rebuilds the index from it, which re-embeds every message (a cost with a
-paid embedding provider).
 
 ## mbsync reports a UIDVALIDITY change
 
@@ -588,27 +582,35 @@ stack runs under:
 
 ```bash
 make down
-names=$(docker compose config --format json | python3 -c 'import json, sys
-v = json.load(sys.stdin)["volumes"]
-print(v["maildir-volume"]["name"], v["sqlite-volume"]["name"])')
-maildir=${names%% *}
+maildir=$(docker compose config --format json \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["maildir-volume"]["name"])')
+index=$(docker compose config --format json \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["sqlite-volume"]["name"])')
+archive="maildir-$(date -u +%Y%m%dT%H%M%SZ).tgz"
 mkdir -m 700 -p ~/protonmail-local-ai-backup
-docker run --rm -v "$maildir:/maildir:ro" -v ~/protonmail-local-ai-backup:/backup \
-    debian:bookworm-slim bash -c '
-        tar -C /maildir -czf /backup/maildir-uidvalidity.tgz . &&
+docker run --rm -e archive="$archive" -v "$maildir:/maildir:ro" \
+    -v ~/protonmail-local-ai-backup:/backup debian:bookworm-slim bash -c '
+        tar -C /maildir -czf "/backup/$archive" . &&
         find /maildir -type f \( -path "*/cur/*" -o -path "*/new/*" \) | wc -l &&
-        tar -tzf /backup/maildir-uidvalidity.tgz | grep -cE "/(cur|new)/[^/]+$"'
-chmod 600 ~/protonmail-local-ai-backup/maildir-uidvalidity.tgz
+        tar -tzf "/backup/$archive" | grep -cE "/(cur|new)/[^/]+$"'
+chmod 600 ~/protonmail-local-ai-backup/"$archive"
 ```
 
 The two numbers it prints are the message files in the Maildir and in
-the archive. Continue only if they match:
+the archive. Continue only if they match, in the same shell (the
+volume names are quoted separately, so this works in zsh, macOS's
+default shell, as well as bash):
 
 ```bash
-docker volume rm $names
+docker volume rm "$maildir" "$index"
 make up
-docker logs mbsync     # no UIDVALIDITY errors
+docker logs mbsync     # no UIDVALIDITY or earlier-layout errors
 ```
+
+If the stack runs with an overlay (such as
+`docker-compose.hardened.yml`), use `docker compose` with the same `-f`
+files in place of `make down` and `make up`, or the recreated
+containers drop the overlay.
 
 What this keeps and changes:
 
@@ -956,9 +958,11 @@ kind of reindex that needs depends on whether search data changes too:
   draining has stalled. Progress is in the log every five
   minutes (`reparse: remaining=... parked_trashed=...
   reparsed_since_last_heartbeat=... dead=...`), then one `reparse
-  complete: ...` line once no job that can drain is left; jobs for
-  messages in Trash are counted in `parked_trashed`, not `remaining`,
-  and drain only if the message is restored; `make status`
+  complete: ...` line once no job that can drain is left. In mirror
+  mode, jobs for files carrying the Maildir `T` (deleted) flag are
+  counted in `parked_trashed`, not `remaining`, and drain only if the
+  flag is cleared (the message is restored in Proton); a message in the
+  Trash folder without the flag is reparsed like any other. `make status`
   shows the remaining count (`queue.reparse`). A message that fails to
   parse dead-letters like any other; fix the cause, then
   `make requeue-dead`.
@@ -974,9 +978,17 @@ parser fix now decodes differently), with their filename search rows
 and, when no other occurrence of the message carries the same bytes,
 their chunks (#1375); the attachments line counts them as `dropped`.
 `make reparse` queues the same reparse by hand, for recovery (for
-example when a reparse's jobs were cleared another way), and run once
-after upgrading to the release with #1375 it clears such leftovers
-from earlier parser fixes. Messages that
+example when a reparse's jobs were cleared another way). Two releases
+shipped no migration and asked for one `make reparse` after deploying
+them: #1375, to clear such leftovers from earlier parser fixes, and the
+attached-email extractor (#1311), to refresh every message's stored
+attachment completeness flags (`attachments_manifest_complete` and
+each attachment's `text_complete`). (The startup sweep after #1311
+re-queues only the messages whose attached emails had no extractor;
+the other messages' flags change only on a reparse.) The schema v12
+migration (#1416) queues a reparse of every indexed file, so an index
+upgraded to v12 or later needs neither; one left on a release between
+#1311 and v12 needs `make reparse` once. Messages that
 already have a job keep it, and dead-lettered ones stay dead until
 `make requeue-dead`. It runs inside the indexer container, so the
 stack must be up:
@@ -1445,8 +1457,9 @@ Queue and maintenance (all INFO unless noted):
   opens new files to the indexer only after its sync; deferred for up
   to 24 h, after which a still-unreadable file takes the normal retry
   path and counts as `retrying` until it is dead);
-  `parked_trashed` jobs belong to trashed messages waiting for the
-  reaper, which is normal in mirror mode, not a failure;
+  `parked_trashed` jobs belong to files carrying the Maildir `T`
+  (deleted) flag, waiting for the reaper, which is normal in mirror
+  mode, not a failure;
   `extraction_deferred` jobs are messages whose attachment extraction
   reached the per-message budget (64 process launches or 5 seconds per
   pass, `docs/architecture.md` "Per-message extraction budget"),
@@ -1846,9 +1859,10 @@ only, never filenames or text (`make logs`):
   budget that was recorded `failed` (`DocxPackageBudgetError`) before
   #1032 is re-queued once at the first start after the `docx@7` bump
   (#1031) and recorded `unsupported`. A password-protected `.ppt` recorded `failed`
-  (`ToolExitError`) before #983 converts the same way, since the `ppt`
-  version was not bumped either: on its first re-run more than 7 days
-  after it was recorded.
+  (`ToolExitError`) before #983 is re-queued once at the first start
+  after the `ppt@2` bump (#1308), which re-runs every cached `.ppt`
+  result, and recorded `unsupported`. In both cases a dead-lettered
+  message is skipped until `make requeue-dead`.
 - `PDF OCR fallback failed: <ExceptionType>` (WARNING): OCR of a PDF's
   pages without a text layer raised (a Tesseract error or timeout). A
   PDF with enough digital text keeps it and loses the scanned pages;
@@ -2284,15 +2298,18 @@ text and logged as `attachment filename charset could not decode it
 limit, #1330).
 
 The fix applies when a message is parsed. Filenames stored by an
-earlier image keep the encoded text until their message is re-indexed;
-a flag change or folder move does not re-parse a message, so to correct
-them all rebuild the index as in
-[Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
-The rebuild re-embeds every message, so it is optional. Extraction
-dispatches by content type first, so for most such attachments only the
-displayed name and filename search change; one sent as
-`application/octet-stream` is also dispatched by its decoded extension
-once re-indexed.
+earlier image keep the encoded text until their message is parsed
+again; a flag change or folder move does not re-parse a message. To
+correct them all, run `make reparse`
+([Reparse or rebuild after an upgrade](#reparse-or-rebuild-after-an-upgrade)):
+it re-reads every indexed message in place and replaces each
+occurrence stored under the old filename (#1375). No rebuild is
+needed. Extraction dispatches by content type first, so for most such
+attachments only the displayed name and filename search change, and the
+attachment's cached text and chunks are reused; one sent as
+`application/octet-stream` is also dispatched by its decoded extension,
+so it may be extracted and its text embedded (sent to the embed
+provider if it is remote).
 
 ## ChatGPT says a tool call was blocked by OpenAI
 
