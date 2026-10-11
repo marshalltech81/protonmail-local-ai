@@ -534,10 +534,12 @@ def test_wal_writer_constants_are_the_indexers(bench):
     assert bench._encode_sum([0] * EMBEDDING_DIM) == vector_sums.encode([0] * EMBEDDING_DIM)
 
 
-# Values the writer does not reproduce on purpose: the wall clock, the
-# folder (its messages are stored in Trash), the file's mtime, and the
-# vector sums (its vectors are random, the mock embedder's are zero).
-_WRITER_UNCOMPARED = _CLOCK | {"folder", "mtime_ns", "sum"}
+# Values the writer does not reproduce on purpose: the wall clock and
+# the file's mtime, and, where the indexer's embedder is the mock's
+# zeros (the writer's vectors are random), the vector sums. With
+# identical synthetic embeddings (``_identical_embeddings``) the sums
+# are compared too.
+_WRITER_UNCOMPARED = _CLOCK | {"mtime_ns", "sum"}
 _WRITER_ROWS = {
     "messages": "claimant_id",
     "message_participants": "claimant_id, role, address",
@@ -561,11 +563,13 @@ _FTS_WRITES = (
 )
 
 
-def _traced_rows(path: Path, root: str | None) -> dict:
+def _traced_rows(
+    path: Path, root: str | None, drop: set[str] = _WRITER_UNCOMPARED, tables: dict = _WRITER_ROWS
+) -> dict:
     with closing(sqlite3.connect(path)) as conn:
         out = {}
-        for table, order in _WRITER_ROWS.items():
-            rows = _without(_rows(conn, table, order), _WRITER_UNCOMPARED)
+        for table, order in tables.items():
+            rows = _without(_rows(conn, table, order), drop)
             for row in rows:
                 if root and isinstance(row.get("filepath"), str):
                     row["filepath"] = row["filepath"].replace(root, "/maildir", 1)
@@ -915,3 +919,229 @@ def test_wal_writer_extraction_seconds_are_a_plain_timing(bench):
         timings.append(time.perf_counter() - started)
     median = statistics.median(timings)
     assert median / 3 <= bench.PDF_EXTRACT_SECONDS <= median * 3
+
+
+# --- the WAL baseline and the common-ID thread (owner, 2026-10-11, round 16)
+
+
+def _synthetic_embedding(text: str) -> list[float]:
+    """One unit vector per text, float32-exact, so the indexer stores the
+    bytes the writer stores for the same chunk."""
+    import hashlib
+    import math
+    import random
+    import struct
+
+    rng = random.Random(hashlib.sha256(text.encode()).digest())
+    values = [rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)]
+    norm = math.sqrt(sum(v * v for v in values))
+    packed = struct.pack(f"{EMBEDDING_DIM}f", *(v / norm for v in values))
+    return list(struct.unpack(f"{EMBEDDING_DIM}f", packed))
+
+
+def _identical_embeddings(bench, monkeypatch, records):
+    """An indexer embedder and the writer's (``bench._embedder``) giving
+    every chunk text the same synthetic embedding. The indexer embeds a
+    message's first body chunk behind its subject line, so an input is
+    mapped back to the chunk text it ends with."""
+    import struct
+    from unittest.mock import MagicMock
+
+    texts = sorted({c[4] for rec in records for c in rec.chunks}, key=len, reverse=True)
+    known = set(texts)
+    cache: dict[str, list[float]] = {}
+
+    def vector(text: str) -> list[float]:
+        if text not in cache:
+            cache[text] = _synthetic_embedding(text)
+        return cache[text]
+
+    def chunk_text(given: str) -> str:
+        return given if given in known else next(t for t in texts if given.endswith(t))
+
+    embedder = MagicMock()
+    embedder.embed_batch.side_effect = lambda inputs, **_kw: [vector(chunk_text(t)) for t in inputs]
+    monkeypatch.setattr(
+        bench,
+        "_embedder",
+        lambda _pool: lambda text: struct.pack(f"{EMBEDDING_DIM}f", *vector(text)),
+    )
+    return embedder
+
+
+# Every table the indexer fills for a message, compared row by row with
+# identical embeddings: the writer's tables, the benchmark's, and the
+# vectors (their bytes).
+_ALL_ROWS = {
+    **_WRITER_ROWS,
+    "attachments": "attachment_occurrence_id",
+    "pending_deletions": "filepath",
+}
+_VECTORS = {"threads_vec": "thread_id", "message_chunks_vec": "chunk_id"}
+
+
+def _vectors(path: Path) -> dict:
+    with closing(_with_vec(sqlite3.connect(path))) as conn:
+        return {
+            table: list(conn.execute(f"SELECT {key}, embedding FROM {table} ORDER BY {key}"))
+            for table, key in _VECTORS.items()
+        }
+
+
+def _shape_of(identity: str) -> dict:
+    return {**_SHAPE, "identity": identity, "per_message": 2}
+
+
+def _write_files(bench, maildir: Path, numbers, shape: dict, vendors: dict) -> None:
+    for i in numbers:
+        path = Path(bench.maildir_path(i, shape["identity"], shape["records"], str(maildir)))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(
+            bench.render_eml(
+                i,
+                shape["identity"],
+                shape["records"],
+                shape["references"],
+                chunks=shape["chunks"],
+                words=shape["chunk_tokens"],
+                per_message=shape["per_message"],
+            )
+        )
+        for _, address, _ in bench._shape(i, shape["identity"], shape["records"], 0)["people"]:
+            if bench.authority(address)[0] != "unclassified":
+                vendors[address] = bench.authority(address)[0]
+
+
+def _indexer_baseline_and_replies(bench, tmp_path, monkeypatch, shape, n, batch, embedder):
+    """The indexer's first index of messages 0..n-1 at batch size
+    ``batch``, then of ``batch`` more (``n``..), as a later walk and
+    drain index new mail: the statements of each, and the index."""
+    maildir = tmp_path / "maildir"
+    vendors: dict[str, str] = {}
+    _write_files(bench, maildir, range(n), shape, vendors)
+    for i in range(n, n + batch):
+        for _, address, _ in bench._shape(i, shape["identity"], shape["records"], 0)["people"]:
+            if bench.authority(address)[0] != "unclassified":
+                vendors[address] = bench.authority(address)[0]
+    statements: list[str] = []
+    real = Database._connect
+
+    def traced(self):
+        conn = real(self)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(Database, "_connect", traced)
+    db = Database(tmp_path / "indexer.db")
+    db.set_authority_rules(AuthorityRules(addresses=vendors))
+    monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+    monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", batch)
+    statements.clear()
+    main.initial_index(db, embedder, Threader(db), IndexingQueue(db, max_attempts=3))
+    first = list(statements)
+    snapshot = tmp_path / "indexer-baseline.db"
+    with closing(sqlite3.connect(snapshot)) as copy:
+        db._conn.backup(copy)
+    _write_files(bench, maildir, range(n, n + batch), shape, {})
+    statements.clear()
+    main.initial_index(db, embedder, Threader(db), IndexingQueue(db, max_attempts=3))
+    second = list(statements)
+    db.close()
+    return first, snapshot, second, tmp_path / "indexer.db", str(maildir)
+
+
+def _writer_baseline_and_replies(bench, tmp_path, monkeypatch, shape, n, batch):
+    tmp_path.mkdir()
+    corpus = tmp_path / "corpus.db"
+    bench.build(corpus, n, shape["per_message"], shape["identity"], shape["records"])
+    statements: list[str] = []
+    real = bench.sqlite3.connect
+
+    def traced(*args, **kwargs):
+        conn = real(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(bench.sqlite3, "connect", traced)
+    monkeypatch.setattr(bench, "INITIAL_INDEX_BATCH_SIZE", batch)
+    base = str(tmp_path / "base.db")
+    built = bench.build_wal_baseline(str(corpus), base, n, shape)
+    first = list(statements)
+    snapshot = tmp_path / "writer-baseline.db"
+    with closing(real(base)) as src, closing(real(snapshot)) as copy:
+        src.backup(copy)
+    statements.clear()
+    stop = tmp_path / "stop"
+    timer = _stop_after_batch(Path(base), stop, n + batch)
+    bench.phase_writer(base, str(stop), batch, 3600.0, shape=shape)
+    timer.join()
+    second = list(statements)
+    return first, snapshot, second, Path(base), built
+
+
+def _compare_indexes(ours: Path, theirs: Path, root: str) -> list[str]:
+    drop = _CLOCK | {"mtime_ns"}
+    mine = _traced_rows(ours, None, drop, _ALL_ROWS)
+    expected = _traced_rows(theirs, root, drop, _ALL_ROWS)
+    problems = []
+    for table in _ALL_ROWS:
+        problems += _differences(table, mine[table], expected[table])
+    if _vectors(ours) != _vectors(theirs):
+        problems.append("vectors differ")
+    return problems
+
+
+@pytest.mark.real_extractor_child
+@pytest.mark.parametrize("identity", ["typical", "ascii998common"])
+def test_wal_baseline_and_replies_are_what_the_indexer_writes(
+    bench, tmp_path, monkeypatch, identity
+):
+    # The WAL baseline is the corpus indexed by the writer's own commits
+    # (``build_wal_baseline``), in batches, as a first index makes them;
+    # then a batch of new mail is indexed on top. ``ascii998common``
+    # puts every message, the new ones included, in one thread: the
+    # replies update the large existing thread. Against the indexer's
+    # own first index and a later drain of the same files, with
+    # identical embeddings: every commit's statements in order, every
+    # row (folders included), every FTS statement with its values, the
+    # vector tables' bytes and the encoded sums.
+    n, batch = 8, 4
+    shape = _shape_of(identity)
+    records = [bench._record(i, identity, "typical", 0, 1, 40, 2, None) for i in range(n + batch)]
+    embedder = _identical_embeddings(bench, monkeypatch, records)
+    first, their_base, second, theirs, root = _indexer_baseline_and_replies(
+        bench, tmp_path / "indexer", monkeypatch, shape, n, batch, embedder
+    )
+    embedder = _identical_embeddings(bench, monkeypatch, records)
+    ours_first, our_base, ours_second, ours, built = _writer_baseline_and_replies(
+        bench, tmp_path / "writer", monkeypatch, shape, n, batch
+    )
+    tables = set(_TABLES) | set(_WRITER_TABLES)
+    # The walk: one commit per file for the indexer, the backlog in one
+    # for the writer (before any window).
+    theirs_writes, ours_writes = _writes(first, tables), _writes(ours_first, tables)
+    assert theirs_writes[:n] == [["INSERT indexing_jobs"]] * n
+    assert ours_writes[:1] == [["INSERT indexing_jobs"]]
+    assert ours_writes[1:] == theirs_writes[n:]
+    assert [s for s in ours_first if s.startswith(_FTS_WRITES)] == [
+        s for s in first if s.startswith(_FTS_WRITES)
+    ]
+    assert _compare_indexes(our_base, their_base, root) == []
+    assert built["jobs_left"] == 0
+    # The new mail: the indexer's walk enqueues each file, the writer's
+    # arrival each message, then one batch.
+    assert _writes(ours_second, tables) == _writes(second, tables)
+    assert [s for s in ours_second if s.startswith(_FTS_WRITES)] == [
+        s for s in second if s.startswith(_FTS_WRITES)
+    ]
+    assert _compare_indexes(ours, theirs, root) == []
+    # What was compared: every message, its chunks' vectors and the
+    # threads' non-empty sums (one thread for the common ID).
+    with closing(_with_vec(sqlite3.connect(ours))) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == n + batch
+        assert conn.execute("SELECT COUNT(*) FROM message_chunks_vec").fetchone()[0] == 3 * (
+            n + batch
+        )
+        sums = conn.execute("SELECT count, length(sum) FROM thread_vector_sums").fetchall()
+        assert len(sums) == (1 if identity == "ascii998common" else (n + batch) // 4)
+        assert all(count and size for count, size in sums)

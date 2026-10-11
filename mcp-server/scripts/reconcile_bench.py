@@ -33,8 +33,11 @@ paged run: sizing"). The tables mirror the indexer's ``messages``,
 indexer writes for the messages ``render_eml`` describes
 (indexer/tests/test_reconcile_bench_fidelity.py indexes those files
 with the indexer and compares). Other tables (threads, vectors, the
-queue) are left out because no measured statement reads them; the WAL
-writer (``--wal``) creates them after every other step, for its commits.
+queue) are left out because no measured statement reads them (a test
+checks every measured statement with an authorizer). The WAL phase
+(``--wal``) runs after every other step on its own index, which has
+them all: the corpus indexed again by the writer's commits
+(``build_wal_baseline``).
 """
 
 from __future__ import annotations
@@ -57,7 +60,7 @@ import struct
 import subprocess
 import sys
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -700,17 +703,14 @@ _UPSERT_MESSAGE = _INSERT_MESSAGE + (
 )
 
 
-def _message_values(
-    rec: _Record, now: str, body_complete: int | None, folder: str | None = None
-) -> tuple:
-    """``_INSERT_MESSAGE``'s values for ``rec`` (stored in ``folder``
-    when given)."""
+def _message_values(rec: _Record, now: str, body_complete: int | None) -> tuple:
+    """``_INSERT_MESSAGE``'s values for ``rec``."""
     return (
         rec.cid,
         rec.mid,
         rec.tid,
         rec.path,
-        folder or rec.folder,
+        rec.folder,
         rec.shape["subject"],
         rec.at,
         None if rec.folder == "Sent" else rec.at,
@@ -1284,6 +1284,8 @@ def phase_reconcile(
     return {
         "count": count,
         "scanned": scanned,
+        "certificate": response["certificate"],
+        "complete": response["complete"],
         "missing_total": missing_total,
         "returned": len(records),
         **read,
@@ -1469,9 +1471,12 @@ def phase_request_shape(path: str, shape: str) -> dict:
 
 # The indexer's tables (schema v12) that it writes for every message but
 # no measured statement reads. ``build`` leaves them out, so a measured
-# statement that read one would fail; the WAL writer creates them, after
-# every other step, so its commits write every table the indexer's do.
-# Copies: indexer/tests/test_reconcile_bench_fidelity.py checks them.
+# statement that read one would fail there and read them only in the WAL
+# phase: ``test_measured_statements_read_no_table_only_the_wal_baseline_has``
+# runs every measured statement under an authorizer. The WAL phase's
+# index (``build_wal_baseline``) and the writer create them, so its
+# commits write every table the indexer's do. Copies:
+# indexer/tests/test_reconcile_bench_fidelity.py checks them.
 _WRITER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
     thread_id       TEXT PRIMARY KEY,
@@ -1566,6 +1571,8 @@ WRITER_TABLES = (
 # path (``run_wal``), so no configuration starts from the file an earlier
 # writer left (its freelist, B-tree splits, FTS segments, vector chunks).
 WAL_COPY_SUFFIX = ".wal-run.db"
+# The WAL phase's own index (``build_wal_baseline``), beside ``build``'s.
+WAL_BASE_SUFFIX = ".wal-base.db"
 
 # Copies of indexer values the writer follows (the fidelity test checks
 # them): the vector width (indexer/src/database.py), the thread-sum
@@ -1812,8 +1819,10 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
     and aliases, the thread's FTS row and seed vector), in the open
     transaction. Like the indexer it reads the thread back and merges
     into it; a message already in the thread (a continuation pass) adds
-    no body text. The message is stored in Trash, so the round's
-    unfiltered predicate leaves it out."""
+    no body text. The message is stored in its own folder, as the
+    indexer stores it, so new mail joins the round's set as it does in
+    production (``run_wal`` derives the expected snapshot); a thread
+    keeps the folder of the message that created it."""
     authors, addresses = _addresses(rec)
     sender = authors[0] if authors else ""
     subject_in = rec.shape["subject"]
@@ -1872,7 +1881,7 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
     conn.execute(
         "INSERT INTO threads (thread_id, subject, participants, senders, folder, "
         "date_first, date_last, message_ids, snippet, has_attachments, body_text, "
-        "display_subject) VALUES (?, ?, ?, ?, 'Trash', ?, ?, ?, ?, ?, ?, ?) "
+        "display_subject) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(thread_id) DO UPDATE SET participants = excluded.participants, "
         "senders = excluded.senders, date_first = excluded.date_first, "
         "date_last = excluded.date_last, message_ids = excluded.message_ids, "
@@ -1883,6 +1892,7 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
             subject,
             participants_json,
             json.dumps(senders),
+            rec.folder,
             date_first,
             rec.at,
             json.dumps(ids),
@@ -1909,7 +1919,7 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
         "content_hash) VALUES (?, ?, ?, ?, ?)",
         (rec.path, now, len(rec.raw), time.time_ns(), hashlib.sha256(rec.raw).hexdigest()),
     )
-    conn.execute(_UPSERT_MESSAGE, _message_values(rec, now, None, folder="Trash"))
+    conn.execute(_UPSERT_MESSAGE, _message_values(rec, now, None))
     conn.execute("DELETE FROM message_participants WHERE claimant_id = ?", (rec.cid,))
     # indexer/src/database.py ``_write_message_record``: every header
     # address in order, each followed by its entity writes the first time
@@ -2045,7 +2055,7 @@ def _writer_phase2c(
     rec: _Record,
     plan: list[tuple[str, bool, bool, int | None]],
     continuation: bool,
-    vectors: Iterator[bytes],
+    embed: Callable[[str], bytes],
     now: str,
 ) -> bool:
     """Message ``rec``'s phase 2c writes (indexer/src/main.py
@@ -2054,29 +2064,26 @@ def _writer_phase2c(
     only; a continuation's are stored) with their FTS rows and vectors
     and the thread's sum, the body's completeness, then per occurrence
     its row, its result or its deferral mark, its chunks and the sum
-    again, and last the thread's vector. Returns whether an occurrence
-    was deferred (the caller then continues the job). Vectors come from
-    ``vectors``, made before the transaction as the indexer's come from
-    its embed request (phase 2b): their bytes, not their values, are
-    what the WAL keeps."""
+    again, and last the thread's vector, the mean of its chunk vectors
+    (``_thread_vector``). Returns whether an occurrence was deferred
+    (the caller then continues the job). Each chunk's vector is ``embed(text)``, taken from vectors
+    made before the transaction as the indexer's come from its embed
+    request (phase 2b)."""
     shape = rec.shape
     count, blob = conn.execute(
         "SELECT count, sum FROM thread_vector_sums WHERE thread_id = ?", (rec.tid,)
     ).fetchone()
     total = _decode_sum(blob)
-    vector = conn.execute(
-        "SELECT embedding FROM threads_vec WHERE thread_id = ?", (rec.tid,)
-    ).fetchone()[0]
 
     def chunks(attachment_id: str | None) -> None:
         # indexer/src/database.py ``replace_message_chunks``.
-        nonlocal count, total, vector
+        nonlocal count, total
         added = 0
         for pk, chunk_attachment, kind, c, text, start, end in rec.chunks:
             if chunk_attachment != attachment_id:
                 continue
             added += 1
-            vector = next(vectors)
+            vector = embed(text)
             fts_rowid = conn.execute(
                 "INSERT INTO message_chunks_fts (text) VALUES (?)", (text,)
             ).lastrowid
@@ -2167,8 +2174,9 @@ def _writer_phase2c(
             (PDF_EXTRACTOR, occurrence),
         )
         chunks(attachment_id)
-    # The thread vector is the chunks' mean; any unit vector has its size.
-    _write_thread_vector(conn, rec.tid, vector)
+    if count:
+        # ``thread_chunk_mean`` from the sums just written.
+        _write_thread_vector(conn, rec.tid, _thread_vector(total, count))
     return deferred
 
 
@@ -2189,6 +2197,36 @@ def _chunk_vectors(pool: list[bytes]) -> Iterator[bytes]:
         cut = 4 * shift
         for vector in pool:
             yield vector[cut:] + vector[:cut]
+
+
+# indexer/src/chunker.py ``_UNIT_NORM_TOLERANCE``.
+UNIT_NORM_TOLERANCE = 1e-6
+
+
+def _thread_vector(total: list[int], count: int) -> bytes:
+    """indexer/src/vector_sums.py ``thread_vector`` as stored: the mean
+    of ``count`` chunk vectors summing to ``total`` (each component
+    rounded once to float64), L2-normalized as ``chunker.l2_normalize``
+    does (left as is within ``UNIT_NORM_TOLERANCE`` of unit norm), packed
+    as float32."""
+    divisor = count << 149
+    mean = [value / divisor for value in total]
+    norm_sq = 0.0
+    for x in mean:
+        norm_sq += x * x
+    if norm_sq > 0.0:
+        norm = math.sqrt(norm_sq)
+        if abs(norm - 1.0) >= UNIT_NORM_TOLERANCE:
+            mean = [x / norm for x in mean]
+    return struct.pack(f"{EMBEDDING_DIM}f", *mean)
+
+
+def _embedder(pool: list[bytes]) -> Callable[[str], bytes]:
+    """The writer's embeddings: each chunk takes the next distinct vector
+    (``_chunk_vectors``) whatever its text. The fidelity test replaces it
+    with one embedding per text that the indexer's embedder shares."""
+    vectors = _chunk_vectors(pool)
+    return lambda _text: next(vectors)
 
 
 def _message_number(path: str) -> int:
@@ -2244,6 +2282,7 @@ def phase_writer(
     extract_seconds: float = PDF_EXTRACT_SECONDS,
     lifecycle: str = "arrival",
     backlog: int = WRITER_BACKLOG,
+    baseline: bool = False,
 ) -> dict:
     """A concurrent writer that commits what the indexer commits while
     it indexes mail (indexer/src/main.py ``_drain_queue_batched``), until
@@ -2280,8 +2319,8 @@ def phase_writer(
     Each message's record and its vectors are made before the
     transactions that write them, as the indexer parses, chunks and
     embeds before it writes. The messages have ``shape`` (``build``'s
-    arguments) and continue the corpus's numbering in threads of four;
-    they are stored in Trash. indexer/tests/test_reconcile_bench_fidelity.py
+    arguments) and continue the corpus's numbering in threads of four,
+    each stored in its own folder. indexer/tests/test_reconcile_bench_fidelity.py
     traces the indexer's own commits and checks this sequence, the
     tables and statements of every commit and each pass's occurrence
     states. The pace is a parameter, not the indexer's own, and the
@@ -2293,7 +2332,18 @@ def phase_writer(
     settings.
 
     After each commit it records the time and the WAL file's size, so a
-    window's commit count and its WAL sizes come from the same records:
+    window's commit count and its WAL sizes come from the same records,
+    and, when the commit inserted a message or an occurrence, the
+    highest ``messages`` and ``attachments`` rowids then visible
+    (``visible``: rows are only inserted, so a snapshot taken after that
+    commit sees exactly the rows at or below them; ``run_wal`` derives
+    the round's expected set from it).
+
+    ``baseline`` builds ``build_wal_baseline``'s index instead: a drain
+    of the corpus itself, with the indexer's automatic checkpoints, that
+    returns once the backlog is done.
+
+    Otherwise:
     only this process writes the WAL, and it runs with automatic
     checkpoints off, so the WAL is never restarted into its allocated
     file and the file's size is the WAL's logical end until the
@@ -2313,7 +2363,7 @@ def phase_writer(
     # transaction spends time on them (``_writer_phase2c``), rotated into
     # distinct ones (``_chunk_vectors``).
     rng = random.Random(7)
-    vectors = _chunk_vectors([_unit_vector(rng) for _ in range(VECTOR_POOL)])
+    embed = _embedder([_unit_vector(rng) for _ in range(VECTOR_POOL)])
 
     def record(i: int) -> _Record:
         # Made where it is used and dropped after, so memory holds one
@@ -2332,6 +2382,7 @@ def phase_writer(
     wal = db_path + "-wal"
     commits = 0
     times: list[tuple[float, int]] = []
+    visible: list[tuple[float, int, int]] = []
     exhausted_at: float | None = None
     with closing(sqlite3.connect(db_path, isolation_level=None, timeout=30)) as conn:
         conn.enable_load_extension(True)
@@ -2345,19 +2396,28 @@ def phase_writer(
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-64000")
-        conn.execute("PRAGMA wal_autocheckpoint=0")
+        if not baseline:
+            conn.execute("PRAGMA wal_autocheckpoint=0")
         conn.executescript(_WRITER_SCHEMA)
         corpus = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM messages")
         next_i = -(-corpus.fetchone()[0] // 4) * 4
+        # The highest rowids visible so far: the writer only inserts.
+        rows = list(
+            conn.execute(
+                "SELECT (SELECT COALESCE(MAX(rowid), 0) FROM messages), "
+                "(SELECT COALESCE(MAX(rowid), 0) FROM attachments)"
+            ).fetchone()
+        )
         if lifecycle == "drain":
             _writer_backlog(conn, range(next_i, next_i + backlog), identity, records)
             next_i += backlog
         # The state before any measured commit: it can only be the start.
         times.append((time.monotonic(), os.stat(wal).st_size))
+        visible.append((times[0][0], *rows))
         Path(stop + ".ready").touch()
 
         @contextmanager
-        def transaction() -> Iterator[None]:
+        def transaction(messages: int = 0, occurrences: int = 0) -> Iterator[None]:
             # The whole transaction, BEGIN to COMMIT and its stamp, under
             # the order lock (``_ordered``): a commit is in a round's
             # window only once it is durable, and every frame it writes
@@ -2380,6 +2440,10 @@ def phase_writer(
                     raise _WriterStopped
                 conn.execute("COMMIT")
                 times.append((time.monotonic(), os.stat(wal).st_size))
+                if messages or occurrences:
+                    rows[0] += messages
+                    rows[1] += occurrences
+                    visible.append((times[-1][0], *rows))
             commits += 1
 
         def charge(path: str) -> None:
@@ -2450,7 +2514,7 @@ def phase_writer(
             # it waits for the round to end.
             nonlocal exhausted_at
             exhausted_at = times[-1][0]
-            while not os.path.exists(stop):
+            while not baseline and not os.path.exists(stop):
                 time.sleep(0.05)
 
         try:
@@ -2482,11 +2546,13 @@ def phase_writer(
                     idle()
                     break
                 paths = [path for _, path, _ in jobs]
-                for i, path, _ in jobs:
+                for i, path, continuation in jobs:
                     rec = record(i)
                     charge(path)
                     now = datetime.now(UTC).isoformat()
-                    with transaction():
+                    # A first pass inserts the message; a continuation
+                    # rewrites it in place.
+                    with transaction(messages=0 if continuation else 1):
                         _writer_phase1(conn, rec, now)
                     refund(path)
                     del rec
@@ -2511,8 +2577,10 @@ def phase_writer(
                     rec = record(i)
                     plan = _writer_plan(conn, rec, continuation, extract_seconds)
                     now = datetime.now(UTC).isoformat()
-                    with transaction():
-                        deferred = _writer_phase2c(conn, rec, plan, continuation, vectors, now)
+                    # The occurrences not yet stored are inserted.
+                    new = sum(1 for _, stored, _, _ in plan if not stored)
+                    with transaction(occurrences=new):
+                        deferred = _writer_phase2c(conn, rec, plan, continuation, embed, now)
                         if deferred:
                             defer(path, lone, now)
                     del rec
@@ -2539,6 +2607,7 @@ def phase_writer(
     return {
         "commits": commits,
         "commit_times": times,
+        "visible": visible,
         "backlog_exhausted_at": exhausted_at,
         "jobs_left": left,
     }
@@ -2645,6 +2714,136 @@ def wal_window(commits: list[tuple[float, int]], start: float, end: float) -> tu
     return at_start, max(inside, default=at_start), len(inside)
 
 
+def build_wal_baseline(
+    db_path: str,
+    out: str,
+    messages: int,
+    shape: dict,
+    extract_seconds: float = PDF_EXTRACT_SECONDS,
+) -> dict:
+    """The WAL phase's index: the corpus of ``db_path`` (``build``'s,
+    only read) indexed again from empty tables by the writer's own
+    commits (``phase_writer`` with ``baseline``): a first index's drain
+    at ``INITIAL_INDEX_BATCH_SIZE``, oldest first, with the indexer's
+    transaction boundaries and continuation passes, so every table the
+    indexer fills for a mailbox (threads, their FTS rows, vectors and
+    sums, the thread map, indexed files, aliases) holds the corpus as a
+    deployed index holds it. ``build`` writes one transaction per
+    message and leaves those tables out; its index stays the read
+    figures' (#1577). The queue is empty after it. ``bench_worst`` is
+    copied from ``db_path``, and the counts ``build`` reports are
+    returned for the caller to compare. Each WAL configuration then runs
+    on a fresh copy of ``out`` (``run_wal``)."""
+    t0 = time.perf_counter()
+    for suffix in ("", "-wal", "-shm", ".stop.ready"):
+        Path(out + suffix).unlink(missing_ok=True)
+    with closing(sqlite3.connect(out, isolation_level=None)) as conn:
+        conn.executescript(_SCHEMA)
+        conn.execute("PRAGMA journal_mode=WAL")
+    writer = phase_writer(
+        out,
+        out + ".stop",
+        INITIAL_INDEX_BATCH_SIZE,
+        0.0,
+        shape=shape,
+        extract_seconds=extract_seconds,
+        lifecycle="drain",
+        backlog=messages,
+        baseline=True,
+    )
+    Path(out + ".stop.ready").unlink(missing_ok=True)
+    with closing(sqlite3.connect(out, isolation_level=None)) as conn:
+        conn.execute("ATTACH DATABASE ? AS corpus", (db_path,))
+        conn.execute("INSERT INTO bench_worst (identity) SELECT identity FROM corpus.bench_worst")
+        conn.execute("DETACH DATABASE corpus")
+        tokens = conn.execute(
+            "SELECT MIN(token_est), MAX(token_est) FROM message_chunks WHERE kind = 'body'"
+        ).fetchone()
+        counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # nosec B608
+            for table in ("message_chunks", "message_participants", "message_participant_names")
+        }
+        jobs = conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0]
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return {
+        "build_s": round(time.perf_counter() - t0, 2),
+        "db_bytes": Path(out).stat().st_size,
+        "commits": writer["commits"],
+        "jobs_left": jobs,
+        "body_tokens_min": tokens[0],
+        "body_tokens_max": tokens[1],
+        "chunks": counts["message_chunks"],
+        "participant_rows": counts["message_participants"],
+        "name_rows": counts["message_participant_names"],
+    }
+
+
+def _visible_at(visible: list, when: float) -> tuple[int, int]:
+    """The highest ``messages`` and ``attachments`` rowids the writer had
+    committed by ``when`` (``phase_writer``'s ``visible``; its first
+    entry is the state before any commit)."""
+    rows = visible[0][1:]
+    for stamp, messages, occurrences in visible:
+        if stamp > when:
+            break
+        rows = (messages, occurrences)
+    return rows[0], rows[1]
+
+
+def expected_round(db_path: str, kind: str, request: str, rows: tuple[int, int]) -> dict:
+    """What a round's snapshot must hold: every identity the round's
+    scan (the server's predicate) matches among the ``messages`` and
+    ``attachments`` rows at or below ``rows`` (``_visible_at``), in the
+    round's order, with its certificate and its diff against the
+    upload ``request``. Run after the writer stops, outside every
+    window: the rows are only inserted, so the bound selects exactly
+    what the round's snapshot could see."""
+    _, scan, params = scan_sql(kind)
+    table, column, limit = (
+        ("messages", "claimant_id", rows[0])
+        if kind == "messages"
+        else ("attachments", "attachment_occurrence_id", rows[1])
+    )
+    sql = (
+        f"WITH s(identity) AS ({scan}) SELECT identity FROM s "  # nosec B608
+        f"WHERE identity IN (SELECT {column} FROM {table} WHERE rowid <= ?) ORDER BY 1"
+    )
+    client = set(unpack_hashes(Path(request).read_bytes()))
+    digest = hashlib.sha256(CERT_DOMAIN)
+    count = missing_total = 0
+    with closing(_ro(db_path)) as conn:
+        for (identity,) in conn.execute(sql, [*params, limit]):
+            b = identity.encode()
+            digest.update(len(b).to_bytes(8, "big") + b)
+            count += 1
+            h = identity_hash(b)
+            if h in client:
+                client.discard(h)
+            else:
+                missing_total += 1
+    return {
+        "count": count,
+        "certificate": digest.hexdigest(),
+        "missing_total": missing_total,
+        "extras": len(client),
+    }
+
+
+def _round_problems(result: dict, expected: dict, k: int) -> list[str]:
+    """The fields in which a round's result is not the expected one."""
+    want = {
+        "count": expected["count"],
+        "scanned": expected["count"],
+        "certificate": expected["certificate"],
+        "missing_total": expected["missing_total"],
+        "extras": expected["extras"],
+        # At most K records, every one of them when they fit.
+        "returned": min(k, expected["missing_total"]),
+        "complete": expected["missing_total"] <= k,
+    }
+    return [name for name, value in want.items() if result[name] != value]
+
+
 def run_wal(
     db_path: str,
     kind: str,
@@ -2674,7 +2873,11 @@ def run_wal(
 
     It runs on a fresh copy of ``db_path`` (``WAL_COPY_SUFFIX``, taken
     with SQLite's backup, so page for page), replacing the last
-    configuration's copy; ``db_path`` itself is only read."""
+    configuration's copy; ``db_path`` (``run`` passes the WAL baseline,
+    ``build_wal_baseline``) is only read. The writer's new mail joins
+    the round's set, so after the writer stops the round's result is
+    checked against the rows committed before its snapshot
+    (``expected_round``); a difference fails the measurement."""
     base = db_path
     db_path = base + WAL_COPY_SUFFIX
     for suffix in ("", "-wal", "-shm"):
@@ -2781,6 +2984,16 @@ def run_wal(
             raise RuntimeError(
                 "the WAL writer's backlog ran out before the round ended: raise --writer-backlog"
             )
+        # New mail joins the round's set: what the snapshot had to hold
+        # is the rows committed before it was taken. Checked here, after
+        # the writer stopped, outside the window.
+        corpus_rows = _visible_at(writer_out["visible"], float("-inf"))
+        snapshot_rows = _visible_at(writer_out["visible"], result["started_at"])
+        expected = expected_round(db_path, kind, request, snapshot_rows)
+        problems = _round_problems(result, expected, k)
+        if problems:
+            raise RuntimeError("the round's result is not its snapshot's: " + ", ".join(problems))
+        corpus_count = expected_round(db_path, kind, request, corpus_rows)["count"]
         at_start, at_end, overlapping = wal_window(
             writer_out["commit_times"], result["started_at"], result["ended_at"]
         )
@@ -2801,6 +3014,11 @@ def run_wal(
             # backlog had left (a backlog that ran out fails above).
             "writer_jobs_left": writer_out["jobs_left"],
             "hold_s": hold_s,
+            # Members the round's snapshot held, and how many of them the
+            # writer had added before it (checked against the snapshot).
+            "snapshot_count": result["count"],
+            "snapshot_growth": result["count"] - corpus_count,
+            "missing_total": result["missing_total"],
             "wal_at_transaction_start_bytes": at_start,
             "wal_max_during_transaction_bytes": at_end,
             "commits_during_transaction": overlapping,
@@ -2912,18 +3130,51 @@ def run(args: argparse.Namespace) -> dict:
         report["reconcile"][kind] = {"request": req}
         report["reconcile"][kind].update(_reconcile_runs(db, kind, request, req, args))
     if args.wal:
-        # Last, after every other step, one sample per configuration in
-        # this order, each on a fresh copy of the index (``run_wal``; the
-        # page cache holds what the copy and the steps before left).
-        # The copy can be as large as the index: removed whether every
-        # configuration succeeds or one fails.
+        # Last, after every other step: the WAL phase's own index, the
+        # corpus indexed again by the writer's commits so every table a
+        # deployed index fills is full (``build_wal_baseline``), then
+        # one sample per configuration in this order, each on a fresh
+        # copy of it (``run_wal``; the page cache holds what the copy and
+        # the steps before left). Both can be as large as the index:
+        # removed whether every configuration succeeds or one fails.
+        shape = {
+            "identity": args.identity,
+            "records": args.records,
+            "references": args.references,
+            "chunks": args.chunks,
+            "chunk_tokens": args.chunk_tokens,
+            "per_message": args.per_message,
+            "extracted_chars": args.extracted_chars,
+        }
+        base = db + WAL_BASE_SUFFIX
         try:
+            report["wal_baseline"] = build_wal_baseline(
+                db, base, args.messages, shape, args.writer_extract_seconds
+            )
+            # The baseline holds the corpus ``build`` wrote, so the
+            # upload (written from ``build``'s index) and the worst-case
+            # rows mean the same there.
+            for key in (
+                "chunks",
+                "participant_rows",
+                "name_rows",
+                "body_tokens_min",
+                "body_tokens_max",
+            ):
+                if report["wal_baseline"][key] != report["build"][key]:
+                    raise RuntimeError(f"the WAL baseline's {key} differ from the corpus's")
+            for kind in ("messages", "occurrences"):
+                if (
+                    phase_certificate(base, kind, "stream")["digest"]
+                    != phase_certificate(db, kind, "stream")["digest"]
+                ):
+                    raise RuntimeError(f"the WAL baseline's {kind} differ from the corpus's")
             report["wal"] = [
                 {
                     "kind": kind,
                     "method": method,
                     **run_wal(
-                        db,
+                        base,
                         kind,
                         max(args.k),
                         str(work / f"request-{kind}.json"),
@@ -2932,15 +3183,7 @@ def run(args: argparse.Namespace) -> dict:
                         args.wal_hold,
                         args.all_extras,
                         method,
-                        {
-                            "identity": args.identity,
-                            "records": args.records,
-                            "references": args.references,
-                            "chunks": args.chunks,
-                            "chunk_tokens": args.chunk_tokens,
-                            "per_message": args.per_message,
-                            "extracted_chars": args.extracted_chars,
-                        },
+                        shape,
                         args.writer_extract_seconds,
                         lifecycle,
                         args.writer_backlog,
@@ -2953,8 +3196,9 @@ def run(args: argparse.Namespace) -> dict:
                 for interval in args.writer_interval
             ]
         finally:
-            for suffix in ("", "-wal", "-shm"):
-                Path(db + WAL_COPY_SUFFIX + suffix).unlink(missing_ok=True)
+            for path in (base, base + WAL_COPY_SUFFIX):
+                for suffix in ("", "-wal", "-shm"):
+                    Path(path + suffix).unlink(missing_ok=True)
     return report
 
 

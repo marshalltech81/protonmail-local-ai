@@ -193,6 +193,17 @@ def test_wal_is_reclaimed_after_the_round(bench, report):
         assert wal["writer_backlog"] == (2000 if drain else None)
         assert (0 < wal["writer_jobs_left"] < 2000) if drain else wal["writer_jobs_left"] >= 0
         assert wal["writer_extract_s"] == bench.PDF_EXTRACT_SECONDS
+        # New mail the warm-up committed joined the snapshot (checked
+        # against it in run_wal, which would have failed otherwise).
+        assert wal["snapshot_growth"] > 0
+    # Less what it added, each snapshot is its kind's corpus.
+    for kind in ("messages", "occurrences"):
+        corpus = {
+            w["snapshot_count"] - w["snapshot_growth"] for w in report["wal"] if w["kind"] == kind
+        }
+        assert len(corpus) == 1
+    assert report["wal_baseline"]["jobs_left"] == 0
+    assert report["wal_baseline"]["chunks"] == report["build"]["chunks"]
     for wal in report["wal"]:
         # The explicit checkpoint found the retained frames still in the
         # WAL: no last-connection close reclaimed them first.
@@ -1078,12 +1089,14 @@ def test_file_size_check_is_exact_for_many_parts(bench):
     )
 
 
-def test_writer_indexes_each_batch_into_trash(bench, tmp_path):
+def test_writer_indexes_each_batch_into_its_folders(bench, tmp_path):
     # One batch of three new messages (the corpus's numbering goes on
     # in threads of four: a root and two replies), each with a body
     # chunk and an attachment: the commits the indexer makes for them
     # (indexer/tests/test_reconcile_bench_fidelity.py compares the
-    # sequence with the indexer's own), and the rows it leaves.
+    # sequence with the indexer's own), and the rows it leaves, each
+    # message in its own folder, so the round's sets grow by the ones
+    # outside Trash, as new mail joins them in production.
     db = tmp_path / "batch.db"
     bench.build(db, 8, 1, "typical", "typical")
     counts = [bench.scan_sql(kind)[::2] for kind in ("messages", "occurrences")]
@@ -1102,7 +1115,7 @@ def test_writer_indexes_each_batch_into_trash(bench, tmp_path):
         added = conn.execute(
             "SELECT folder, body_complete, thread_id FROM messages WHERE rowid > 8"
         ).fetchall()
-        assert [(f, c) for f, c, _ in added] == [("Trash", 1)] * 3
+        assert [(f, c) for f, c, _ in added] == [(bench._folder(i), 1) for i in (8, 9, 10)]
         assert {t for _, _, t in added} == {bench.message_id(8, "typical")}
         assert conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 1
@@ -1111,8 +1124,12 @@ def test_writer_indexes_each_batch_into_trash(bench, tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM message_chunks_vec").fetchone()[0] == 6
         assert conn.execute("SELECT count FROM thread_vector_sums").fetchone()[0] == 6
         assert conn.execute("SELECT COUNT(*) FROM attachments WHERE rowid > 8").fetchone()[0] == 3
-        # Trash is left out of the round's sets, so they are unchanged.
-        assert [conn.execute(sql, params).fetchone()[0] for sql, params in counts] == before
+        # None of them is filed in Trash, so each joins the round's sets.
+        assert "Trash" not in {bench._folder(i) for i in (8, 9, 10)}
+        after = [conn.execute(sql, params).fetchone()[0] for sql, params in counts]
+        assert after == [n + 3 for n in before]
+        # The thread keeps the folder of the message that created it.
+        assert conn.execute("SELECT folder FROM threads").fetchone()[0] == bench._folder(8)
 
 
 def test_writer_stores_the_extraction_stress_text_as_build_does(bench, tmp_path, monkeypatch):
@@ -1512,6 +1529,174 @@ def test_a_writer_that_cannot_be_told_to_stop_is_reaped(bench, tmp_path, monkeyp
     assert not (tmp_path / ("full.db" + bench.WAL_COPY_SUFFIX + ".stop.ready")).exists()
 
 
+@pytest.fixture(scope="module")
+def baseline(bench, tmp_path_factory):
+    """A small corpus (mixed records: worst-case rows in ``bench_worst``)
+    and its WAL baseline."""
+    work = tmp_path_factory.mktemp("baseline")
+    corpus = work / "corpus.db"
+    built = bench.build(corpus, 60, 2, "typical", "mixed")
+    base = str(work / "base.db")
+    shape = {"identity": "typical", "records": "mixed", "per_message": 2}
+    return corpus, base, built, bench.build_wal_baseline(str(corpus), base, 60, shape)
+
+
+def test_wal_baseline_fills_every_indexer_table(bench, baseline):
+    # The corpus indexed again by the writer's commits: the same
+    # identities (each kind's certificate) and counts ``build`` reports,
+    # the same worst-case rows, and every table a deployed index fills
+    # holding them, with the queue empty.
+    corpus, base, built, report = baseline
+    for kind in ("messages", "occurrences"):
+        assert (
+            bench.phase_certificate(base, kind, "stream")["digest"]
+            == bench.phase_certificate(str(corpus), kind, "stream")["digest"]
+        )
+    for key in ("chunks", "participant_rows", "name_rows", "body_tokens_min", "body_tokens_max"):
+        assert report[key] == built[key]
+    assert report["jobs_left"] == 0
+    with closing(sqlite3.connect(corpus)) as c, closing(sqlite3.connect(base)) as conn:
+        assert sorted(conn.execute("SELECT identity FROM bench_worst")) == sorted(
+            c.execute("SELECT identity FROM bench_worst")
+        )
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+
+        def count(table: str) -> int:
+            return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+        assert count("bench_worst") > 0
+        assert count("threads") == count("threads_vec") == count("thread_vector_sums") == 15
+        assert count("message_thread_map") == count("indexed_files") == 60
+        assert count("message_chunks_vec") == built["chunks"]
+        assert count("entity_aliases") > 0
+        assert count("indexing_jobs") == 0
+        assert conn.execute("SELECT MIN(length(sum)) FROM thread_vector_sums").fetchone()[0] > 0
+
+
+def test_measured_statements_read_no_table_only_the_wal_baseline_has(bench, baseline, monkeypatch):
+    # ``build``'s index has no table of ``_WRITER_SCHEMA``, so the read
+    # figures stand only while no measured statement reads one: every
+    # measured phase runs here on the baseline, which has them all, and
+    # the authorizer records every table read.
+    from src.lib.sqlite import Database
+
+    corpus, base, _built, _report = baseline
+    read: set[str] = set()
+    real = Database._connect
+
+    def connect(self):
+        conn = real(self)
+
+        def authorize(action, table, _column, _db, _source):
+            if action == sqlite3.SQLITE_READ and table:
+                read.add(table)
+            return sqlite3.SQLITE_OK
+
+        conn.set_authorizer(authorize)
+        return conn
+
+    monkeypatch.setattr(Database, "_connect", connect)
+    bench.phase_idle(base)
+    for kind in ("messages", "occurrences"):
+        request = corpus.parent / f"request-{kind}.json"
+        bench.write_request(base, kind, 5, 3, request)
+        for method in ("stream", "collect"):
+            bench.phase_certificate(base, kind, method)
+            bench.phase_reconcile(base, kind, 3, str(request), method)
+        bench.phase_reconcile(base, kind, 3, str(request), worst_first=True)
+        filters = bench.MESSAGE_FILTERS if kind == "messages" else bench.OCCURRENCE_FILTERS
+        for spec in filters:
+            bench.phase_filtered(base, kind, bench._fill_thread(spec, "typical"))
+    assert "messages" in read and "attachments" in read
+    writer_only = {
+        t for t in read if any(t == w or t.startswith(w + "_") for w in bench.WRITER_TABLES)
+    }
+    assert writer_only == set()
+
+
+def test_visibility_selects_the_rows_committed_before_the_snapshot(bench):
+    visible = [(1.0, 60, 120), (2.0, 61, 120), (3.0, 61, 122), (4.0, 62, 122)]
+    assert bench._visible_at(visible, float("-inf")) == (60, 120)
+    assert bench._visible_at(visible, 0.5) == (60, 120)
+    # A commit stamped at the snapshot was made before it (``wal_window``).
+    assert bench._visible_at(visible, 3.0) == (61, 122)
+    assert bench._visible_at(visible, 9.0) == (62, 122)
+
+
+def test_round_problems_name_every_field_that_differs(bench):
+    expected = {"count": 10, "certificate": "c", "missing_total": 4, "extras": 2}
+    good = {
+        "count": 10,
+        "scanned": 10,
+        "certificate": "c",
+        "missing_total": 4,
+        "extras": 2,
+        "returned": 3,
+        "complete": False,
+    }
+    assert bench._round_problems(good, expected, 3) == []
+    assert bench._round_problems({**good, "returned": 4, "complete": True}, expected, 5) == []
+    for field, wrong in (
+        ("count", 9),
+        ("scanned", 11),
+        ("certificate", "d"),
+        ("missing_total", 5),
+        ("extras", 1),
+        ("returned", 2),
+        ("complete", True),
+    ):
+        assert bench._round_problems({**good, field: wrong}, expected, 3) == [field]
+
+
+def test_expected_round_holds_the_new_mail_committed_before_the_snapshot(bench, baseline, tmp_path):
+    # A batch of new mail on a copy of the baseline: the expected set at
+    # the corpus's rows is the corpus, and at the rows after the batch
+    # it holds the new messages outside Trash and their occurrences.
+    corpus, base, _built, _report = baseline
+    copy = tmp_path / "copy.db"
+    with closing(sqlite3.connect(base)) as src, closing(sqlite3.connect(copy)) as dst:
+        src.backup(dst)
+    stop = tmp_path / "stop"
+    timer = _stop_after_batch(copy, stop, 60 + 4)
+    shape = {"identity": "typical", "records": "mixed", "per_message": 2}
+    out = bench.phase_writer(str(copy), str(stop), 4, 3600.0, shape=shape)
+    timer.join()
+    assert out["visible"][0][1:] == (60, 120)
+    assert out["visible"][-1][1:] == (64, 128)
+    shown = sum(bench._folder(i) != "Trash" for i in range(60, 64))
+    for kind, new in (("messages", shown), ("occurrences", 2 * shown)):
+        request = tmp_path / f"request-{kind}.json"
+        bench.write_request(str(corpus), kind, 5, 3, request)
+        before = bench.expected_round(str(copy), kind, str(request), (60, 120))
+        after = bench.expected_round(str(copy), kind, str(request), (64, 128))
+        assert before["missing_total"] == 5 and before["extras"] == 3
+        assert after["count"] == before["count"] + new
+        assert after["missing_total"] == 5 + new and after["extras"] == 3
+        assert (
+            before["certificate"] == bench.phase_certificate(str(corpus), kind, "stream")["digest"]
+        )
+
+
+def test_a_round_whose_result_is_not_its_snapshot_fails(bench, tmp_path, monkeypatch):
+    # The round's count, certificate, diff and records are checked
+    # against the snapshot after the writer stops: one that differs
+    # fails the measurement, naming the fields.
+    db = tmp_path / "check.db"
+    bench.build(db, 20, 1, "typical", "typical")
+    request = tmp_path / "request.json"
+    bench.write_request(str(db), "messages", 2, 1, request)
+    real = bench._child
+
+    def child(phase, **kwargs):
+        out = real(phase, **kwargs)
+        return {**out, "count": out["count"] + 1} if phase == "reconcile" else out
+
+    monkeypatch.setattr(bench, "_child", child)
+    with pytest.raises(RuntimeError, match="not its snapshot's: count"):
+        bench.run_wal(str(db), "messages", 5, str(request), 1, 0.0)
+
+
 def test_writer_tokenizer_is_the_indexers_pinned_version():
     # The writer cuts thread bodies with the indexer's tokenizer; the
     # ``tokenizers`` this environment resolves (through cohere) must be
@@ -1783,19 +1968,23 @@ def test_writer_waits_only_the_remaining_interval(bench, tmp_path, monkeypatch):
     bench.build(db, 8, 0, "typical", "typical")
     stop = tmp_path / "stop"
     slept: list[float] = []
-    real_sleep = time.sleep
+    # A clock that only sleeping advances, so a loaded host cannot
+    # stretch one sleep past the whole interval.
+    now = [time.monotonic()]
 
     def sleep(seconds):
         slept.append(seconds)
-        real_sleep(max(seconds, 0))
+        now[0] += max(seconds, 0)
         if len(slept) >= 6:
             stop.touch()
 
     monkeypatch.setattr(bench.time, "sleep", sleep)
+    monkeypatch.setattr(bench.time, "monotonic", lambda: now[0])
     bench.phase_writer(str(db), str(stop), 1, 0.06)
-    # Within one 0.06 s delay: 0.05, then at most the 0.01 s left.
-    assert all(s <= 0.05 for s in slept)
-    assert any(s < 0.0101 for s in slept[1::2])
+    # Each 0.06 s pause: 0.05, then only the 0.01 s left.
+    assert len(slept) == 6
+    assert slept[0::2] == [0.05] * 3
+    assert all(0 < s < 0.0101 for s in slept[1::2])
 
 
 def test_a_writer_that_dies_mid_round_fails_the_measurement(bench, tmp_path):
@@ -1874,7 +2063,7 @@ def test_writer_transactions_run_wholly_under_the_order_lock(bench):
     import inspect
 
     src = inspect.getsource(bench.phase_writer)
-    loop = src[src.index("def transaction()") :]
+    loop = src[src.index("def transaction(") :]
     # The only BEGIN and COMMIT after the writer is ready are these: every
     # measured commit runs through ``transaction()``.
     assert src.count('"BEGIN IMMEDIATE"') == src.count('"COMMIT"') == 1

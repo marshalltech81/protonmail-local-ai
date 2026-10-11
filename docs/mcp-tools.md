@@ -1671,7 +1671,15 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
 - with `--wal`, after every other step, WAL growth while a second
   process commits during one round's snapshot (largest K, each kind
   and scan method), and whether a `TRUNCATE` checkpoint then reclaims
-  it. The writer makes the indexer's commits while it indexes mail,
+  it. The WAL phase runs on its own index: the corpus indexed again
+  from empty tables by the writer's own commits, as a first index makes
+  them (batches of 50, oldest first, continuation passes included), so
+  every table a deployed index fills (threads, their full-text rows,
+  vectors and sums, the thread map, indexed files) holds the corpus;
+  it is checked to hold the same identities and counts as the read
+  steps' index, which stays as it is
+  ([#1577](https://github.com/marshalltech81/protonmail-local-ai/issues/1577)).
+  The writer makes the indexer's commits while it indexes mail,
   claiming up to `--writer-batch` due jobs at a time (absent: 8 and 50,
   the indexer's steady-state and first-index batch sizes) in the
   indexer's order and pausing `--writer-interval` seconds after each
@@ -1698,24 +1706,41 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
   deletes the job only on its last pass. Each message is rendered and
   chunked, and its vectors made, before the commits that write it, as
   the indexer parses and embeds before it writes. Its tables are the ones the
-  indexer writes and its messages have the corpus's shape, stored in
-  Trash so the round's set does not change; it overwrites deleted
-  content as the indexer does. `indexer/tests/test_reconcile_bench_fidelity.py`
+  indexer writes and its messages have the corpus's shape, each stored
+  in its own folder, so new mail joins the round's set as it does in
+  production; it overwrites deleted content as the indexer does. The
+  upload stays the one written before the writer started: after the
+  writer stops, outside the window, the round's count, certificate,
+  missing and extra hashes, returned records and completeness are
+  checked against the rows committed before its snapshot (any
+  difference fails the measurement), and each result reports how many
+  members the snapshot gained (`snapshot_growth`). `indexer/tests/test_reconcile_bench_fidelity.py`
   traces the indexer's own commits and checks the writer's sequence, the
-  tables and statements of each commit, the rows and full-text entries
-  it writes, and each continuation pass, with the indexer's extraction
-  budget clock driven so each extraction takes the writer's seconds.
+  tables and statements of each commit, the rows (folders included)
+  and full-text entries it writes, and each continuation pass, with the
+  indexer's extraction budget clock driven so each extraction takes the
+  writer's seconds; with identical synthetic embeddings it also checks
+  the vectors and thread sums, for the WAL index's construction and
+  for new mail joining the one large thread `--identity
+  ascii998common` makes.
   It cuts thread bodies at the indexer's 4,000-token cap with the
   indexer's own tokenizer asset (`indexer/src/data/qwen3-embedding`,
   read only; `tokenizers` is already in the image at the indexer's
   pinned version), so `--wal` is refused when the asset is not found
-  beside the script or mounted at `/app/tokenizer`. The writer's tables
-  (but a drain's queue) start empty, its bytes and extraction time are not calibrated against
-  the live indexer, and the pace is a parameter
+  beside the script or mounted at `/app/tokenizer`. Its bytes and
+  extraction time are not calibrated against the live indexer, and the
+  pace is a parameter
   ([#1469](https://github.com/marshalltech81/protonmail-local-ai/issues/1469)).
   The writer runs with automatic checkpoints off, so the WAL file's
   size is the WAL's end. Each configuration runs on a fresh copy of the
-  index as it was built, so the WAL phase needs disk for a second copy.
+  WAL phase's index, so the phase needs disk for that index and a copy
+  beside the read steps' index: measured on a laptop with typical
+  records and one attachment a message, the WAL index took 63 s and
+  543 MB for 10,000 messages (the read index: 68 MB). With
+  `--identity ascii998common` every message rewrites the one thread's
+  list of 1,015-byte claimant IDs, so a message's cost rises with the
+  corpus: 173 s and 342 MB for 2,000 messages (about 86 ms a message,
+  against 6 ms for typical records).
 
 Run it inside the mcp-server image so SQLite and Python match the
 server's; `--help` lists every option:
