@@ -2553,9 +2553,8 @@ mail a population run will read; the steps are not sent to clients:
    `max(50, RERANK_CANDIDATES)` candidate threads to the rerank
    provider. No tool reports either setting
    ([#1578](https://github.com/marshalltech81/protonmail-local-ai/issues/1578)),
-   so before extracting, ask the user, who runs the server, for them,
-   or tell the user that the rerank bound is unknown and that
-   `RERANK_CANDIDATES` has no upper limit.
+   and `RERANK_CANDIDATES` has no upper limit: ask the user, who runs
+   the server, for both, and do not extract until they are known.
 2. Enumerate the population, paging each query to the end with
    `next_cursor`:
    - For occurrences backed by an attachment (every invoice line for
