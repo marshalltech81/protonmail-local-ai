@@ -1568,7 +1568,8 @@ Exhausting a keyword query does not establish exhaustive coverage of a
 topic. Consider alternate wording, read candidate messages, and keep the
 counting unit explicit (messages, threads, or distinct bills/items).
 
-**Multi-lane enumeration.** A call takes one AND of filters, so a
+**Multi-lane enumeration.** A call ANDs its filters, and only a
+`where` `any` group ORs (address and `body_words` leaves only), so a
 broad question ("every message about a committee's finances and
 audits") is answered with several exact lanes and their union (#992):
 
