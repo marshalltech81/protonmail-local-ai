@@ -730,11 +730,12 @@ drive an unbounded query against the index.
   in New York is `date_from="2026-01-01T00:00:00-05:00"`. A message sent
   at 21:30 New York time on 31 December is stored as 02:30 UTC on 1
   January, so `date_from="2026-01-01"` includes it and the offset bound
-  does not. `search_emails`, `search_attachments` and `query_messages`
-  echo the instants applied as `date_bounds` (`date_from` / `date_to` in
-  UTC, null for a bound not given; the field is null without a date
-  filter) and in a `Date bounds (UTC):` line of the prose. The tools do
-  not parse natural-language dates.
+  does not. `search_emails`, `search_attachments`, `query_messages`,
+  `aggregate_messages` and `query_attachments` echo the instants
+  applied as `date_bounds` (`date_from` / `date_to` in UTC, null for a
+  bound not given; the field is null without a date filter) and in a
+  `Date bounds (UTC):` line of the prose. The tools do not parse
+  natural-language dates.
 - A `date_from` later than `date_to` names an empty interval and is
   rejected with an error naming both fields, the same way by every tool
   that takes both bounds. The bounds are compared after UTC
@@ -801,8 +802,8 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `from_name`, `participant`, `date_from`, `date_to`, `has_attachments` or `max_threads`, which select threads |
 | `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Filter by sender address or domain |
-| `date_from` | string | none | ISO 8601 date lower bound |
-| `date_to` | string | none | ISO 8601 date upper bound |
+| `date_from` | string | none | Inclusive ISO 8601 lower bound ([date bounds](#search_emails)) |
+| `date_to` | string | none | Inclusive ISO 8601 upper bound; a date-only value covers the whole UTC day |
 | `has_attachments` | bool | none | Restrict to threads with attachments |
 | `participant` | string | none | Any role: From, To, or Cc, as in `search_emails` and `ask_mailbox` |
 | `from_name` | string | none | Sender name or role, resolved through `find_contact` exactly as `ask_mailbox` resolves it, so an answer scoped with it can be audited (the `find_contact` tool counts every role, so its top match can differ). An unmatched name returns no evidence. `from_addr` wins if both are given |
@@ -946,13 +947,16 @@ lists attachments by the structured filters alone, newest message
 first. Each result carries `sent_at` and `occurred_at`, the send and
 delivery dates of the message carrying the attachment, beside its
 thread's `date_last`; the date filters and the no-query order use the
-message's effective time (`occurred_at`, else `sent_at`).
+message's effective time (`occurred_at`, else `sent_at`, else the time
+it was first indexed).
 
 To read what an attachment says, use `get_evidence` (the matching
 passages of its extracted text, each capped at 1600 characters) or
-`ask_mailbox` (an answer synthesized from those passages). This tool
-locates attachments and previews their extracted text; none of the
-three returns the whole document.
+`ask_mailbox` (an answer synthesized from those passages). To read
+one attachment's whole stored text, list its message's attachments
+with `query_attachments` (`claimant_id`) and pass the attachment's
+`attachment_occurrence_id` to [`get_attachment`](#get_attachment).
+This tool locates attachments and previews their extracted text.
 
 Before a no-query coverage scan, disclose the filters and planned maximum
 number of attachment previews; these reach the calling model, which may
@@ -1035,7 +1039,8 @@ carries the same file more than once (under different names or MIME
 types), an extracted-text match is reported once, as the first copy
 that passes `content_type`. Attachments on messages filed in Trash are
 left out; the tool has no folder filter, so reach them through
-`search_emails(folders=["Trash"])` or `get_evidence` on the thread
+`query_attachments(folder="Trash")`, `search_emails(folders=["Trash"])`
+or `get_evidence` on the thread
 ([Trash](#trash-is-left-out-by-default)).
 
 ---
@@ -1241,8 +1246,8 @@ internally to the most-active matching sender and reports the address
 it used in `resolved_from_addr` and how many senders matched in
 `from_name_matches` ([Resolving `from_name`](#search_emails)). Resolve a name here first only when
 you need a different matching contact than that one (then pass it as
-`from_addr`), or for a tool that filters by address alone, such as
-`get_evidence` or `search_attachments`.
+`from_addr`), or for a tool with no `from_name` or `participant`, such
+as the experimental `brief_issue` and `check_conclusion`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -1370,8 +1375,11 @@ through the flat parameters' inferred mode:
   A value may hold at most 320 characters (`domain_is` 255,
   `body_words` 1000).
 - **Limits:** at most 16 nodes, each leaf and each `any` group
-  counting one; neither `all` nor an `any` group may be empty. The schema also caps each `all` and `any` list at 16 items (`maxItems`), so a longer list is refused before its items are read. An `id` is optional, at most
-  64 characters, not blank and unique within the call.
+  counting one; neither `all` nor an `any` group may be empty. The
+  schema also caps each `all` and `any` list at 16 items (`maxItems`),
+  so a longer list is refused before its items are read. An `id` is
+  optional, at most 64 characters, not blank and unique within the
+  call.
 - **Rejections:** fixed text naming the leaf's path (`where.all[1]`,
   or `where.all[1].any[0]` inside a group),
   logged only as the rate-limited `rejected invalid argument:
@@ -1379,7 +1387,8 @@ through the flat parameters' inferred mode:
 - **Cursor:** the digest a cursor carries covers the flat leaves in
   order and the normalized `where` expression, kept apart (so `sender=`
   and `address_is` on `from` are different queries), plus a format
-  version (2 since #1087). The expression is taken in canonical form:
+  version that changes whenever what the digest covers or means
+  changes. The expression is taken in canonical form:
   the items of `all` in order, the leaves of each `any` group (with
   their `negate`) in any order, so reordering a group keeps a cursor
   valid; grouping and negation change it. A cursor issued for another
@@ -1490,11 +1499,13 @@ message carries its send and delivery dates (`sent_at` null when the
 `sent_at` null too, before the reparse; the prose says which), folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
-Message-ID, claimant ID, and Thread ID; the structured output adds
-`sender_ambiguous` ([Sender attribution](#sender-attribution)), In-Reply-To and
-up to 10 References. Header values are sender-controlled, so any past
-500 characters is cut with a marker. The count, the page, and its participants are read in one
-snapshot.
+Message-ID, claimant ID, and Thread ID, and the prose row flags a
+sender that is ambiguous or not yet checked; the structured output
+adds `sender_ambiguous` itself ([Sender
+attribution](#sender-attribution)), In-Reply-To and up to 10
+References. Header values are sender-controlled, so any past 500
+characters is cut with a marker. The count, the page, and its
+participants are read in one snapshot.
 
 **Field projection.** A corpus-building pass that pages through
 hundreds of rows rarely needs every field. `fields` lists the row
@@ -1511,8 +1522,8 @@ and thread IDs always). The envelope (`filters`, `address_matches`,
 `next_cursor`) is unchanged, and so is the cursor: it is built from the
 page's messages before projection, so a projected and an unprojected
 page continue each other. An unknown name is an error that names it,
-and a list of more than 23 names (one per field; repeats add nothing)
-is an error; the log records only that `fields` was rejected and why,
+and a list longer than the field list (repeats add nothing) is an
+error; the log records only that `fields` was rejected and why,
 in a warning rate-limited to one per reason per minute with a count of
 the repeats. Omitting `fields`
 returns every field, as before. Because rows can be projected, the
@@ -1570,11 +1581,15 @@ audits") is answered with several exact lanes and their union (#992):
    dropped, or unresolved. Any reading done to sort them follows the
    disclosure and smallest-sample paragraphs above.
 
-`get_message` and `get_thread` return no attachment text; attachment
-passages come only through [`get_evidence`](#get_evidence), which
-ranks and caps a whole thread's passages. A missing passage therefore
-does not resolve a row, and a row with attachments whose body is not
-relevant stays unresolved, never dropped.
+`get_message` and `get_thread` return no attachment text. Attachment
+text comes through [`get_evidence`](#get_evidence), which ranks and
+caps a whole thread's passages, or one attachment at a time through
+[`query_attachments`](#query_attachments) (`claimant_id`) and
+[`get_attachment`](#get_attachment), which returns its whole stored
+text. A missing passage therefore does not resolve a row, and a row
+with attachments whose body is not relevant stays unresolved, never
+dropped, until its attachments' stored text is read; one with no text
+available keeps it unresolved.
 
 The recipe supports this claim: the rows the lanes returned during the
 run, within their shared scope, subject to the snapshot caveat above.
@@ -2108,8 +2123,8 @@ reported by the server in text `content` and the additive structured
 | `from_addr` | string | none | Scope to a sender address or domain |
 | `from_name` | string | none | Scope to mail from a named person or role; resolved through `find_contact` exactly as in [`search_emails`](#search_emails). `from_addr` wins if both are given |
 | `participant` | string | none | Scope to threads where this person appears in **any** role — From, To, or Cc, as in `search_emails`. Accepts an address, a domain (`@example.com`), or a name fragment |
-| `date_from` | string | none | Date lower bound |
-| `date_to` | string | none | Date upper bound |
+| `date_from` | string | none | Inclusive ISO 8601 lower bound ([date bounds](#search_emails)) |
+| `date_to` | string | none | Inclusive ISO 8601 upper bound; a date-only value covers the whole UTC day |
 | `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `max_threads` | int | `5` | Context threads to use |
 
@@ -2418,9 +2433,10 @@ Summarize a thread in different styles.
 | `style` | string | `brief` | `brief`, `detailed`, `action-items`, `timeline` |
 
 When `thread_id` matches no thread, the tool treats it as a subject
-phrase: it runs a hybrid search and summarizes the top candidate whose
-subject shares a meaningful word with the phrase, or returns `Thread
-not found` when none does. An input containing `@` is never treated
+phrase: it runs a hybrid search and, of the top three threads,
+summarizes the one whose subject shares the most meaningful words with
+the phrase (the higher-ranked on a tie), or returns `Thread not found`
+when none shares one. An input containing `@` is never treated
 as a phrase, so a missing or mistyped thread ID (a Message-ID such as
 `<abc@example.com>`) returns `Thread not found` without calling the
 embedder, rather than matching a subject on its domain or local part.
@@ -2483,8 +2499,8 @@ extracted.
 | `query` | string | required | What to search for; also sent to the model as the request, so it can pick which records in a passage are wanted |
 | `schema` | dict | required | JSON schema for extraction |
 | `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
-| `date_from` | string | none | Date lower bound |
-| `date_to` | string | none | Date upper bound |
+| `date_from` | string | none | Inclusive ISO 8601 lower bound ([date bounds](#search_emails)) |
+| `date_to` | string | none | Inclusive ISO 8601 upper bound; a date-only value covers the whole UTC day |
 | `limit` | int | `20` | Max threads to search |
 | `from_name` | string | none | Scope to mail from a named person or role; resolved through `find_contact` as in [`search_emails`](#search_emails). An unmatched name returns no records and makes no model call |
 | `participant` | string | none | Scope to threads where this person appears in **any** role — From, To, or Cc, as in `search_emails` |
@@ -2748,8 +2764,8 @@ indexed, so a brief can never come back as evidence.
 | `topic` | string | required | The issue to brief, as the user phrased it |
 | `folders` | list | all but Trash | Scope to threads with a message in any of these folders; name `"Trash"` to include Trash ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Scope to a specific sender |
-| `date_from` | string | none | Date lower bound |
-| `date_to` | string | none | Date upper bound |
+| `date_from` | string | none | Inclusive ISO 8601 lower bound ([date bounds](#search_emails)) |
+| `date_to` | string | none | Inclusive ISO 8601 upper bound; a date-only value covers the whole UTC day |
 | `max_threads` | int | `5` | Context threads to use, clamped to `[1, 10]` |
 
 Retrieval and evidence are those of `ask_mailbox`: hybrid search with
@@ -2861,8 +2877,8 @@ finding is returned with the source passages it rests on.
 | `conclusion` | string | required | The statement to check, 1–2000 characters (empty or longer is an error before any provider call) |
 | `folders` | list | all but Trash | Scope to threads with a message in any of these folders; name `"Trash"` to include Trash ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Scope to a specific sender |
-| `date_from` | string | none | Date lower bound |
-| `date_to` | string | none | Date upper bound |
+| `date_from` | string | none | Inclusive ISO 8601 lower bound ([date bounds](#search_emails)) |
+| `date_to` | string | none | Inclusive ISO 8601 upper bound; a date-only value covers the whole UTC day |
 | `max_threads` | int | `5` | Context threads to use, clamped to `[1, 10]` |
 
 Retrieval, evidence labels, the prompt budget and the coverage note are

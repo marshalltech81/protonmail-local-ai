@@ -574,9 +574,11 @@ class SearchAttachmentsOutput(_Output):
         default=None,
         description="Only with a sender filter: indexed attachments the other filters and "
         "the query reach whose carrying message sender could neither accept nor reject (its "
-        "sender ambiguous or not yet checked; for a name or domain fragment, its display "
-        "names not all indexed); left out of results, and not limited by limit. Null without sender, and when the count was unavailable (the "
-        "text says so); never read null as 0. When not 0, report it with the results.",
+        "sender ambiguous or not yet checked; its From address list incomplete or not yet "
+        "checked; for a name or domain fragment, its display names not all indexed); left "
+        "out of results, and not limited by limit. Null without sender, and when the count "
+        "was unavailable (the text says so); never read null as 0. When not 0, report it "
+        "with the results.",
     )
 
 
@@ -744,14 +746,13 @@ class QueryMessagesOutput(_Output):
         "complete count only when indeterminate is 0."
     )
     indeterminate: int = Field(
-        description="Messages the filters could neither accept nor reject (a size bound on "
-        "a message without a stored size; a date bound on one without that date: no "
-        "delivery or parsed send date for effective, no parsed send date for sent; a "
-        "sender or participant filter, or an "
-        "authority_class filter on a message outside Spam whose sender is ambiguous or not yet "
-        "checked), in neither total_matches nor the pages. 0 when "
-        "every filter could be decided for every message; when not 0, report it with any "
-        "count."
+        description="Messages the filters could neither accept nor reject (a filtered size, "
+        "date, subject, body, attachment list, address or display name the index does not "
+        "hold, holds cut by a parse limit, or has not checked yet; a sender or participant "
+        "filter, or an authority_class filter on a message outside Spam whose sender is "
+        "ambiguous or not yet checked; the prose names the causes the given filters can "
+        "have), in neither total_matches nor the pages. 0 when every filter could be "
+        "decided for every message; when not 0, report it with any count."
     )
     returned: int
     offset: int = Field(description="Matches returned by earlier pages.")
@@ -900,10 +901,11 @@ class QueryAttachmentsOutput(_Output):
         description="Occurrences the filters could neither accept nor reject (a date bound "
         "on a carrying message with no delivery or parsed send date; a sender or "
         "participant filter on a carrying message whose sender is ambiguous or not yet "
-        "checked; a name or fragment address filter on one whose display names are not all "
-        "indexed; an extraction_status other than none on an occurrence with no extraction "
-        "recorded), in neither total_matches nor the pages. When not 0, report it with any "
-        "count."
+        "checked; an address filter that finds nothing on one whose stored addresses for "
+        "that role were cut by a parse limit or are not checked yet; a name or fragment "
+        "address filter on one whose display names are not all indexed; an "
+        "extraction_status other than none on an occurrence with no extraction recorded), "
+        "in neither total_matches nor the pages. When not 0, report it with any count."
     )
     status_counts: dict[str, int] = Field(
         description="total_matches split by extraction status over every match, not just "
@@ -1169,9 +1171,11 @@ class QuoteCheck(_Output):
         description="verified: found in the indexed text shown for a passage its statement "
         "cites. misattributed: found only in other supplied passages. unmatched: found in no "
         "supplied passage. uncited: its statement cites no supplied passage. not_checked: over "
-        "the per-answer quote cap or the quote length cap. The comparison ignores whitespace "
-        "and quote-mark style and allows an ellipsis to skip text; indexed text is extracted "
-        "and normalized, so a verified quote is not proof of the raw message bytes."
+        "the per-answer quote cap or the quote length cap, or quote marks whose text starts "
+        "or ends with a space (a nested quotation or a stray mark). The comparison ignores "
+        "whitespace and quote-mark style and allows an ellipsis to skip text; indexed text "
+        "is extracted and normalized, so a verified quote is not proof of the raw message "
+        "bytes."
     )
     found_in: list[str] = Field(
         description="Labels of the supplied passages the quote was found in."
@@ -1436,10 +1440,11 @@ class ReplyQuoteCheck(_Output):
         description="verified: found in the indexed text shown for a passage its entry "
         "cites. misattributed: found only in other supplied passages. unmatched: found in no "
         "supplied passage. uncited: its entry cites no supplied passage. not_checked: over "
-        "the per-reply quote cap or the quote length cap. Checked as ask_mailbox's quotes "
-        "are: whitespace and quote-mark style are ignored and an ellipsis may skip text; "
-        "indexed text is extracted and normalized, so a verified quote is not proof of the "
-        "raw message bytes, nor that the passage supports the entry."
+        "the per-reply quote cap or the quote length cap, or quote marks whose text starts or "
+        "ends with a space (a nested quotation or a stray mark). Checked as ask_mailbox's "
+        "quotes are: whitespace and quote-mark style are ignored and an ellipsis may skip "
+        "text; indexed text is extracted and normalized, so a verified quote is not proof of "
+        "the raw message bytes, nor that the passage supports the entry."
     )
     found_in: list[str] = Field(
         description="Labels of the supplied passages the quote was found in."
