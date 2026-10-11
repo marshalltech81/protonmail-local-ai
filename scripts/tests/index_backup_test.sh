@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # first on PATH never contacts a daemon: `exec indexer python -c` and
 # `run ... python -c` run the scripts' real Python on the host against a
 # synthetic SQLite index in a temporary directory standing in for the
-# index volume (SQLITE_PATH), with a stub `src.database` for the restore.
+# index volume (SQLITE_PATH), with a stub `src.database` for both scripts.
 # `ps`, `inspect`, `stop`, `start` and `logs` answer from FAKE_* values.
 #
 # Run: bash scripts/tests/index_backup_test.sh
@@ -26,7 +26,8 @@ MARKER=synthetic-mail-marker-1005
 
 mkdir -p "$WORK/bin" "$WORK/stub/src"
 touch "$WORK/stub/src/__init__.py"
-# The values restore-index.sh imports from the indexer image. The
+# The values backup-index.sh and restore-index.sh import from the
+# indexer image. The
 # version is read from indexer/src/database.py; a case below checks the
 # application ID matches it.
 cat >"$WORK/stub/src/database.py" <<EOF
@@ -1073,7 +1074,7 @@ check "restore refuses ACL-writable paths" restore_refuses_acl_writable_paths
 check "restore treats a killed container as an unknown swap state" restore_treats_a_killed_container_as_unknown
 check "restore waits for a lingering restore container before starting the indexer" restore_waits_for_a_lingering_container
 check "restore starts nothing while the restore container still runs" restore_starts_nothing_while_the_container_runs
-check "the restore stub matches indexer/src/database.py" stub_matches_the_indexer
+check "the src.database stub matches indexer/src/database.py" stub_matches_the_indexer
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
