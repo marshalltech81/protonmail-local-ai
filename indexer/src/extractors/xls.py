@@ -1,10 +1,12 @@
 """Legacy Excel ``.xls`` extractor (#935).
 
 A legacy ``.xls`` is an OLE2 compound file holding a BIFF workbook,
-which openpyxl cannot read. The dispatcher routes an OLE2 payload
-labelled ``.xls`` / ``application/vnd.ms-excel`` here; a
-``.xls``-labelled payload that is not OLE2 (an OOXML file mislabelled
-as ``.xls``) still goes to ``xlsx``.
+which openpyxl cannot read. An OLE2 or ZIP payload, whatever its
+label, runs the extractor its directory names (``container.identify``,
+#1416): this one for an OLE2 file with a workbook stream. A payload
+under a ``.xls`` label whose bytes are neither OLE2 nor ZIP is recorded
+``unsupported``
+("not an OLE2 or OOXML container", #1227).
 
 The workbook is read by xlrd in the extractor child
 (``extractor_child.py``, running the walk in ``xls_child.py``),
