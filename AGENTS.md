@@ -1125,6 +1125,27 @@ and Semgrep), so parallel checkouts or worktrees never share one cache
 (#896); each fills its own once. Set `UV_CACHE_DIR` explicitly to
 override it.
 
+## Explanatory Writing
+
+Apply Grice's maxims wherever you explain something: documentation,
+code comments, commit messages, issues, PRs, reviews, and chat.
+
+- Quantity: give enough information for the reader's task, without
+  repetition or unnecessary detail.
+- Quality: make supported claims; distinguish facts, assumptions,
+  estimates, and uncertainty.
+- Relation: keep each explanation relevant to the reader's decision
+  or understanding, and place it where it is needed.
+- Manner: use clear, direct language and a logical order; avoid
+  ambiguity, jargon, and needless narrative.
+
+Preserve requirements, qualifications, rationale, safety constraints,
+and non-obvious failure modes. Brevity must not reduce accuracy or
+completeness. Do not impose word-count or reduction targets.
+
+Before finishing, ask: "Can the reader understand and act correctly
+with this explanation? Can anything be removed without losing that?"
+
 ## Documentation Expectations
 
 Update docs when changing:
