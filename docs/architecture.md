@@ -11,7 +11,7 @@ reranking goes to whichever endpoints the operator configures.
 Embedding and inference are operator-supplied
 external dependencies — the project itself ships no model-serving
 components, and whether they run on the host (LM Studio, vLLM,
-`mlx_lm.server`, etc.) or against a remote provider is a deployment
+`mlx_lm.server` for inference only, etc.) or against a remote provider is a deployment
 choice.
 
 ## Data Flow

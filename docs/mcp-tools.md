@@ -2572,7 +2572,7 @@ mail a population run will read; the steps are not sent to clients:
      [`query_messages`](#query_messages) with `sender` or `text`, the
      same bounds, and `folder="Trash"` in a separate query for messages
      in Trash; a broad one needs several lanes (its multi-lane recipe).
-     A population defined by `subject` cannot be reconciled in step 4:
+     A population defined by `subject` cannot be compared in step 4:
      the model sees the thread's subject outside every citable
      passage, so no record can cite it.
 
@@ -2628,7 +2628,7 @@ mail a population run will read; the steps are not sent to clients:
    - Senders: `participant` puts in scope every message with the
      vendor in From, To or Cc, so attachments on messages others sent
      to the vendor are extracted too, though the enumeration's `sender`
-     leaves them out; step 4 sets aside records that rely on them.
+     leaves them out; a record citing only them is set aside in step 4.
 
    A citation's `sender`, like the `sender` and `participant` filters, is the
    claimed From address: the index does not authenticate senders and
@@ -2636,42 +2636,39 @@ mail a population run will read; the steps are not sent to clients:
    so a forged From matches too. Counting a record as the vendor's mail
    needs provenance these results do not give (the vendor's own
    records, or checking the message by hand).
-4. Reconcile across all windows, not per window. A record links to
-   its source through its `_evidence` labels: look each label up by
-   `label` in that call's top-level `citations` list, whose entries
-   carry `thread_id`, `claimant_id`, `attachment_id`, `sent_at` and
-   `occurred_at`. These IDs name sources, not records: one occurrence
-   or message can yield several records, and one record can cite
-   several sources. Key an attachment occurrence by `claimant_id` and
-   `attachment_id` together, as `query_attachments` rows carry them
-   (`attachment_id` is the payload's content hash, shared by every
-   message carrying the same bytes, and `claimant_id` names the
-   message), and a message by `claimant_id`.
-   Count a record only when it has no entry in `citation_problems`
-   (the server reports a problem but keeps the record), every field
-   that places it in the population (here the line's product code)
-   cites only `in_scope` passages (each citation's `scope`) of
-   enumerated items and, for a string value, has `value_check`
-   `verified` in `fields` (`unmatched` and `not_checked` raise no
-   problem, so a value the model made up would otherwise pass), and
-   every other field cites only `in_scope`
-   passages; mark covered only the enumerated items whose passages a
-   population field's `found_in` names (the cited passages its value
-   was found in: a field can cite more passages than hold the value).
-   Set aside any
-   other record for review. Each call marks a thread's messages in or out of its
-   own scope (its window, folders and `participant`) and tells the
-   model to extract only from in-scope messages, so calls that search
-   one thread can return different, valid records. With windows that
-   share no instant and one call per folder scope, each message is in
-   scope for one call only: keep every counted record from every
-   remaining call, identical ones included (one invoice can repeat a
-   line), and never merge records across calls.
-   Report each enumerated item no counted record cites (its stored text can be
-   read with `get_attachment` or `get_message`, following each
-   `next_offset`, after telling the user how much). Copies of the same
-   bytes attached twice to one message share both IDs, so they cannot
-   be reconciled one by one.
+4. Compare the records with the enumeration across all calls, not per
+   call. The comparison finds gaps; it cannot certify a count. A
+   record names its sources through its `_evidence` labels: look each
+   label up by `label` in that call's top-level `citations` list, whose
+   entries carry `thread_id`, `claimant_id`, `attachment_id`, `source`,
+   `scope`, `sent_at` and `occurred_at`. Match an attachment occurrence
+   by `claimant_id` and `attachment_id` together (`attachment_id` is
+   the payload's content hash, shared by every message carrying the
+   same bytes), and a message by `claimant_id` on a `source` `body`
+   citation (an attachment passage carries its message's `claimant_id`
+   too). Then:
+   - report each enumerated item no record cites (its stored text can
+     be read with `get_attachment` or `get_message`, following each
+     `next_offset`, after telling the user how much);
+   - set aside for review a record that cites no enumerated item,
+     cites a `context` passage, or has an entry in `citation_problems`
+     (the server reports a problem but keeps the record);
+   - keep every other record from every call, identical ones included
+     (one invoice can repeat a line). With windows that share no
+     instant and one call per folder scope, each message is in scope
+     for one call only, and the model is told to extract only from
+     in-scope messages.
+
+   No output ties a record to the one item it came from: a field can
+   cite several items, a value found in two items is found in both,
+   absent fields and values that are not strings are not checked, and
+   an item a record cites can still be missing other records. Report
+   the result as model output compared by citation, not as a verified
+   total
+   ([#976](https://github.com/marshalltech81/protonmail-local-ai/issues/976),
+   [#1382](https://github.com/marshalltech81/protonmail-local-ai/issues/1382)).
+   Copies of the same bytes attached twice to one message share both
+   IDs, so they cannot be told apart.
 
 Limits the recipe does not remove:
 

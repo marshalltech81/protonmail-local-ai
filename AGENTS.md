@@ -19,7 +19,7 @@ the OpenAI-compatible `/v1/embeddings` shape and (for OpenAI-mode
 inference) the `/v1/chat/completions` shape, plus an Anthropic-compatible
 Messages API for `INFERENCE_MODE=anthropic`. Whether the operator
 points these at a remote provider or a host-side server they install
-themselves (LM Studio, vLLM, mlx_lm.server, TEI, etc.) is a deployment
+themselves (LM Studio, vLLM, TEI, mlx_lm.server for inference only, etc.) is a deployment
 choice, not a project concern.
 
 Core behavior:
@@ -118,7 +118,7 @@ Important architecture facts:
   placeholder or stale key plus a forgotten URL would still ship mail.
   Disabled layers (`mode=none`) need no base URL. Operators pointing
   at an unauthenticated host-side server (LM Studio, vLLM,
-  `mlx_lm.server`, TEI) set `{LAYER}_BASE_URL` to the host endpoint
+  TEI, `mlx_lm.server` for inference only) set `{LAYER}_BASE_URL` to the host endpoint
   and supply any non-empty placeholder string (e.g. `unauthenticated`)
   for `{LAYER}_API_KEY`; the compat server ignores the bearer header.
 - inference is selected by `INFERENCE_MODE` (`anthropic|openai|none`).

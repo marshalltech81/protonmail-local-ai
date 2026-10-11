@@ -270,7 +270,7 @@ endpoint (OpenAI proper for `openai`/`embed` modes, Anthropic API for
 any request: an API key is not a choice of provider, because the
 request (with mail text) reaches the provider before it checks the key
 (#750). Operators pointing at an unauthenticated host-side server (LM
-Studio, vLLM, `mlx_lm.server`, TEI) set `{LAYER}_BASE_URL` to the host
+Studio, vLLM, TEI, `mlx_lm.server` for inference only) set `{LAYER}_BASE_URL` to the host
 endpoint and supply any non-empty placeholder string (e.g.
 `unauthenticated`) for `{LAYER}_API_KEY`.
 
@@ -342,7 +342,7 @@ When pointing at a host-side server, bind it to `127.0.0.1` and use
 `http://host.docker.internal:<port>/v1` from the container's
 perspective. The project does not provision these servers — install
 them with the tool of your choice (LM Studio, vLLM, TEI,
-`mlx_lm.server`, etc.).
+`mlx_lm.server` for inference only, etc.).
 
 **Reranker** — optional; off by default.
 
@@ -427,7 +427,7 @@ You should see:
 Operator-supplied inference / embed / rerank endpoints are not in
 this list — they run wherever you choose (a remote provider, or a
 host-side OpenAI-compatible server such as LM Studio, vLLM,
-`mlx_lm.server`, or TEI). If a layer's container fails to start with a
+TEI, or `mlx_lm.server` for inference only). If a layer's container fails to start with a
 connection error, see "Embedder or inference endpoint unreachable from
 containers" in `docs/troubleshooting.md`.
 
