@@ -2554,7 +2554,12 @@ mail a population run will read; the steps are not sent to clients:
      date bounds, and `folder="Trash"` in a separate query for
      attachments on messages in Trash. It has no text filter: whether
      an occurrence holds the product code is read from its stored text
-     with [`get_attachment`](#get_attachment).
+     with [`get_attachment`](#get_attachment), following each
+     `next_offset` until it is null. Stored text without the code does
+     not show the file lacks it, since no tool reports whether a cap
+     cut the stored text
+     ([#1261](https://github.com/marshalltech81/protonmail-local-ai/issues/1261)):
+     keep such an occurrence undecided.
      [`search_attachments`](#search_attachments) matches extracted
      text, but it ranks, stops at 50 results and has no cursor, so it
      can suggest candidates, not enumerate them.
@@ -2575,8 +2580,11 @@ mail a population run will read; the steps are not sent to clients:
 3. Run `extract_from_emails` with `participant` set to the vendor's
    address (the tool has no `sender`) and a schema that declares its
    own `invoice_date` and `invoice_number`, splitting the period into
-   date windows, with `limit=50` (its maximum). A call's `threads`
-   output lists the threads it searched: check that some window
+   date windows, with `limit=50` (its maximum). Run it once per folder
+   scope the enumeration used, with `folders` to match
+   (`folders=["Trash"]` for the Trash query: without it, threads filed
+   only in Trash are left out). A call's `threads`
+   output lists the threads it searched: check that some call
    searched every enumerated thread, and narrow a window whose call
    left one out. Other threads that rank for `query` take slots too,
    and a thread falls in every window its span overlaps, so narrowing
@@ -2615,15 +2623,17 @@ mail a population run will read; the steps are not sent to clients:
    (`attachment_id` is the payload's content hash, shared by every
    message carrying the same bytes, and `claimant_id` names the
    message), and a message by `claimant_id`, and mark each enumerated
-   item a record cites as covered. Identify a record by the fields its
-   schema declares (here `invoice_number` with the line's own fields), and drop one
-   as a duplicate only when another with the same fields cites the
-   same item, as when overlapping windows extract one thread twice.
+   item a record cites as covered. Each thread is extracted by one
+   model call, so when overlapping windows or folder scopes search one
+   thread more than once, keep that thread's records from one call
+   only, and keep every record that call returned, identical ones
+   included (one invoice can repeat a line).
    Set aside for review a record that cites no enumerated item, and
    report each enumerated item no record cites (its stored text can be
-   read with `get_attachment` or `get_message`, after telling the user
-   how much). Copies of the same bytes attached twice to one message
-   share both IDs, so they cannot be reconciled one by one.
+   read with `get_attachment` or `get_message`, following each
+   `next_offset`, after telling the user how much). Copies of the same
+   bytes attached twice to one message share both IDs, so they cannot
+   be reconciled one by one.
 
 Limits the recipe does not remove:
 
