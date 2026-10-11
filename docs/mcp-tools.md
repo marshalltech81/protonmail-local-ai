@@ -2636,14 +2636,13 @@ mail a population run will read; the steps are not sent to clients:
    (`attachment_id` is the payload's content hash, shared by every
    message carrying the same bytes, and `claimant_id` names the
    message), and a message by `claimant_id`.
-   Count a record only when every field that places it in the
-   population (here the invoice number and the line's product code and
-   amounts) cites passages that are all `in_scope` (each citation's
-   `scope`) and all from enumerated items; mark those items covered.
-   Set aside for review any other record, including one with a
-   `context_only_fields` or `uncited_fields` problem in
-   `citation_problems`: the server reports these problems but keeps
-   the record. Each call marks a thread's messages in or out of its
+   Count a record only when it has no entry in `citation_problems`
+   (the server reports a problem but keeps the record), every field
+   that places it in the population (here the line's product code)
+   cites only `in_scope` passages (each citation's `scope`) of
+   enumerated items, and every other field cites only `in_scope`
+   passages; mark the enumerated items it cites covered. Set aside any
+   other record for review. Each call marks a thread's messages in or out of its
    own scope (its window, folders and `participant`) and tells the
    model to extract only from in-scope messages, so calls that search
    one thread can return different, valid records. With windows that
