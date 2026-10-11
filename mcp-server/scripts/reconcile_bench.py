@@ -2864,42 +2864,46 @@ def run(args: argparse.Namespace) -> dict:
         # Last, after every other step, one sample per configuration in
         # this order, each on a fresh copy of the index (``run_wal``; the
         # page cache holds what the copy and the steps before left).
-        report["wal"] = [
-            {
-                "kind": kind,
-                "method": method,
-                **run_wal(
-                    db,
-                    kind,
-                    max(args.k),
-                    str(work / f"request-{kind}.json"),
-                    batch,
-                    interval,
-                    args.wal_hold,
-                    args.all_extras,
-                    method,
-                    {
-                        "identity": args.identity,
-                        "records": args.records,
-                        "references": args.references,
-                        "chunks": args.chunks,
-                        "chunk_tokens": args.chunk_tokens,
-                        "per_message": args.per_message,
-                        "extracted_chars": args.extracted_chars,
-                    },
-                    args.writer_extract_seconds,
-                    lifecycle,
-                    args.writer_backlog,
-                ),
-            }
-            for kind in ("messages", "occurrences")
-            for method in ("stream", "collect")
-            for lifecycle in args.writer_lifecycle
-            for batch in args.writer_batch
-            for interval in args.writer_interval
-        ]
-        for suffix in ("", "-wal", "-shm"):
-            Path(db + WAL_COPY_SUFFIX + suffix).unlink(missing_ok=True)
+        # The copy can be as large as the index: removed whether every
+        # configuration succeeds or one fails.
+        try:
+            report["wal"] = [
+                {
+                    "kind": kind,
+                    "method": method,
+                    **run_wal(
+                        db,
+                        kind,
+                        max(args.k),
+                        str(work / f"request-{kind}.json"),
+                        batch,
+                        interval,
+                        args.wal_hold,
+                        args.all_extras,
+                        method,
+                        {
+                            "identity": args.identity,
+                            "records": args.records,
+                            "references": args.references,
+                            "chunks": args.chunks,
+                            "chunk_tokens": args.chunk_tokens,
+                            "per_message": args.per_message,
+                            "extracted_chars": args.extracted_chars,
+                        },
+                        args.writer_extract_seconds,
+                        lifecycle,
+                        args.writer_backlog,
+                    ),
+                }
+                for kind in ("messages", "occurrences")
+                for method in ("stream", "collect")
+                for lifecycle in args.writer_lifecycle
+                for batch in args.writer_batch
+                for interval in args.writer_interval
+            ]
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                Path(db + WAL_COPY_SUFFIX + suffix).unlink(missing_ok=True)
     return report
 
 

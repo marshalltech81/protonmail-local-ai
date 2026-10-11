@@ -1338,6 +1338,26 @@ def test_a_drain_that_runs_out_before_the_round_ends_fails_the_measurement(bench
     assert not (tmp_path / ("short.db" + bench.WAL_COPY_SUFFIX + ".stop")).exists()
 
 
+def test_a_failed_wal_configuration_leaves_no_copy_behind(bench, tmp_path):
+    # The WAL copy (and its -wal and -shm files) can be as large as the
+    # index: a configuration that fails (here a drain whose backlog runs
+    # out) still removes it.
+    with pytest.raises(RuntimeError, match="backlog ran out"):
+        bench.main(
+            _argv(
+                {
+                    "--workdir": str(tmp_path),
+                    "--wal": None,
+                    "--writer-batch": "1",
+                    "--writer-interval": "0",
+                    "--writer-lifecycle": "drain",
+                    "--writer-backlog": "1",
+                }
+            )
+        )
+    assert not [p.name for p in tmp_path.iterdir() if bench.WAL_COPY_SUFFIX in p.name]
+
+
 def test_writer_tokenizer_is_the_indexers_pinned_version():
     # The writer cuts thread bodies with the indexer's tokenizer; the
     # ``tokenizers`` this environment resolves (through cohere) must be
