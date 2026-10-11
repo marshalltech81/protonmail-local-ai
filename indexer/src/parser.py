@@ -789,9 +789,9 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     decompose, anything raised by the body / attachment walker that is
     not already caught locally) propagate; an HTML conversion failure is
     caught, and counted as ``html_body`` when the failed part could have
-    contributed to the body; only ``OSError`` from starting the HTML
-    child, or a ``MemoryError`` in this process (host pressure),
-    propagates. They are not collapsed into the
+    contributed to the body; only a parent-side ``OSError`` (the child's
+    scratch, its launch or its pipes) or a ``MemoryError`` in this
+    process (host pressure) propagates. They are not collapsed into the
     ``None`` channel of a missing Message-ID, which would silently
     un-index the file with no dead-letter visibility: letting the
     exception escape routes the row through the queue's retry +
@@ -2127,8 +2127,10 @@ def _convert_html_parts(
     the parts the body could have kept are counted under ``html_body``,
     which marks the body incomplete. The rest of the message is indexed
     as usual. A lone surrogate, which cannot cross to the child as UTF-8,
-    is replaced by ``?`` first and the count logged. ``OSError`` from starting the child (no process or scratch
-    space left) propagates, so the queue retries the message."""
+    is replaced by ``?`` first and the count logged. A parent-side
+    ``OSError`` (creating, writing or removing the child's scratch,
+    starting it, or its pipes) propagates, so the queue retries the
+    message."""
     sources: list[str] = []
     surrogates = 0
     for _, html in parts:
