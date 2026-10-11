@@ -13,7 +13,12 @@ before any proposed use of the headers (#1313):
   get two claimant IDs (#217), each with its own rows in every table
   keyed by claimant ID, and
   neither header ever merges, overwrites or deletes another claimant's
-  rows, in either arrival order.
+  rows, in either arrival order, whether the headers sit at the top of
+  the header block or below the others.
+- Like any header fields, enough of them reach existing work caps: past
+  ``MAX_ADDRESS_HEADER_FIELDS`` top-level fields the address scan stops
+  and says so (#1144), and above ``Date`` past ``SORT_HEADER_MAX_BYTES``
+  they leave a first full index's sort time unknown.
 - Two byte versions of one logical message (a rebuild with a new MIME
   boundary) are two claimants with disjoint chunk IDs; reaping one
   leaves the other's chunks as they were and records the reaped
@@ -30,10 +35,12 @@ and synthetic identity values; nothing is derived from real mail.
 """
 
 import dataclasses
+import email
 import hashlib
 import json
 import logging
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from src import main, parser
@@ -59,14 +66,18 @@ def _eml(
     body: str,
     *,
     identity: tuple[tuple[str, str], ...] = (),
+    identity_first: bool = False,
     boundary: str = "b1316one",
     subject: str = "Identity evidence",
 ) -> bytes:
     """A small multipart message: a text body and a text attachment,
     with display names on the addresses so every claimant-keyed table
     gets rows. ``identity`` is a list of extra ``(name, value)`` header
-    fields, written in order (so a name can repeat); ``boundary``
-    changes only the MIME representation."""
+    fields, written in order (so a name can repeat), after
+    ``Message-ID`` or, with ``identity_first``, at the top of the header
+    block, above ``From``; ``boundary`` changes only the MIME
+    representation."""
+    identity_fields = [f"{name}: {value}" for name, value in identity]
     headers = [
         "From: Sender One <sender@mail.example>",
         "To: Recipient Two <recipient@mail.example>",
@@ -75,7 +86,7 @@ def _eml(
     ]
     if message_id is not None:
         headers.append(f"Message-ID: <{message_id}>")
-    headers += [f"{name}: {value}" for name, value in identity]
+    headers = [*identity_fields, *headers] if identity_first else [*headers, *identity_fields]
     headers += ["MIME-Version: 1.0", f'Content-Type: multipart/mixed; boundary="{boundary}"']
     return (
         "\r\n".join(headers)
@@ -131,25 +142,38 @@ class _Index:
             self.queue.enqueue(str(path), REASON_INITIAL_SCAN)
             _drain(self.queue, self.db, self.embedder, self.threader, batch_size=1)
 
-    def reap(self, path: Path) -> None:
-        """Trash ``path`` (Maildir ``T`` flag) and reap it at once."""
-        path.rename(path.with_name(path.name + "T"))
-        reconciler = Reconciler(
+    def reconciler(self, grace_days: int) -> Reconciler:
+        return Reconciler(
             self.db,
             self.embedder,
             ReconcilerConfig(
-                enabled=True, grace_days=0, sweep_interval_secs=60, max_batch_pct=1.0, force=False
+                enabled=True,
+                grace_days=grace_days,
+                sweep_interval_secs=60,
+                max_batch_pct=1.0,
+                force=False,
             ),
             maildir_root=self.maildir,
         )
+
+    @staticmethod
+    def trash(path: Path) -> Path:
+        """Set the Maildir ``T`` flag on ``path``; the trashed path."""
+        trashed = path.with_name(path.name + "T")
+        path.rename(trashed)
+        return trashed
+
+    def reap(self, path: Path) -> None:
+        """Trash ``path`` and reap it at once."""
+        self.trash(path)
+        reconciler = self.reconciler(grace_days=0)
         reconciler.sweep()
         reconciler.reap()
 
-    def claimant_tables(self) -> list[str]:
+    def schema_claimant_tables(self) -> set[str]:
         """Every regular table with a ``claimant_id`` column, read from
         the schema so a new per-message table is covered without editing
-        this test. ``reaped_messages`` is the reap record, checked on its
-        own."""
+        this test."""
         tables = [
             r[0]
             for r in self.db._conn.execute(
@@ -157,12 +181,16 @@ class _Index:
                 "WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL%'"
             )
         ]
-        return sorted(
+        return {
             t
             for t in tables
-            if t != "reaped_messages"
-            and "claimant_id" in {c[1] for c in self.db._conn.execute(f'PRAGMA table_info("{t}")')}
-        )
+            if "claimant_id" in {c[1] for c in self.db._conn.execute(f'PRAGMA table_info("{t}")')}
+        }
+
+    def claimant_tables(self) -> list[str]:
+        """``schema_claimant_tables`` but ``reaped_messages``, the reap
+        record, which is checked on its own."""
+        return sorted(self.schema_claimant_tables() - {"reaped_messages"})
 
     def rows_of(self, claimant: str) -> dict[str, list[tuple]]:
         """Every row, all columns, keyed by ``claimant``, per table."""
@@ -213,33 +241,56 @@ def _claimant(path: Path) -> str:
     return msg.claimant_id
 
 
+_SOURCE = parser.SourceMetadata(
+    folder="INBOX", flags=frozenset("S"), size=0, mtime_ns=None, path="synthetic://1"
+)
+
+
+def _top_level_fields(raw: bytes) -> int:
+    """The header fields of ``raw``'s top-level header block."""
+    return len(email.message_from_bytes(raw).keys())
+
+
+def _filler(count: int) -> tuple[tuple[str, str], ...]:
+    """``count`` distinct ``X-Pm-Internal-Id`` fields."""
+    return tuple((_INTERNAL, f"SYNTHPMID1316{i:06d}==") for i in range(count))
+
+
+def _same_apart_from_bytes(tagged: parser.Message, plain: parser.Message) -> bool:
+    """Whether ``tagged`` equals ``plain`` in every compared field but
+    the byte-derived ``size`` and ``content_hash`` (``first_indexed_at``,
+    the clock at parse time, is not compared)."""
+    return dataclasses.replace(tagged, size=plain.size, content_hash=plain.content_hash) == plain
+
+
 class TestParserIgnoresIdentityHeaders:
+    @pytest.mark.parametrize("identity_first", [False, True], ids=["after-ids", "top"])
     @pytest.mark.parametrize("shape", sorted(_SECOND_IDENTITY))
-    def test_identity_headers_only_change_the_bytes(self, shape, caplog):
+    def test_identity_headers_only_change_the_bytes(self, shape, identity_first, caplog):
         """Parsed from the same source metadata, a message with identity
-        headers and one without differ only in the fields taken from the
-        bytes themselves (``size`` and ``content_hash``, so the claimant
-        ID); every other compared ``Message`` field is equal (only
-        ``first_indexed_at``, the clock at parse time, is not compared),
-        and ``Message`` has no provider-identity field."""
+        headers (after its other headers, or at the top above ``From``)
+        and one without differ only in the fields taken from the bytes
+        themselves (``size`` and ``content_hash``, so the claimant ID);
+        every other compared ``Message`` field is equal, and ``Message``
+        has no provider-identity field."""
         caplog.set_level(logging.DEBUG)
         plain_raw = _eml("evidence@mail.example", "Same body.")
-        tagged_raw = _eml("evidence@mail.example", "Same body.", identity=_SECOND_IDENTITY[shape])
-        source = parser.SourceMetadata(
-            folder="INBOX", flags=frozenset("S"), size=0, mtime_ns=None, path="synthetic://1"
+        tagged_raw = _eml(
+            "evidence@mail.example",
+            "Same body.",
+            identity=_SECOND_IDENTITY[shape],
+            identity_first=identity_first,
         )
 
-        plain = parser.parse_email_bytes(plain_raw, source)
-        tagged = parser.parse_email_bytes(tagged_raw, source)
+        plain = parser.parse_email_bytes(plain_raw, _SOURCE)
+        tagged = parser.parse_email_bytes(tagged_raw, _SOURCE)
 
         assert plain is not None and tagged is not None
         assert (tagged.size, tagged.content_hash) == (
             len(tagged_raw),
             hashlib.sha256(tagged_raw).hexdigest(),
         )
-        assert (
-            dataclasses.replace(tagged, size=plain.size, content_hash=plain.content_hash) == plain
-        )
+        assert _same_apart_from_bytes(tagged, plain)
         if shape == "absent":
             assert tagged.claimant_id == plain.claimant_id
         else:
@@ -247,20 +298,149 @@ class TestParserIgnoresIdentityHeaders:
         assert all(marker not in repr(tagged) for marker in _ID_MARKERS)
         assert all(marker not in caplog.text for marker in _ID_MARKERS)
 
+    @pytest.mark.parametrize("identity_first", [False, True], ids=["after-ids", "top"])
+    def test_identity_headers_up_to_the_address_scan_cap_change_nothing_else(self, identity_first):
+        """With exactly ``MAX_ADDRESS_HEADER_FIELDS`` top-level fields in
+        all, identity headers are still bytes only, wherever they sit."""
+        plain_raw = _eml("evidence@mail.example", "Same body.")
+        count = parser.MAX_ADDRESS_HEADER_FIELDS - _top_level_fields(plain_raw)
+        tagged_raw = _eml(
+            "evidence@mail.example",
+            "Same body.",
+            identity=_filler(count),
+            identity_first=identity_first,
+        )
+        assert _top_level_fields(tagged_raw) == parser.MAX_ADDRESS_HEADER_FIELDS
+
+        plain = parser.parse_email_bytes(plain_raw, _SOURCE)
+        tagged = parser.parse_email_bytes(tagged_raw, _SOURCE)
+
+        assert plain is not None and tagged is not None
+        assert _same_apart_from_bytes(tagged, plain)
+
+    @pytest.mark.parametrize(
+        ("layout", "addresses_kept"),
+        [("one-over-after-ids", True), ("one-over-top", True), ("fill-scan-top", False)],
+    )
+    def test_identity_headers_past_the_address_scan_cap_are_counted(
+        self, caplog, layout, addresses_kept
+    ):
+        """Past ``MAX_ADDRESS_HEADER_FIELDS`` top-level fields, the From /
+        To / Cc scan stops (#1144), wherever the identity headers sit. The
+        cap is counted (``parse_caps``, a WARNING with its count), the
+        sender is flagged ambiguous and all three address roles
+        incomplete. Address headers before the cut-off are kept; identity
+        headers that fill the scan above ``From`` lose every address. The
+        body, attachments, subject and dates are unchanged."""
+        caplog.set_level(logging.DEBUG)
+        plain_raw = _eml("evidence@mail.example", "Same body.")
+        if layout == "fill-scan-top":
+            count = parser.MAX_ADDRESS_HEADER_FIELDS
+        else:
+            count = parser.MAX_ADDRESS_HEADER_FIELDS - _top_level_fields(plain_raw) + 1
+        tagged_raw = _eml(
+            "evidence@mail.example",
+            "Same body.",
+            identity=_filler(count),
+            identity_first=layout != "one-over-after-ids",
+        )
+
+        plain = parser.parse_email_bytes(plain_raw, _SOURCE)
+        tagged = parser.parse_email_bytes(tagged_raw, _SOURCE)
+
+        assert plain is not None and tagged is not None
+        assert tagged.parse_caps == {"address_fields": 1}
+        assert tagged.sender_ambiguous and not plain.sender_ambiguous
+        assert not (
+            tagged.from_addresses_complete
+            or tagged.to_addresses_complete
+            or tagged.cc_addresses_complete
+        )
+        if addresses_kept:
+            kept = (plain.from_addr, plain.from_addrs, plain.to_addrs, plain.participant_names)
+        else:
+            kept = ("", [], [], [])
+        assert (tagged.from_addr, tagged.from_addrs, tagged.to_addrs, tagged.participant_names) == (
+            kept
+        )
+        # Nothing else the parser returns changes.
+        assert _same_apart_from_bytes(
+            dataclasses.replace(
+                tagged,
+                from_addr=plain.from_addr,
+                from_addrs=plain.from_addrs,
+                to_addrs=plain.to_addrs,
+                participant_names=plain.participant_names,
+                sender_ambiguous=plain.sender_ambiguous,
+                from_addresses_complete=plain.from_addresses_complete,
+                to_addresses_complete=plain.to_addresses_complete,
+                cc_addresses_complete=plain.cc_addresses_complete,
+                parse_caps=plain.parse_caps,
+            ),
+            plain,
+        )
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "parser work caps" in r.getMessage()
+        ]
+        assert len(warnings) == 1 and warnings[0].endswith(": address_fields=1")
+        assert all(marker not in caplog.text for marker in _ID_MARKERS)
+
+    @pytest.mark.parametrize(
+        ("identity_first", "past_the_read"),
+        [(False, True), (True, False), (True, True)],
+        ids=["after-ids", "top-within-read", "top-past-read"],
+    )
+    def test_identity_headers_above_the_date_past_the_sort_read_hide_it(
+        self, tmp_path, identity_first, past_the_read
+    ):
+        """``message_sort_time``, which orders a first full index, reads
+        only the first ``SORT_HEADER_MAX_BYTES`` of the header block.
+        Identity headers below the ``Date`` leave it alone; identity
+        headers above it that push it past that read leave the sort time
+        unknown (the file is ordered at the walk's start time)."""
+        plain_raw = _eml("evidence@mail.example", "Same body.")
+        field = len(f"{_INTERNAL}: SYNTHPMID1316000000==\r\n")
+        count = (parser.SORT_HEADER_MAX_BYTES // field + 1) if past_the_read else 10
+        tagged_raw = _eml(
+            "evidence@mail.example",
+            "Same body.",
+            identity=_filler(count),
+            identity_first=identity_first,
+        )
+        path = tmp_path / "message"
+        path.write_bytes(plain_raw)
+        plain_time = parser.message_sort_time(path)
+        path.write_bytes(tagged_raw)
+
+        tagged_time = parser.message_sort_time(path)
+
+        assert plain_time is not None
+        if identity_first and past_the_read:
+            assert tagged_raw.index(b"\r\nDate:") > parser.SORT_HEADER_MAX_BYTES
+            assert tagged_time is None
+        else:
+            assert tagged_time == plain_time
+
 
 class TestClaimantsStayIndependent:
     @pytest.mark.parametrize("order", ["first-then-second", "second-then-first"])
     @pytest.mark.parametrize("same_message_id", [True, False], ids=["same-mid", "other-mid"])
+    @pytest.mark.parametrize("identity_first", [False, True], ids=["after-ids", "top"])
     @pytest.mark.parametrize("shape", sorted(_SECOND_IDENTITY))
     def test_identity_headers_never_merge_overwrite_or_delete(
-        self, tmp_path, monkeypatch, caplog, shape, same_message_id, order
+        self, tmp_path, monkeypatch, caplog, shape, identity_first, same_message_id, order
     ):
         """Two different files, whatever identity headers they carry
-        (equal, forged, duplicated, conflicting, absent) and whatever
-        their Message-IDs, are two claimants, each with its own rows in
-        every table keyed by claimant ID. Reaping the first removes all
-        of its rows and leaves every row of the second exactly as it
-        was."""
+        (equal, forged, duplicated, conflicting, absent; after the other
+        headers or at the top) and whatever their Message-IDs, are two
+        claimants, each with its own rows in every table keyed by
+        claimant ID. Trashing the first tombstones only its claimant ID
+        and, within the grace window, changes no row of either; reaping
+        it then removes all of its rows and leaves every row of the
+        second exactly as it was. Every table with a ``claimant_id``
+        column in the schema holds rows at some step."""
         caplog.set_level(logging.DEBUG)
         idx = _Index(tmp_path, monkeypatch)
         first = idx.write(
@@ -278,6 +458,7 @@ class TestClaimantsStayIndependent:
                 "first@mail.example" if same_message_id else "second@mail.example",
                 "Second wording betaword.",
                 identity=_SECOND_IDENTITY[shape],
+                identity_first=identity_first,
                 subject="Second subject",
             ),
         )
@@ -307,8 +488,34 @@ class TestClaimantsStayIndependent:
         text_b = " ".join(idx.chunks_of(b).values())
         assert "alphaword" in text_a and "betaword" not in text_a
         assert "betaword" in text_b and "alphaword" not in text_b
+        observed = {t for rows in (rows_a, rows_b) for t, r in rows.items() if r}
 
-        idx.reap(first)
+        # Trash the first and hold it in the grace window: the tombstone
+        # names its claimant ID, never the bare Message-ID or the other
+        # claimant, and no row of either claimant is removed.
+        trashed = idx.trash(first)
+        held = idx.reconciler(grace_days=1)
+        held.sweep()
+        held.reap()
+        tombstones = [
+            (r["filepath"], r["claimant_id"], r["thread_id"])
+            for r in idx.db._conn.execute(
+                "SELECT filepath, claimant_id, thread_id FROM pending_deletions"
+            )
+        ]
+        (thread_a,) = idx.db._conn.execute(
+            "SELECT thread_id FROM messages WHERE claimant_id = ?", (a,)
+        ).fetchone()
+        assert tombstones == [(str(trashed), a, thread_a)]
+        held_a = idx.rows_of(a)
+        assert held_a["pending_deletions"] == [(str(trashed), a, thread_a, mock.ANY)]
+        assert all(held_a[t] for t in populated)
+        assert idx.rows_of(b) == rows_b
+        assert not idx.db._conn.execute("SELECT 1 FROM reaped_messages").fetchall()
+        assert idx.tables_holding(_ID_MARKERS) == set()
+        observed |= {t for t, r in held_a.items() if r}
+
+        idx.reconciler(grace_days=0).reap()
 
         assert not any(idx.rows_of(a).values())
         # Every row of the survivor, in every claimant-keyed table, is
@@ -317,8 +524,63 @@ class TestClaimantsStayIndependent:
         assert idx.db.is_indexed(str(second))
         reaped = idx.db._conn.execute("SELECT claimant_id FROM reaped_messages").fetchall()
         assert [r["claimant_id"] for r in reaped] == [a]
+        observed.add("reaped_messages")
+        # Each claimant-keyed table in the schema was seen holding rows,
+        # so none of the checks above passed on an empty table. A new
+        # table needs rows in this test, or an exclusion with its reason.
+        assert observed == idx.schema_claimant_tables()
         # No identity value is logged or stored anywhere (no table keeps
         # raw headers today; #1079's header store will revisit this).
+        assert all(marker not in caplog.text for marker in _ID_MARKERS)
+        assert idx.tables_holding(_ID_MARKERS) == set()
+
+    def test_identity_headers_past_the_address_scan_cap_index_as_their_own_claimant(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A file whose identity headers fill the address scan above
+        ``From`` (``MAX_ADDRESS_HEADER_FIELDS``, #1144) is still its own
+        claimant: indexed with the sender flagged ambiguous, all three
+        address roles incomplete, the cap in ``caps_json`` and no
+        participant rows, while the other file's rows are unchanged; and
+        reaping it leaves them unchanged."""
+        caplog.set_level(logging.DEBUG)
+        idx = _Index(tmp_path, monkeypatch)
+        first = idx.write(
+            "1700000000.M1.host",
+            _eml("first@mail.example", "First wording alphaword.", identity=_FIRST_IDENTITY),
+        )
+        idx.index(first)
+        a = _claimant(first)
+        rows_a = idx.rows_of(a)
+        capped = idx.write(
+            "1700000001.M2.host",
+            _eml(
+                "first@mail.example",
+                "Capped wording betaword.",
+                identity=_filler(parser.MAX_ADDRESS_HEADER_FIELDS),
+                identity_first=True,
+            ),
+        )
+        idx.index(capped)
+
+        b = _claimant(capped)
+        assert b != a
+        (row,) = idx.db._conn.execute(
+            "SELECT sender_ambiguous, from_addresses_complete, to_addresses_complete, "
+            "cc_addresses_complete, caps_json FROM messages WHERE claimant_id = ?",
+            (b,),
+        ).fetchall()
+        assert tuple(row)[:4] == (1, 0, 0, 0)
+        assert json.loads(row["caps_json"]) == {"address_fields": 1}
+        rows_b = idx.rows_of(b)
+        assert not rows_b["message_participants"] and not rows_b["message_participant_names"]
+        assert "betaword" in " ".join(idx.chunks_of(b).values())
+        assert idx.rows_of(a) == rows_a
+
+        idx.reap(capped)
+
+        assert not any(idx.rows_of(b).values())
+        assert idx.rows_of(a) == rows_a
         assert all(marker not in caplog.text for marker in _ID_MARKERS)
         assert idx.tables_holding(_ID_MARKERS) == set()
 
