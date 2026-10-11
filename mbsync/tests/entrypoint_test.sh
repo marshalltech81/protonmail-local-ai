@@ -1586,7 +1586,8 @@ endpoint_setup() {
     BRIDGE_CERT_FINGERPRINT="$FP_OLD"
     export BRIDGE_USER="synthetic@example.com"
     load_constants PROTON_FOLDER_EXCLUSIONS ISYNC_LAYOUT_EXCLUSIONS
-    load expected_fingerprint validate_bridge_endpoint render_mbsync_config
+    load expected_fingerprint validate_bridge_endpoint bridge_imap_host bridge_imap_connect \
+        render_mbsync_config
 }
 
 # The settings the config must keep: implicit TLS (#638) with the
@@ -2720,6 +2721,90 @@ check "a new setting left out of the hash is reported" \
     a_new_setting_left_out_of_the_hash_is_reported
 check "malformed settings still give the identity line" \
     malformed_settings_still_give_the_identity_line
+
+# --- the Proton provider integration is one section (#1482) -----------------
+#
+# PLAN.md decision 45: the Bridge policy (connection and trust input
+# validation, the expected fingerprint, the persistent pin and its
+# rotation, the Tunnel, the Proton folder exclusions) sits between the
+# two marker lines below, and the transport (rendering, the wait, the
+# sync loop, permission repair, output filtering) reaches it only through
+# the entry points named here. The lists are written out, not read from
+# the section, so a function or constant that moves out, or a new one
+# that is never placed, is reported.
+readonly PROVIDER_BEGIN='# --- Proton provider integration: begin ---'
+readonly PROVIDER_END='# --- Proton provider integration: end ---'
+PROVIDER_ENTRY_POINTS=(bridge_imap_connect bridge_imap_host expected_fingerprint extract_bridge_cert
+    validate_bridge_endpoint warn_if_pin_rotation_enabled)
+PROVIDER_INTERNAL=(cert_fingerprint verify_cert_pin verify_expected_fingerprint write_pin)
+PROVIDER_CONSTANTS=(BRIDGE_CERT_FINGERPRINT BRIDGE_CERT_HOST BRIDGE_CERT_PIN_ROTATE BRIDGE_HOST
+    BRIDGE_IMAP_PORT BRIDGE_PASS_FILE CERT_EXTRACT_TIMEOUT_SECONDS CERT_FILE PIN_FILE
+    PROTON_FOLDER_EXCLUSIONS STATE_DIR)
+# Code (not comments) that only the provider section may hold.
+PROVIDER_ONLY_CODE=(socat s_client PIN_FILE CERT_FILE)
+readonly PROVIDER_ENTRY_POINTS PROVIDER_INTERNAL PROVIDER_CONSTANTS PROVIDER_ONLY_CODE
+
+# Prints each problem with the provider section of the given entrypoint,
+# nothing when there is none.
+provider_section_problems() {
+    local file="$1" inside outside begins ends defined name expected
+    begins="$(grep -cxF "$PROVIDER_BEGIN" "$file" || true)"
+    ends="$(grep -cxF "$PROVIDER_END" "$file" || true)"
+    if [[ "$begins" != 1 || "$ends" != 1 ]]; then
+        printf 'expected one begin and one end marker, found %s and %s\n' "$begins" "$ends"
+        return 0
+    fi
+    inside="$(awk -v b="$PROVIDER_BEGIN" -v e="$PROVIDER_END" '$0 == e {p = 0} p {print} $0 == b {p = 1}' "$file")"
+    outside="$(awk -v b="$PROVIDER_BEGIN" -v e="$PROVIDER_END" '$0 == b {p = 1} !p {print} $0 == e {p = 0}' "$file")"
+    defined="$(grep -oE '^[a-z_]+\(\) \{$' <<<"$inside" | sed 's/() {$//' | sort)"
+    expected="$(printf '%s\n' "${PROVIDER_ENTRY_POINTS[@]}" "${PROVIDER_INTERNAL[@]}" | sort)"
+    [[ "$defined" == "$expected" ]] || printf 'provider functions differ:\n%s\n' "$(diff <(printf '%s\n' "$expected") <(printf '%s\n' "$defined") || true)"
+    for name in "${PROVIDER_CONSTANTS[@]}"; do
+        grep -qE "^readonly ${name}=" <<<"$inside" || printf 'constant not in the provider section: %s\n' "$name"
+        if grep -qE "^readonly ${name}=" <<<"$outside"; then
+            printf 'constant outside the provider section: %s\n' "$name"
+        fi
+    done
+    outside="$(grep -vE '^[[:space:]]*#' <<<"$outside")"
+    for name in "${PROVIDER_ENTRY_POINTS[@]}"; do
+        grep -qw "$name" <<<"$outside" || printf 'entry point not called outside the provider section: %s\n' "$name"
+    done
+    for name in "${PROVIDER_INTERNAL[@]}" "${PROVIDER_ONLY_CODE[@]}"; do
+        if grep -qw "$name" <<<"$outside"; then
+            printf 'provider code outside the provider section: %s\n' "$name"
+        fi
+    done
+    # The provider calls no transport function.
+    while IFS= read -r name; do
+        if grep -vE '^[[:space:]]*#' <<<"$inside" | grep -qw "$name"; then
+            printf 'the provider section calls a transport function: %s\n' "$name"
+        fi
+    done < <(grep -oE '^[a-z_]+\(\) \{$' <<<"$outside" | sed 's/() {$//')
+}
+
+bridge_policy_is_one_provider_section() {
+    local problems
+    problems="$(provider_section_problems "$ENTRYPOINT")"
+    [[ -z "$problems" ]] || {
+        printf '%s\n' "$problems"
+        return 1
+    }
+}
+
+# The check reports a policy step written outside the section.
+policy_outside_the_provider_section_is_reported() {
+    local copy="$WORK/entrypoint-policy-outside.sh"
+    {
+        cat "$ENTRYPOINT"
+        # shellcheck disable=SC2016 # the expansion is the text written
+        printf 'write_pin "$FP"\n'
+    } >"$copy"
+    [[ "$(provider_section_problems "$copy")" == "provider code outside the provider section: write_pin" ]] || return 1
+}
+
+check "the Bridge policy is one provider section" bridge_policy_is_one_provider_section
+check "policy outside the provider section is reported" \
+    policy_outside_the_provider_section_is_reported
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
