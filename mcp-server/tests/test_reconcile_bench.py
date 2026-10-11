@@ -205,8 +205,9 @@ def test_failed_round_stops_the_writer(bench, tmp_path):
     bench.build(db, 20, 1, "typical", "typical")
 
     def commits() -> int:
-        # Every writer message adds a messages row after the corpus's 20.
-        with closing(sqlite3.connect(db)) as conn:
+        # Every writer message adds a messages row after the corpus's 20,
+        # in the copy the configuration runs on.
+        with closing(sqlite3.connect(str(db) + bench.WAL_COPY_SUFFIX)) as conn:
             return conn.execute("SELECT MAX(rowid) FROM messages").fetchone()[0]
 
     with pytest.raises(RuntimeError, match="reconcile round failed"):
@@ -215,7 +216,7 @@ def test_failed_round_stops_the_writer(bench, tmp_path):
     assert after > 20
     time.sleep(0.5)
     assert commits() == after
-    assert not (tmp_path / "failed.db.stop").exists()
+    assert not (tmp_path / ("failed.db" + bench.WAL_COPY_SUFFIX + ".stop")).exists()
 
 
 def test_filtered_certificate_counts_what_a_page_counts(report):
@@ -1131,7 +1132,7 @@ def test_a_writer_that_fails_before_it_is_ready_fails_the_measurement(bench, tmp
     with pytest.raises(RuntimeError, match="did not get ready"):
         bench.run_wal(str(db), "messages", 5, str(request), 1, 0.0)
     assert time.monotonic() - started < 30
-    assert not (tmp_path / "unready.db.stop").exists()
+    assert not (tmp_path / ("unready.db" + bench.WAL_COPY_SUFFIX + ".stop")).exists()
 
 
 def test_writer_holds_one_message_at_a_time(bench, tmp_path, monkeypatch):
@@ -1182,38 +1183,31 @@ def test_writer_holds_one_message_at_a_time(bench, tmp_path, monkeypatch):
     assert threads[-1].participants
 
 
-def test_writer_removes_what_an_earlier_writer_added(bench, tmp_path):
-    # Each WAL configuration starts from the corpus build wrote.
-    db = tmp_path / "again.db"
+def test_each_wal_configuration_starts_from_the_built_index(bench, tmp_path):
+    # Deleting a writer's rows would restore row counts, not the file
+    # (freelist, B-tree splits, FTS segments, vector chunks), so each
+    # configuration runs on a fresh copy of the index build left, and
+    # the index itself is never written.
+    import hashlib
+
+    db = tmp_path / "base.db"
     bench.build(db, 8, 1, "typical", "typical")
-    tables = [*bench._MARKED, "pending_deletions"]
-
-    def counts() -> dict:
-        with closing(sqlite3.connect(db)) as conn:
-            found = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
-            # The writer's first message's body term and filename.
-            found["fts"] = conn.execute(
-                "SELECT COUNT(*) FROM message_chunks_fts WHERE message_chunks_fts MATCH ?",
-                ("gamma0000000008",),
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"hashes": ""}))
+    built = hashlib.sha256(db.read_bytes()).hexdigest()
+    copy = Path(str(db) + bench.WAL_COPY_SUFFIX)
+    shape = {"per_message": 1}
+    for _ in range(2):
+        out = bench.run_wal(str(db), "messages", 5, str(request), 1, 0.0, shape=shape)
+        assert out["writer_commits_total"] > 0
+        with closing(sqlite3.connect(copy)) as conn:
+            # The writer numbers on from the corpus each time: no earlier
+            # writer's message is in its copy.
+            first = conn.execute(
+                "SELECT message_id FROM messages WHERE rowid > 8 ORDER BY rowid LIMIT 1"
             ).fetchone()[0]
-            return found
-
-    built = counts()
-    stop = tmp_path / "stop"
-    timer = _stop_after_batch(db, stop, 9)
-    bench.phase_writer(str(db), str(stop), 1, 3600.0, shape={"per_message": 1})
-    timer.join()
-    assert counts()["messages"] == 9 and counts()["fts"] == 1
-    out = bench.phase_writer(str(db), str(stop), 1, 0.0)  # stop exists: setup only
-    assert out["commits"] == 0 and len(out["commit_times"]) == 1
-    assert (tmp_path / "stop.ready").exists()
-    assert counts() == built
-    with closing(sqlite3.connect(db)) as conn:
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        for table in bench.WRITER_TABLES:
-            if table != "threads_fts":
-                assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
+        assert first == bench.message_id(8, "typical")
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == built
 
 
 def test_round_transaction_time_starts_at_the_snapshot(bench):
@@ -1470,7 +1464,7 @@ def test_a_writer_that_dies_mid_round_fails_the_measurement(bench, tmp_path):
     request.write_text(json.dumps({"hashes": ""}))
     with pytest.raises(RuntimeError, match="WAL writer exited with status 1"):
         bench.run_wal(str(db), "messages", 5, str(request), 1, 0.0)
-    assert not (tmp_path / "dies.db.stop").exists()
+    assert not (tmp_path / ("dies.db" + bench.WAL_COPY_SUFFIX + ".stop")).exists()
 
 
 def test_wal_results_name_the_round_they_measured(bench, report):

@@ -1513,9 +1513,6 @@ CREATE TABLE IF NOT EXISTS indexing_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_indexing_jobs_status_next
     ON indexing_jobs(status, next_attempt_at);
--- The corpus's high-water rowid per table the writer adds rows to,
--- written once, before the first writer is ready.
-CREATE TABLE IF NOT EXISTS bench_writer_marks (name TEXT PRIMARY KEY, mark INTEGER NOT NULL);
 """
 WRITER_TABLES = (
     "threads",
@@ -1528,19 +1525,10 @@ WRITER_TABLES = (
     "message_chunks_vec",
     "indexing_jobs",
 )
-# Corpus tables the writer adds rows to. Its setup deletes every row
-# above the corpus's mark, so each WAL configuration starts from the
-# corpus ``build`` wrote (the FTS rows go with their chunks and
-# occurrences).
-_MARKED = (
-    "messages",
-    "message_participants",
-    "message_participant_names",
-    "entities",
-    "message_chunks",
-    "attachments",
-    "attachment_extractions",
-)
+# Each WAL configuration runs on a fresh copy of the built index at this
+# path (``run_wal``), so no configuration starts from the file an earlier
+# writer left (its freelist, B-tree splits, FTS segments, vector chunks).
+WAL_COPY_SUFFIX = ".wal-run.db"
 
 # Copies of indexer values the writer follows (the fidelity test checks
 # them): the vector width (indexer/src/database.py), the thread-sum
@@ -1687,35 +1675,6 @@ def _thread_body(text: str) -> str:
         if tokens > THREAD_BODY_TEXT_MAX_TOKENS:
             return " ".join(words[:n])
     return text
-
-
-def _writer_setup(conn: sqlite3.Connection) -> None:
-    """Create the writer's tables, record the corpus's marks once, and
-    delete every row an earlier writer added, in one transaction."""
-    conn.executescript(_WRITER_SCHEMA)
-    conn.execute("BEGIN IMMEDIATE")
-    for table in _MARKED:
-        conn.execute(
-            f"INSERT OR IGNORE INTO bench_writer_marks (name, mark) "  # nosec B608
-            f"SELECT ?, COALESCE(MAX(rowid), 0) FROM {table}",
-            (table,),
-        )
-    marks = dict(conn.execute("SELECT name, mark FROM bench_writer_marks"))
-    conn.execute(
-        "DELETE FROM message_chunks_fts WHERE rowid IN "
-        "(SELECT fts_rowid FROM message_chunks WHERE rowid > ?)",
-        (marks["message_chunks"],),
-    )
-    conn.execute(
-        "DELETE FROM attachments_fts WHERE rowid IN "
-        "(SELECT fts_rowid FROM attachments WHERE rowid > ?)",
-        (marks["attachments"],),
-    )
-    for table in _MARKED:
-        conn.execute(f"DELETE FROM {table} WHERE rowid > ?", (marks[table],))  # nosec B608
-    for table in WRITER_TABLES:
-        conn.execute(f"DELETE FROM {table}")  # nosec B608
-    conn.execute("COMMIT")
 
 
 @dataclass
@@ -1994,11 +1953,9 @@ def phase_writer(
     commit. The pace is a parameter, not the indexer's own, and the
     phase 2b embed request it waits for is not modelled.
 
-    First, in one transaction, it creates the indexer's tables the
-    corpus lacks (``_WRITER_SCHEMA``), deletes every row an earlier
-    writer added (``_writer_setup``), records that state and creates
-    ``stop + ".ready"``. Like the indexer's connection it overwrites
-    deleted content (``secure_delete``).
+    First it creates the indexer's tables the corpus lacks
+    (``_WRITER_SCHEMA``), records that state and creates
+    ``stop + ".ready"``. It applies the indexer's connection settings.
 
     After each commit it records the time and the WAL file's size, so a
     window's commit count and its WAL sizes come from the same records:
@@ -2048,8 +2005,8 @@ def phase_writer(
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-64000")
         conn.execute("PRAGMA wal_autocheckpoint=0")
-        _writer_setup(conn)
-        corpus = conn.execute("SELECT mark FROM bench_writer_marks WHERE name = 'messages'")
+        conn.executescript(_WRITER_SCHEMA)
+        corpus = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM messages")
         next_i = -(-corpus.fetchone()[0] // 4) * 4
         # The state before any measured commit: it can only be the start.
         times.append((time.monotonic(), os.stat(wal).st_size))
@@ -2282,7 +2239,17 @@ def run_wal(
     records (``phase_writer``), split at the round's window by the same
     timestamps, so no commit is counted without its frames or the
     reverse; the order lock (``_ordered``) keeps every commit wholly on
-    one side of each window boundary."""
+    one side of each window boundary.
+
+    It runs on a fresh copy of ``db_path`` (``WAL_COPY_SUFFIX``, taken
+    with SQLite's backup, so page for page), replacing the last
+    configuration's copy; ``db_path`` itself is only read."""
+    base = db_path
+    db_path = base + WAL_COPY_SUFFIX
+    for suffix in ("", "-wal", "-shm"):
+        Path(db_path + suffix).unlink(missing_ok=True)
+    with closing(sqlite3.connect(base)) as src, closing(sqlite3.connect(db_path)) as dst:
+        src.backup(dst)
     wal = Path(db_path + "-wal")
     stop = Path(db_path + ".stop")
     ready = Path(str(stop) + ".ready")
@@ -2328,8 +2295,8 @@ def run_wal(
         try:
             # The writer's setup, then three seconds of commits before the
             # round.
-            # The setup's work is bounded (what earlier writers added), so
-            # it is waited for while the writer runs, however long.
+            # The setup's work is bounded (it creates the writer's
+            # tables), so it is waited for while the writer runs.
             while not ready.exists():
                 if writer.poll() is not None:
                     raise RuntimeError("the WAL writer did not get ready")
@@ -2490,7 +2457,8 @@ def run(args: argparse.Namespace) -> dict:
         report["reconcile"][kind].update(_reconcile_runs(db, kind, request, req, args))
     if args.wal:
         # Last, after every other step, one sample per configuration in
-        # this order (the page cache holds what the steps before left).
+        # this order, each on a fresh copy of the index (``run_wal``; the
+        # page cache holds what the copy and the steps before left).
         report["wal"] = [
             {
                 "kind": kind,
@@ -2521,6 +2489,8 @@ def run(args: argparse.Namespace) -> dict:
             for batch in args.writer_batch
             for interval in args.writer_interval
         ]
+        for suffix in ("", "-wal", "-shm"):
+            Path(db + WAL_COPY_SUFFIX + suffix).unlink(missing_ok=True)
     return report
 
 

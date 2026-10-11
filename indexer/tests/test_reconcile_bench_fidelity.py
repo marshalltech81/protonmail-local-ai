@@ -404,7 +404,7 @@ def _setting(pragma: str) -> str:
 
 def _writer_commits(bench, tmp_path, monkeypatch, batch: int, tables: set[str], pragmas):
     """The WAL writer's commits for its first batch of ``batch``
-    messages, its setup commit left out."""
+    messages."""
 
     tmp_path.mkdir()
     db = tmp_path / "bench.db"
@@ -426,12 +426,8 @@ def _writer_commits(bench, tmp_path, monkeypatch, batch: int, tables: set[str], 
     # Every connection setting the indexer applies, the writer applies.
     ours = {_setting(s) for s in statements if s.upper().startswith("PRAGMA")}
     assert {_setting(p) for p in pragmas} <= ours
-    commits = _commits(statements, tables | {"bench_writer_marks"})
-    # The setup commit (before the writer is ready) records the corpus
-    # high-water marks; every later commit is the batch.
-    assert "bench_writer_marks" in commits[0]
-    assert not any("bench_writer_marks" in c for c in commits[1:])
-    return commits[1:]
+    # The setup only creates tables: every commit is the batch's.
+    return _commits(statements, tables)
 
 
 @pytest.mark.parametrize("batch", [1, 4])
@@ -610,9 +606,7 @@ def test_wal_writer_writes_the_rows_the_indexer_writes(bench, tmp_path, monkeypa
     bench.phase_writer(str(ours_db), str(stop), 4, 3600.0, shape=shape)
     timer.join()
     ours = _traced_rows(ours_db, None)
-    # After the writer's setup commit (its first).
-    batch = ours_statements[ours_statements.index("COMMIT") + 1 :]
-    ours_fts = [s for s in batch if s.startswith(_FTS_WRITES)]
+    ours_fts = [s for s in ours_statements if s.startswith(_FTS_WRITES)]
     if case != "typical":
         # These threads' bodies pass ``THREAD_BODY_TEXT_MAX_TOKENS``,
         # which the indexer counts with its BPE tokenizer and the writer

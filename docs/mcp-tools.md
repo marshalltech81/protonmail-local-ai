@@ -1672,7 +1672,8 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
   pace is a parameter
   ([#1469](https://github.com/marshalltech81/protonmail-local-ai/issues/1469)).
   The writer runs with automatic checkpoints off, so the WAL file's
-  size is the WAL's end.
+  size is the WAL's end. Each configuration runs on a fresh copy of the
+  index as it was built, so the WAL phase needs disk for a second copy.
 
 Run it inside the mcp-server image so SQLite and Python match the
 server's; `--help` lists every option:
