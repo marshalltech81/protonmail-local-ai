@@ -162,7 +162,7 @@ explicit_values_still_pass() {
 }
 
 # The Compose default model is an Anthropic one, so openai mode needs its
-# own (Codex review round 2).
+# own.
 openai_mode_requires_a_model() {
     setup 'INFERENCE_MODE=openai'
     fails_with 'INFERENCE_MODEL must be set when INFERENCE_MODE=openai'
@@ -292,7 +292,7 @@ non_numeric_timeout_fails() {
     fails_with 'RERANK_TIMEOUT_SECS must be a number'
 }
 
-# --- Existing failures still fail -----------------------------------------
+# --- Other rejected values ------------------------------------------------
 
 zero_sync_interval_fails() {
     setup 'SYNC_INTERVAL=0'
@@ -327,7 +327,7 @@ sync_deadline_values() {
 }
 
 # Compose and the mcp-server loader both read a zero-padded port as
-# decimal (Codex review round 1).
+# decimal.
 zero_padded_port_is_decimal() {
     setup 'MCP_PORT=08080'
     passes
@@ -508,7 +508,7 @@ unusable_mcp_token_fails_without_echoing_it() {
     done
 }
 
-# Review round 1: command substitution drops NUL bytes, so a token with
+# Command substitution drops NUL bytes, so a token with
 # one inside must be refused before the file is read into a variable.
 mcp_token_with_nul_byte_fails() {
     setup
@@ -877,7 +877,7 @@ linux_operator_holding_uid_1002_passes() {
     ! grep -F 'host account' "$WORK/output"
 }
 
-# Review round 1: another account sharing UID 1002 with the operator
+# Another account sharing UID 1002 with the operator
 # reads the file just the same, though a lookup by UID names only the
 # operator.
 linux_account_sharing_operator_uid_1002_fails() {
@@ -889,7 +889,7 @@ linux_account_sharing_operator_uid_1002_fails() {
     fails_with "$HOST_ACCOUNT_1002_ERROR"
 }
 
-# Review round 2: a failed lookup by UID stops validation even though
+# A failed lookup by UID stops validation even though
 # the listing that follows it succeeds.
 linux_failed_uid_lookup_fails() {
     stub_host Linux 4242
@@ -900,7 +900,7 @@ linux_failed_uid_lookup_fails() {
     fails_with 'getent passwd failed with status 1'
 }
 
-# Review round 2: the operator's name is compared as is, so a name
+# The operator's name is compared as is, so a name
 # with a backslash (winbind's DOMAIN\user) still matches its own entry.
 linux_operator_name_with_backslash_passes() {
     stub_host Linux 1002
@@ -911,7 +911,7 @@ linux_operator_name_with_backslash_passes() {
     passes
 }
 
-# Review round 1: without getent the account check cannot run.
+# Without getent the account check cannot run.
 linux_missing_getent_fails() {
     stub_host Linux 4242
     setup
@@ -921,7 +921,7 @@ linux_missing_getent_fails() {
     fails_with 'getent is needed to check for another host account with UID 1002'
 }
 
-# Review round 1: the indexer must also be able to search config/, the
+# The indexer must also be able to search config/, the
 # mount root; a 700 directory needs a search ACL for UID 1002.
 linux_unsearchable_config_dir_fails() {
     stub_host Linux 4242
@@ -937,7 +937,7 @@ linux_unsearchable_config_dir_fails() {
     passes
 }
 
-# Review round 1: the printed command quotes the path for the shell.
+# The printed command quotes the path for the shell.
 linux_fix_command_quotes_the_path() {
     stub_host Linux 4242
     setup
@@ -948,7 +948,7 @@ linux_fix_command_quotes_the_path() {
     grep -F "setfacl -b $(printf '%q' "$ROOT/config/authority.toml") &&" "$WORK/output"
 }
 
-# Review round 2: a named-user ACL entry for UID 1002 overrides the
+# A named-user ACL entry for UID 1002 overrides the
 # other bits, so one without search denies the indexer.
 linux_config_dir_acl_denying_indexer_fails() {
     stub_host Linux 4242
@@ -1059,7 +1059,7 @@ whitespace_only_number_takes_the_default() {
 }
 
 whitespace_only_models_fail() {
-    # Codex round 2 on #773: models must be non-empty after trimming.
+    # #773: models must be non-empty after trimming.
     setup 'EMBED_MODEL="   "'
     fails_with 'EMBED_MODEL must be set'
     setup 'INFERENCE_MODEL="   "'

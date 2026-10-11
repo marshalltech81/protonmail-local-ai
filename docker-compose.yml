@@ -406,7 +406,10 @@ volumes:
 
 # =============================================================================
 # Networks
-# mbsync's traffic to the Bridge app is isolated from the application network.
+# mbsync joins bridge-net and the indexer and mcp-server join app-net, so
+# mbsync shares no container network with them. Neither network is
+# internal here (docker-compose.hardened.yml makes app-net internal), and
+# only mbsync is given the Bridge password secret.
 # Only the MCP server port is exposed to the host (localhost only).
 # =============================================================================
 networks:

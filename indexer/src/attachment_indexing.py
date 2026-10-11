@@ -248,10 +248,10 @@ _SUMMARY_FIELDS = (
     "warnings_suppressed",
 )
 # Counts that mean attachment text is missing from search: the line is
-# then a WARNING (review round 1 on #884). ``pdf_pages_failed`` is left
-# out: a page pypdf cannot read is OCR'd when OCR is on and may be
-# recovered, so it is a diagnostic count (review round 3); the pages no
-# OCR recovered are ``pdf_pages_unrecovered`` (review round 4).
+# then a WARNING (#884). ``pdf_pages_failed`` is left out: a page pypdf
+# cannot read is OCR'd when OCR is on and may be recovered, so it is a
+# diagnostic count; the pages no OCR recovered are
+# ``pdf_pages_unrecovered``.
 _DEGRADED_FIELDS = (
     STATUS_FAILED,
     STATUS_UNSUPPORTED,
@@ -369,13 +369,13 @@ def attachment_occurrence_id(
 
 
 # How long to honor a cached ``STATUS_FAILED`` row before re-running the
-# extractor. AGENTS.md says ``attachment_extractions`` exists so OCR /
-# parse cost is paid once per unique payload — but a ``failed``
-# row may be due to a corrupt PDF that *will* keep failing or a
-# transient extractor bug that a future dependency bump fixes. Default
-# 7 days strikes a balance: most retries within a week of a real
-# library upgrade, but a chronic failure no longer burns OCR cycles
-# every time the same payload reappears.
+# extractor (a fixed constant, not a setting). ``attachment_extractions``
+# exists so OCR / parse cost is paid once per payload and cache key — but
+# a ``failed`` row may be due to a corrupt PDF that *will* keep failing
+# or a transient extractor bug that a future dependency bump fixes.
+# Seven days strikes a balance: a library upgrade is retried within a
+# week, and a chronic failure does not burn OCR cycles every time the
+# same payload reappears.
 _FAILED_CACHE_MAX_AGE = timedelta(days=7)
 
 
@@ -640,13 +640,6 @@ def _cache_hit_short_circuits(
 
     * ``STATUS_EMPTY`` — the payload genuinely had no text. Re-running
       will produce the same empty result.
-
-    A ``success`` or ``empty`` row is not a hit when a configured limit
-    that cut it has since been raised (``cap_raised``), or when it
-    predates the cap record and lost text (``cap_bootstrap_due``, once):
-    it is extracted again (#1418). The limits are the settings as
-    ``extract`` takes them, ``max_pdf_pages`` and ``max_extracted_chars``
-    0 for none.
     * ``STATUS_TOO_LARGE`` — while the payload still exceeds
       ``max_bytes``. Once the operator raises the cap far enough for it
       to fit, the row is stale and the payload is extracted (#693);
@@ -659,6 +652,13 @@ def _cache_hit_short_circuits(
       ``_FAILED_CACHE_MAX_AGE`` (defense against a chronic failure
       burning OCR cycles on every reappearance), otherwise honor the
       cache.
+
+    A ``success`` or ``empty`` row is not a hit when a configured limit
+    that cut it has since been raised (``cap_raised``), or when it
+    predates the cap record and lost text (``cap_bootstrap_due``, once):
+    it is extracted again (#1418). The limits are the settings as
+    ``extract`` takes them, ``max_pdf_pages`` and ``max_extracted_chars``
+    0 for none.
     """
     status = cached["extraction_status"]
     if status in {STATUS_SUCCESS, STATUS_EMPTY} and (

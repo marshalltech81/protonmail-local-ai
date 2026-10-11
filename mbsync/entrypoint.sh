@@ -77,7 +77,9 @@ mkdir -p "$RUNTIME_DIR"
 # transport below calls only validate_bridge_endpoint,
 # expected_fingerprint, bridge_imap_host, bridge_imap_connect,
 # warn_if_pin_rotation_enabled, extract_bridge_cert and
-# validate_proton_settings, and reads the isync names below.
+# validate_proton_settings, and reads constants defined below: the
+# endpoint, the isync names, the folder exclusions, the password file
+# and, for the startup identity line, the certificate settings.
 
 # The defaults and validators of the Proton settings, one implementation
 # shared with scripts/validate-env.sh (PLAN.md decision 46): copied from
@@ -942,7 +944,8 @@ record_successful_sync() {
 # =============================================================================
 # Generate mbsync config from template (render_mbsync_config): the Bridge
 # app's endpoint from BRIDGE_HOST, BRIDGE_IMAP_PORT and BRIDGE_CERT_HOST, and
-# BRIDGE_USER, all set in docker-compose.yml / .env, plus the two Patterns
+# BRIDGE_USER, all set in docker-compose.yml / .env, isync's account,
+# store and channel names (PROTON_*_NAME), plus the two Patterns
 # exclusion sets (PROTON_FOLDER_EXCLUSIONS, ISYNC_LAYOUT_EXCLUSIONS).
 # BRIDGE_PASS is NOT passed as an env var — mbsyncrc uses PassCmd to read
 # it directly from the Docker secret at /run/secrets/bridge_pass.
