@@ -2655,8 +2655,10 @@ mail a population run will read; the steps are not sent to clients:
    `verified` in `fields` (`unmatched` and `not_checked` raise no
    problem, so a value the model made up would otherwise pass), and
    every other field cites only `in_scope`
-   passages; mark covered only the enumerated items its population
-   fields cite. Set aside any
+   passages; mark covered only the enumerated items whose passages a
+   population field's `found_in` names (the cited passages its value
+   was found in: a field can cite more passages than hold the value).
+   Set aside any
    other record for review. Each call marks a thread's messages in or out of its
    own scope (its window, folders and `participant`) and tells the
    model to extract only from in-scope messages, so calls that search
