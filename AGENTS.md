@@ -32,7 +32,7 @@ Core behavior:
   Streamable HTTP at `/mcp`
 - whether mail text leaves the host depends on which embed,
   inference and rerank endpoints the operator wires up: the indexer
-  sends every message's subject, body and extracted attachment text to
+  sends message subjects, body text and extracted attachment text to
   the embedder, and the MCP server sends queries and retrieved mail to
   the enabled layers
 
@@ -979,10 +979,10 @@ Notes:
 - review schema implications before changing embedding or storage assumptions
 - indexer and mcp-server must point at the same `EMBED_BASE_URL` +
   `EMBED_MODEL` so query vectors are comparable to indexed vectors —
-  on an existing index, any change to the embedder's mode, model,
-  endpoint or vectors fails both services at startup until the old
-  embedder is restored or the index is rebuilt (`docs/architecture.md`,
-  "Embedder identity record")
+  on an existing index, an embedder that differs from the recorded
+  one fails both services at startup until the old embedder is
+  restored or the index is rebuilt (`docs/architecture.md`, "Embedder
+  identity record", lists what is compared)
 - embed has no disabled mode; see the Architecture Summary for the
   provider contract
 

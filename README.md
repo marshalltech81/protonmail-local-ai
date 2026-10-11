@@ -216,7 +216,7 @@ endpoint is not host-local (`127.0.0.1`, `::1`, `localhost`,
 | Data | Where it lives |
 |---|---|
 | Your emails (Maildir) | Local Docker volume — never leaves your machine |
-| Embeddings | Wherever `EMBED_BASE_URL` points. A host-side server (LM Studio, vLLM, `mlx_lm.server`, TEI, etc.) keeps the embedded text on your machine; a remote provider (DeepInfra, OpenRouter, etc.) receives every message's subject, body text and extracted attachment text at index time, and search-query strings at retrieval time. |
+| Embeddings | Wherever `EMBED_BASE_URL` points. A host-side server (LM Studio, vLLM, `mlx_lm.server`, TEI, etc.) keeps the embedded text on your machine; a remote provider (DeepInfra, OpenRouter, etc.) receives message subjects, body text and extracted attachment text at index time, and search-query strings at retrieval time. |
 | Search index (SQLite FTS5 + sqlite-vec) | Local Docker volume |
 | Bridge ↔ Proton traffic | The only mandatory path off your machine for mail data |
 

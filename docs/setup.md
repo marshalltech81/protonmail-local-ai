@@ -642,17 +642,16 @@ After changing provider:
 4. The schema reserves a fixed 4096-dim vector. `EMBED_MODEL`
    must keep producing 4096-dim vectors (Qwen3-Embedding-8B variants)
    or a schema migration is required.
-5. On an existing index, both services then stop at startup with
-   "The configured embedder is not the one that built this index":
-   the index records the embedder that built it, and a different
-   `EMBED_MODE`, `EMBED_MODEL`, endpoint, vector width or calibration
-   vector fails the check, so vectors from two embedders are never
-   mixed (docs/architecture.md, "Embedder identity record"). Rebuild
+5. On an existing index, an embedder that differs from the one the
+   index recorded stops both services at startup with "The configured
+   embedder is not the one that built this index" (what is compared,
+   and the calibration tolerance, is in docs/architecture.md,
+   "Embedder identity record"). Rebuild
    the index with the new embedder, or put the old settings back; see
    "Embedder identity mismatch" in `docs/troubleshooting.md`.
 
-Privacy note: remote embedders receive every message's subject, body
-text and extracted attachment text at index time and every search
+Privacy note: remote embedders receive message subjects, body text
+and extracted attachment text at index time and every search
 query at retrieval time.
 Pointing at a host-side server keeps that traffic on your machine.
 Choose accordingly.

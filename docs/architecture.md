@@ -4018,7 +4018,7 @@ and exporter were present.
 | Operation | Local only | Leaves machine |
 |---|---|---|
 | Embedding — `EMBED_BASE_URL` points at a host-side server | ✅ | Never |
-| Embedding — `EMBED_BASE_URL` points at a remote provider | The index | Every message's subject, body text and extracted attachment text at index time; search-query text at retrieval time → provider |
+| Embedding — `EMBED_BASE_URL` points at a remote provider | The index | Message subjects, body text and extracted attachment text at index time; search-query text at retrieval time → provider |
 | Reranking — `RERANK_BASE_URL` points at a host-side server | ✅ | Never |
 | Reranking — `RERANK_BASE_URL` points at a remote provider | Retrieval | The search query, candidate thread subjects, up to five changed reply subjects each, and retrieved chunks → provider |
 | Q&A — `INFERENCE_MODE=openai`, host-side `INFERENCE_BASE_URL` | Retrieval local | Never |
@@ -4027,9 +4027,8 @@ and exporter were present.
 | Q&A — `INFERENCE_MODE=none` (default) | ✅ | Never (intelligence tools not registered) |
 
 > **Note on remote providers.** Pointing any of these at a remote
-> provider ships data over the network: every message's subject,
-> body text and extracted attachment text through the embedder at
-> index time, every search-query string
+> provider ships data over the network: message subjects, body text
+> and extracted attachment text through the embedder at index time, every search-query string
 > through the embedder at retrieval time, and every retrieved chunk
 > through the inference and reranker endpoints. This is a deliberate
 > departure from a fully-local posture; choose the provider URLs
