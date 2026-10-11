@@ -319,15 +319,15 @@ their whole first and last days.
 - The index is built once from files that do not change, so paging
   while the index changes is not exercised.
 
-### Outstanding items (`outstanding_items`, #798)
+### Outstanding items (`outstanding_items`)
 
 "What outstanding items do Avery Cole or Blair Reed owe me, including
 anything that needs follow-up, since January 1, 2026?", asked on
 2026-10-05 (America/New_York) about corpus threads 46-65: fourteen
-matters of a fictional owners' association (a letter sent but
+items between a fictional site and its vendor (a letter sent but
 compliance unchecked, an invoice paid but its allocation open, half of
 a two-part question answered, a closure in another thread from
-management, a reopened matter, answers below a signature delimiter, an
+the coordinator, a reopened item, answers below a signature delimiter, an
 attachment-only due date, a disputed status, a revised due date, a
 phone call with no recorded outcome, an identity decoy, a prompt
 injection) plus the paging, cap, extraction and date boundaries, and
@@ -335,7 +335,7 @@ in threads 120-124 the claim cases: a document prepared but never sent,
 a transmission shown only by a message in Sent, a receipt explicitly
 acknowledged with later guidance in a different thread from a different
 sender, and a later same-thread reply about something else. The
-held-out variant `marina-counsel-follow-ups` (threads 66-74) asks the
+held-out variant `second-vendor-follow-ups` (threads 66-74) asks the
 same about Sasha Ortiz and Emery Vance with different names, wording,
 thread structure and evidence placement.
 
@@ -353,7 +353,7 @@ actions, each naming its ground-truth `action` with `owner`, `status`,
 (messages it could not read). Matching a live answer's prose to action
 IDs is a labelling step this harness does not automate.
 
-Per-claim labels (owner decision on #798, 2026-10-08). An action's
+Per-claim labels (owner decision, 2026-10-08). An action's
 truth may hold `claims`, mapping each claim kind the question or the
 mail makes relevant (`sent`, `received`, `done`) to its supported label
 (`confirmed`, `proposed` or `unverified`) and its proof set: the
@@ -423,7 +423,7 @@ same-thread reply, the prepared consent treated as sent, an unlabelled
 completion, `done: confirmed` on an excluded entry, every claim
 labelled `unverified`, every action padded with three `unverified`
 claims, the unverified receipts left out, conflicting labels on one
-kind, the decoy cited only inside a claim, and the towing amendment
+kind, the decoy cited only inside a claim, and the signage revision
 left with Blair after its handover in another thread. Each is caught.
 
 Layer A, `tests/baseline/test_outstanding_items_baseline.py`, runs in
@@ -533,7 +533,7 @@ Cases must never be built from real mail.
 (including a rate before and a different one after a stated future date
 in one notice, asked for 2027 and for after the change:
 `ask-darkroom-rate-2027` and `ask-darkroom-from-2028`, #911; and
-`ask-dispenser-first-explanation`, the vendor's first explanation in a
+`ask-fc4410-entry-first-reason`, the vendor's first explanation in a
 12-message thread whose late closing message contradicts it, #975),
 attachment-only answers, multiple required threads (including
 `ask-tofu-summary`, a summary of the four genuine messages of the
@@ -549,7 +549,7 @@ change the fact; `ask-armchair-revised` is a revised attachment under
 the same filename, #910; `ask-conservatory-real-price` states the
 price as "not" a value first, and another thread bills that value;
 `ask-trestles-revised` replaces a count and a price together, #911;
-`ask-dispenser-hire-outcome` asks for the outcome of a matter raised
+`ask-fc4410-hire-outcome` asks for the outcome of a matter raised
 early in a 12-message thread and settled late, in a message that
 shares no word with the question, #975),
 unresolved conflicts (`ask-wall-bill-attachment` is a body and its
@@ -572,7 +572,7 @@ coverage cannot show that only one was supplied or cited (#1182);
 shapes reaches the prompt. The #975 cases are a known gap (#974): each
 thread's passages are chosen by similarity to the question, so the late
 closing message never reaches either case's prompt, and
-`ask-dispenser-hire-outcome` is listed with the cases that lose evidence
+`ask-fc4410-hire-outcome` is listed with the cases that lose evidence
 before the model sees it; `make baseline` pins this with a strict
 xfail that a fix turns into a pass. Held-out membership is
 `is_held_out(id)`, as for the agent scenarios; tune nothing against
@@ -590,7 +590,7 @@ same fields apply to every tool: `required_evidence`, `expected_facts`
 with corpus excerpts, `must_include` / `must_not_include` (matched
 against the answer or the summary), expected handling and criteria. The shipped cases:
 `summarize-pool-bids` (a brief summary of a three-message thread),
-`summarize-hall-open-points` (an action-items summary of a 56-message
+`summarize-qh62-open-points` (an action-items summary of a 56-message
 thread under a 1,600-token prompt window, `settings.prompt_tokens`, so
 the window leaves out the message holding the two open points: a
 `disclose_missing` case, like `ask-kayak-tight-budget`).
@@ -633,7 +633,7 @@ labels (schema in `cases.py`), over corpus threads 125-128 and the
 | Shape | `ask_mailbox` | `brief_issue` |
 |---|---|---|
 | An agreement corrected after the fact, then called off (t125: proposal, agreement, retrospective correction, cancellation) | `ask-hedge-price-as-of-march` (as of a date before the correction), `ask-hedge-status-now` | `brief-hedge-agreement` |
-| The settling disposition later in the same thread (#975, t100) | `ask-dispenser-position-june` (as of a date before it) | `brief-dispenser-hire-charge` (held out) |
+| The settling disposition later in the same thread (#975, t100) | `ask-fc4410-june-position` (as of a date before it) | `brief-fc4410-hire-charge` (held out) |
 | Different people holding conflicting positions, neither superseding (t126, t127) | `ask-reading-room-deposit` | `brief-reading-room-deposit` |
 | A position stated only in quoted history, dated by its reply header (t128) | `ask-footbridge-closure` | `brief-footbridge-closure` |
 
@@ -699,7 +699,7 @@ repairs and nine judge calls):
 ```bash
 make eval-answers EVAL_MAX_CALLS=27 EVAL_ARGS="--case ask-hedge-price-as-of-march \
   --case ask-hedge-status-now --case brief-hedge-agreement \
-  --case ask-dispenser-position-june --case brief-dispenser-hire-charge \
+  --case ask-fc4410-june-position --case brief-fc4410-hire-charge \
   --case ask-reading-room-deposit --case brief-reading-room-deposit \
   --case ask-footbridge-closure --case brief-footbridge-closure"
 ```

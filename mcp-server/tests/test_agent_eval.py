@@ -16,7 +16,7 @@ mutates reference traces into the failures the correction, conflict and
 abstention scenarios exist to catch, and ``test_counting_failures_are_caught``
 into the mistakes the counting scenario regresses (#283),
 ``test_outstanding_failures_are_caught`` into the failures the
-outstanding-items scenario exists to catch (#798), and
+outstanding-items scenario exists to catch, and
 ``test_citing_after_a_listing_only_is_caught`` cites after a listing
 in place of every read (#804). ``HELD_OUT_IDS`` pins the held-out
 split. The contract tests below keep the
@@ -69,7 +69,7 @@ HELD_OUT_IDS = [
     "electrician-quote",
     "frontdesk-appointment",
     "kayak-total-cost",
-    "marina-counsel-follow-ups",
+    "second-vendor-follow-ups",
 ]
 
 
@@ -363,7 +363,7 @@ def _list_instead_of_reading(trace: dict) -> None:
 def test_citing_after_a_listing_only_is_caught(scenario_id: str, failure: str) -> None:
     """A listing names a message but returns no content, so citing the
     right messages after only listing them fails (#804), as it does for
-    outstanding items (#798). The citations stay valid: the IDs were returned."""
+    outstanding items. The citations stay valid: the IDs were returned."""
     trace = copy.deepcopy(TRACE_BY_SCENARIO[scenario_id])
     _list_instead_of_reading(trace)
     score = score_trace(SCENARIOS[scenario_id], trace)
@@ -396,7 +396,7 @@ def _recite(answer: dict) -> None:
 
 
 def _skip_second_blair_page(trace: dict) -> None:
-    # The leasing thread (t47) is listed only on page 2, so its read goes too.
+    # The logo thread (t47) is listed only on page 2, so its read goes too.
     trace["calls"] = [
         c
         for c in trace["calls"]
@@ -405,7 +405,7 @@ def _skip_second_blair_page(trace: dict) -> None:
 
 
 def _cite_superseded_due(trace: dict) -> None:
-    item = _item(trace["answer"], "m11-collection-policy")
+    item = _item(trace["answer"], "m11-onboarding-guide")
     item.update(due="2026-08-14", cited=[f"t58.2{_D}#00005802"])
     _recite(trace["answer"])
 
@@ -417,7 +417,7 @@ def _wrong_owner(trace: dict) -> None:
 
 def _close_on_letter_sent(trace: dict) -> None:
     answer = trace["answer"]
-    item = _item(answer, "m02-leasing-compliance")
+    item = _item(answer, "m02-logo-compliance")
     answer["items"].remove(item)
     answer["excluded"].append(
         {"action": item["action"], "status": "closed", "cited": item["cited"]}
@@ -457,15 +457,15 @@ def _merge_the_decoy(trace: dict) -> None:
 
 def _duplicate_quoted_request(trace: dict) -> None:
     # The same request again, from a reply that only quotes it.
-    item = dict(_item(trace["answer"], "m11-collection-policy"))
+    item = dict(_item(trace["answer"], "m11-onboarding-guide"))
     item["cited"] = [f"t58.4{_D}#00005804", f"t58.5{_D}#00005805"]
     trace["answer"]["items"].append(item)
     _recite(trace["answer"])
 
 
-def _closed_policy_as_open(trace: dict) -> None:
+def _closed_checklist_as_open(trace: dict) -> None:
     answer = trace["answer"]
-    (entry,) = [e for e in answer["excluded"] if e["action"] == "m05-records-policy"]
+    (entry,) = [e for e in answer["excluded"] if e["action"] == "m05-file-checklist"]
     answer["excluded"].remove(entry)
     answer["items"].append(
         {**entry, "owner": "avery_cole", "status": "open", "due": None},
@@ -500,7 +500,7 @@ def _decoy_cited_only_at_top_level(trace: dict) -> None:
     trace["answer"]["cited"].append(decoy["claimant_id"])
 
 
-# Per-claim labels (#798, owner decision 2026-10-08): the claim cases are
+# Per-claim labels (owner decision 2026-10-08): the claim cases are
 # t120 (prepared, never sent), t121 (sent, shown only in Sent), t122/t123
 # (receipt acknowledged; later guidance in another thread from another
 # sender) and t124 (a later same-thread reply that acknowledges nothing).
@@ -511,29 +511,29 @@ def _claim(answer: dict, action: str, kind: str) -> dict:
 
 
 def _sent_scored_as_done(trace: dict) -> None:
-    _claim(trace["answer"], "c2-railing-advice", "sent")["kind"] = "done"
+    _claim(trace["answer"], "c2-shutter-advice", "sent")["kind"] = "done"
 
 
 def _receipt_from_a_same_thread_reply(trace: dict) -> None:
-    claim = _claim(trace["answer"], "c4-lease-review", "received")
+    claim = _claim(trace["answer"], "c4-agreement-review", "received")
     claim.update(label="confirmed", cited=[f"t124.3{_D}#00012403"])
     _recite(trace["answer"])
 
 
 def _prepared_consent_as_sent(trace: dict) -> None:
-    claim = _claim(trace["answer"], "c1-snow-consent", "sent")
+    claim = _claim(trace["answer"], "c1-northfield-consent", "sent")
     claim.update(label="confirmed", cited=[f"t120.2{_D}#00012002"])
     _recite(trace["answer"])
 
 
 def _unlabelled_completion(trace: dict) -> None:
-    item = _item(trace["answer"], "c2-railing-advice")
+    item = _item(trace["answer"], "c2-shutter-advice")
     item["claims"].append({"kind": "done", "label": None, "cited": [f"t121.2{_D}#00012102"]})
 
 
 def _done_confirmed_on_an_excluded_entry(trace: dict) -> None:
     answer = trace["answer"]
-    item = _item(answer, "c2-railing-advice")
+    item = _item(answer, "c2-shutter-advice")
     answer["items"].remove(item)
     answer["excluded"].append(
         {
@@ -566,7 +566,7 @@ def _omit_the_unverified_receipts(trace: dict) -> None:
 
 
 def _conflicting_labels(trace: dict) -> None:
-    item = _item(trace["answer"], "c2-railing-advice")
+    item = _item(trace["answer"], "c2-shutter-advice")
     item["claims"].append({"kind": "sent", "label": "unverified", "cited": []})
 
 
@@ -579,12 +579,12 @@ def _decoy_cited_only_in_a_claim(trace: dict) -> None:
             "result": {"has_more": False, "next_cursor": None, "messages": [decoy]},
         }
     )
-    _claim(trace["answer"], "c2-railing-advice", "sent")["cited"].append(decoy["claimant_id"])
+    _claim(trace["answer"], "c2-shutter-advice", "sent")["cited"].append(decoy["claimant_id"])
 
 
-def _towing_left_with_blair(trace: dict) -> None:
+def _signage_left_with_blair(trace: dict) -> None:
     # Misses the handover to Avery in another thread from another sender.
-    item = _item(trace["answer"], "c3-towing-amendment")
+    item = _item(trace["answer"], "c3-signage-revision")
     item.update(owner="blair_reed", due=None, cited=[f"t122.4{_D}#00012204"])
     _recite(trace["answer"])
 
@@ -598,7 +598,7 @@ def _drop_tool_calls(*tools: str) -> Callable[[dict], None]:
     return change
 
 
-# The failures the outstanding-items scenario exists to catch (#798),
+# The failures the outstanding-items scenario exists to catch,
 # each made on its reference trace.
 _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
     ("skips-a-page", _skip_second_blair_page, ["required_evidence_coverage", "citation_validity"]),
@@ -620,7 +620,7 @@ _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
         ["action_precision", "forbidden_sources_avoided"],
     ),
     ("duplicates-a-quoted-request", _duplicate_quoted_request, ["action_precision"]),
-    ("counts-the-closed-policy", _closed_policy_as_open, ["action_precision"]),
+    ("counts-the-closed-checklist", _closed_checklist_as_open, ["action_precision"]),
     (
         "claims-completeness-despite-failed-extraction",
         _complete_despite_failed_extraction,
@@ -647,7 +647,7 @@ _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
         _decoy_cited_only_at_top_level,
         ["citations_consistent", "forbidden_sources_avoided"],
     ),
-    # Per-claim labels (#798): sent, received and done are claimed
+    # Per-claim labels: sent, received and done are claimed
     # separately, each with its supported label and proof.
     (
         "scores-sent-as-done",
@@ -684,8 +684,8 @@ _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
         ["citations_consistent", "forbidden_sources_avoided"],
     ),
     (
-        "leaves-the-towing-amendment-with-blair",
-        _towing_left_with_blair,
+        "leaves-the-signage-revision-with-blair",
+        _signage_left_with_blair,
         ["owner_accuracy", "conclusion_citation_support"],
     ),
 ]
@@ -699,16 +699,16 @@ _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
 def test_outstanding_failures_are_caught(
     change: Callable[[dict], None], failures: list[str]
 ) -> None:
-    trace = copy.deepcopy(TRACE_BY_SCENARIO["counsel-outstanding"])
+    trace = copy.deepcopy(TRACE_BY_SCENARIO["vendor-outstanding"])
     change(trace)
-    score = score_trace(SCENARIOS["counsel-outstanding"], trace)
+    score = score_trace(SCENARIOS["vendor-outstanding"], trace)
     assert set(failures) <= set(score.failures), score.failures
 
 
 def test_the_reference_trace_scores_its_claims() -> None:
     """The claim metrics are scored, not left ``None``, and are full."""
-    trace = TRACE_BY_SCENARIO["counsel-outstanding"]
-    score = score_trace(SCENARIOS["counsel-outstanding"], trace)
+    trace = TRACE_BY_SCENARIO["vendor-outstanding"]
+    score = score_trace(SCENARIOS["vendor-outstanding"], trace)
     assert score.claim_recall == 1.0
     assert score.claim_precision == 1.0
     assert score.claim_labels_present == 1.0
@@ -718,13 +718,13 @@ def test_the_reference_trace_scores_its_claims() -> None:
 
 def test_the_held_out_variant_catches_a_false_closure() -> None:
     """The held-out trace is scored like the dev one (and never tuned on)."""
-    trace = copy.deepcopy(TRACE_BY_SCENARIO["marina-counsel-follow-ups"])
+    trace = copy.deepcopy(TRACE_BY_SCENARIO["second-vendor-follow-ups"])
     answer = trace["answer"]
     item = answer["items"].pop()
     answer["excluded"].append(
         {"action": item["action"], "status": "closed", "cited": item["cited"]}
     )
-    score = score_trace(SCENARIOS["marina-counsel-follow-ups"], trace)
+    score = score_trace(SCENARIOS["second-vendor-follow-ups"], trace)
     assert "closures_supported" in score.failures
 
 

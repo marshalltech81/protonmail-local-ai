@@ -64,7 +64,7 @@ as failed extractions.
      `query_messages(text=...)` lookups must list at least one decoy
      while reaching every expected message.
    - **Outstanding-items reachability**
-     (`test_outstanding_items_baseline.py`, #798). For each decisive
+     (`test_outstanding_items_baseline.py`). For each decisive
      passage in `tests/eval/outstanding_items.json`, the layers that
      hold it on the built index must match the recorded matrix: the
      `.eml`, the thread text (`threads.body_text`: 2,000 characters per
@@ -227,9 +227,9 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   (t41's PIN is past the first 20,000-character `get_message` page)
   and four decoys sharing their obvious words (tofu, access-PIN
   boilerplate, security advice). Threads 46-74 back the
-  outstanding-items scenarios (#798): an owners' association's
-  correspondence with its attorneys in 2026 (dev, 46-65) and a marina
-  co-op's (held out, 66-74); threads 120-124 add the dev scenario's
+  outstanding-items scenarios: a fictional site's correspondence
+  with one vendor in 2026 (dev, 46-65) and a second site's with
+  another vendor (held out, 66-74); threads 120-124 add the dev scenario's
   claim cases (a document prepared but never sent, a transmission shown
   only in Sent, an acknowledged receipt with later guidance in another
   thread, an unrelated same-thread reply). Because they add 2026 sent mail
