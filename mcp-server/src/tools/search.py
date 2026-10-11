@@ -288,7 +288,10 @@ def register_search_tools(
         ``Thread ID``. To read attachment content, use
         ``search_attachments`` (keyword search over extracted text),
         ``get_evidence`` (matching passages), ``get_attachment`` (one
-        attachment's whole stored text), ``ask_mailbox`` (synthesized
+        attachment's whole stored text, by the
+        ``attachment_occurrence_id`` that ``query_attachments`` lists
+        with ``thread_id``, plus ``folder="Trash"`` for messages in
+        Trash), ``ask_mailbox`` (synthesized
         answers), or ``extract_from_emails`` (structured fields) —
         neither this tool nor get_thread surfaces attachment chunks.
         Never invent a thread_id from the subject — IDs are opaque;
@@ -1241,9 +1244,12 @@ def register_search_tools(
 
         Check each result's ``extraction_status``: anything other than
         ``success`` (``failed``, ``unsupported``, ``too_large``,
-        ``empty``, ``deferred`` or null) means no extracted text is
-        available, not that the attachment says nothing relevant. To
-        check coverage, omit ``query``
+        ``empty`` or null) means no extracted text is available, not
+        that the attachment says nothing relevant. ``deferred`` means
+        its extraction waits for a later indexer pass: no current text
+        here, though get_evidence and ask_mailbox may still return text
+        indexed before (extraction_deferred=true). To check coverage,
+        omit ``query``
         in a separate call with applicable structured filters and leave
         ``extracted_only`` false: a text query cannot reveal unextracted
         files whose filename and MIME type do not match. There is no pagination

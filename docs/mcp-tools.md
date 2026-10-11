@@ -1000,10 +1000,12 @@ not say which match mode applied or how many distinct addresses
 matched; `query_messages(sender=..., has_attachments=true)` does.
 
 Check `extraction_status`: any value other than `success` (`failed`,
-`unsupported`, `too_large`, `empty`, `deferred` or null) means no
-extracted text is available, not absence of relevant content.
-`deferred` (#1236) means the indexer will extract the attachment on a
-later pass of its message; it is read from the occurrence, so the
+`unsupported`, `too_large`, `empty` or null) means no extracted text
+is available, not absence of relevant content. `deferred` (#1236)
+means the indexer will extract the attachment on a later pass of its
+message; its current text is not available here, though
+`get_evidence` and `ask_mailbox` may still return text indexed before,
+marked `extraction_deferred`. It is read from the occurrence, so the
 result has no `text_snippet`, `extracted_only` leaves it out, and the
 timing line counts such results as `attachments_extraction_deferred`. While
 any copy of the same bytes in a message is `deferred`, an
@@ -1126,8 +1128,8 @@ Report the gap; do not attribute the context to the message or treat
 the missing body as proof that it contained no relevant evidence.
 Attachment text is not included — use `get_evidence` for passages, or
 list the message's attachments with `query_attachments`
-(`claimant_id`) and read one with [`get_attachment`](#get_attachment). The
-prose ends its header block with the raw source file's path, size, and
+(`claimant_id`, plus `folder="Trash"` for a message in Trash) and read
+one with [`get_attachment`](#get_attachment). The prose ends its header block with the raw source file's path, size, and
 SHA-256.
 
 Headers are bounded like every other tool's: at most 10 recipients per
@@ -1584,7 +1586,8 @@ audits") is answered with several exact lanes and their union (#992):
 `get_message` and `get_thread` return no attachment text. Attachment
 text comes through [`get_evidence`](#get_evidence), which ranks and
 caps a whole thread's passages, or one attachment at a time through
-[`query_attachments`](#query_attachments) (`claimant_id`) and
+[`query_attachments`](#query_attachments) (`claimant_id`, plus
+`folder="Trash"` for a message in Trash) and
 [`get_attachment`](#get_attachment), which returns its whole stored
 text. A missing passage therefore does not resolve a row, and a row
 with attachments whose body is not relevant stays unresolved, never
