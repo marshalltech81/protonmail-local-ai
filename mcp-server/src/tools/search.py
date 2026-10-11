@@ -287,11 +287,15 @@ def register_search_tools(
         call get_thread or summarize_thread with the result's
         ``Thread ID``. To read attachment content, use
         ``search_attachments`` (keyword search over extracted text),
-        ``ask_mailbox`` (synthesized answers), or
-        ``extract_from_emails`` (structured fields) — neither this tool nor
-        get_thread surfaces attachment chunks. Never invent a
-        thread_id from the subject — IDs are opaque; pass only a
-        ``Thread ID`` that a tool result returned.
+        ``get_evidence`` (matching passages), ``get_attachment`` (one
+        attachment's whole stored text, by the
+        ``attachment_occurrence_id`` that ``query_attachments`` lists
+        with ``thread_id``, plus ``folder="Trash"`` for messages in
+        Trash), ``ask_mailbox`` (synthesized
+        answers), or ``extract_from_emails`` (structured fields) —
+        neither this tool nor get_thread surfaces attachment chunks.
+        Never invent a thread_id from the subject — IDs are opaque;
+        pass only a ``Thread ID`` that a tool result returned.
 
         For outstanding-item questions, check for completion, corrections,
         reopening and later guidance in different threads and senders before
@@ -638,17 +642,19 @@ def register_search_tools(
             from_addr: Restrict to a sender ADDRESS or domain
                        ("jane@example.com", "@example.com"). For a
                        person's name, use from_name.
-            date_from: ISO 8601 date lower bound, e.g. "2024-01-01".
-                       A thread qualifies when its span (its messages'
-                       occurred_at, else sent_at, else when first
-                       indexed, #1373) overlaps the range,
+            date_from: ISO 8601 date lower bound, inclusive, e.g.
+                       "2024-01-01". A thread qualifies when its span
+                       (its messages' occurred_at, else sent_at, else
+                       when first indexed, #1373) overlaps the range,
                        and any of its passages may be returned; check
                        each chunk's occurred_at and sent_at, which can
                        fall outside the range. Each chunk's scope is
                        in_scope when its own message meets every
                        sender, participant, date and folder filter,
                        as ask_mailbox labels it, else context.
-            date_to: ISO 8601 date upper bound, e.g. "2024-12-31".
+            date_to: ISO 8601 date upper bound, inclusive, e.g.
+                     "2024-12-31"; a date-only value covers the whole
+                     UTC day.
             has_attachments: True to restrict to threads with attachments.
             participant: Restrict to threads where this person appears
                          in ANY role (sender, To or Cc), as in
@@ -1220,9 +1226,11 @@ def register_search_tools(
 
         To read what an attachment says, use get_evidence (the matching
         passages of its extracted text, each capped at 1600 characters)
-        or ask_mailbox (an answer synthesized from those passages). This
-        tool LOCATES attachments and previews their extracted text; none
-        of the three returns the whole document.
+        or ask_mailbox (an answer synthesized from those passages). To
+        read one attachment's whole stored text, list its message's
+        attachments with query_attachments (claimant_id) and pass the
+        attachment's attachment_occurrence_id to get_attachment. This
+        tool LOCATES attachments and previews their extracted text.
 
         Before a no-query coverage scan, disclose the filters and planned
         maximum number of attachment previews; those previews go to the
@@ -1235,9 +1243,13 @@ def register_search_tools(
         messages carried.
 
         Check each result's ``extraction_status``: anything other than
-        ``success`` (``failed``, ``unsupported``, ``too_large``, ``empty`` or null)
-        means no extracted text is available, not that the attachment
-        says nothing relevant. To check coverage, omit ``query``
+        ``success`` (``failed``, ``unsupported``, ``too_large``,
+        ``empty`` or null) means no extracted text is available, not
+        that the attachment says nothing relevant. ``deferred`` means
+        its extraction waits for a later indexer pass: no current text
+        here, though get_evidence and ask_mailbox may still return text
+        indexed before (extraction_deferred=true). To check coverage,
+        omit ``query``
         in a separate call with applicable structured filters and leave
         ``extracted_only`` false: a text query cannot reveal unextracted
         files whose filename and MIME type do not match. There is no pagination

@@ -234,7 +234,7 @@ run_make() {
 # docker.yml's image gates, one per gate in the order docker compose
 # lists the images (not the workflow's), each on the image docker
 # compose names for its service, with the gate's flags, online whatever
-# the environment says (as the fs scans).
+# the environment says (as the dependency fs scans).
 check_image_calls() {
     local i gate scanners ref code unfixed severity service call
     for i in "${!GATES[@]}"; do
