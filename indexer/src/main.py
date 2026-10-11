@@ -1489,8 +1489,9 @@ class _BatchedMsg:
     # ``all_texts`` list, or ``None`` when no fallback is needed. The
     # fallback is added in Phase 2a when the message contributes no new
     # chunks and either the thread has no committed chunks or this pass
-    # deletes the message's last ones (``clears_chunks``), except on a
-    # reparse that kept the thread's stored vector. Without this
+    # clears a previously committed slice of the message
+    # (``clears_chunks``; Phase 2c still prefers a remaining chunk mean),
+    # except on a reparse that kept the thread's stored vector. Without this
     # fallback the thread vector would be permanently stuck at zero
     # (search quality regression).
     subject_fallback_offset: int | None = None
@@ -2022,8 +2023,8 @@ def _phase2a_collect_chunks(
                 clears_chunks = clears_chunks or bool(stored_attach_ids)
         # Subject-fallback path: when this message contributes zero new
         # chunks AND the parent thread has no committed chunks (or this
-        # pass clears the message's chunks; not on a reparse that keeps
-        # the stored vector), embed the subject (or a sentinel string)
+        # pass clears a previously committed slice of the message; not on
+        # a reparse that keeps the stored vector), embed the subject (or a sentinel string)
         # so the thread vector is not permanently stuck at the Phase 1
         # placeholder zero. The fallback text rides through Phase 2b inside the
         # same batched embed call as everyone else's chunks.
