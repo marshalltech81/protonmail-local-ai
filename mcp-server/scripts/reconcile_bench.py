@@ -3326,6 +3326,14 @@ MAX_ATTACHMENTS = 10_000 - 2
 MAX_EXTRACTED_CHARS = 10_000_000
 # ``message_id`` and ``_wide_digits`` stay unique below this.
 MAX_MESSAGES = 2**30
+# The largest corpus ``--wal`` accepts with ``--identity ascii998common``:
+# every message rewrites the one thread's claimant-ID list (about 1 KB a
+# message already in it), so the WAL baseline's build grows faster than
+# linearly. A plain timing on a laptop (Apple silicon, macOS): 2,000
+# messages 173 s, 4,000 414 s, 5,000 534 s; the bound keeps the build
+# under ten minutes there. Other identities grow linearly (10,000
+# typical messages: 63 s).
+MAX_COMMON_WAL_MESSAGES = 5_000
 # The most digests an upload holds: built in memory (430 MB packed),
 # over 16 times the largest upload #1469's sizing runs send (600,000).
 MAX_UPLOAD = 10_000_000
@@ -3682,6 +3690,14 @@ _RULES: tuple = (
         lambda a: (
             "--wal needs the indexer's tokenizer asset: run from the repository, or mount "
             "indexer/src/data/qwen3-embedding at /app/tokenizer (docs/mcp-tools.md)"
+        ),
+    ),
+    (
+        lambda a: a.wal and a.identity == "ascii998common" and a.messages > MAX_COMMON_WAL_MESSAGES,
+        lambda a: (
+            f"--wal with --identity ascii998common takes at most "
+            f"{MAX_COMMON_WAL_MESSAGES:,} messages: its WAL baseline's build grows faster "
+            "than linearly (docs/mcp-tools.md)"
         ),
     ),
     (

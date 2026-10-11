@@ -1004,6 +1004,55 @@ def test_forbidden_combinations_are_refused_before_building(bench, tmp_path, cha
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize(
+    ("changes", "refused"),
+    [
+        # The common-ID WAL baseline's build grows faster than linearly:
+        # at the bound it is accepted, one message over it is refused.
+        ({"--wal": None, "--identity": "ascii998common", "--messages": "5000"}, False),
+        ({"--wal": None, "--identity": "ascii998common", "--messages": "5001"}, True),
+        # Without --wal no baseline is built; other identities scale linearly.
+        ({"--identity": "ascii998common", "--messages": "5001"}, False),
+        ({"--wal": None, "--identity": "typical", "--messages": "5001"}, False),
+        ({"--wal": None, "--identity": "ascii998", "--messages": "5001"}, False),
+        # Other options do not move the bound.
+        (
+            {
+                "--wal": None,
+                "--identity": "ascii998common",
+                "--messages": "5001",
+                "--writer-lifecycle": "arrival",
+                "--writer-batch": "1",
+            },
+            True,
+        ),
+        (
+            {
+                "--wal": None,
+                "--identity": "ascii998common",
+                "--messages": "5000",
+                "--per-message": "0",
+                "--missing": "0",
+            },
+            False,
+        ),
+    ],
+)
+def test_the_common_id_wal_baseline_is_bounded(bench, tmp_path, monkeypatch, changes, refused):
+    # Refused before anything is built: no file in the work directory
+    # and no build started.
+    monkeypatch.setattr(bench, "build", lambda *a, **k: pytest.fail("built"))
+    monkeypatch.setattr(bench, "build_wal_baseline", lambda *a, **k: pytest.fail("built"))
+    argv = _argv({**changes, "--workdir": str(tmp_path)})
+    if refused:
+        with pytest.raises(SystemExit, match="ascii998common.*at most 5,000 messages"):
+            bench.parse_args(argv)
+    else:
+        args = bench.parse_args(argv)
+        assert args.messages == int(changes["--messages"])
+    assert not list(tmp_path.iterdir())
+
+
 def test_the_largest_accepted_combinations_pass(bench):
     bench.parse_args(_argv({"--chunks": "3", "--chunk-tokens": "250"}))
     bench.parse_args(

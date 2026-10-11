@@ -1740,7 +1740,10 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
   `--identity ascii998common` every message rewrites the one thread's
   list of 1,015-byte claimant IDs, so a message's cost rises with the
   corpus: 173 s and 342 MB for 2,000 messages (about 86 ms a message,
-  against 6 ms for typical records).
+  against 6 ms for typical records), 414 s for 4,000 and 534 s and
+  831 MB for 5,000. `--wal` with that identity is therefore refused
+  above 5,000 messages, before anything is built, which keeps the
+  build under ten minutes on that laptop.
 
 Run it inside the mcp-server image so SQLite and Python match the
 server's; `--help` lists every option:
