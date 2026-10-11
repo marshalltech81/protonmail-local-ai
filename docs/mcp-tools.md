@@ -137,8 +137,8 @@ for how to confirm it and what to do.
 
 Tool descriptions are not prefixed with "Read-only." (decided in #899,
 kept in #919): the block also hits tools that already declare the
-read-only hint, so the prefix is not adopted as a fix (#818 is
-trimming descriptions).
+read-only hint, so the prefix is not adopted as a fix (#818 tracks
+the descriptions' size).
 
 A tool's description is its handler docstring before `Args:`, but
 FastMCP parses the docstring as Google style and sends only its first
@@ -367,7 +367,7 @@ before.
   unfiltered search as before.
 
 The excluded folder list is `DEFAULT_EXCLUDED_FOLDERS` in
-`mcp-server/src/lib/sqlite.py`, matched exactly as `folders` values
+`mcp-server/src/lib/predicates.py`, matched exactly as `folders` values
 are.
 
 ## Reaped sources
@@ -1299,7 +1299,7 @@ questions.
 | `seen` | bool | none | `true` for messages read in Proton, `false` for unread ([read state](#read-state)) |
 | `flagged` | bool | none | `true` for flagged (starred) messages, `false` for the rest |
 | `replied` | bool | none | `true` for messages answered in Proton (the Maildir `R` flag), `false` for the rest |
-| `size_min` | int | none | Inclusive lower bound in bytes on the message's local Maildir file size: not IMAP `RFC822.SIZE` (isync writes LF line endings, so a message is about one byte per line smaller than the server's size). A message whose size is not stored is left out. An integer from 0 to 2^63-1 (SQLite's INTEGER range, stated in the schema as `minimum` / `maximum`), checked strictly, so `"100"` or `true` is an error, not a coerced filter, logged through the rate-limited `rejected invalid argument: query_messages.size_min` warning; `size_min` above `size_max` is an error |
+| `size_min` | int | none | Inclusive lower bound in bytes on the message's local Maildir file size: not IMAP `RFC822.SIZE` (isync writes LF line endings, so a message is about one byte per line smaller than the server's size). A message whose size is not stored is `indeterminate`, not a match. An integer from 0 to 2^63-1 (SQLite's INTEGER range, stated in the schema as `minimum` / `maximum`), checked strictly, so `"100"` or `true` is an error, not a coerced filter, logged through the rate-limited `rejected invalid argument: query_messages.size_min` warning; `size_min` above `size_max` is an error |
 | `size_max` | int | none | Inclusive upper bound in bytes, likewise |
 | `where` | object | none | Explicit leaves, with `any` groups and `negate`, ANDed with the other filters ([below](#where-explicit-leaves)) |
 | `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches, and any other whose `sender_ambiguous` is not `false`, or whose From addresses are not complete with none of the class stored, is counted as `indeterminate`, not matched ([Sender attribution](#sender-attribution)); blank is ignored, any other value is an error |
@@ -1778,8 +1778,8 @@ All given filters must match; blank filters are ignored. The message
 filters (`sender`, `recipient`, `participant`, `folder`, the dates) are
 the [predicate leaves](#filter-predicates) `query_messages` builds,
 decided on the message carrying each attachment, so they match the same
-messages. There is no `date_basis`: the clock is effective time, as in
-`query_messages`
+messages. The date bounds use effective time, as in `query_messages`;
+neither tool can bound by another date yet
 ([#1150](https://github.com/marshalltech81/protonmail-local-ai/issues/1150)).
 
 **Unknown values.** A filter can leave an occurrence undecided: a
