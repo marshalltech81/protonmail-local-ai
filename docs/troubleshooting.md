@@ -160,18 +160,18 @@ the permission repair after a sync fails, mbsync logs
 `find/chmod reported <n> error line(s)` with a `docker exec` command that
 lists the entries still unreadable; the errors themselves are not logged,
 because their paths name folders. If startup
-fails, `mbsync` now logs a specific cause such as:
+fails, `mbsync` logs a specific cause such as:
 
 - missing `BRIDGE_USER`
 - missing or empty `/run/secrets/bridge_pass`
-- cert extraction timeout
+- `cert extraction failed`, also when the extraction times out (20 s)
 - `openssl s_client` handshake errors. mbsync connects with implicit
   TLS only (#638), so the app's IMAP connection mode must be SSL; see
   [mbsync cannot reach or verify the Bridge app](#mbsync-cannot-reach-or-verify-the-bridge-app)
 - Bridge TLS cert fingerprint does not match the pinned value (see the
   "Bridge cert pin mismatch" section below)
 
-Repeated sync failures now count toward an exit threshold so the container
+Repeated sync failures count toward an exit threshold so the container
 restarts instead of looping forever in a broken state. A Proton folder
 that was renamed or deleted is not such a failure; see
 [A Proton folder was renamed or deleted](#a-proton-folder-was-renamed-or-deleted).
@@ -179,23 +179,18 @@ that was renamed or deleted is not such a failure; see
 **2. Did any mail land in the Maildir volume?**
 
 ```bash
-docker run --rm \
-    -v protonmail-local-ai_maildir-volume:/maildir:ro \
-    debian:bookworm-slim \
-    find /maildir -name "*.eml" -o -name "*:2,*" | wc -l
+docker exec mbsync find /maildir -type f \( -path '*/cur/*' -o -path '*/new/*' \) | wc -l
 ```
 
-A non-zero count means mbsync is writing files. Zero means it connected but
-downloaded nothing — either the mailbox is empty or `Patterns` is filtering
-everything out.
+This counts the message files in every folder's `cur` and `new`, the
+files the indexer reads. A non-zero count means mbsync is writing
+files. Zero means it connected but downloaded nothing — either the
+mailbox is empty or `Patterns` is filtering everything out.
 
 **3. Check the folder structure was created**
 
 ```bash
-docker run --rm \
-    -v protonmail-local-ai_maildir-volume:/maildir:ro \
-    debian:bookworm-slim \
-    find /maildir -maxdepth 2 -type d
+docker exec mbsync find /maildir -maxdepth 2 -type d
 ```
 
 You should see `INBOX`, `Sent`, `Drafts`, etc. If only `/maildir` appears with
@@ -214,7 +209,7 @@ mismatches.
 ## mbsync fails to connect
 
 Bridge takes a few seconds to start listening. mbsync waits automatically, but it
-now gives up after a bounded wait and lets Docker restart it rather than
+gives up after a bounded wait and lets Docker restart it rather than
 appearing healthy forever. If it keeps failing, check that the Bridge app
 is running and signed in (see the next section), and:
 
@@ -607,14 +602,19 @@ servers, so the diagnostic depends on where you pointed it:
   (`lsof -iTCP:<port> -sTCP:LISTEN`) and bound to `127.0.0.1`.
   Containers reach `127.0.0.1` on the host as
   `host.docker.internal:<port>` (OrbStack and Docker Desktop).
-- Remote provider: verify outbound networking from a container:
+- Remote provider: verify outbound networking from the container that
+  reports the error (`indexer` or `mcp-server`, while it is running;
+  both are on `app-net`):
 
   ```bash
-  docker run --rm curlimages/curl:latest -fsS https://example.com
+  docker exec indexer python -c "import urllib.request; urllib.request.urlopen('https://example.com', timeout=10); print('ok')"
   ```
 
-  If the hardened compose overlay is active (`internal: true` on
-  `app-net`), all remote provider calls are blocked by design.
+  It prints `ok` when the container reaches the internet, and a
+  `URLError` traceback when it does not. If the hardened compose overlay
+  is active (`internal: true` on `app-net`; `make status` shows
+  `No-egress overlay: active`), all remote provider calls are blocked
+  by design.
 
 ## Inference / embedder cold start
 
@@ -634,7 +634,7 @@ both `indexer/pyproject.toml` and `mcp-server/pyproject.toml` pin
 `sqlite-vec==0.1.9` or later, regenerate the lockfiles, then rebuild:
 
 ```bash
-docker compose build indexer mcp-server
+make build
 ```
 
 ## The indexer build fails with a trusted checksum mismatch
@@ -1159,10 +1159,10 @@ account re-auth) before setting `INDEXER_DELETION_FORCE=true`.
 Tombstones and reaper actions can be inspected directly:
 
 ```bash
-docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
-    debian:bookworm-slim bash -c \
-    'apt-get -qq install -y sqlite3 >/dev/null && \
-     sqlite3 /data/mail.db "SELECT COUNT(*) FROM pending_deletions;"'
+docker exec indexer python -c '
+import os, sqlite3
+db = sqlite3.connect("file:" + os.environ["SQLITE_PATH"] + "?mode=ro", uri=True)
+print(db.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])'
 ```
 
 The reaper sweeps `pending_deletions` on startup and once per
@@ -1204,12 +1204,14 @@ it; see [`get_mailbox_status`](mcp-tools.md#get_mailbox_status)). For the
 error class breakdown, inspect the table directly:
 
 ```bash
-docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
-    debian:bookworm-slim bash -c \
-    'apt-get -qq install -y sqlite3 >/dev/null && \
-     sqlite3 /data/mail.db \
-       "SELECT status, last_error_class, COUNT(*) FROM indexing_jobs
-        GROUP BY status, last_error_class;"'
+docker exec indexer python -c '
+import os, sqlite3
+db = sqlite3.connect("file:" + os.environ["SQLITE_PATH"] + "?mode=ro", uri=True)
+for row in db.execute(
+    "SELECT status, last_error_class, COUNT(*) FROM indexing_jobs"
+    " GROUP BY status, last_error_class"
+):
+    print(*row)'
 ```
 
 Every failed row records a `last_error_class`:
@@ -2260,8 +2262,9 @@ safety hints (#919; background and sources in
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`
-2. Check the server is responding: `curl http://localhost:3000/health`
-   should print `{"status":"ok"}`
+2. Check the server is responding: `curl http://127.0.0.1:3000/health`
+   (with your `MCP_PORT` in place of `3000` if you changed it) should
+   print `{"status":"ok"}`
 3. Check the client points at `http://127.0.0.1:3000/mcp`. The legacy
    `/sse` endpoint was removed and now returns `404`; see
    [Connect an MCP client](setup.md#7-connect-an-mcp-client) for the

@@ -395,7 +395,8 @@ services:
 # =============================================================================
 # Volumes
 # All email data and indexes live in named Docker volumes.
-# Back up sqlite-volume to preserve your search index.
+# Back up the index with `make backup-index` (docs/troubleshooting.md,
+# "Back up and restore the index").
 # =============================================================================
 volumes:
   maildir-volume:    # Raw email in Maildir format
