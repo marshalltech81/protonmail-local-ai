@@ -84,8 +84,8 @@ SHAPES: dict[str, str] = {
     "german_header": "Danke.\n\nAm 1. Jan. 2024 schrieb Alice <alice@example.com>:\n> Frage?",
     "long_reply_header_like_line": "On " + "<a@b> " * 80 + "wrote:\n> quoted",
     "many_paragraphs_with_quotes": "\n\n".join(f"Answer {i}.\n> Question {i}?" for i in range(40)),
-    # Fallback shapes: nothing survives stripping, so the original body
-    # is chunked whole.
+    # Fallback shapes: nothing survives stripping, so there is no body
+    # text (see FALLBACK_KINDS for how they are chunked).
     "fallback_quote_only": f"{_ATTRIBUTION}\n> Original question text.",
     "fallback_quoted_lines": "> line one\n> line two\n> line three",
     "fallback_signature_only": "-- \nBob Example\nPhone 555 0100",
@@ -133,7 +133,7 @@ def _pin(body: str) -> str:
     return digest.hexdigest()[:16]
 
 
-# Taken on main (646ba5e) before chunk kinds.
+# Taken at 646ba5e, before chunk kinds.
 PINNED: dict[str, str] = {
     "apple_forward": "c910a290e0af2720",  # pragma: allowlist secret
     "crlf_plain": "6b38ad98c6a80f76",  # pragma: allowlist secret
@@ -178,7 +178,7 @@ class TestPinnedEmbeddingInput:
 
 
 def _production_chunks(body: str):
-    """Chunk ``body`` the way the indexer does (``main._chunk_message_plan``)."""
+    """Chunk ``body`` the way the indexer does (``main._phase2a_collect_chunks``)."""
     segments = segment_for_embedding(body)
     chunks = chunk_segments(
         message_pk="m1",
@@ -206,7 +206,8 @@ FALLBACK_KINDS: dict[str, list[str]] = {
 
 
 class TestProductionPathMatchesPin:
-    """Every shape with body text chunks exactly as it did on main."""
+    """Every shape with body text chunks exactly as it did before chunk
+    kinds (``PINNED``)."""
 
     @pytest.mark.parametrize("name", sorted(set(SHAPES) - set(FALLBACK_KINDS)))
     def test_body_shape_is_one_body_segment_with_pinned_chunks(self, name):
@@ -377,7 +378,7 @@ class TestKindValidation:
 
 class TestSegmentationWorkBound:
     def test_body_text_stops_the_scan_at_the_first_marker(self, monkeypatch):
-        # Review round 1: a message with body text then a marker and a
+        # A message with body text then a marker and a
         # huge tail is not classified past the marker, as before kinds:
         # only the lines up to the marker are checked.
         import src.quoting as quoting
@@ -396,7 +397,7 @@ class TestSegmentationWorkBound:
         assert calls == 2
 
     def test_fallback_runs_are_coalesced_while_scanning(self, monkeypatch):
-        # Review round 1: past the cap, runs are merged as they are
+        # Past the cap, runs are merged as they are
         # found, so no more than the cap plus one run per kind is ever
         # held, rather than one run per line until the end.
         import src.quoting as quoting
@@ -415,7 +416,7 @@ class TestSegmentationWorkBound:
         assert len(held) <= _MAX_FALLBACK_SEGMENTS + 2
 
     def test_merged_runs_are_held_in_one_buffer_per_kind(self, monkeypatch):
-        # Review round 2: past the cap, text is written into one buffer
+        # Past the cap, text is written into one buffer
         # per kind rather than kept as one string per run, so the memory
         # held stays close to what splitting the lines costs anyway.
         import io

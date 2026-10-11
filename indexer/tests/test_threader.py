@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from src import threader
-from src.database import EMBEDDING_DIM  # noqa: F401  -- via reuse
+from src.database import EMBEDDING_DIM
 from src.threader import (
     SUBJECT_FALLBACK_WINDOW,
     Thread,
@@ -24,7 +24,7 @@ from src.threader import (
 from tests.conftest import make_message, make_thread
 
 # ---------------------------------------------------------------------------
-# Thread.build_body_text
+# fts_subject_text
 # ---------------------------------------------------------------------------
 
 
@@ -67,7 +67,12 @@ class TestFtsSubjectText:
         assert len(text) - len("topic") <= FTS_REPLY_SUBJECTS_MAX_CHARS + 2
 
 
-class TestTextForEmbedding:
+# ---------------------------------------------------------------------------
+# Thread.build_body_text
+# ---------------------------------------------------------------------------
+
+
+class TestBuildBodyText:
     def test_includes_subject_and_participants(self):
         thread = make_thread(subject="project update")
         text = thread.build_body_text()
@@ -98,13 +103,12 @@ class TestTextForEmbedding:
         assert "x" * (PER_MESSAGE_BODY_CAP_CHARS + 1) not in text
 
     def test_thread_output_capped_at_shared_max_tokens(self):
-        """Both the fresh-insert embedding text and the accumulated body
-        written on update must respect the same cap so updated threads
-        don't silently retain more context than brand-new ones. The
-        cap is now token-based (``THREAD_BODY_TEXT_MAX_TOKENS``) — a
-        char-based cap under-counted CJK / dense content by 4-6× and
-        forced unnecessarily aggressive truncation in ASCII-heavy
-        threads."""
+        """The stored thread body (FTS input) is capped at
+        ``THREAD_BODY_TEXT_MAX_TOKENS`` real tokens, the cap
+        ``Database._compute_body`` also applies on update, so updated
+        threads don't retain more than brand-new ones. Token-based, since
+        a char cap under-counts CJK / dense content by 4-6× and
+        over-truncates ASCII-heavy threads."""
         from datetime import timedelta
 
         from src.chunker import estimate_tokens
@@ -317,7 +321,7 @@ class TestAssignThread:
         """Regression: subject-only fallback merged any two messages with
         the same normalized subject in the same folder — "Re: Follow up"
         from one sender/recipient pair would merge into an unrelated
-        thread with the same subject. Require participant overlap."""
+        thread with the same subject. Require a shared correspondent pair."""
         original = make_message(
             message_id="sub_no_overlap_orig@example.com",
             subject="Follow up",
@@ -364,7 +368,7 @@ class TestAssignThread:
         assert threader.assign_thread(second).thread_id == "inv_b@example.com"
 
     def test_subject_fallback_counts_every_from_author(self, db, threader):
-        """Review round 1: a multi-author From is parsed into
+        """A multi-author From is parsed into
         ``from_addrs``, but only the first author reached the thread's
         participants and the fallback check, so a co-author's headerless
         follow-up was split off."""
@@ -446,9 +450,10 @@ class TestAssignThread:
         assert threader.assign_thread(second).thread_id == "meet_y@example.com"
 
     def test_subject_fallback_rejected_when_too_distant_in_time(self, db, threader):
-        """Subject fallback must also respect a time window — a matching
-        subject more than a year later is almost certainly a different
-        conversation even if the participants overlap."""
+        """Subject fallback must also respect a time window: a matching
+        subject more than ``SUBJECT_FALLBACK_WINDOW`` (60 days) from the
+        thread's last activity starts a new thread even if the
+        participants overlap."""
         original = make_message(
             message_id="sub_stale_orig@example.com",
             subject="Invoice",
@@ -983,7 +988,7 @@ class TestLongSubjectCap:
 
 
 # ---------------------------------------------------------------------------
-# Subject-fallback provenance (#1144, review round 2)
+# Subject-fallback provenance (#1144)
 # ---------------------------------------------------------------------------
 
 _PROV_MARKER = "SYNTHETIC_PROVENANCE_MARKER"
@@ -1147,7 +1152,7 @@ class TestSubjectFallbackProvenance:
     def test_a_candidate_outside_the_date_window_is_not_a_provenance_rejection(
         self, db, threader, caplog
     ):
-        # Review round 4: the date window rejects this candidate whatever
+        # The date window rejects this candidate whatever
         # its evidence, so it must not count as a provenance rejection.
         caplog.set_level("DEBUG")
         forged = _index(db, threader, _msg("far1", ambiguous=True, subject=f"{_PROV_MARKER} plan"))
