@@ -11,6 +11,10 @@
 #                            Bridge app on the host
 #   synthetic@example.com         — Bridge IMAP username (from the Bridge app's
 #                            IMAP details)
+#   MBSYNC_PROVIDER_EXCLUSIONS, MBSYNC_LAYOUT_EXCLUSIONS — the Channel's
+#                            Patterns exclusions (see the Channel comment);
+#                            named without the dollar-brace form here so
+#                            envsubst leaves this comment as it is
 # =============================================================================
 
 # IMAP Account — connection to the Proton Mail Bridge app's IMAP server.
@@ -52,6 +56,10 @@ Inbox /maildir/INBOX
 SubFolders Legacy
 
 # Channel — connects remote Bridge IMAP to local Maildir.
+# Its Patterns exclusions are filled in from two constants in
+# entrypoint.sh: PROTON_FOLDER_EXCLUSIONS (Proton provider policy: All
+# Mail, Labels/*, Starred) and ISYNC_LAYOUT_EXCLUSIONS (isync's own state
+# and layout files), PLAN.md decision 45.
 # Patterns excludes All Mail and Labels/*. All Mail is a virtual view that
 # Bridge's operation guard refuses to change. Labels are excluded by project
 # policy, not by a Bridge restriction: the index does not model label
