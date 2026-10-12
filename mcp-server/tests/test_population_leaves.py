@@ -63,6 +63,29 @@ def _query(db, *items):
     return db.query_messages(where=normalize_where(_where(*items)), limit=50)
 
 
+def test_subject_and_attachment_union_is_one_population(population_db):
+    page = _query(
+        population_db,
+        {
+            "any": [
+                {"leaf": "subject_contains", "value": "STRASSE"},
+                {"leaf": "attachment_text_words", "value": "alpha budget"},
+            ]
+        },
+    )
+    assert {m.message_id for m in page.messages} == {"m0", "m5"}
+    assert (page.total_matches, page.indeterminate) == (2, 4)
+    assert [r.leaf for r in page.leaf_results] == ["subject_contains", "attachment_text_words"]
+
+
+def test_negation_never_claims_absence_after_failed_or_incomplete_extraction(population_db):
+    page = _query(
+        population_db, {"leaf": "attachment_text_words", "value": "alpha budget", "negate": True}
+    )
+    assert {m.message_id for m in page.messages} == {"m2", "m6"}
+    assert (page.total_matches, page.indeterminate) == (2, 3)
+
+
 def test_subject_reuses_flat_subject_semantics(population_db):
     explicit = _query(population_db, {"leaf": "subject_contains", "value": "STRASSE"})
     flat = population_db.query_messages(subject="STRASSE", limit=50)
@@ -71,6 +94,41 @@ def test_subject_reuses_flat_subject_semantics(population_db):
         flat.total_matches,
         flat.indeterminate,
     )
+
+
+def test_attachment_words_have_shared_cap_and_one_fts_subquery_per_word():
+    leaves = normalize_where(
+        _where({"leaf": "attachment_text_words", "value": "alpha alpha budget"})
+    )
+    sql, params = compile_where(leaves)
+    assert sql.count("message_chunks_fts MATCH ?") == 2
+    assert params == ['"alpha"', '"budget"']
+    with pytest.raises(InvalidFilterError, match="at most 16 words"):
+        normalize_where(
+            _where(
+                {"leaf": "attachment_text_words", "value": " ".join(f"word{i}" for i in range(17))}
+            )
+        )
+
+
+def test_tool_reports_counts_causes_and_does_not_log_values(population_db, caplog, fake_server):
+    handlers = _handlers(fake_server, population_db)
+    with caplog.at_level(logging.INFO):
+        result = asyncio.run(
+            handlers["query_messages"](
+                where=_where({"leaf": "attachment_text_words", "value": "SYNTHETIC_PRIVATE_MARKER"})
+            )
+        )
+    assert result.structured_content["indeterminate"] == 4
+    assert "attachment_text" in caplog.text
+    assert "SYNTHETIC_PRIVATE_MARKER" not in caplog.text
+    grouped = asyncio.run(
+        handlers["aggregate_messages"](
+            group_by="folder", where=_where({"leaf": "attachment_text_words", "value": "alpha"})
+        )
+    )
+    assert grouped.structured_content["total_matches"] == 2
+    assert grouped.structured_content["indeterminate"] == 3
 
 
 @pytest.fixture

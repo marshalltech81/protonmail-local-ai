@@ -141,6 +141,7 @@ class TestModel:
             "domain_is",
             "body_words",
             "subject_contains",
+            "attachment_text_words",
             "header_exists",
             "header_contains",
         )

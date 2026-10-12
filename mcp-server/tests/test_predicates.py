@@ -374,6 +374,7 @@ _NOT_BUILT: dict[str, str] = {
         "display_name_contains",
         "domain_is",
         "subject_contains",
+        "attachment_text_words",
         "header_exists",
         "header_contains",
     )
@@ -476,7 +477,7 @@ class TestLeafRegistry:
 
     def test_registry_is_keyed_by_leaf_name(self):
         assert all(name == kind.name for name, kind in LEAVES.items())
-        assert len(LEAVES) == 30
+        assert len(LEAVES) == 31
 
     @pytest.mark.parametrize("name", sorted(LEAVES))
     def test_leaf_compiles_with_a_rule_and_a_docs_entry(self, name, mixed_db):
@@ -1026,6 +1027,7 @@ class TestClockSizeAndRepliedLeaves:
             "domain_is",
             "body_words",
             "subject_contains",
+            "attachment_text_words",
             "header_exists",
             "header_contains",
         }

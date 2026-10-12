@@ -740,6 +740,29 @@ def _compile_body_words(terms: tuple[str, ...], params: list) -> str:
     return _decided_by(f"({match})", "body_complete")
 
 
+def _compile_attachment_text_words(terms: tuple[str, ...], params: list) -> str:
+    # Same token semantics and one FTS subquery per word as body_words,
+    # across the message's attachment chunks, never its body chunks.
+    params.extend('"' + term.replace('"', '""') + '"' for term in terms)
+    match = " AND ".join(
+        "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
+        "JOIN message_chunks c ON c.fts_rowid = f.rowid "
+        "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NOT NULL)"
+        for _ in terms
+    )
+    # Absence needs both a complete manifest and complete committed text
+    # for every occurrence. During phase 1, a nonempty manifest may not
+    # yet have occurrence rows; that is unknown too.
+    complete = (
+        "m.attachments_manifest_complete = 1 "
+        "AND (m.has_attachments = 0 OR EXISTS "
+        "(SELECT 1 FROM attachments a WHERE a.claimant_id = m.claimant_id)) "
+        "AND NOT EXISTS (SELECT 1 FROM attachments a "
+        "WHERE a.claimant_id = m.claimant_id AND a.text_complete IS NOT 1)"
+    )
+    return f"CASE WHEN ({match}) THEN 1 WHEN {complete} THEN 0 ELSE NULL END"
+
+
 def _compile_header_exists(name: str, params: list) -> str:
     params.append(name)
     return _decided_by(
@@ -918,6 +941,12 @@ LEAVES: dict[str, LeafKind] = {
         ),
         LeafKind("subject", "text", _compile_subject, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind("subject_contains", "text", _compile_subject, Evaluability.UNKNOWN_WHEN_NULL),
+        LeafKind(
+            "attachment_text_words",
+            "words",
+            _compile_attachment_text_words,
+            Evaluability.UNKNOWN_WHEN_NULL,
+        ),
         # ``text`` is the flat filter's name for ``body_words`` (#1088).
         LeafKind("text", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind("body_words", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
@@ -1066,6 +1095,7 @@ WHERE_LEAVES = (
     *WHERE_ADDRESS_LEAVES,
     "body_words",
     "subject_contains",
+    "attachment_text_words",
     "header_exists",
     "header_contains",
 )
@@ -1085,6 +1115,7 @@ MAX_WHERE_VALUE_CHARS = {
     "domain_is": 255,
     "body_words": 1000,
     "subject_contains": 500,
+    "attachment_text_words": 1000,
     "header_contains": 500,
 }
 MAX_WHERE_ID_CHARS = 64
@@ -1101,6 +1132,7 @@ WhereLeafName = Literal[
     "domain_is",
     "body_words",
     "subject_contains",
+    "attachment_text_words",
     "header_exists",
     "header_contains",
 ]
@@ -1230,7 +1262,7 @@ def _where_value(path: str, item: WhereLeafItem) -> Any:
     value = value.strip()
     if not value:
         raise InvalidFilterError("where", f"{path}: {name} value is empty")
-    if name == "body_words":
+    if name in {"body_words", "attachment_text_words"}:
         terms = _text_terms(value)
         if not terms:
             raise InvalidFilterError("where", f"{path}: {name} value holds no word")

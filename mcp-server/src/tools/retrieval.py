@@ -394,6 +394,7 @@ _INDETERMINATE_CAUSES: tuple[tuple[str, frozenset[str], str], ...] = (
         "attachment list incomplete (a parse cap), or not yet checked",
     ),
     ("headers", frozenset(), "header evidence incomplete or not yet assessed"),
+    ("attachment_text", frozenset(), "attachment text incomplete, unavailable, or not yet indexed"),
     ("size", frozenset({"size_min", "size_max"}), "no stored size"),
     (
         "date",
@@ -415,6 +416,9 @@ def _where_cause_keys(where: list[WhereLeaf]) -> set[str]:
             continue
         if w.leaf.name == "subject_contains":
             keys.add("subject")
+            continue
+        if w.leaf.name == "attachment_text_words":
+            keys.update({"attachment_list", "attachment_text"})
             continue
         if w.leaf.name in {"header_exists", "header_contains"}:
             keys.add("headers")
@@ -454,7 +458,7 @@ def _describe_where(where: list[WhereLeaf]) -> list[str]:
     parts = []
     for w in where:
         prefix = f"{w.path} {'not ' if w.negate else ''}"
-        if w.leaf.name == "body_words":
+        if w.leaf.name in {"body_words", "attachment_text_words"}:
             words = ", ".join(repr(t) for t in w.leaf.value)
             parts.append(f"{prefix}{w.leaf.name}({words})")
         elif w.leaf.name == "header_exists":
@@ -1378,7 +1382,9 @@ def register_retrieval_tools(server, db):
                    substring of any decoded occurrence (raw on decode
                    failure); absence is unknown without complete headers.
                    Header names hold 1 to 128 ASCII token characters and
-                   values at most 500 characters. Roles: from, to,
+                   values at most 500 characters. attachment_text_words: the same words over
+                   attachment chunks; absence needs a complete manifest
+                   and complete text for every occurrence. Roles: from, to,
                    cc, visible_recipient (To or Cc). ``role`` is
                    required on the five address leaves and refused,
                    null included, on non-address leaves. An ``all`` item

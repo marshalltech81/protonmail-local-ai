@@ -1138,7 +1138,10 @@ on every occurrence whose `text_extractor` is an older version than
 `EXTRACTOR_VERSIONS` (whatever the OCR or extraction setting, and for
 dead-lettered messages too) and logs the count; only a later commit of
 the occurrence's chunks sets it again. The 7-day retry of a `failed`
-row is unchanged. No filter reads the flag yet.
+row is unchanged. `attachment_text_words` reads the occurrence flags:
+a stored hit decides true; a miss decides false only with a complete
+manifest and complete committed text for every occurrence. Otherwise
+it is indeterminate.
 
 The MCP leaves read the per-message `messages` flags above
 (`docs/mcp-tools.md`, "Filter predicates"): a stored match decides a leaf; finding nothing decides it
