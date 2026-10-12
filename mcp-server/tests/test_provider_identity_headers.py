@@ -97,13 +97,23 @@ def test_identity_value_counts_files_not_logical_messages(identity_db):
 
 def test_identity_value_is_a_caseless_substring_not_an_equality(identity_db):
     """A shared prefix in another case matches every stored ID that
-    contains it, so the predicate cannot stand in for an ID lookup."""
+    contains it, so the predicate cannot stand in for an ID lookup; and
+    a duplicated field matches on its first occurrence as well as its
+    last."""
     page = _query(
         identity_db,
         {"leaf": "header_contains", "name": "x-pm-internal-id", "value": "synthpmid1316"},
     )
     assert (page.total_matches, page.indeterminate) == (7, 2)
     assert claimant_of("other@mail.example") in _matched(page)
+    # The forged file's first field holds _PM_OTHER, its last _PM_ID.
+    first_only = _query(
+        identity_db, {"leaf": "header_contains", "name": "X-Pm-Internal-Id", "value": _PM_OTHER}
+    )
+    assert _matched(first_only) == {
+        claimant_of("forged@mail.example"),
+        claimant_of("other@mail.example"),
+    }
 
 
 def _contains(db, value):

@@ -701,7 +701,8 @@ class TestClaimantsStayIndependent:
         claimants, each with its own rows in every table keyed by
         claimant ID. Trashing the first tombstones only its claimant ID
         and, within the grace window, changes no row of either; reaping
-        it then removes all of its rows and leaves every row of the
+        it then removes all of its rows but the ``reaped_messages``
+        record it adds and leaves every row of the
         second exactly as it was. Each file's identity fields are stored
         only as its own ``message_headers`` rows (ordinary header
         evidence, complete here), so reaping the first removes its copies
