@@ -4500,6 +4500,24 @@ class Database:
         """
         self._fetchone("SELECT 1")
 
+    def get_accounts(self) -> list[tuple[str, str]] | None:
+        """The indexer's account registry (#1596) as ``(scope_uuid,
+        provider)`` rows, at most two (enough to tell one from several);
+        ``None`` when the table does not exist yet (the indexer has not
+        created or migrated the index)."""
+        with closing(self._connect()) as conn:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'accounts'"
+                ).fetchone()
+                is None
+            ):
+                return None
+            rows = conn.execute(
+                "SELECT scope_uuid, provider FROM accounts ORDER BY id LIMIT 2"
+            ).fetchall()
+        return [(row["scope_uuid"], row["provider"]) for row in rows]
+
     def get_active_vector_generation(self) -> dict | None:
         """The indexer's active ``vector_generations`` row (the embedder
         identity record, ``lib/embed_identity.py``), its calibration

@@ -21,6 +21,7 @@ import os
 import sys
 from pathlib import Path
 
+from .account import account_config_from_env, maildir_root_from_env
 from .database import Database
 from .queue import ERROR_CLASSES, IndexingQueue
 
@@ -43,7 +44,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No index database at {db_path}; nothing to requeue.", file=sys.stderr)
         return 1
 
-    db = Database(db_path)
+    account = account_config_from_env(os.environ, maildir_root=maildir_root_from_env(os.environ))
+    db = Database(db_path, account=account)
     try:
         requeued = IndexingQueue(db).requeue_dead(error_class=args.error_class)
     finally:

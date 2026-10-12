@@ -32,7 +32,7 @@ from src.queue import (
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_mock_embedder
+from tests.conftest import TEST_ACCOUNT, make_mock_embedder
 
 MARKER = "SYNTHETIC_OBS_MARKER"
 
@@ -218,7 +218,7 @@ class _FakeReconciler:
 class TestReconcileRecovery:
     def test_fail_then_succeed_logs_one_recovery(self, tmp_path, caplog, clock):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         reconciler = _FakeReconciler([OSError(5, "io", MARKER), None])
         main._run_periodic_reconcile(reconciler, db)  # type: ignore[arg-type]
         clock["t"] += 900
@@ -313,7 +313,7 @@ class TestRescanRenameSweepFailure:
 class TestWalCheckpointRecovery:
     def test_fail_then_succeed_logs_one_recovery(self, tmp_path, monkeypatch, caplog, clock):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         real = db.wal_checkpoint_truncate
         outcomes = [sqlite3.OperationalError(MARKER), None]
 
@@ -337,7 +337,7 @@ class TestWalCheckpointRecovery:
 class TestPruneRecovery:
     def test_fail_then_succeed_logs_one_recovery(self, tmp_path, monkeypatch, caplog, clock):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         outcomes = [sqlite3.OperationalError(MARKER), None]
 
         def prune(**_kw):
@@ -365,7 +365,7 @@ def _seed_queue(tmp_path) -> tuple[Database, IndexingQueue, datetime]:
     retrying a permission error past its deferral window, one deferred
     for permissions, one parked trashed file, one continued for deferred
     attachment extraction (#1236), one dead."""
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     now = datetime.now(UTC)
     path = f"/maildir/{MARKER}/cur/%s"
@@ -427,7 +427,7 @@ class TestQueueHeartbeatCounts:
         db.close()
 
     def test_empty_queue(self, tmp_path):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         counts = IndexingQueue(db).heartbeat_counts()
         assert counts == {
             "pending": 0,
@@ -519,7 +519,7 @@ class TestQueueHeartbeatLine:
         db.close()
 
     def test_a_failed_count_query_logs_its_type(self, tmp_path, monkeypatch, caplog):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db)
 
         def boom(**_kw):
@@ -534,7 +534,7 @@ class TestQueueHeartbeatLine:
     def test_the_initial_drain_logs_the_heartbeat(self, tmp_path, caplog):
         """The initial index can run for hours inside one drain call."""
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db)
         main._drain_queue_batched(
             db,
@@ -563,7 +563,7 @@ class TestReextractSweepDeadSkips:
 
     def test_dead_lettered_files_are_counted(self, tmp_path, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db)
         paths = [f"/maildir/{MARKER}/cur/{n}" for n in ("a", "b", "c")]
         for p in paths[1:]:
@@ -590,7 +590,7 @@ class TestReextractSweepDeadSkips:
 
     def test_only_dead_lettered_files_still_log(self, tmp_path, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db)
         path = f"/maildir/{MARKER}/cur/a"
         queue.enqueue(path, REASON_INITIAL_SCAN)
@@ -605,7 +605,7 @@ class TestReextractSweepDeadSkips:
 
     def test_no_dead_skips_keeps_info(self, tmp_path, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db)
         self._stale(db, monkeypatch, ["/maildir/x/cur/a"])
 
@@ -621,7 +621,7 @@ class TestReextractSweepDeadSkips:
         """#1415: a message the sweep found that already has a queued job is
         counted, once, whatever arms found it, and keeps its job."""
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db)
         paths = [f"/maildir/{MARKER}/cur/{n}" for n in ("a", "b")]
         queue.enqueue(paths[1], REASON_INITIAL_SCAN)
@@ -654,7 +654,7 @@ class TestRescanSummary:
         for name in ("a", "b", "c"):
             (cur / name).write_bytes(b"Subject: x\r\n\r\nbody\r\n")
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db)
         queue.enqueue(str(cur / "c"), REASON_INITIAL_SCAN)
         queue.mark_dead_terminal(str(cur / "c"), stage="parse", error="x")
@@ -683,7 +683,7 @@ class TestRescanSummary:
             raise OSError(5, "io", MARKER)
 
         monkeypatch.setattr(main, "_iter_maildir_messages", walk)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         state = main._IngestionStateRecorder(db, tmp_path)
         main._run_periodic_rescan(db, IndexingQueue(db), state, skip_trashed=False)
         assert not _messages(caplog, "maintenance pass=rescan")
@@ -694,7 +694,7 @@ class TestRescanSummary:
 class TestReconcileSummary:
     def test_logs_sweep_and_reap_counts(self, tmp_path, caplog):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         main._run_periodic_reconcile(_FakeReconciler([None]), db)  # type: ignore[arg-type]
         (line,) = _messages(caplog, "maintenance pass=reconcile")
         assert line.levelno == logging.INFO
@@ -724,7 +724,7 @@ class TestReconcileSummary:
     )
     def test_brake_state(self, tmp_path, caplog, reap, force, brake):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         reconciler = _FakeReconciler([None])
         reconciler.config.force = force
         reconciler.reap = lambda: reap  # type: ignore[method-assign]
@@ -735,7 +735,7 @@ class TestReconcileSummary:
 
     def test_archive_mode_logs_no_reconcile_summary(self, tmp_path, caplog):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         main._run_periodic_reconcile(None, db)
         assert not _messages(caplog, "maintenance pass=reconcile")
         db.close()
@@ -767,7 +767,7 @@ class TestWatchRefreshSummary:
 
 def _busy_db(tmp_path, monkeypatch, results):
     """A real database whose checkpoint returns ``results`` in turn."""
-    db = Database(tmp_path / f"{MARKER}.db")
+    db = Database(tmp_path / f"{MARKER}.db", account=TEST_ACCOUNT)
     outcomes = list(results)
     monkeypatch.setattr(db, "wal_checkpoint_truncate", lambda: outcomes.pop(0))
     return db
@@ -811,7 +811,7 @@ class TestWalBusyStreak:
 class TestStorageLine:
     def test_logs_sizes_once_per_pass(self, tmp_path, caplog):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / f"{MARKER}.db")
+        db = Database(tmp_path / f"{MARKER}.db", account=TEST_ACCOUNT)
         caplog.clear()  # the database's own startup line names its path
         main._run_wal_maintenance(db)
         lines = _messages(caplog, "storage: ")
@@ -823,7 +823,7 @@ class TestStorageLine:
 
     def test_sizes_are_in_mebibytes(self, tmp_path, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         sizes = {str(db.path): 5 * 1024 * 1024 + 1, f"{db.path}-wal": 3 * 1024 * 1024}
         monkeypatch.setattr(main.os, "stat", lambda p: SimpleNamespace(st_size=sizes[str(p)]))
         monkeypatch.setattr(
@@ -837,7 +837,7 @@ class TestStorageLine:
 
     def test_a_missing_wal_is_zero(self, tmp_path, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         real_stat = main.os.stat
 
         def stat(p):
@@ -852,7 +852,7 @@ class TestStorageLine:
         db.close()
 
     def test_a_stat_failure_logs_its_type(self, tmp_path, monkeypatch, caplog):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
 
         def stat(p):
             raise PermissionError(13, "denied", MARKER)
@@ -960,7 +960,7 @@ class TestThreadVectorSums:
 
         from tests.conftest import make_message, make_thread
 
-        db = Database(tmp_path / "sums.db")
+        db = Database(tmp_path / "sums.db", account=TEST_ACCOUNT)
         for t in range(n):
             msg = make_message(message_id=f"m{t}@x", subject=MARKER, filepath=f"/m/{t}")
             db.upsert_thread(make_thread(messages=[msg], thread_id=f"t{t}"), [0.0] * 4096)

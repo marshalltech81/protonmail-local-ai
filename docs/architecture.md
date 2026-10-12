@@ -484,6 +484,41 @@ startup only; periodic re-checks are tracked separately. An index that
 holds messages but no row, or predates the table, fails closed with
 rebuild instructions, since nothing says which embedder wrote it.
 
+#### Account registry
+
+The index records the account it serves (#1596, PLAN.md decision 47),
+so a changed or lost account setting is caught at startup instead of
+mixing two accounts' mail under one identity. `accounts` holds one row
+per account, today exactly one: `scope_uuid` is `ACCOUNT_SCOPE` from
+`.env` (a canonical lower-case UUID, not a secret and not a Proton
+identifier), `provider` is the normalized `SOURCE_MODE` (only
+`proton-bridge`), and `created_at` is the registration time, never a
+collection observation. Triggers abort any `UPDATE` or `DELETE`, so a
+row is never changed or removed: a different UUID is a different
+account, never a rename.
+
+`make init-secrets` (which `make up` runs) writes a random UUID to
+`.env` when the `ACCOUNT_SCOPE` line is missing or empty, and never
+replaces a value. `scripts/validate-env.sh`, the indexer and mcp-server
+each refuse a missing or malformed value, and `SOURCE_MODE` under the
+rule of `mbsync/proton-settings.sh`, with fixed text naming the setting
+and the fix, never the value. Compose passes `${ACCOUNT_SCOPE}` bare, as
+a required setting (`indexer/src/account.py`,
+`mcp-server/src/lib/account.py`).
+
+A fresh index inserts the row in its initial-schema transaction. An
+existing index binds it in the v14 migration: the indexer registers
+connection-local SQL functions holding the configured values before the
+migration runner starts, so the row commits with the version stamp or
+not at all. On every open the indexer (`Database`) and mcp-server (at
+startup, through its `mode=ro` / `query_only` connection) require
+exactly one stored account equal to the configured `(ACCOUNT_SCOPE,
+SOURCE_MODE)` pair, and otherwise exit with fixed text naming no value
+(docs/troubleshooting.md, "Account scope mismatch"); mcp-server also
+exits, and its restart policy retries, while the indexer has not yet
+created or migrated the index. The Maildir root is not part of the
+account: moving it keeps the index.
+
 Every enabled layer must name its endpoint: `{LAYER}_BASE_URL` is a
 URL, or `default` for the SDK's documented default endpoint. An empty
 value fails startup in `validate-env.sh`, the indexer and mcp-server
@@ -3147,6 +3182,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 14 | `0014_account_registry.sql` | `accounts` (#1596; see *Account registry*): the configured `ACCOUNT_SCOPE` and `SOURCE_MODE` provider, bound in the migration's own transaction through connection-local functions; update and delete triggers. No per-message column, so no reparse is queued. |
 | 13 | `0013_message_headers.sql` | Bounded ordered `message_headers` and nullable `messages.headers_complete` (#1079); existing rows start unknown and a queued reparse fills them. |
 | 12 | `0012_extraction_identifier.sql` | `attachment_extractions.identifier` (#1416; see the `attachment_extractions` row above and *Extractor dispatch*): how the payload's container was certified, `container@<n>` or `none@<n>`, NULL (unknown) on every row cached before it. The bytes are not in the database, so the migration ends with the shared reparse statement (see *Reparse in place*): every occurrence passes through the lookup once, which records `none@<n>` on a row whose payload has neither signature and identifies and re-extracts the rest. Unchanged chunks keep their IDs and vectors; text a re-identified container now yields is new chunks, sent to the configured embedder, so the upgrade embeds the newly readable Office attachments once. A container sent under a `message/*` label is kept as sent from this release, so its occurrence gets a new attachment ID on the reparse: the old occurrence, FTS row, chunks and vectors are removed and the new one is extracted and embedded. The startup sweep's identification arm queues the same rows and clears their occurrences' `text_complete` first, so a message whose extraction continuation the reparse leaves queued refreshes them too. |
 | 11 | `0011_extraction_cap_record.sql` | `attachment_extractions.ocr_pages_cap`, `digital_pages_cap` and `extracted_chars_cap` (#1418; see the `attachment_extractions` row above): the configured limit that cut the result, 0 when it did not, NULL (unknown) on every row cached before it. The extractor writes them, so no reparse is queued; the startup sweep re-queues once the messages using an incomplete `success` / `empty` row with no record (the bootstrap arm), and the re-extraction records the columns. |

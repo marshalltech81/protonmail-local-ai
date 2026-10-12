@@ -30,7 +30,7 @@ from src.entities import AuthorityRules
 from src.queue import IndexingQueue
 from src.threader import Threader
 
-from tests.conftest import make_mock_embedder
+from tests.conftest import TEST_ACCOUNT, make_mock_embedder
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "mcp-server" / "scripts" / "reconcile_bench.py"
 
@@ -102,7 +102,7 @@ def _index_with_the_indexer(bench, tmp_path, monkeypatch, n, **shape) -> Path:
             cls, _rule = bench.authority(address)
             if cls != "unclassified":
                 vendors[address] = cls
-    db = Database(tmp_path / "indexer.db")
+    db = Database(tmp_path / "indexer.db", account=TEST_ACCOUNT)
     db.set_authority_rules(AuthorityRules(addresses=vendors))
     embedder = make_mock_embedder([0.0] * EMBEDDING_DIM)
     monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
@@ -274,7 +274,7 @@ def test_benchmark_schema_is_the_indexers(bench, tmp_path, table):
     # planner has the same choices, and foreign keys (their cascades are
     # writes the WAL writer makes as the indexer does). CHECK
     # constraints are left out: they write nothing.
-    Database(tmp_path / "indexer.db").close()
+    Database(tmp_path / "indexer.db", account=TEST_ACCOUNT).close()
     with (
         closing(_with_vec(sqlite3.connect(tmp_path / "indexer.db"))) as prod,
         closing(_with_vec(sqlite3.connect(":memory:"))) as ours,
@@ -365,7 +365,7 @@ def _indexer_commits(bench, tmp_path, monkeypatch, n: int, batch: int):
         return conn
 
     monkeypatch.setattr(sqlite3, "connect", traced)
-    db = Database(tmp_path / "indexer.db")
+    db = Database(tmp_path / "indexer.db", account=TEST_ACCOUNT)
     # The settings the indexer's connection applies (secure_delete, the
     # page cache, ...): each changes which pages a commit writes, so the
     # writer applies every one of them (``_writer_commits``).
@@ -625,7 +625,7 @@ def test_wal_writer_writes_the_rows_the_indexer_writes(bench, tmp_path, monkeypa
         return conn
 
     monkeypatch.setattr(Database, "_connect", traced)
-    db = Database(tmp_path / "indexer.db")
+    db = Database(tmp_path / "indexer.db", account=TEST_ACCOUNT)
     db.set_authority_rules(AuthorityRules(addresses=vendors))
     monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
     monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", 4)
@@ -746,7 +746,7 @@ def _indexer_passes(bench, tmp_path, monkeypatch, n, batch, per_message, seconds
         return conn
 
     monkeypatch.setattr(Database, "_connect", traced)
-    db = Database(tmp_path / "indexer.db")
+    db = Database(tmp_path / "indexer.db", account=TEST_ACCOUNT)
     db.set_authority_rules(AuthorityRules(addresses=vendors))
     if seed:
         _seed_cache(bench, db._conn, per_message)
@@ -1038,7 +1038,7 @@ def _indexer_baseline_and_replies(bench, tmp_path, monkeypatch, shape, n, batch,
         return conn
 
     monkeypatch.setattr(Database, "_connect", traced)
-    db = Database(tmp_path / "indexer.db")
+    db = Database(tmp_path / "indexer.db", account=TEST_ACCOUNT)
     db.set_authority_rules(AuthorityRules(addresses=vendors))
     monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
     monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", batch)

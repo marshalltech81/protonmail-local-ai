@@ -26,7 +26,7 @@ from src.database import (
 )
 from src.migrations import runner
 
-from tests.conftest import count_pending_deletions, make_message, make_thread
+from tests.conftest import TEST_ACCOUNT, count_pending_deletions, make_message, make_thread
 
 FAKE_EMBEDDING = [0.1] * EMBEDDING_DIM
 
@@ -62,7 +62,7 @@ def _reap_message(db, thread, message_id: str) -> list[str] | None:
 class TestSchema:
     def test_database_created_at_given_path(self, tmp_path):
         db_path = tmp_path / "mail.db"
-        database = Database(db_path)
+        database = Database(db_path, account=TEST_ACCOUNT)
         database.close()
         assert db_path.exists()
 
@@ -75,7 +75,7 @@ class TestSchema:
         monkeypatch.setattr(database.sqlite3, "sqlite_version", "3.40.1")
         monkeypatch.setattr(database.sqlite3, "sqlite_version_info", (3, 40, 1))
         with pytest.raises(database.SQLiteTooOldError, match="contentless_delete"):
-            Database(tmp_path / "too_old.db")
+            Database(tmp_path / "too_old.db", account=TEST_ACCOUNT)
 
     def test_schema_version_set_correctly(self, db):
         row = db._conn.execute("SELECT version FROM schema_version").fetchone()
@@ -111,16 +111,16 @@ class TestSchema:
         the second call: ``_migrate`` finds the matching SCHEMA_VERSION
         row and exits without touching the schema."""
         db_path = tmp_path / "idem.db"
-        first = Database(db_path)
+        first = Database(db_path, account=TEST_ACCOUNT)
         first.close()
-        second = Database(db_path)  # second open must not raise
+        second = Database(db_path, account=TEST_ACCOUNT)  # second open must not raise
         second.close()
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        the current version (v13), skipping the migration files."""
-        assert SCHEMA_VERSION == 13
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 13
+        the current version (v14), skipping the migration files."""
+        assert SCHEMA_VERSION == 14
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 14
 
     def test_fresh_install_has_a_nullable_ocr_pages_skipped_column(self, db):
         """#891: a count, NULL when unknown, with no default."""
@@ -155,7 +155,7 @@ class TestSchema:
         Such a database now reads as newer than the code and must fail
         closed with the volume-wipe step."""
         db_path = tmp_path / "v22.db"
-        Database(db_path).close()
+        Database(db_path, account=TEST_ACCOUNT).close()
         import sqlite3
 
         conn = sqlite3.connect(str(db_path))
@@ -165,7 +165,7 @@ class TestSchema:
         finally:
             conn.close()
         with pytest.raises(RuntimeError, match="wipe the sqlite-volume"):
-            Database(db_path)
+            Database(db_path, account=TEST_ACCOUNT)
 
     def test_fresh_install_carries_the_application_id(self, db):
         assert db._conn.execute("PRAGMA application_id").fetchone()[0] == SCHEMA_APPLICATION_ID
@@ -175,7 +175,7 @@ class TestSchema:
         version alone cannot tell the two apart. An old database has no
         ``application_id`` stamp and must fail closed, not read as ready."""
         db_path = tmp_path / "old-v0.db"
-        Database(db_path).close()
+        Database(db_path, account=TEST_ACCOUNT).close()
         import sqlite3
 
         conn = sqlite3.connect(str(db_path))
@@ -185,7 +185,7 @@ class TestSchema:
         finally:
             conn.close()
         with pytest.raises(RuntimeError, match="wipe the sqlite-volume"):
-            Database(db_path)
+            Database(db_path, account=TEST_ACCOUNT)
 
     def test_opening_with_higher_stored_version_raises_downgrade_error(self, tmp_path):
         """A stored version above ``SCHEMA_VERSION`` is a downgrade
@@ -193,7 +193,7 @@ class TestSchema:
         error must point at the two viable paths (image upgrade or
         volume wipe)."""
         db_path = tmp_path / "future.db"
-        database = Database(db_path)
+        database = Database(db_path, account=TEST_ACCOUNT)
         database.close()
         import sqlite3
 
@@ -204,7 +204,7 @@ class TestSchema:
         finally:
             conn.close()
         with pytest.raises(RuntimeError, match="Downgrade migrations are not supported"):
-            Database(db_path)
+            Database(db_path, account=TEST_ACCOUNT)
 
 
 _V0_SCHEMA = Path(__file__).parent / "fixtures" / "schema" / "v0.sql"
@@ -307,8 +307,8 @@ class TestMigrationV1:
     def test_v0_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         _build_v0_database(tmp_path / "v0.db")
-        migrated = Database(tmp_path / "v0.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v0.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
@@ -318,12 +318,12 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]" in caplog.text
+        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
         _build_v0_database(tmp_path / "v0.db")
-        db = Database(tmp_path / "v0.db")
+        db = Database(tmp_path / "v0.db", account=TEST_ACCOUNT)
         try:
             rows = db._conn.execute(
                 "SELECT attachment_id, extractor_module, extraction_status, extractor, "
@@ -356,7 +356,7 @@ class TestMigrationV1:
         from src.extractors import is_stale_extractor
 
         _build_v0_database(tmp_path / "v0.db")
-        db = Database(tmp_path / "v0.db")
+        db = Database(tmp_path / "v0.db", account=TEST_ACCOUNT)
         try:
             assert sorted(
                 name for name in db.get_extractor_names() if is_stale_extractor(name)
@@ -377,7 +377,7 @@ class TestMigrationV1:
         conn.close()
 
         with pytest.raises(sqlite3.OperationalError, match="already exists"):
-            Database(path)
+            Database(path, account=TEST_ACCOUNT)
 
         conn = sqlite3.connect(path)
         try:
@@ -392,7 +392,7 @@ class TestMigrationV1:
         finally:
             conn.close()
 
-        db = Database(path)
+        db = Database(path, account=TEST_ACCOUNT)
         try:
             assert (
                 db._conn.execute("SELECT version FROM schema_version").fetchone()[0]
@@ -411,7 +411,7 @@ class TestMigrationV1:
         _build_v0_database(path)
         monkeypatch.setattr(database, "SCHEMA_VERSION", SCHEMA_VERSION + 1)
         with pytest.raises(RuntimeError, match="migration sequence broken"):
-            Database(path)
+            Database(path, account=TEST_ACCOUNT)
         conn = sqlite3.connect(path)
         try:
             assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 0
@@ -422,10 +422,10 @@ class TestMigrationV1:
         """Downgrade detection: a migrated database refuses older code."""
         from src import database
 
-        Database(tmp_path / "v1.db").close()
+        Database(tmp_path / "v1.db", account=TEST_ACCOUNT).close()
         monkeypatch.setattr(database, "SCHEMA_VERSION", 0)
         with pytest.raises(RuntimeError, match="Downgrade migrations are not supported"):
-            Database(tmp_path / "v1.db")
+            Database(tmp_path / "v1.db", account=TEST_ACCOUNT)
 
 
 def _v1_from_fresh(db: Database) -> None:
@@ -555,8 +555,24 @@ def _only_the_v12_reparse(db: Database) -> bool:
     return {r[0] for r in jobs} == files and all(r[1] == "reparse" for r in jobs)
 
 
+def _drop_v14_tables(db: Database) -> None:
+    """Drop what v14 adds: the account registry (#1596)."""
+    for trigger in ("accounts_never_updated", "accounts_never_deleted"):
+        db._conn.execute(f"DROP TRIGGER {trigger}")
+    db._conn.execute("DROP TABLE accounts")
+
+
+def _v13_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v13 shape: v13 is the current schema
+    without the account registry (#1596)."""
+    _drop_v14_tables(db)
+    db._conn.execute("UPDATE schema_version SET version = 13")
+    db._conn.commit()
+
+
 def _v12_from_fresh(db: Database) -> None:
     """Remove v13's header evidence to construct the deployed v12 shape."""
+    _v13_from_fresh(db)
     db._conn.execute("DROP TABLE message_headers")
     db._conn.execute("ALTER TABLE messages DROP COLUMN headers_complete")
     db._conn.execute("UPDATE schema_version SET version = 12")
@@ -676,7 +692,7 @@ class TestMigrationV6:
 
     def test_v5_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
-        db = Database(tmp_path / "v5.db")
+        db = Database(tmp_path / "v5.db", account=TEST_ACCOUNT)
         msg = make_message(message_id="old@x")
         pending = make_message(message_id="pending@x", filepath="/maildir/INBOX/cur/pending")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
@@ -692,8 +708,8 @@ class TestMigrationV6:
         )
         db._conn.commit()
         db.close()
-        migrated = Database(tmp_path / "v5.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v5.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
@@ -719,7 +735,7 @@ class TestMigrationV6:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [6, 7, 8, 9, 10, 11, 12, 13]" in caplog.text
+        assert "applied migrations: [6, 7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
     @pytest.mark.parametrize("table, column", [c for c in _V6_COLUMNS if c[1] == "text_complete"])
@@ -962,7 +978,7 @@ class TestMigrationV12:
 
     def test_v11_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
-        db = Database(tmp_path / "v11.db")
+        db = Database(tmp_path / "v11.db", account=TEST_ACCOUNT)
         msg = make_message(message_id="old@x")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
         _store_occurrence(db, claimant_id=msg.claimant_id, occurrence="occ-1", attachment_id="h1")
@@ -981,13 +997,13 @@ class TestMigrationV12:
         db._conn.commit()
         _v11_from_fresh(db)
         db.close()
-        migrated = Database(tmp_path / "v11.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v11.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 13
+                == 14
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             row = migrated.get_attachment_extraction("h1", "text")
@@ -1009,7 +1025,7 @@ class TestMigrationV12:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [12, 13]" in caplog.text
+        assert "applied migrations: [12, 13, 14]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
 
@@ -1020,20 +1036,20 @@ class TestMigrationV11:
 
     def test_v10_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
-        db = Database(tmp_path / "v10.db")
+        db = Database(tmp_path / "v10.db", account=TEST_ACCOUNT)
         msg = make_message(message_id="old@x")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
         _store_occurrence(db, claimant_id=msg.claimant_id, occurrence="occ-1", attachment_id="h1")
         db._conn.commit()
         _v10_from_fresh(db)
         db.close()
-        migrated = Database(tmp_path / "v10.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v10.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 13
+                == 14
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             row = migrated.get_attachment_extraction("h1", "text")
@@ -1054,7 +1070,7 @@ class TestMigrationV11:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [11, 12, 13]" in caplog.text
+        assert "applied migrations: [11, 12, 13, 14]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
 
@@ -1064,7 +1080,7 @@ class TestMigrationV10:
 
     def test_v9_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
-        db = Database(tmp_path / "v9.db")
+        db = Database(tmp_path / "v9.db", account=TEST_ACCOUNT)
         msg = make_message(message_id="old@x")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
         chunk = _make_chunk("old".ljust(64, "0"), 0, "old body")
@@ -1076,13 +1092,13 @@ class TestMigrationV10:
         )
         _v9_from_fresh(db)
         db.close()
-        migrated = Database(tmp_path / "v9.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v9.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 13
+                == 14
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             assert (
@@ -1100,7 +1116,7 @@ class TestMigrationV10:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [10, 11, 12, 13]" in caplog.text
+        assert "applied migrations: [10, 11, 12, 13, 14]" in caplog.text
 
 
 class TestMigrationV9:
@@ -1109,20 +1125,20 @@ class TestMigrationV9:
 
     def test_v8_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
-        db = Database(tmp_path / "v8.db")
+        db = Database(tmp_path / "v8.db", account=TEST_ACCOUNT)
         msg = make_message(message_id="old@x")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
         _store_occurrence(db, claimant_id=msg.claimant_id, occurrence="occ-1", attachment_id="h1")
         db._conn.commit()
         _v8_from_fresh(db)
         db.close()
-        migrated = Database(tmp_path / "v8.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v8.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 13
+                == 14
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             assert [
@@ -1140,7 +1156,7 @@ class TestMigrationV9:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [9, 10, 11, 12, 13]" in caplog.text
+        assert "applied migrations: [9, 10, 11, 12, 13, 14]" in caplog.text
 
 
 class TestMigrationV8:
@@ -1164,7 +1180,7 @@ class TestMigrationV8:
 
     def test_v7_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
-        db = Database(tmp_path / "v7.db")
+        db = Database(tmp_path / "v7.db", account=TEST_ACCOUNT)
         dated = make_message(
             message_id="dated@x",
             subject="SYNTHETIC_V8_MARKER",
@@ -1198,8 +1214,8 @@ class TestMigrationV8:
         )
         db.close()
 
-        migrated = Database(tmp_path / "v7.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v7.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             conn = migrated._conn
             assert (
@@ -1249,13 +1265,13 @@ class TestMigrationV8:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [8, 9, 10, 11, 12, 13]" in caplog.text
+        assert "applied migrations: [8, 9, 10, 11, 12, 13, 14]" in caplog.text
         assert "SYNTHETIC_V8_MARKER" not in caplog.text
 
     def test_a_failed_rebuild_leaves_v7_intact(self, tmp_path):
         """The rebuild runs in the migration's one transaction: a failure
         part way rolls back to the v7 table with its participants."""
-        db = Database(tmp_path / "v7.db")
+        db = Database(tmp_path / "v7.db", account=TEST_ACCOUNT)
         msg = make_message(message_id="keep@x", cc_addrs=["carol@example.com"])
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
         _v7_from_fresh(db)
@@ -1292,13 +1308,13 @@ class TestMigrationV7:
 
     def test_v6_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
-        db = Database(tmp_path / "v6.db")
+        db = Database(tmp_path / "v6.db", account=TEST_ACCOUNT)
         msg = make_message(message_id="old@x")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
         _v6_from_fresh(db)
         db.close()
-        migrated = Database(tmp_path / "v6.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v6.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
@@ -1321,7 +1337,7 @@ class TestMigrationV7:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [7, 8, 9, 10, 11, 12, 13]" in caplog.text
+        assert "applied migrations: [7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
 
 
 class TestAttachmentTextCompleteness:
@@ -1422,13 +1438,13 @@ class TestMigrationV5:
 
     def test_v4_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
-        db = Database(tmp_path / "v4.db")
+        db = Database(tmp_path / "v4.db", account=TEST_ACCOUNT)
         msg = make_message(message_id="old@x")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
         _v4_from_fresh(db)
         db.close()
-        migrated = Database(tmp_path / "v4.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v4.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
@@ -1444,7 +1460,7 @@ class TestMigrationV5:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [5, 6, 7, 8, 9, 10, 11, 12, 13]" in caplog.text
+        assert "applied migrations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
 
     @pytest.mark.parametrize("column", [c for c in _V5_COLUMNS if c != "caps_json"])
     def test_the_flag_columns_reject_other_values(self, db, column):
@@ -1560,11 +1576,11 @@ class TestMigrationV2:
 
     def test_v1_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
-        db = Database(tmp_path / "v1.db")
+        db = Database(tmp_path / "v1.db", account=TEST_ACCOUNT)
         _v1_from_fresh(db)
         db.close()
-        migrated = Database(tmp_path / "v1.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v1.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
@@ -1574,13 +1590,13 @@ class TestMigrationV2:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]" in caplog.text
+        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
-        db = Database(tmp_path / "v1.db")
+        db = Database(tmp_path / "v1.db", account=TEST_ACCOUNT)
         _v1_from_fresh(db)
         db.close()
-        db = Database(tmp_path / "v1.db")
+        db = Database(tmp_path / "v1.db", account=TEST_ACCOUNT)
         try:
             msg = make_message(message_id="chk@x")
             db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
@@ -1597,7 +1613,7 @@ class TestMigrationV3:
 
     @staticmethod
     def _v2_with_rows(path) -> None:
-        db = Database(path)
+        db = Database(path, account=TEST_ACCOUNT)
         _v2_from_fresh(db)
         db._conn.execute(
             "INSERT INTO attachment_extractions (attachment_id, extractor_module, "
@@ -1615,8 +1631,8 @@ class TestMigrationV3:
     def test_v2_database_migrates_to_the_fresh_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         self._v2_with_rows(tmp_path / "v2.db")
-        migrated = Database(tmp_path / "v2.db")
-        fresh = Database(tmp_path / "fresh.db")
+        migrated = Database(tmp_path / "v2.db", account=TEST_ACCOUNT)
+        fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
@@ -1626,7 +1642,7 @@ class TestMigrationV3:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]" in caplog.text
+        assert "applied migrations: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path, monkeypatch):
@@ -1635,7 +1651,9 @@ class TestMigrationV3:
         self._v2_with_rows(tmp_path / "v2.db")
         # This migration alone: v4 queues a reparse of its own (#1140).
         monkeypatch.setattr(database, "SCHEMA_VERSION", 3)
-        db = Database(tmp_path / "v2.db")
+        # v3 predates the account registry (v14) the open check reads.
+        monkeypatch.setattr(database.Database, "_verify_account", lambda self: None)
+        db = Database(tmp_path / "v2.db", account=TEST_ACCOUNT)
         try:
             # Read directly: v3 predates the v6 column the accessor reads.
             row = db._conn.execute(
@@ -1652,7 +1670,7 @@ class TestMigrationV3:
 
     def test_the_migrated_column_rejects_a_negative_count(self, tmp_path):
         self._v2_with_rows(tmp_path / "v2.db")
-        db = Database(tmp_path / "v2.db")
+        db = Database(tmp_path / "v2.db", account=TEST_ACCOUNT)
         try:
             with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
                 db._conn.execute("UPDATE attachment_extractions SET ocr_pages_skipped = -1")
@@ -4541,7 +4559,7 @@ class TestFtsScrub:
         self._index_and_reap(db, threader)
         path = db.path
         db.close()
-        reopened = Database(path)
+        reopened = Database(path, account=TEST_ACCOUNT)
         try:
             assert reopened.scrub_reaped_fts() == self._ALL
             assert reopened.wal_checkpoint_truncate()[0] == 0
@@ -4754,7 +4772,7 @@ class TestWalCheckpoint:
     """
 
     def test_returns_three_int_tuple(self, tmp_path):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         try:
             result = db.wal_checkpoint_truncate()
             assert isinstance(result, tuple) and len(result) == 3
@@ -4771,7 +4789,7 @@ class TestWalCheckpoint:
         truncate the WAL persists across writes for the lifetime of
         the connection."""
         db_path = tmp_path / "mail.db"
-        db = Database(db_path)
+        db = Database(db_path, account=TEST_ACCOUNT)
         try:
             db.upsert_thread(make_thread([make_message(message_id="m1@x")]), FAKE_EMBEDDING)
             wal_path = tmp_path / "mail.db-wal"
@@ -5408,7 +5426,7 @@ class TestUpdateFilepathMovesQueueRow:
     def test_queued_row_keeps_its_retry_state(self, tmp_path):
         from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=5, base_backoff_seconds=0)
         queue.enqueue("/m/cur/b:2,S", REASON_INITIAL_SCAN)
         queue.mark_failed("/m/cur/b:2,S", stage="embed", error="x")
@@ -5422,7 +5440,7 @@ class TestUpdateFilepathMovesQueueRow:
     def test_dead_row_moves_so_requeue_targets_the_live_path(self, tmp_path):
         from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
         queue.enqueue("/m/cur/b:2,S", REASON_INITIAL_SCAN)
         queue.mark_failed("/m/cur/b:2,S", stage="embed", error="x")
@@ -5459,10 +5477,10 @@ class TestInterruptedInitialSchema:
 
         monkeypatch.setattr(Database, "_apply_initial_schema", failing_apply)
         with pytest.raises(sqlite3.DatabaseError):
-            Database(tmp_path / "mail.db")
+            Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         monkeypatch.setattr(Database, "_apply_initial_schema", real_apply)
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
 
         assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == (
             SCHEMA_VERSION

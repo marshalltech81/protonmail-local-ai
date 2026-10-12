@@ -15,7 +15,7 @@ help:
 	@echo ""
 	@echo "  protonmail-local-ai"
 	@echo ""
-	@echo "  init-secrets Create placeholder secret files under .secrets/ (run once on setup)"
+	@echo "  init-secrets Create placeholder secret files under .secrets/ and write ACCOUNT_SCOPE to .env when it is missing (run once on setup)"
 	@echo "  validate-env Verify .env values and secret file permissions before startup"
 	@echo "  build        Build all Docker images"
 	@echo "  build-nocache Rebuild all Docker images from scratch (skips BuildKit cache)"
@@ -67,6 +67,9 @@ help:
 # only when the matching layer's *_MODE=none.
 # The MCP bearer token (.secrets/mcp_auth_token.txt) is generated here
 # with openssl when absent; every /mcp request must send it.
+# ACCOUNT_SCOPE, the account the index is registered to (#1596), is not a
+# secret and lives in .env: scripts/init-account-scope.sh writes a new
+# one there when the line is missing or empty, and never replaces a value.
 init-secrets:
 	@mkdir -p .secrets
 	@chmod 700 .secrets
@@ -105,6 +108,7 @@ init-secrets:
 	else \
 		echo "  .secrets/mcp_auth_token.txt already exists, skipping"; \
 	fi
+	@./scripts/init-account-scope.sh
 
 # Source commit baked into each image (the org.opencontainers.image.revision
 # label and GIT_COMMIT) and logged at startup (#887): the short HEAD hash,
@@ -281,6 +285,7 @@ test-compose:
 
 test-validate-env:
 	bash scripts/tests/validate_env_test.sh
+	bash scripts/tests/init_account_scope_test.sh
 	bash scripts/tests/mcp_auth_headers_test.sh
 
 test-make-status:

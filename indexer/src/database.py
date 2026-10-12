@@ -21,6 +21,7 @@ from pathlib import Path
 import sqlite_vec
 
 from . import vector_sums
+from .account import AccountConfig, register_account_functions, verified_account_id
 from .chunker import l2_normalize, truncate_to_tokens
 from .entities import (
     PERSON_PREFIX,
@@ -170,8 +171,41 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # (owner decision on #1416, 2026-10-10), NULL on rows cached before it; the
 # migration queues a reparse, whose lookup certifies or refreshes each
 # row (``migrations/0012_extraction_identifier.sql``).
-SCHEMA_VERSION = 13
+# v13 (#1079): ``message_headers`` keeps bounded top-level header
+# evidence and ``messages.headers_complete`` whether it is whole; a
+# reparse fills both (``migrations/0013_message_headers.sql``).
+# v14 (#1596): ``accounts`` registers the configured account
+# (``ACCOUNT_SCOPE`` and the ``SOURCE_MODE`` provider), bound in the
+# migration through ``account.register_account_functions``; rows are
+# never changed or removed (``migrations/0014_account_registry.sql``).
+SCHEMA_VERSION = 14
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
+
+# The account registry's DDL (#1596), shared by the initial schema; the
+# v14 migration file repeats it, and the migration test compares the two
+# shapes.
+ACCOUNT_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE accounts (
+        id         INTEGER PRIMARY KEY,
+        scope_uuid TEXT NOT NULL UNIQUE,
+        provider   TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TRIGGER accounts_never_updated BEFORE UPDATE ON accounts
+    BEGIN
+        SELECT RAISE(ABORT, 'accounts rows are never changed');
+    END
+    """,
+    """
+    CREATE TRIGGER accounts_never_deleted BEFORE DELETE ON accounts
+    BEGIN
+        SELECT RAISE(ABORT, 'accounts rows are never removed');
+    END
+    """,
+)
 
 # How long a ``reaped_messages`` record outlives the reap. The record
 # holds identifiers derived from the sender's Message-ID, kept only so a
@@ -407,9 +441,13 @@ def _synchronized(fn):
 
 
 class Database:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, account: AccountConfig):
         _require_minimum_sqlite()
         self.path = path
+        # The configured account (#1596): bound on a fresh index or by the
+        # v14 migration, then required to match the stored record.
+        self.account = account
+        self.account_id: int | None = None
         self._lock = threading.RLock()
         self._transaction_depth = 0
         # Operator source-authority rules; empty until ``set_authority_rules``.
@@ -623,11 +661,15 @@ class Database:
         from .migrations import runner as migration_runner
 
         cur = self._conn.cursor()
+        # Before any schema work, so the v14 migration can bind the account
+        # in its own transaction (#1596).
+        register_account_functions(self._conn, self.account)
         cur.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         row = cur.execute("SELECT version FROM schema_version").fetchone()
         if row is None:
             self._apply_initial_schema(cur)
             log.info(f"Database initialized at {self.path} (schema v{SCHEMA_VERSION})")
+            self._verify_account()
             return
 
         if cur.execute("PRAGMA application_id").fetchone()[0] != SCHEMA_APPLICATION_ID:
@@ -640,6 +682,7 @@ class Database:
         stored = row["version"]
         if stored == SCHEMA_VERSION:
             log.info(f"Database ready at {self.path} (schema v{SCHEMA_VERSION})")
+            self._verify_account()
             return
 
         if stored > SCHEMA_VERSION:
@@ -662,6 +705,20 @@ class Database:
             f"Database ready at {self.path} (schema v{SCHEMA_VERSION}, "
             f"applied migrations: {applied})"
         )
+        self._verify_account()
+
+    def _verify_account(self) -> None:
+        """Require the one stored account to be the configured one (#1596),
+        and keep its id for the rows that reference it. Raises
+        ``AccountMismatchError`` with fixed text otherwise."""
+        rows = [
+            (r["id"], r["scope_uuid"], r["provider"])
+            for r in self._conn.execute(
+                "SELECT id, scope_uuid, provider FROM accounts ORDER BY id LIMIT 2"
+            ).fetchall()
+        ]
+        self.account_id = verified_account_id(rows, self.account)
+        log.info("Account verified against the index (provider=%s)", self.account.provider)
 
     def _apply_initial_schema(self, cur: sqlite3.Cursor):
         """Create every table the indexer needs, in their final shape, and
@@ -711,6 +768,11 @@ class Database:
         # leaves it open for the stamp.
         try:
             self._run_initial_schema_script(cur)
+            # The configured account, registered with the schema (#1596).
+            cur.execute(
+                "INSERT INTO accounts (scope_uuid, provider, created_at) VALUES (?, ?, ?)",
+                (self.account.scope_uuid, self.account.provider, datetime.now(UTC).isoformat()),
+            )
             cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
             cur.execute(f"PRAGMA application_id = {SCHEMA_APPLICATION_ID}")
             self._conn.commit()
@@ -1170,6 +1232,7 @@ class Database:
         self._run_entity_schema_script(cur)
         self._run_vector_generation_schema_script(cur)
         self._run_operator_identity_schema_script(cur)
+        self._run_account_schema_script(cur)
 
     @staticmethod
     def _run_entity_schema_script(cur: sqlite3.Cursor) -> None:
@@ -1284,6 +1347,22 @@ class Database:
             "VALUES (1, 'unconfigured', 0, ?)",
             (identity_digest(frozenset()),),
         )
+
+    @staticmethod
+    def _run_account_schema_script(cur: sqlite3.Cursor) -> None:
+        """The account registry (#1596), inside the initial schema's open
+        transaction; ``migrations/0014_account_registry.sql`` creates the
+        same table on an existing index and binds its row there.
+
+        One row per account the index serves; today exactly one, the
+        configured ``ACCOUNT_SCOPE`` and its ``SOURCE_MODE`` provider.
+        ``created_at`` is the registration time, never a collection
+        observation. Triggers abort any UPDATE or DELETE, so a row is
+        never changed or removed: a different scope is a different
+        account, never a rename.
+        """
+        for statement in ACCOUNT_SCHEMA_STATEMENTS:
+            cur.execute(statement)
 
     # -------------------------------------------------------------------------
     # Write operations

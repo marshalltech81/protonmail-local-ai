@@ -169,6 +169,12 @@ services:
       HOME: /home/indexer
       MAILDIR_PATH: /maildir
       SQLITE_PATH: /data/mail.db
+      # The account the index is registered to (#1596): ACCOUNT_SCOPE is
+      # required (make init-secrets writes it to .env), SOURCE_MODE names
+      # its provider. The index records both, and a different pair stops
+      # the service at startup.
+      ACCOUNT_SCOPE: ${ACCOUNT_SCOPE}
+      SOURCE_MODE: ${SOURCE_MODE:-}
       # OpenAI-compatible embedder via the openai SDK. EMBED_MODEL,
       # EMBED_API_KEY and EMBED_BASE_URL are required. The value
       # ``default`` selects the SDK default (``https://api.openai.com/v1``)
@@ -307,6 +313,12 @@ services:
       - mcp_auth_token
     environment:
       SQLITE_PATH: /data/mail.db
+      # The account the index is registered to (#1596): ACCOUNT_SCOPE is
+      # required (make init-secrets writes it to .env), SOURCE_MODE names
+      # its provider. The index records both, and a different pair stops
+      # the service at startup.
+      ACCOUNT_SCOPE: ${ACCOUNT_SCOPE}
+      SOURCE_MODE: ${SOURCE_MODE:-}
       # INFERENCE_MODE selects the inference client/SDK. For any enabled
       # mode INFERENCE_MODEL, INFERENCE_API_KEY and INFERENCE_BASE_URL
       # are required; INFERENCE_BASE_URL=default selects the SDK's

@@ -50,6 +50,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src import main
+from src.account import DEFAULT_SOURCE_MODE, AccountConfig
 from src.database import EMBEDDING_DIM, Database
 from src.embed_identity import verify_or_record_embedder
 from src.embedder import EmbeddingBackend, OpenAIEmbedder
@@ -75,6 +76,19 @@ from tests.baseline.hash_embedder import HashEmbedder
 # ``test_ocr_binaries_cover_the_executables_the_ocr_path_starts`` checks
 # this list against the commands those libraries name.
 OCR_BINARIES = ("tesseract", "pdftoppm", "pdfinfo")
+
+# The synthetic account the baseline index is registered to (#1596).
+BASELINE_ACCOUNT_SCOPE = "00000000-0000-4000-8000-00000000ba5e"
+
+
+def baseline_account(out_dir: Path) -> AccountConfig:
+    """The account of the index ``build`` writes under ``out_dir``, whose
+    Maildir is ``out_dir / "maildir"``."""
+    return AccountConfig(
+        scope_uuid=BASELINE_ACCOUNT_SCOPE,
+        provider=DEFAULT_SOURCE_MODE,
+        maildir_root=out_dir / "maildir",
+    )
 
 
 def require_ocr_binaries() -> None:
@@ -212,7 +226,7 @@ def build(
         embedder = HashEmbedder()
     if query_embedder is None:
         query_embedder = embedder
-    db = Database(out_dir / "mail.db")
+    db = Database(out_dir / "mail.db", account=baseline_account(out_dir))
     try:
         record_identity(db)
         with (

@@ -32,7 +32,14 @@ from src.extractors import (
 )
 from src.parser import Attachment
 
-from tests.conftest import make_message, make_mock_embedder, make_ole2, make_thread, make_zip
+from tests.conftest import (
+    TEST_ACCOUNT,
+    make_message,
+    make_mock_embedder,
+    make_ole2,
+    make_thread,
+    make_zip,
+)
 
 
 def _module(attachment: Attachment) -> str:
@@ -87,7 +94,7 @@ def _prepare_and_apply(
 
 
 def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     db.upsert_thread(
         make_thread(
             messages=[make_message(message_id="message@example.com")], thread_id="thread-1"
@@ -436,7 +443,7 @@ def test_re_extraction_without_text_clears_the_stale_chunks(tmp_path, monkeypatc
 
 def _seed_thread_for_cache_test(tmp_path):
     tmp_path.mkdir(parents=True, exist_ok=True)
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     db.upsert_thread(
         make_thread(
             messages=[make_message(message_id="message@example.com")], thread_id="thread-1"
@@ -686,7 +693,7 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
     window (``_FAILED_CACHE_MAX_AGE``) lets a real fix land later
     without permanently caching broken extractions.
     """
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     db.upsert_thread(
         make_thread(
             messages=[make_message(message_id="message@example.com")], thread_id="thread-1"
@@ -732,7 +739,7 @@ def test_stale_failed_cached_extraction_is_retried(tmp_path, monkeypatch):
     but a real library / dep upgrade should eventually pick the
     payload up again rather than caching the failure forever.
     """
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     db.upsert_thread(
         make_thread(
             messages=[make_message(message_id="message@example.com")], thread_id="thread-1"
@@ -797,7 +804,7 @@ def test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled(tmp_path, monkey
     when the operator re-enables OCR. Other ``unsupported`` reasons (no
     extractor for this MIME type) stay cached.
     """
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     db.upsert_thread(
         make_thread(
             messages=[make_message(message_id="message@example.com")], thread_id="thread-1"
@@ -848,7 +855,7 @@ def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypa
     images, so enabling OCR later refreshes them instead of preserving an
     empty/tiny digital-text result forever.
     """
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     db.upsert_thread(
         make_thread(
             messages=[make_message(message_id="message@example.com")], thread_id="thread-1"
@@ -900,7 +907,7 @@ def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypa
 
 def _setup_db_for_attachment(tmp_path, message_id="msg@x", thread_id="thread-x"):
     """Create a DB with one thread + message ready to receive attachments."""
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     db.upsert_thread(
         make_thread(messages=[make_message(message_id=message_id)], thread_id=thread_id),
         [0.0] * EMBEDDING_DIM,
@@ -1312,7 +1319,7 @@ def test_payload_re_arriving_after_its_last_carrier_was_reaped_is_re_extracted(
     """Reaping the last message carrying a payload purges its cached
     extraction (#562), so the same bytes arriving again later are
     extracted afresh rather than served from the cache."""
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     first = make_message(message_id="first@x", filepath="/m/first")
     keep = make_message(message_id="keep@x", filepath="/m/keep")
     db.upsert_thread(

@@ -37,6 +37,7 @@ from src.extractors import (
 from src.parser import Attachment
 from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT
 
+from tests.conftest import TEST_ACCOUNT
 from tests.test_extraction_budget import Pipeline
 
 MARKER = "SYNTHETIC_1415_MARKER"
@@ -226,7 +227,7 @@ class TestCacheCheck:
 
         from tests.conftest import make_message, make_thread
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         db.upsert_thread(
             make_thread(
                 messages=[make_message(message_id="message@example.com")], thread_id="thread-1"

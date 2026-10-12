@@ -31,8 +31,8 @@ from src.queue import (
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_mock_embedder
-from tests.test_database import _v7_from_fresh
+from tests.conftest import TEST_ACCOUNT, make_mock_embedder
+from tests.test_database import _drop_v14_tables, _v7_from_fresh
 
 MARKER = "SYNTHETIC_REPARSE_MARKER"
 _VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
@@ -69,7 +69,7 @@ def _drain(db: Database, queue: IndexingQueue, embedder) -> int:
 def _index(tmp_path: Path, bodies: list[str | None]) -> tuple[Database, IndexingQueue, list[str]]:
     """Index one message per body through the real pipeline; ``None``
     writes an empty body (a chunkless message)."""
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     paths = []
     for i, body in enumerate(bodies):
@@ -131,7 +131,7 @@ class TestReparseEnqueueStatement:
         db.close()
 
     def test_files_never_indexed_are_not_queued(self, tmp_path):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         assert IndexingQueue(db).enqueue_reparse() == 0
         assert _jobs(db) == {}
         db.close()
@@ -284,11 +284,12 @@ class TestSenderAmbiguousMigration:
         _drop_v5_columns(db)
         db._conn.execute("ALTER TABLE messages DROP COLUMN participant_names_complete")
         db._conn.execute("ALTER TABLE messages DROP COLUMN sender_ambiguous")
+        _drop_v14_tables(db)
         db._conn.execute("UPDATE schema_version SET version = 1")
         db._conn.commit()
         db.close()
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
         flags = db._conn.execute("SELECT sender_ambiguous FROM messages").fetchall()
         assert [r[0] for r in flags] == [None, None, None]
@@ -368,11 +369,12 @@ class TestParticipantNamesMigration:
         )
         _drop_v5_columns(db)
         db._conn.execute("ALTER TABLE messages DROP COLUMN participant_names_complete")
+        _drop_v14_tables(db)
         db._conn.execute("UPDATE schema_version SET version = 3")
         db._conn.commit()
         db.close()
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
         flags = db._conn.execute("SELECT participant_names_complete FROM messages").fetchall()
         assert [r[0] for r in flags] == [None, None, None]
@@ -481,11 +483,12 @@ class TestCompletenessMigration:
             "SELECT chunk_id FROM message_chunks ORDER BY chunk_id"
         ).fetchall()
         _drop_v5_columns(db)
+        _drop_v14_tables(db)
         db._conn.execute("UPDATE schema_version SET version = 4")
         db._conn.commit()
         db.close()
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
         unknown = (None,) * len(_V5_COLUMNS)
         assert _completeness(db) == {live: unknown, chunkless: unknown, dead: unknown}
@@ -582,7 +585,7 @@ class TestUnknownDateMigration:
         assert date_lines() == {True}
         db.close()
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
         assert {fp: d[1] for fp, d in self._dates(db).items()} == dict.fromkeys(v7)
         assert {fp: (r["reason"], r["status"]) for fp, r in _jobs(db).items()} == {
@@ -639,7 +642,7 @@ class TestBodyCompletePublication:
             b"--b\r\nContent-Type: text/plain\r\n\r\nfirst\r\n"
             b"--b\r\nContent-Type: text/plain\r\n\r\nSYNTHETIC_REPARSE_MARKER\r\n--b--\r\n"
         )
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         _drain(db, queue, make_mock_embedder(_VECTOR))
@@ -932,7 +935,7 @@ class TestReparseCommand:
             "had a job keep it; dead-lettered ones stay dead until make requeue-dead.\n"
         )
         assert MARKER not in out
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         assert {row["reason"] for row in _jobs(db).values()} == {REASON_ON_CREATED, REASON_REPARSE}
         db.close()
 

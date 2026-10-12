@@ -5,9 +5,11 @@ from src import requeue_dead
 from src.database import Database
 from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 
+from tests.conftest import TEST_ACCOUNT
+
 
 def _seed(db_path):
-    db = Database(db_path)
+    db = Database(db_path, account=TEST_ACCOUNT)
     q = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
     q.enqueue("/m/exhausted", REASON_INITIAL_SCAN)
     q.mark_failed("/m/exhausted", stage="embed", error="boom")
@@ -17,7 +19,7 @@ def _seed(db_path):
 
 
 def _status(db_path, filepath):
-    db = Database(db_path)
+    db = Database(db_path, account=TEST_ACCOUNT)
     try:
         return IndexingQueue(db).is_dead(filepath)
     finally:

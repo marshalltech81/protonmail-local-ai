@@ -44,7 +44,7 @@ from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_message, make_mock_embedder, make_ole2, make_thread
+from tests.conftest import TEST_ACCOUNT, make_message, make_mock_embedder, make_ole2, make_thread
 
 MARKER = "SYNTHETIC_1418_MARKER"
 _UNIT_VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
@@ -344,7 +344,7 @@ def _catalogue() -> list[dict]:
 def catalogue_db(tmp_path_factory):
     """One message per catalogue row, each with one occurrence using its
     own cached row."""
-    db = Database(tmp_path_factory.mktemp("cat") / "mail.db")
+    db = Database(tmp_path_factory.mktemp("cat") / "mail.db", account=TEST_ACCOUNT)
     rows = _catalogue()
     for row in rows:
         msg = make_message(
@@ -472,7 +472,7 @@ def test_raising_qualifies_and_lowering_never_does(recorded, current, due):
 
 
 def _setup(tmp_path) -> Database:
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     db.upsert_thread(
         make_thread(messages=[make_message(message_id="msg@x")], thread_id="thread-x"),
         _UNIT_VECTOR,
@@ -752,7 +752,7 @@ class TestStartupSweep:
         monkeypatch.setattr(main, "INDEXER_OCR_MAX_PAGES", 20)
         monkeypatch.setattr(main, "INDEXER_PDF_MAX_DIGITAL_PAGES", 500)
         monkeypatch.setattr(main, "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS", 60)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
         paths = {}
         for name, payload in (
@@ -975,7 +975,7 @@ class TestOcrOffToOn:
         monkeypatch.setattr(main, "INDEXER_OCR_MAX_PAGES", 20)
         monkeypatch.setattr(main, "INDEXER_PDF_MAX_DIGITAL_PAGES", 20)
         monkeypatch.setattr(main, "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS", 0)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
         found = {}
         for name, (stamp, record, skipped, caps) in self.ROWS.items():

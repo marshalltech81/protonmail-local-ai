@@ -12,6 +12,17 @@ import pytest
 import sqlite_vec
 from src.lib.sqlite import Database
 
+# The account every main() test runs under (#1596); fake databases report
+# it as the index's one stored account.
+TEST_ACCOUNT_SCOPE = "00000000-0000-4000-8000-000000000001"
+
+
+@pytest.fixture(autouse=True)
+def _account_env(monkeypatch):
+    """``main()`` reads the account from the environment (#1596)."""
+    monkeypatch.setenv("ACCOUNT_SCOPE", TEST_ACCOUNT_SCOPE)
+    monkeypatch.delenv("SOURCE_MODE", raising=False)
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(

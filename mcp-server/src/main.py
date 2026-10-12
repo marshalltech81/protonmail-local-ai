@@ -30,6 +30,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from .lib.account import AccountConfigError, account_config_from_env, run_startup_account_check
 from .lib.argument_validation import ArgumentValidationLog, DropArgumentModelWarning
 from .lib.build_identity import git_commit as _git_commit
 from .lib.embed import DEFAULT_EMBED_TIMEOUT_SECS, EmbedClient
@@ -68,6 +69,8 @@ log = logging.getLogger("mcp-server")
 # never an API key, ``MCP_AUTH_TOKEN`` or any other secret, and never the
 # whole environment.
 _IDENTITY_SETTINGS = (
+    "ACCOUNT_SCOPE",
+    "SOURCE_MODE",
     "SQLITE_PATH",
     "INFERENCE_MODE",
     "INFERENCE_BASE_URL",
@@ -890,6 +893,12 @@ def _run_server(server: FastMCP) -> None:
 def main():
     # No MCP endpoint is served without its bearer token.
     _require_auth_token(MCP_AUTH_TOKEN)
+    # The account this index serves (#1596), validated before the database
+    # opens; a refusal is fixed text, never the value.
+    try:
+        account = account_config_from_env(os.environ)
+    except AccountConfigError as exc:
+        raise SystemExit(str(exc)) from None
 
     # Validate per-mode required vars BEFORE constructing service clients
     # or opening the SQLite database. A missing volume mount or bad DB
@@ -967,6 +976,9 @@ def main():
 
     # Env validated — now open the SQLite index.
     db = Database(SQLITE_PATH)
+    # The index must be registered to the configured account (#1596),
+    # checked before anything is served.
+    run_startup_account_check(db, account)
 
     # Read the declared embedding dim from ``message_chunks_vec`` so the
     # tool layer can reject wrong-shaped query vectors before they reach

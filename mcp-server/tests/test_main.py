@@ -30,6 +30,8 @@ from src.main import (
     _warn_if_remote_endpoint,
 )
 
+from tests.conftest import TEST_ACCOUNT_SCOPE
+
 
 class TestReadSecret:
     def test_secret_file_is_preferred_over_env_fallback(self, monkeypatch, tmp_path):
@@ -183,6 +185,9 @@ class TestMcpAuthToken:
     a container), and startup fails closed without it."""
 
     class _FakeDatabase:
+        def get_accounts(self):
+            return [(TEST_ACCOUNT_SCOPE, "proton-bridge")]
+
         def __init__(self, _path):  # pragma: no cover — must not be opened
             raise AssertionError("the index must not be opened without a token")
 
@@ -300,6 +305,9 @@ class TestContextTokens:
     ``INFERENCE_MAX_TOKENS`` fails startup."""
 
     class _FakeDatabase:
+        def get_accounts(self):
+            return [(TEST_ACCOUNT_SCOPE, "proton-bridge")]
+
         def __init__(self, _path):
             pass
 
@@ -511,6 +519,9 @@ class TestDefaultIgnoresAmbientEndpoints:
     carrying a credential, must neither redirect mail nor reach a log."""
 
     class _FakeDatabase:
+        def get_accounts(self):
+            return [(TEST_ACCOUNT_SCOPE, "proton-bridge")]
+
         def __init__(self, _path):
             pass
 
@@ -921,6 +932,9 @@ class TestExperimentalToolsFlag:
     inference."""
 
     class _FakeDatabase:
+        def get_accounts(self):
+            return [(TEST_ACCOUNT_SCOPE, "proton-bridge")]
+
         def __init__(self, _path):
             pass
 

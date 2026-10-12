@@ -23,6 +23,8 @@ import pytest
 from src import main
 from src.database import SCHEMA_APPLICATION_ID, SCHEMA_VERSION, Database
 
+from tests.conftest import TEST_ACCOUNT
+
 _LINE = re.compile(
     r"Startup identity: service=indexer commit=(?P<commit>\S+) "
     r"boot=(?P<boot>[0-9a-f]{12}) schema_code=(?P<code>\d+) "
@@ -66,7 +68,7 @@ def test_line_format_before_and_after_the_index_exists(tmp_path, monkeypatch, ca
     assert fresh["code"] == str(SCHEMA_VERSION)
     # No index yet: nothing is stored.
     assert fresh["stored"] == "none"
-    Database(path).close()
+    Database(path, account=TEST_ACCOUNT).close()
     reopened = _log(caplog)
     assert reopened["stored"] == str(SCHEMA_VERSION)
     # Each start gets its own boot ID; the settings did not change.
@@ -132,6 +134,8 @@ class TestReadStoredSchemaVersion:
 def test_config_hash_covers_only_the_named_non_secret_settings():
     names = set(main._identity_settings())
     assert names == {
+        "ACCOUNT_SCOPE",
+        "SOURCE_MODE",
         "MAILDIR_PATH",
         "SQLITE_PATH",
         "INDEXER_HEALTH_FILE",

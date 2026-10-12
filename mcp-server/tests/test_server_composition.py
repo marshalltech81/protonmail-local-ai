@@ -17,6 +17,7 @@ import pytest
 from fastmcp import Client, FastMCP
 from starlette.routing import Route
 
+from tests.conftest import TEST_ACCOUNT_SCOPE
 from tests.test_tool_annotations import EXPECTED_TITLES, _server, _wire_tools
 
 _TOKEN = "synthetic-mcp-token-xxxxxxxxxxxxxxxx"  # pragma: allowlist secret
@@ -26,6 +27,9 @@ _INTELLIGENCE = {"ask_mailbox", "summarize_thread", "extract_from_emails"}
 
 
 class _FakeDatabase:
+    def get_accounts(self):
+        return [(TEST_ACCOUNT_SCOPE, "proton-bridge")]
+
     def __init__(self, _path):
         pass
 

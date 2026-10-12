@@ -34,7 +34,7 @@ from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_message, make_mock_embedder, make_ole2, make_thread
+from tests.conftest import TEST_ACCOUNT, make_message, make_mock_embedder, make_ole2, make_thread
 
 # Captured before any test monkeypatches the name, so the sorted
 # wrapper installed by ``_run`` still walks the real Maildir.
@@ -416,7 +416,7 @@ class TestOnMovedIndexesDestination:
         restart. ``on_moved`` must enqueue the destination and the
         worker drain must then pick it up."""
         db_path = tmp_path / "db" / "mail.db"
-        db = Database(db_path)
+        db = Database(db_path, account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)
 
@@ -448,7 +448,7 @@ class TestOnMovedIndexesDestination:
         path but not the job, whose old path then hit FileNotFoundError
         and was dropped — B's chunks were never written, with no pending
         or dead job left to say so."""
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)
         embedder = make_mock_embedder()
@@ -481,7 +481,7 @@ class TestOnMovedIndexesDestination:
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_directory_moves_are_ignored(self, tmp_path):
-        db = Database(tmp_path / "db" / "mail.db")
+        db = Database(tmp_path / "db" / "mail.db", account=TEST_ACCOUNT)
         handler = main.MaildirHandler(db, _make_queue(db))
         # Directory events should not cause an index attempt
         handler.on_moved(
@@ -498,7 +498,7 @@ class TestOnMovedIndexesDestination:
         """A rename from ``cur/msg`` to ``cur/msg,S`` (flag change) must
         not re-parse and re-embed an already-indexed message."""
         db_path = tmp_path / "db" / "mail.db"
-        db = Database(db_path)
+        db = Database(db_path, account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)
 
@@ -529,7 +529,7 @@ class TestOnMovedIndexesDestination:
         new name, the handler must detect the rename, skip the re-embed,
         and move the stored filepath forward."""
         db_path = tmp_path / "db" / "mail.db"
-        db = Database(db_path)
+        db = Database(db_path, account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)
 
@@ -564,7 +564,7 @@ class TestOnMovedIndexesDestination:
         """mbsync carries a read / flag change from Proton as a rename
         (new/ -> cur/, then ``:2,S`` -> ``:2,FS``). The message's state
         follows each rename with no parse, embed or duplicate row."""
-        db = Database(tmp_path / "db" / "mail.db")
+        db = Database(tmp_path / "db" / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)
         delivered = tmp_path / "INBOX" / "new" / "1738500000.state.proton"
@@ -612,7 +612,7 @@ class TestInitialIndexNestedFolders:
         _write_eml(nested / "deep.eml", "deep@example.com")
         _write_eml(flat / "top.eml", "top@example.com")
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
@@ -631,7 +631,7 @@ class TestInitialIndexNestedFolders:
         nested.mkdir(parents=True)
         _write_eml(nested / "m.eml", "nested@example.com")
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
@@ -733,7 +733,7 @@ class TestInitialIndexHeartbeat:
         for i in range(message_count):
             _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
 
         embedder = make_mock_embedder()
@@ -772,7 +772,7 @@ class TestInitialIndexHeartbeat:
         for i in range(5):
             _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
 
         embedder = make_mock_embedder()
@@ -845,7 +845,7 @@ class TestInitialIndexDeadLetterRespect:
         dest = inbox / "msg.eml"
         _write_eml(dest, "deadletter@example.com")
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
@@ -891,7 +891,7 @@ class TestDrainQueueRetryAndDeadLetter:
         dest = tmp_path / "INBOX" / "new" / "msg.eml"
         _write_eml(dest, "retry@example.com")
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)
 
@@ -917,7 +917,7 @@ class TestDrainQueueRetryAndDeadLetter:
         readable."""
         dest = tmp_path / "INBOX" / "new" / "fresh.eml"
         _write_eml(dest, "fresh@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)  # max_attempts=3
         embedder = make_mock_embedder()
@@ -956,7 +956,7 @@ class TestDrainQueueRetryAndDeadLetter:
 
         dest = tmp_path / "INBOX" / "new" / "fresh.eml"
         _write_eml(dest, "fresh@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         # A real backoff, so the retry path records one attempt per drain.
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=60)
         monkeypatch.setattr(
@@ -991,7 +991,7 @@ class TestDrainQueueRetryAndDeadLetter:
         visible terminal state rather than deferring forever."""
         dest = tmp_path / "INBOX" / "new" / "stuck.eml"
         _write_eml(dest, "stuck@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         monkeypatch.setattr(
             main,
@@ -1021,7 +1021,7 @@ class TestDrainQueueRetryAndDeadLetter:
         dest = tmp_path / "INBOX" / "new" / "broken.eml"
         _write_eml(dest, "broken@example.com")
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)  # max_attempts=3
         embedder = make_mock_embedder()
@@ -1071,7 +1071,7 @@ class TestDrainQueueRetryAndDeadLetter:
         dest = tmp_path / "INBOX" / "new" / "msg.eml"
         _write_eml(dest, "giveup@example.com")
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)  # max_attempts=3
 
@@ -1109,7 +1109,7 @@ class TestDrainQueueRetryAndDeadLetter:
         # of consuming retry budget.
         dest = tmp_path / "INBOX" / "cur" / "definitely-not-here.eml"
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
@@ -1127,7 +1127,7 @@ class TestDrainQueueRetryAndDeadLetter:
         # in the queue with attempts incremented). One drain pass; if
         # this regressed and routed to mark_failed instead, attempts
         # would be 1 and status would be queued (with backoff).
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
@@ -1162,7 +1162,7 @@ class TestDrainQueueRetryAndDeadLetter:
         # Write a file larger than the 1 KiB cap above.
         dest.write_bytes(b"X" * 2048)
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
@@ -1212,7 +1212,7 @@ class TestDrainQueueRetryAndDeadLetter:
             return real_parse(*args, **kwargs)
 
         monkeypatch.setattr(main, "parse_email", _counting_parse)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder()
         queue = _make_queue(db)
@@ -1251,7 +1251,7 @@ class TestDrainQueueRetryAndDeadLetter:
             raise RecursionError("synthetic")
 
         monkeypatch.setattr(parser, "_read_address_headers", _boom)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)
         queue.enqueue(str(dest), REASON_INITIAL_SCAN)
@@ -1280,7 +1280,7 @@ class TestDrainQueueRetryAndDeadLetter:
         _write_eml(dest, "race@example.com")
         os.chmod(dest, 0o000)
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
@@ -1419,7 +1419,7 @@ class TestMainEmbedEndpoint:
     def test_empty_url_fails_before_any_client_or_database(self, monkeypatch):
         self._configure(monkeypatch, "")
         built: list[str] = []
-        monkeypatch.setattr(main, "Database", lambda path: built.append("database"))
+        monkeypatch.setattr(main, "Database", lambda path, account: built.append("database"))
         monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: built.append("embedder"))
         # The SDK constructor itself, in case anything bypasses the wrapper.
         monkeypatch.setattr("src.embedder.OpenAI", lambda **kw: built.append("sdk"))
@@ -1440,8 +1440,8 @@ class TestMainEmbedEndpoint:
             return real_openai(**kwargs)
 
         monkeypatch.setattr("src.embedder.OpenAI", recording_openai)
-        db = Database(tmp_path / "mail.db")
-        monkeypatch.setattr(main, "Database", lambda path: db)
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
+        monkeypatch.setattr(main, "Database", lambda path, account: db)
 
         def stop(_db):
             raise self._Stop
@@ -1528,7 +1528,9 @@ class TestStartupWidthCheck:
 
     def test_matching_dim_passes_with_one_request(self, tmp_path):
         embedder = self._embedder([0.1] * EMBEDDING_DIM)
-        main._check_embedder_identity(Database(tmp_path / "mail.db"), embedder)
+        main._check_embedder_identity(
+            Database(tmp_path / "mail.db", account=TEST_ACCOUNT), embedder
+        )
         embedder.embed.assert_called_once_with(CALIBRATION_TEXT)
 
     def test_mismatched_dim_raises_systemexit(self, tmp_path):
@@ -1537,7 +1539,9 @@ class TestStartupWidthCheck:
         cryptic sqlite-vec insert error."""
         embedder = self._embedder([0.0] * (EMBEDDING_DIM + 256))
         with pytest.raises(SystemExit) as exc_info:
-            main._check_embedder_identity(Database(tmp_path / "mail.db"), embedder)
+            main._check_embedder_identity(
+                Database(tmp_path / "mail.db", account=TEST_ACCOUNT), embedder
+            )
         assert str(EMBEDDING_DIM) in str(exc_info.value)
 
     def test_request_failure_exits_without_provider_text(self, tmp_path, caplog):
@@ -1553,7 +1557,9 @@ class TestStartupWidthCheck:
             body=body,
         )
         with pytest.raises(SystemExit) as exc_info:
-            main._check_embedder_identity(Database(tmp_path / "mail.db"), embedder)
+            main._check_embedder_identity(
+                Database(tmp_path / "mail.db", account=TEST_ACCOUNT), embedder
+            )
         exc = exc_info.value
         rendered = "".join(traceback.format_exception(exc))
         for text in (str(exc), repr(exc), rendered, caplog.text):
@@ -1572,7 +1578,7 @@ class TestIndexOneFileChunking:
     def test_chunks_land_and_thread_vector_is_chunk_mean(self, tmp_path):
 
         db_path = tmp_path / "db" / "mail.db"
-        db = Database(db_path)
+        db = Database(db_path, account=TEST_ACCOUNT)
         threader = Threader(db)
 
         # A multi-paragraph body so the chunker emits at least one
@@ -1648,7 +1654,7 @@ class TestIndexOneFileChunking:
         deterministic chunk_ids so a re-index burns zero extra embedding
         service round-trips."""
         db_path = tmp_path / "db" / "mail.db"
-        db = Database(db_path)
+        db = Database(db_path, account=TEST_ACCOUNT)
         threader = Threader(db)
 
         dest = tmp_path / "INBOX" / "cur" / "msg.eml"
@@ -1693,7 +1699,7 @@ class TestIndexOneFileChunking:
     def test_attachment_stored_chunk_ids_are_looked_up_once(self, tmp_path, monkeypatch):
         """#845: preparing an attachment does not diff stored chunk IDs;
         the batched pipeline does it once per occurrence, then embeds."""
-        db = Database(tmp_path / "db" / "mail.db")
+        db = Database(tmp_path / "db" / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         dest = tmp_path / "INBOX" / "cur" / "msg.eml"
         _write_eml_with_text_attachment(dest, "attachment-lookup@x")
@@ -1728,7 +1734,7 @@ class TestIndexOneFileChunking:
         transaction and must remain empty so the queue retry replays
         the whole message cleanly when the embedder recovers."""
         db_path = tmp_path / "db" / "mail.db"
-        db = Database(db_path)
+        db = Database(db_path, account=TEST_ACCOUNT)
         threader = Threader(db)
 
         dest = tmp_path / "INBOX" / "cur" / "msg.eml"
@@ -1779,7 +1785,7 @@ class TestInterruptedMessagesDeadLetter:
     that message — and only that message — one attempt."""
 
     def _run_until_quiet(self, tmp_path, poison: Path, healthy: Path, max_restarts: int = 6):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder()
         embedder.embed.return_value = _UNIT_VECTOR
         _make_queue(db).enqueue(str(poison), REASON_INITIAL_SCAN)
@@ -1849,7 +1855,7 @@ class TestInterruptedMessagesDeadLetter:
 
         monkeypatch.setattr(main, "_phase1_commit_thread", phase1)
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder()
         embedder.embed.return_value = _UNIT_VECTOR
         _make_queue(db).enqueue(str(first), REASON_INITIAL_SCAN)
@@ -1903,7 +1909,7 @@ class TestInterruptedEmbedPhase:
         b = tmp_path / "INBOX" / "new" / "b.eml"
         _write_eml(a, "a@example.com")
         _write_eml(b, "b@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder()
         embedder.embed.return_value = _UNIT_VECTOR
         embedder.embed_batch.side_effect = embed_batch
@@ -1957,7 +1963,7 @@ class TestStallGuardProgress:
     def _drain_one_counting_progress(self, tmp_path, monkeypatch, embed_batch):
         dest = tmp_path / "INBOX" / "new" / "big.eml"
         _write_eml(dest, "big@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(dest), REASON_INITIAL_SCAN)
         progress: list[int] = []
@@ -2001,7 +2007,7 @@ class TestStallGuardProgress:
     def test_phase2a_reports_progress_per_attachment(self, tmp_path):
         dest = tmp_path / "INBOX" / "new" / "att.eml"
         _write_eml_with_text_attachment(dest, "att@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(dest), REASON_INITIAL_SCAN)
         row = queue.claim_batch(1)[0]
@@ -2023,7 +2029,7 @@ class TestStallGuardProgress:
 
         dest = tmp_path / "INBOX" / "new" / "att.eml"
         _write_eml_with_text_attachment(dest, "att@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(dest), REASON_INITIAL_SCAN)
         row = queue.claim_batch(1)[0]
@@ -2055,7 +2061,7 @@ class TestStallGuardProgress:
         healthcheck reports."""
         dest = tmp_path / "INBOX" / "new" / "att.eml"
         _write_eml_with_text_attachment(dest, "att@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(dest), REASON_INITIAL_SCAN)
         row = queue.claim_batch(1)[0]
@@ -2144,7 +2150,7 @@ class TestHostPressureEscapesPhase2a:
 
         dest = tmp_path / "INBOX" / "new" / "pdf.eml"
         self._write_eml_with_pdf(dest, "pdf@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(dest), REASON_INITIAL_SCAN)
         embedder = make_mock_embedder()
@@ -2173,7 +2179,7 @@ class TestReprocessKeepsThreadMembership:
         indexer was down, so its new path looked unindexed), threading
         re-resolved it into A's thread: the map moved but B's chunks kept
         thread B, and both thread rows listed B."""
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)
         embedder = make_mock_embedder()
@@ -2244,7 +2250,7 @@ class TestReprocessKeepsFirstDate:
         _drain(queue, db, make_mock_embedder(_UNIT_VECTOR), threader)
 
     def test_dated_message_keeps_header_date_on_reprocess(self, tmp_path, monkeypatch):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         path = tmp_path / "INBOX" / "cur" / "d:2,S"
         _write_eml(path, "dated@example.com")
@@ -2270,7 +2276,7 @@ class TestReprocessKeepsFirstDate:
         same file: a file whose real Date header differs has different
         bytes, so it is another claimant of the Message-ID (#217) with its
         own header date, and the first keeps its own."""
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         path = tmp_path / "INBOX" / "cur" / "c:2,S"
         _write_eml(path, "changed@example.com")
@@ -2292,7 +2298,7 @@ class TestReprocessKeepsFirstDate:
 
     @pytest.mark.parametrize("date", [None, "not-a-date"], ids=["missing", "malformed"])
     def test_undated_message_keeps_first_index_time_on_reprocess(self, tmp_path, monkeypatch, date):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         path = tmp_path / "INBOX" / "cur" / "u:2,S"
         _write_eml(path, "undated@example.com", date=date)
@@ -2328,7 +2334,7 @@ class TestReprocessKeepsFirstDate:
         _write_eml(root, "root@example.com", subject="Plan", date=None, received=received)
         _write_eml(reply, "reply@example.com", subject="Re: Plan", in_reply_to="root@example.com")
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         _set_parser_clock(monkeypatch, self._FIRST)
@@ -2367,7 +2373,7 @@ class TestReprocessKeepsFirstDate:
         keeps an unknown ``sent_at`` and one ``occurred_at``; its thread span
         is its effective time, and its chunks carry no date of their
         own (#575), so every passage reads that same message row."""
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         path = tmp_path / "INBOX" / "cur" / "r:2,S"
         _write_eml(
@@ -2433,7 +2439,7 @@ class TestBatchedInitialIndex:
         maildir = tmp_path / "maildir"
         inbox = maildir / "INBOX" / "cur"
         inbox.mkdir(parents=True)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         return maildir, inbox, db, threader
 
@@ -2572,7 +2578,7 @@ class TestBatchedInitialIndex:
             encoding="utf-8",
         )
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
 
         # Embedder returns a deterministic non-zero vector so the
@@ -2648,7 +2654,7 @@ class TestBatchedInitialIndex:
             encoding="utf-8",
         )
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder(vector=[0.25] * EMBEDDING_DIM)
         queue = _make_queue(db)
@@ -2716,7 +2722,7 @@ class TestBatchedInitialIndex:
             encoding="utf-8",
         )
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder(vector=[0.5] * EMBEDDING_DIM)
         queue = _make_queue(db)
@@ -2761,7 +2767,7 @@ class TestBatchedInitialIndex:
         sentinel = [0.25] * EMBEDDING_DIM  # exactly representable in float32
         embedder_ok = make_mock_embedder()
         embedder_ok.embed.return_value = sentinel
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)
         self._run(db, embedder_ok, threader, queue, monkeypatch, maildir)
@@ -2852,7 +2858,7 @@ class TestBatchedInitialIndex:
         sentinel = [0.5] * EMBEDDING_DIM
         embedder_ok = make_mock_embedder()
         embedder_ok.embed.return_value = sentinel
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         queue = _make_queue(db)
         self._run(db, embedder_ok, threader, queue, monkeypatch, maildir)
@@ -3224,7 +3230,7 @@ class TestSteadyStateBatchedDrain:
         maildir = tmp_path / "maildir"
         inbox = maildir / "INBOX" / "cur"
         inbox.mkdir(parents=True)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
@@ -3936,7 +3942,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         self._drain(db, queue)
@@ -3974,7 +3980,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         self._drain(db, queue)
@@ -3998,7 +4004,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         self._drain(db, queue)
@@ -4023,7 +4029,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         self._drain(db, queue)
@@ -4069,7 +4075,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         # Index with the pre-fix walker's output: unversioned and
@@ -4124,7 +4130,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         self._drain(db, queue)
@@ -4169,7 +4175,7 @@ class TestRequeueStaleExtractions:
             b"application/octet-stream",
         ).replace(b"contract.docx", b"blob.bin")
         blob_path.write_bytes(raw)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(docx_path), REASON_INITIAL_SCAN)
         queue.enqueue(str(blob_path), REASON_INITIAL_SCAN)
@@ -4217,7 +4223,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         self._drain(db, queue)
@@ -4233,7 +4239,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         self._drain(db, queue)
@@ -4254,7 +4260,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         self._drain(db, queue)
@@ -4277,7 +4283,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com", body="")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         from src import attachment_indexing
@@ -4330,7 +4336,7 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(path, "contract@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         self._drain(db, queue)
@@ -4406,7 +4412,7 @@ class TestRequeueOcrDisabledExtractions:
         OCR off; return the db, queue and paths."""
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         paths = {}
         for name, (payload, ctype, filename) in messages.items():
@@ -4613,7 +4619,7 @@ class TestRequeueNewlyDispatchedExtensions:
 
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         paths = {}
         for name, (payload, ctype, filename) in messages.items():
@@ -4717,7 +4723,7 @@ class TestRequeueLegacyOle2Rows:
 
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         paths = {}
         for name, (payload, ctype, filename) in messages.items():
@@ -4845,7 +4851,7 @@ class TestPptxStartsDispatching:
 
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         paths = {}
         for name, ctype, filename in (
@@ -4929,7 +4935,7 @@ class TestPptxStartsDispatching:
 
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         path = maildir / "INBOX" / "cur" / "bad.eml"
         self._write_eml(path, "bad@example.com", out.getvalue(), self.PPTX_MIME, "deck.pptx")
@@ -4962,7 +4968,7 @@ class TestLegacyPptThroughThePipeline:
     def _enqueue(self, tmp_path, monkeypatch, messages):
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         paths = {}
         for name, (payload, ctype, filename) in messages.items():
@@ -5142,7 +5148,7 @@ class TestRequeueTooLargeThatNowFits:
     def _index_under_cap(self, tmp_path, monkeypatch, messages, cap):
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         paths = {}
         for name, payload in messages.items():
@@ -5276,7 +5282,7 @@ class TestPeriodicRecoverySkipsDeadLetter:
         _write_eml(inbox / "stuck.eml", "stuck@example.com")
         msg = parse_email(inbox / "stuck.eml", maildir_root=maildir)
         assert msg is not None
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         thread = threader.assign_thread(msg)
         db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)
@@ -5334,7 +5340,7 @@ class TestEnqueueUnindexedMessages:
         inbox = maildir / "INBOX" / "cur"
         inbox.mkdir(parents=True)
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         return maildir, inbox, db, _make_queue(db)
 
     def _claim_order(self, db, queue) -> list[str]:
@@ -5519,7 +5525,7 @@ class TestEnqueueUnindexedMessages:
             return 0
 
         monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         main.initial_index(db, make_mock_embedder(), Threader(db), _make_queue(db))
         assert flags == [True]
 
@@ -6121,13 +6127,13 @@ class TestMainStartupAndLoop:
     ):
         events: list[str] = []
         self._events = events
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         self._db = db
         monkeypatch.setattr(main, "_ingestion_state", None)
         monkeypatch.setattr(main, "_observer", None)
         monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
         monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
-        monkeypatch.setattr(main, "Database", lambda path: db)
+        monkeypatch.setattr(main, "Database", lambda path, account: db)
         embedder = make_mock_embedder(embed_vector or [0.1] * EMBEDDING_DIM)
         embedder.base_url = embed_url
         self._embedder = embedder
@@ -6210,7 +6216,7 @@ class TestMainStartupAndLoop:
     # its embedder.
 
     def _record_identity(self, tmp_path, monkeypatch, vector):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder(vector)
         embedder.base_url = "http://host.docker.internal:8001/v1"
         main._check_embedder_identity(db, embedder)
@@ -6262,7 +6268,7 @@ class TestMainStartupAndLoop:
     def test_fresh_index_holding_messages_stops_with_the_identity_message(
         self, tmp_path, monkeypatch
     ):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         db.upsert_thread(
             make_thread(messages=[make_message(message_id="m@example.com")]),
             [0.0] * EMBEDDING_DIM,
@@ -6839,7 +6845,7 @@ class TestWatcherDeathHeartbeat:
         message_count = 5
         for i in range(message_count):
             _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
@@ -6876,7 +6882,7 @@ class TestReapedMessagesStayDeleted:
         live = inbox / "1700000000.M1.host:2,S"
         _write_eml(live, "reaped@example.com")
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         queue = _make_queue(db)
@@ -6962,7 +6968,7 @@ class TestReapedMessagesStayDeleted:
         maildir = tmp_path / "maildir"
         trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
         _write_eml(trashed, "kept@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
 
         enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
@@ -7016,7 +7022,7 @@ class TestEmbedFailureHandling:
                 encoding="utf-8",
             )
             paths[name] = str(path)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
         for p in paths.values():
             queue.enqueue(p, REASON_INITIAL_SCAN)
@@ -7597,7 +7603,7 @@ class TestRequestLimitIsNotSourceFailure:
         monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
         dest = tmp_path / "INBOX" / "cur" / "msg.eml"
         _write_eml_with_text_attachment(dest, "limits@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(dest), REASON_INITIAL_SCAN)
         sizes: list[int] = []
@@ -7668,7 +7674,7 @@ def test_stage_errors_never_persist_the_decoded_payload(tmp_path, monkeypatch):
     keeps the type and reason, not the payload."""
     dest = tmp_path / "INBOX" / "cur" / "msg.eml"
     _write_eml(dest, "decode@example.com")
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     queue = _make_queue(db)
     queue.enqueue(str(dest), REASON_INITIAL_SCAN)
 
@@ -7726,7 +7732,7 @@ class TestStageErrorsKeepMailOutOfLastError:
     def _drain_one(self, tmp_path, monkeypatch, caplog, target: str, exc: BaseException):
         dest = tmp_path / "INBOX" / "cur" / "msg.eml"
         _write_eml(dest, "stage@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(dest), REASON_INITIAL_SCAN)
 
@@ -7810,7 +7816,7 @@ class TestStageErrorsKeepMailOutOfLastError:
         marker in the Subject reaches neither the log nor ``last_error``."""
         dest = tmp_path / "INBOX" / "cur" / "msg.eml"
         _write_eml(dest, "nul-charset@example.com", subject=f"=?utf-8\x00?q?{SYNTHETIC_MARKER}?=")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         caplog.set_level(logging.DEBUG)
 
         ok, stage, err = _index_one(dest, db, make_mock_embedder(_UNIT_VECTOR), Threader(db))
@@ -7864,7 +7870,7 @@ class TestMessageRecordsEndToEnd:
             encoding="utf-8",
         )
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), _make_queue(db))
 
         participants = {
@@ -7898,7 +7904,7 @@ class TestMessageRecordsEndToEnd:
             ).encode()
         )
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
 
@@ -7925,7 +7931,7 @@ class TestMessageRecordsEndToEnd:
         src = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
         _write_eml(src, "atomic@example.com")
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         main.initial_index(db, embedder, Threader(db), queue)
@@ -7961,7 +7967,7 @@ class TestMessageRecordsEndToEnd:
             ).encode()
         )
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
         participants = {
@@ -8396,7 +8402,7 @@ class TestMessageRecordsEndToEnd:
         src = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
         _write_eml(src, "moved@example.com")
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
 
@@ -8434,7 +8440,7 @@ class TestMessageRecordsEndToEnd:
         src = maildir / "Clients" / "Acme" / "cur" / "1700000000.M1.host:2,S"
         _write_eml(src, "flag@example.com")
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
         folder_before = db._conn.execute("SELECT folder FROM messages").fetchone()["folder"]
@@ -8461,7 +8467,7 @@ class TestMessageRecordsEndToEnd:
         src = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
         _write_eml(src, "restore@example.com", subject=subject)
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
         entry = db.find_message_entry_by_filepath(str(src))
@@ -8513,7 +8519,7 @@ class TestMessageRecordsEndToEnd:
 
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         count = extractors._WARNINGS_PER_WINDOW + 5
         paths = []
@@ -8571,7 +8577,7 @@ class TestMessageRecordsEndToEnd:
         src = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
         _write_eml(src, "plain@example.com")
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
         dest = src.with_name("1700000000.M1.host:2,S")
@@ -8604,7 +8610,7 @@ class TestMessageRecordsEndToEnd:
             to_addr="bob@example.com",
         )
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         threader = Threader(db)
         main.initial_index(db, embedder, threader, _make_queue(db))
@@ -8677,7 +8683,7 @@ class TestBatchSharesExtraction:
 
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         for message_id, filenames in messages.items():
             path = maildir / "INBOX" / "cur" / f"{message_id}.eml"
@@ -8747,7 +8753,7 @@ class TestBatchSharesExtraction:
             msg.add_attachment(payload, maintype="text", subtype=subtype, filename=filename)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(bytes(msg))
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         embedder = make_mock_embedder(_UNIT_VECTOR)
 
@@ -8859,7 +8865,7 @@ class TestTrashedFilesWithReconciliation:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
         _write_eml(path, "trashed@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         main._drain_queue_batched(
@@ -8887,7 +8893,7 @@ class TestTrashedFilesWithReconciliation:
         live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
         trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
         _write_eml(live, "parked@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
 
         def drain():
@@ -8941,7 +8947,7 @@ class TestTrashedFilesWithReconciliation:
         live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
         trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
         _write_eml(live, "startup@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
 
         def drain():
@@ -8976,7 +8982,7 @@ class TestTrashedFilesWithReconciliation:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
         _write_eml(path, "trashed@example.com")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         main._drain_queue_batched(
@@ -8991,7 +8997,7 @@ class TestTrashedFilesWithReconciliation:
         assert db.is_indexed(str(path))
 
     def test_recovery_skips_trashed_files(self, tmp_path, monkeypatch):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         trashed = str(tmp_path / "INBOX" / "cur" / "1.M1.host:2,ST")
         live = str(tmp_path / "INBOX" / "cur" / "2.M2.host:2,S")
@@ -9039,7 +9045,7 @@ class TestReplySubjectSearchable:
 
     def _index_thread(self, tmp_path, **bodies):
         paths = self._write_thread(tmp_path, **bodies)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         threader = Threader(db)
         for path in paths:
@@ -9137,7 +9143,7 @@ class TestReplySubjectSearchable:
     def test_single_message_thread_embeds_its_subject(self, tmp_path):
         path = tmp_path / "INBOX" / "cur" / "solo.eml"
         _write_eml(path, "solo@example.com", "Re: Dana leaving", body="Thanks, will pass it on.")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         assert _index_one(path, db, embedder, Threader(db))[0]
         inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
@@ -9146,7 +9152,7 @@ class TestReplySubjectSearchable:
     def test_blank_subject_adds_no_prefix(self, tmp_path):
         path = tmp_path / "INBOX" / "cur" / "blank.eml"
         _write_eml(path, "blank@example.com", "  ", body="Body only.")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         assert _index_one(path, db, embedder, Threader(db))[0]
         inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
@@ -9164,7 +9170,7 @@ class TestReplySubjectSearchable:
             "Content-Type: text/plain; charset=utf-8\r\n\r\nBody only.\r\n",
             encoding="utf-8",
         )
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         assert _index_one(path, db, embedder, Threader(db))[0]
         inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
@@ -9177,7 +9183,7 @@ class TestReplySubjectSearchable:
         subjectless message or a subject that is only a prefix."""
         path = tmp_path / "INBOX" / "cur" / "placeholder.eml"
         _write_eml(path, "placeholder@example.com", subject, body="Body only.")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         assert _index_one(path, db, embedder, Threader(db))[0]
         inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
@@ -9223,7 +9229,7 @@ class TestReplySubjectSearchable:
             references=["root@example.com"],
             date="Mon, 01 Jan 2024 13:00:00 +0000",
         )
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         threader = Threader(db)
         for path in paths:
@@ -9252,7 +9258,7 @@ class TestReplySubjectSearchable:
             references=["root@example.com"],
             date="Mon, 01 Jan 2024 13:00:00 +0000",
         )
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         threader = Threader(db)
         for path in paths:
@@ -9303,7 +9309,7 @@ class TestMessageIdClaimants:
         second = inbox / "1700000001.M1.host:2,S"
         _write_eml_with_text_attachment(first, self.MID, body="Original wording alphaword.")
         _write_eml_with_text_attachment(second, self.MID, body="Replacement wording betaword.")
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         return maildir, inbox, first, second, db, threader, embedder
@@ -9494,7 +9500,7 @@ class TestReapLeavesNoContent:
             from_addr="Zqxsendermarker <zqxsender@example.com>",
         )
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         threader = Threader(db)
         embedder = make_mock_embedder(_UNIT_VECTOR)
         queue = _make_queue(db)
@@ -9538,7 +9544,7 @@ class TestReapLeavesNoContent:
 
 class TestPruneReapedRecords:
     def test_prunes_expired_records(self, tmp_path, caplog):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         with db.transaction():
             db._conn.execute(
                 "INSERT INTO reaped_messages VALUES ('a#1', 'a', 't', '2000-01-01T00:00:00+00:00')"
@@ -9549,7 +9555,7 @@ class TestPruneReapedRecords:
         assert "pruned 1 expired reaped-message record(s)" in caplog.text
 
     def test_failure_is_logged_by_type(self, tmp_path, caplog, monkeypatch):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
 
         def boom(**_kw):
             raise sqlite3.OperationalError("zqxmarker")
@@ -9563,7 +9569,7 @@ class TestPruneReapedRecords:
         """#576: an embedder that never answers holds ``main`` in
         ``wait_for_ready`` before the initial index, so the startup prune
         must run first or expired records outlive the retention window."""
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         with db.transaction():
             db._conn.execute(
                 "INSERT INTO reaped_messages VALUES ('a#1', 'a', 't', '2000-01-01T00:00:00+00:00')"
@@ -9579,7 +9585,7 @@ class TestPruneReapedRecords:
         embedder.wait_for_ready = never_ready
         embedder.base_url = "http://host.docker.internal:8001/v1"
         monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
-        monkeypatch.setattr(main, "Database", lambda path: db)
+        monkeypatch.setattr(main, "Database", lambda path, account: db)
         monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
         monkeypatch.setattr(main, "StallGuard", MagicMock())
@@ -9593,7 +9599,7 @@ class TestPruneReapedRecords:
         by the scrub every opened database owes. It needs only the
         database, so it runs before an embedder that never answers can
         hold ``main`` in ``wait_for_ready``."""
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         scrubbed: list[list[str]] = []
         real_scrub = db.scrub_reaped_fts
 
@@ -9613,7 +9619,7 @@ class TestPruneReapedRecords:
         embedder.wait_for_ready = never_ready
         embedder.base_url = "http://host.docker.internal:8001/v1"
         monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
-        monkeypatch.setattr(main, "Database", lambda path: db)
+        monkeypatch.setattr(main, "Database", lambda path, account: db)
         monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
         monkeypatch.setattr(main, "StallGuard", MagicMock())
@@ -9627,7 +9633,7 @@ class TestChunkKinds:
     """The pipeline stores each chunk's kind (#646)."""
 
     def _index(self, tmp_path, files) -> Database:
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         for path in files:
             queue.enqueue(str(path), REASON_INITIAL_SCAN)
@@ -9715,7 +9721,7 @@ class TestWalMaintenance:
         maintenance pass; keyword search still finds the survivor."""
         from tests.conftest import make_message, make_thread
 
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         try:
             embedding = [0.1] * EMBEDDING_DIM
             reaped = make_message(message_id="r@x", filepath="/m/r", body_text="zqmaintmark")

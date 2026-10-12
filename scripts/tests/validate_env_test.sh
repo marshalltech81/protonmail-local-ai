@@ -19,7 +19,8 @@ FAILURES=0
 # A .env that passes, with the keys Compose defaults left out except
 # INFERENCE_MODE, which enables the inference layer so its checks run
 # (its default is none since #750).
-readonly BASE_ENV='BRIDGE_USER=placeholder@example.invalid
+readonly BASE_ENV='ACCOUNT_SCOPE=00000000-0000-4000-8000-000000000001
+BRIDGE_USER=placeholder@example.invalid
 BRIDGE_CERT_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EMBED_BASE_URL=http://host.docker.internal:8001/v1
 EMBED_MODEL=placeholder-embed-model
@@ -438,6 +439,39 @@ proton_settings_from_env_file() {
     # Empty values take the defaults, as Compose passes them.
     setup 'SOURCE_MODE=' 'BRIDGE_IMAP_PORT=' 'BRIDGE_CERT_PIN_ROTATE=' 'PROTON_FOLDER_EXCLUSIONS='
     passes
+}
+
+# ACCOUNT_SCOPE (#1596): required, a canonical lower-case UUID compared
+# exactly, refused with fixed text that never repeats the value; the same
+# rule the indexer and mcp-server apply (indexer/tests/test_account.py).
+account_scope_is_required_and_canonical() {
+    local line
+    setup 'ACCOUNT_SCOPE='
+    fails_with 'ACCOUNT_SCOPE is not set. Run make init-secrets'
+    for line in 'ACCOUNT_SCOPE=zq9marker' 'ACCOUNT_SCOPE=0000000A-0000-4000-8000-000000000001' \
+        'ACCOUNT_SCOPE={00000000-0000-4000-8000-000000000001}' \
+        'ACCOUNT_SCOPE=00000000000040008000000000000001' \
+        'ACCOUNT_SCOPE=00000000-0000-4000-8000-0000000000012' \
+        'ACCOUNT_SCOPE=" 00000000-0000-4000-8000-000000000001 "'; do
+        setup "$line"
+        fails_with 'ACCOUNT_SCOPE must be a UUID in canonical lower-case form' || {
+            printf 'not refused: %s\n' "$line"
+            return 1
+        }
+        if grep -qE 'zq9marker|0000000A|00000000-0000-4000-8000' "$WORK/output"; then
+            printf 'the value reached the output: %s\n' "$line"
+            return 1
+        fi
+    done
+    # Unquoted padding is trimmed, as Compose reads .env.
+    setup 'ACCOUNT_SCOPE= 00000000-0000-4000-8000-000000000001 '
+    passes
+    # A value exported in the shell wins, as in Compose, and is not trimmed.
+    setup 'ACCOUNT_SCOPE='
+    passes ACCOUNT_SCOPE=00000000-0000-4000-8000-000000000002
+    setup
+    fails_with 'ACCOUNT_SCOPE must be a UUID' ACCOUNT_SCOPE=' 00000000-0000-4000-8000-000000000002'
+    fails_with 'ACCOUNT_SCOPE is not set' ACCOUNT_SCOPE=
 }
 
 openssl_form_bridge_cert_fingerprint_passes() {
@@ -1227,6 +1261,7 @@ check "a padded value below its minimum fails" padded_value_below_minimum_fails
 check "a padded quoted SYNC_INTERVAL fails" padded_quoted_sync_interval_fails
 check "unquoted values are trimmed like Compose" unquoted_values_are_trimmed_like_compose
 check "chunk budgets follow the chunker's rules" chunk_budget_table
+check "ACCOUNT_SCOPE is required and canonical" account_scope_is_required_and_canonical
 check "an exported chunk budget overrides .env" exported_chunk_budget_overrides_env
 check "padded chunk budgets are stripped" padded_chunk_budgets_are_stripped
 

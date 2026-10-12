@@ -61,7 +61,10 @@ make init-secrets
 `make init-secrets` creates the secret files under `.secrets/` that
 Docker Compose requires before starting, mode `600`: empty placeholders
 for the Bridge password and the API keys, which you fill in during
-setup, and the MCP bearer token, generated with a random value.
+setup, and the MCP bearer token, generated with a random value. It
+also writes `ACCOUNT_SCOPE` to `.env` when the line is missing or empty:
+a random UUID the index is registered to, which is never replaced and
+belongs with your `.env` backups.
 
 ### 2. Build images
 

@@ -25,6 +25,8 @@ from src.queue import (
     load_config_from_env,
 )
 
+from tests.conftest import TEST_ACCOUNT
+
 
 def _in_flight(q: IndexingQueue) -> tuple[str, float] | None:
     """The in-flight message as the stall guard reads it."""
@@ -415,7 +417,7 @@ class TestFailureClasses:
     unindexable source from a configuration problem."""
 
     def test_mark_failed_records_retryable_on_retry_and_on_dead(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db, max_attempts=2)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
 
@@ -427,7 +429,7 @@ class TestFailureClasses:
         assert row["last_error_class"] == ERROR_CLASS_RETRYABLE
 
     def test_mark_dead_terminal_records_permanent_source_failure(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
 
@@ -436,7 +438,7 @@ class TestFailureClasses:
         assert _row(db, "/m/a")["last_error_class"] == ERROR_CLASS_PERMANENT
 
     def test_enqueue_clears_previous_class(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
         q.mark_dead_terminal("/m/a", stage="parse", error="oversized")
@@ -453,7 +455,7 @@ class TestDefer:
     dead-letter mail."""
 
     def test_defer_keeps_attempts_and_schedules_future_retry(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db, max_attempts=2)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
         before = datetime.now(UTC)
@@ -476,7 +478,7 @@ class TestDefer:
         assert q.claim_batch(1) == []
 
     def test_defer_records_operator_action_class(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
 
@@ -502,7 +504,7 @@ class TestRequeueDead:
         assert q.is_dead(path)
 
     def test_requeues_every_dead_row_with_fresh_budget(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         self._dead(db, q, "/m/a", terminal=False)
         self._dead(db, q, "/m/b", terminal=True)
@@ -520,7 +522,7 @@ class TestRequeueDead:
         assert q.stats() == {"queued": 3, "dead": 0}
 
     def test_class_filter_limits_requeue(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         self._dead(db, q, "/m/a", terminal=False)
         self._dead(db, q, "/m/b", terminal=True)
@@ -540,7 +542,7 @@ class TestInFlightAttempts:
     restarted indexer."""
 
     def test_step_that_returns_leaves_attempts_unchanged(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
 
@@ -552,7 +554,7 @@ class TestInFlightAttempts:
         assert _in_flight(q) is None
 
     def test_worker_death_mid_step_counts_one_attempt(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         _queue(db).enqueue("/m/a", REASON_INITIAL_SCAN)
         _queue(db).begin_attempt("/m/a")  # process dies here
 
@@ -561,7 +563,7 @@ class TestInFlightAttempts:
         assert row["status"] == STATUS_QUEUED
 
     def test_repeated_worker_death_dead_letters_the_message(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         _queue(db, max_attempts=3).enqueue("/m/a", REASON_INITIAL_SCAN)
         for _ in range(3):
             assert _queue(db, max_attempts=3).begin_attempt("/m/a")
@@ -584,7 +586,7 @@ class TestInFlightAttempts:
         dead-letter line must not claim the message was interrupted on
         every attempt, only that it was interrupted with none left."""
         caplog.set_level(logging.DEBUG)
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db, max_attempts=2)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
         q.mark_failed("/m/a", stage="parse", error="ValueError")
@@ -600,7 +602,7 @@ class TestInFlightAttempts:
     def test_only_the_running_message_is_charged(self, tmp_path):
         """Charging the whole claimed batch would let an ordinary restart
         dead-letter healthy batchmates."""
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         for path in ("/m/a", "/m/b", "/m/c"):
             q.enqueue(path, REASON_INITIAL_SCAN)
@@ -611,7 +613,7 @@ class TestInFlightAttempts:
         assert [_row(db, p)["attempts"] for p in ("/m/a", "/m/b", "/m/c")] == [0, 1, 0]
 
     def test_mark_failed_during_a_step_counts_one_attempt(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
 
@@ -623,7 +625,7 @@ class TestInFlightAttempts:
         assert _in_flight(q) is None
 
     def test_defer_during_a_step_spends_no_attempt(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
 
@@ -639,7 +641,7 @@ class TestInFlightAttempts:
         assert _row(db, "/m/a")["attempts"] == 0
 
     def test_terminal_outcomes_during_a_step_clear_the_charge(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         for path in ("/m/ok", "/m/gone", "/m/huge"):
             q.enqueue(path, REASON_INITIAL_SCAN)
@@ -657,7 +659,7 @@ class TestInFlightAttempts:
     def test_in_flight_reports_the_running_message_and_its_start(self, tmp_path):
         import time
 
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
         before = time.monotonic()
@@ -672,7 +674,7 @@ class TestInFlightAttempts:
     def test_running_step_marks_the_row_interrupted_until_it_returns(self, tmp_path):
         """The marker is what a restarted indexer reads to know a row's
         step never returned."""
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
 
@@ -688,7 +690,7 @@ class TestInFlightAttempts:
         """The watchdog thread can re-enqueue the running
         path (fresh intent, attempts reset). The refund must not act on
         the reset row's state."""
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
         q.mark_failed("/m/a", stage="parse", error="x")
@@ -700,7 +702,7 @@ class TestInFlightAttempts:
         assert _row(db, "/m/a")["attempts"] == 0
 
     def test_reenqueued_row_is_not_dead_lettered_by_stale_interruptions(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         _queue(db, max_attempts=3).enqueue("/m/a", REASON_INITIAL_SCAN)
         for _ in range(3):
             _queue(db, max_attempts=3).begin_attempt("/m/a")
@@ -714,7 +716,7 @@ class TestInFlightAttempts:
     def test_exhausted_row_without_interruptions_still_runs(self, tmp_path):
         """Lowering INDEXER_MAX_ATTEMPTS leaves ordinary retry rows above
         the limit; only interruptions may dead-letter at begin."""
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db, max_attempts=5)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
         for _ in range(3):
@@ -724,7 +726,7 @@ class TestInFlightAttempts:
         assert _row(db, "/m/a")["status"] == STATUS_QUEUED
 
     def test_progress_restarts_the_in_flight_clock(self, tmp_path):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         q.enqueue("/m/a", REASON_INITIAL_SCAN)
         q.begin_attempt("/m/a")
@@ -738,7 +740,7 @@ class TestInFlightAttempts:
         assert in_flight[1] > 0.0
 
     def test_progress_with_nothing_in_flight_is_a_no_op(self, tmp_path):
-        q = _queue(Database(tmp_path / "q.db"))
+        q = _queue(Database(tmp_path / "q.db", account=TEST_ACCOUNT))
         q.note_progress()
         assert _in_flight(q) is None
 
@@ -746,7 +748,7 @@ class TestInFlightAttempts:
         """Before the bulk embed a multi-message batch is
         marked so a kill there replays each message alone — without
         charging any of them."""
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         for path in ("/m/a", "/m/b"):
             q.enqueue(path, REASON_INITIAL_SCAN)
@@ -773,7 +775,7 @@ class TestPerItemLinesShareTheRateLimit:
 
     def test_terminal_burst_is_bounded_and_counted(self, tmp_path, caplog):
         caplog.set_level(logging.DEBUG)
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         paths = [f"/m/terminal-{i}" for i in range(self.LIMIT + 7)]
         for path in paths:
@@ -791,7 +793,7 @@ class TestPerItemLinesShareTheRateLimit:
 
     def test_retry_burst_is_bounded_and_counted(self, tmp_path, caplog):
         caplog.set_level(logging.DEBUG)
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db, max_attempts=3)
         for i in range(self.LIMIT + 4):
             q.enqueue(f"/m/retry-{i}", REASON_INITIAL_SCAN)
@@ -805,7 +807,7 @@ class TestPerItemLinesShareTheRateLimit:
 
     def test_dead_letter_burst_is_bounded_and_keeps_error_level(self, tmp_path, caplog):
         caplog.set_level(logging.DEBUG)
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db, max_attempts=1)
         for i in range(self.LIMIT + 2):
             q.enqueue(f"/m/dead-{i}", REASON_INITIAL_SCAN)
@@ -819,7 +821,7 @@ class TestPerItemLinesShareTheRateLimit:
 
     def test_interrupted_dead_letter_shares_the_budget(self, tmp_path, caplog):
         caplog.set_level(logging.DEBUG)
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         for i in range(self.LIMIT + 3):
             path = f"/m/killer-{i}"
             _queue(db, max_attempts=1).enqueue(path, REASON_INITIAL_SCAN)
@@ -836,7 +838,7 @@ class TestPerItemLinesShareTheRateLimit:
         clock = {"t": 1000.0}
         monkeypatch.setattr(rate_limited_log.time, "monotonic", lambda: clock["t"])
         caplog.set_level(logging.DEBUG)
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         q = _queue(db)
         for i in range(self.LIMIT + 1):
             q.enqueue(f"/m/a-{i}", REASON_INITIAL_SCAN)

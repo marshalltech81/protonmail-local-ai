@@ -28,7 +28,13 @@ from src.database import EMBEDDING_DIM, Database
 from src.embed_identity import CALIBRATION_TEXT, cosine_distance
 from src.extractors import EXTRACTOR_VERSIONS, _resolve_extractor
 
-from tests.baseline.build import OCR_BINARIES, build, case_queries, check_capped_attachments
+from tests.baseline.build import (
+    OCR_BINARIES,
+    baseline_account,
+    build,
+    case_queries,
+    check_capped_attachments,
+)
 from tests.baseline.corpus import (
     _FIXTURES,
     CAPPED_ATTACHMENT_MAX_BYTES,
@@ -319,7 +325,7 @@ class TestBuild:
         with pytest.raises(OSError):
             socket.create_connection(("127.0.0.1", endpoint.port), timeout=1).close()
 
-        db = Database(out / "mail.db")
+        db = Database(out / "mail.db", account=baseline_account(out))
         try:
             conn = db._conn
             threads = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
@@ -406,7 +412,7 @@ class TestBuild:
         ]
         assert cached and sum(cached) == 1
 
-        db = Database(out / "mail.db")
+        db = Database(out / "mail.db", account=baseline_account(out))
         try:
             rows = db._conn.execute(
                 "SELECT a.thread_id, a.filename, a.content_type, a.attachment_id,"
@@ -454,7 +460,7 @@ class TestBuild:
         ]
         assert parser_caps and sum(parser_caps) == 0
 
-        db = Database(out / "mail.db")
+        db = Database(out / "mail.db", account=baseline_account(out))
         try:
             rows = db._conn.execute(
                 "SELECT a.thread_id, a.filename, a.content_type, e.extraction_status,"
@@ -535,7 +541,7 @@ class TestBuild:
         assert summed("too_large") == 1
         assert summed("extractor_caps") == 1
 
-        db = Database(out / "mail.db")
+        db = Database(out / "mail.db", account=baseline_account(out))
         try:
             rows = db._conn.execute(
                 "SELECT a.thread_id, a.filename, a.size_bytes, e.extraction_status,"
@@ -569,7 +575,7 @@ class TestBuild:
         build(out, _GOLDEN)
         check_capped_attachments(out / "mail.db")
 
-        db = Database(out / "mail.db")
+        db = Database(out / "mail.db", account=baseline_account(out))
         try:
             with db._conn as conn:
                 conn.execute(
@@ -642,7 +648,7 @@ class TestBuild:
         for line in (OCR_IMAGE_TEXT, *OCR_PDF_PAGES, *OCR_TIFF_FRAMES):
             assert _norm(line).split()[0] not in caplog.text.casefold()
 
-        db = Database(out / "mail.db")
+        db = Database(out / "mail.db", account=baseline_account(out))
         try:
             rows = db._conn.execute(
                 "SELECT a.filename, a.content_type, e.extraction_status, e.extractor,"
