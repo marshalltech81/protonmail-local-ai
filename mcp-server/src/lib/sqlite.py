@@ -667,6 +667,9 @@ class Participant:
     address: str
 
 
+MAX_LISTED_MESSAGE_HEADERS = 10
+
+
 @dataclass
 class MessageRecord:
     """One message's own headers, from ``messages`` +
@@ -714,6 +717,12 @@ class MessageRecord:
     # the indexer's header scan stopped short), None when not yet
     # assessed. Only False qualifies for source authority.
     sender_ambiguous: bool | None = None
+    # Exact totals alongside the bounded lists. None lets callers that
+    # construct complete records in memory continue to use their lengths.
+    references_count: int | None = None
+    from_count: int | None = None
+    to_count: int | None = None
+    cc_count: int | None = None
 
 
 # Whether the reconciler tombstoned the message (#794). A tombstone
@@ -731,11 +740,18 @@ _PENDING_DELETION_COLUMN = (
 # never leaves the database layer as a date; its NULL status says why.
 _SENT_AT_COLUMN = f"{SENT_CLOCK_SQL} AS sent_at"
 
+_REFERENCE_PATHS = ", ".join(f"'$[{i}]'" for i in range(MAX_LISTED_MESSAGE_HEADERS))
+
 _MESSAGE_COLUMNS = (
     "m.message_id, m.claimant_id, m.thread_id, m.subject, "
     f"{_SENT_AT_COLUMN}, m.sent_at_status, "
     "m.occurred_at, m.effective_at, m.folder, "
-    "m.has_attachments, m.in_reply_to, m.references_json, m.seen, m.flagged, m.replied, "
+    "m.has_attachments, m.in_reply_to, "
+    "json_array_length(m.references_json) AS references_count, "
+    f"CASE WHEN json_array_length(m.references_json) > {MAX_LISTED_MESSAGE_HEADERS} "
+    f"THEN json_extract(m.references_json, {_REFERENCE_PATHS}) "
+    "ELSE m.references_json END AS references_json, "
+    "m.seen, m.flagged, m.replied, "
     "m.sender_ambiguous, " + _PENDING_DELETION_COLUMN + ", " + _SOURCE_COLUMNS
 )
 
@@ -754,6 +770,7 @@ def _row_to_message_record(r) -> MessageRecord:
         has_attachments=bool(r["has_attachments"]),
         in_reply_to=r["in_reply_to"],
         references=json.loads(r["references_json"]),
+        references_count=r["references_count"],
         source_file=_row_to_source(r),
         seen=bool(r["seen"]),
         flagged=bool(r["flagged"]),
@@ -769,19 +786,31 @@ def _optional_flag(value: int | None) -> bool | None:
 
 
 def _attach_participants(conn: sqlite3.Connection, records: list[MessageRecord]) -> None:
-    """Fill each record's From / To / Cc from ``message_participants``."""
+    """Read the listed participants in header order, with exact role totals.
+
+    Rank row IDs rather than names/addresses, so the window's temporary
+    rows do not carry the header values that will not be returned.
+    """
     by_id = {rec.claimant_id: rec for rec in records}
     if not by_id:
         return
+    for record in records:
+        record.from_count = record.to_count = record.cc_count = 0
     placeholders = ",".join(["?"] * len(by_id))
     # rowid order is insertion order, i.e. header order.
     rows = conn.execute(
-        "SELECT claimant_id, role, address, name FROM message_participants "
-        f"WHERE claimant_id IN ({placeholders}) ORDER BY rowid",  # nosec B608
-        list(by_id),
+        "WITH ranked AS (SELECT rowid AS participant_rowid, claimant_id, role, "
+        "ROW_NUMBER() OVER (PARTITION BY claimant_id, role ORDER BY rowid) AS position, "
+        "COUNT(*) OVER (PARTITION BY claimant_id, role) AS participant_count "
+        f"FROM message_participants WHERE claimant_id IN ({placeholders})) "  # nosec B608
+        "SELECT p.claimant_id, p.role, p.address, p.name, r.participant_count "
+        "FROM ranked r JOIN message_participants p ON p.rowid = r.participant_rowid "
+        "WHERE r.position <= ? ORDER BY p.rowid",
+        [*by_id, MAX_LISTED_MESSAGE_HEADERS],
     ).fetchall()
     for p in rows:
         role_list = {"from": "from_", "to": "to", "cc": "cc"}[p["role"]]
+        setattr(by_id[p["claimant_id"]], f"{p['role']}_count", p["participant_count"])
         getattr(by_id[p["claimant_id"]], role_list).append(
             Participant(name=p["name"], address=p["address"])
         )

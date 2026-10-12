@@ -152,7 +152,7 @@ def _not_found_log(clock: Callable[[], float] = time.monotonic) -> RateLimitedLo
 
 
 # Recipients rendered per role before the rest are summarized as a count.
-_MAX_LISTED_PARTICIPANTS = 10
+_MAX_LISTED_PARTICIPANTS = MAX_LISTED
 
 # get_thread pages by message and cuts each body, so neither a long thread
 # nor a long message makes an unbounded response; get_message pages one
@@ -178,22 +178,25 @@ _MAX_CUT_BACKOFF = 32
 # Headers are sender-controlled too: every tool, get_message included,
 # lists at most this many References and cuts every header value at
 # HEADER_CHAR_LIMIT characters.
-_MAX_LISTED_REFERENCES = 10
+_MAX_LISTED_REFERENCES = MAX_LISTED
 
 
-def _join_limited(items: list[str], limit: int) -> str:
+def _join_limited(items: list[str], limit: int, total: int | None = None) -> str:
     """At most ``limit`` of ``items``, joined and cut at
     ``HEADER_CHAR_LIMIT``, then a count of the entries not listed. The
     count follows the cut so a list of long entries keeps it."""
     joined = clip(", ".join(items[:limit]), HEADER_CHAR_LIMIT)
-    if len(items) <= limit:
+    count = len(items) if total is None else total
+    if count <= limit:
         return joined
-    return joined + f" (+{len(items) - limit} more)"
+    return joined + f" (+{count - limit} more)"
 
 
-def _format_participants(people: list[Participant], limit: int = _MAX_LISTED_PARTICIPANTS) -> str:
+def _format_participants(
+    people: list[Participant], limit: int = _MAX_LISTED_PARTICIPANTS, total: int | None = None
+) -> str:
     return _join_limited(
-        [f"{p.name} <{p.address}>" if p.name else p.address for p in people], limit
+        [f"{p.name} <{p.address}>" if p.name else p.address for p in people], limit, total
     )
 
 
@@ -215,9 +218,13 @@ def _header_lines(m: MessageRecord) -> list[str]:
     from ``_join_limited``; the others are cut here.
     """
     headers = [("Subject", clip(m.subject, HEADER_CHAR_LIMIT))]
-    for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
+    for label, people, count in (
+        ("From", m.from_, m.from_count),
+        ("To", m.to, m.to_count),
+        ("Cc", m.cc, m.cc_count),
+    ):
         if people:
-            headers.append((label, _format_participants(people)))
+            headers.append((label, _format_participants(people, total=count)))
     if m.sender_ambiguous is not False:
         headers.append(("Sender", _SENDER_CHECK_WORDS[m.sender_ambiguous]))
     headers.append(("Sent", sent_text(m.sent_at, m.sent_at_status)))
@@ -227,7 +234,9 @@ def _header_lines(m: MessageRecord) -> list[str]:
     if m.in_reply_to:
         headers.append(("In-Reply-To", clip(m.in_reply_to, HEADER_CHAR_LIMIT)))
     if m.references:
-        headers.append(("References", _join_limited(m.references, _MAX_LISTED_REFERENCES)))
+        headers.append(
+            ("References", _join_limited(m.references, _MAX_LISTED_REFERENCES, m.references_count))
+        )
     headers.append(("Attachments", "yes" if m.has_attachments else "no"))
     headers.append(("Status", ", ".join(_state_words(m))))
     return [f"{label}: {value}" for label, value in headers]
@@ -339,9 +348,13 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
     lines = [f"{i}. " + " | ".join(head) if head else f"{i}."]
     if shown("subject"):
         lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
-    for name, label, people in (("from", "From", m.from_), ("to", "To", m.to), ("cc", "Cc", m.cc)):
+    for name, label, people, count in (
+        ("from", "From", m.from_, m.from_count),
+        ("to", "To", m.to, m.to_count),
+        ("cc", "Cc", m.cc, m.cc_count),
+    ):
         if people and shown(name):
-            lines.append(f"   {label}: {_format_participants(people)}")
+            lines.append(f"   {label}: {_format_participants(people, total=count)}")
     ids = [f"Claimant ID: {m.claimant_id}"]
     if shown("message_id"):
         ids.insert(0, f"Message-ID: {m.message_id}")
