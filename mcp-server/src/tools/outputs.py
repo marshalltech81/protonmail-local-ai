@@ -33,6 +33,7 @@ from ..lib.predicates import SentAtStatus
 from ..lib.sqlite import (
     MAX_LISTED_CLAIMANTS,
     MAX_LISTED_MATCHED_ADDRESSES,
+    MAX_LISTED_MESSAGE_HEADERS,
     REAPED_RECORD_RETENTION_DAYS,
     MessageRecord,
     SourceFile,
@@ -42,7 +43,7 @@ from ..lib.sqlite import Participant as ParticipantRecord
 
 # Entries listed per bounded list (thread participants, senders, one
 # message's recipients per role, References) before the rest are counted.
-MAX_LISTED = 10
+MAX_LISTED = MAX_LISTED_MESSAGE_HEADERS
 # Senders counted per ``from_name`` lookup (#864): ``from_name_matches``
 # saturates here, so one lookup never ranks more contacts than this.
 MAX_FROM_NAME_MATCHES = 10
@@ -287,13 +288,13 @@ def message_headers(m: MessageRecord) -> MessageHeaders:
         replied=m.replied,
         in_reply_to=None if m.in_reply_to is None else clip(m.in_reply_to, chars),
         references=[clip(r, chars) for r in m.references[:refs]],
-        references_count=len(m.references),
+        references_count=len(m.references) if m.references_count is None else m.references_count,
         from_=listed(m.from_, people),
-        from_count=len(m.from_),
+        from_count=len(m.from_) if m.from_count is None else m.from_count,
         to=listed(m.to, people),
-        to_count=len(m.to),
+        to_count=len(m.to) if m.to_count is None else m.to_count,
         cc=listed(m.cc, people),
-        cc_count=len(m.cc),
+        cc_count=len(m.cc) if m.cc_count is None else m.cc_count,
         sender_ambiguous=m.sender_ambiguous,
         source_file=source(m.source_file),
     )

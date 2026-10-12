@@ -1007,8 +1007,9 @@ def _materialize(
 ) -> tuple[list[dict], dict[str, int]]:
     """The response records of ``missing``, read on ``conn`` (the
     round's transaction) and serialized as the query tools do, with the
-    participant rows and References entries read for them: the server's
-    readers load every one before the output clips each list."""
+    participant rows and References entries transferred into Python.
+    The server's readers retain only the listed entries, with exact
+    totals; computing those totals still visits the lists in SQLite."""
     from src.lib import sqlite as db
     from src.tools.outputs import listed_message
     from src.tools.retrieval import _listed_attachment

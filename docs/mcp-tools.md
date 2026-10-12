@@ -55,8 +55,12 @@ the result it belongs to. To verify a cited passage, hash the file:
 Structured output is bounded because headers are sender-controlled.
 Lists hold at most 10 entries (recipients per role, References, thread
 participants, attachment senders), each with a full count (`to_count`,
-`references_count`, `participant_count`, `sender_count`, ...). Header
-values past 500 characters (subjects, display names, addresses, reply
+`references_count`, `participant_count`, `sender_count`, ...). Message
+header reads for `query_messages`, `get_thread` and `get_message` select only
+the first 10 participants per role and the first 10 References into Python, keeping
+their exact totals. Computing those totals still visits the stored lists
+in SQLite; this does not limit the database work of a query.
+Header values past 500 characters (subjects, display names, addresses, reply
 headers, participant and sender strings, attachment filenames and MIME
 types) are cut with a marker. Every tool applies the same cut in its
 prose, the intelligence tools apply it to the headers they send to the
