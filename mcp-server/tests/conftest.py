@@ -90,7 +90,8 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             attachments_manifest_complete INTEGER
                 CHECK (attachments_manifest_complete IN (0, 1)),
             body_complete INTEGER CHECK (body_complete IN (0, 1)),
-            caps_json TEXT
+            caps_json TEXT,
+            headers_complete INTEGER CHECK (headers_complete IN (0, 1))
         );
 
         -- The indexer's ``messages`` indexes, so query plans match.
@@ -102,6 +103,16 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_messages_effective ON messages(effective_at);
         CREATE INDEX idx_messages_filepath ON messages(filepath);
 
+        CREATE TABLE message_headers (
+            claimant_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            name_normalized TEXT NOT NULL,
+            raw_value TEXT NOT NULL,
+            decoded_value TEXT,
+            PRIMARY KEY (claimant_id, ordinal)
+        );
+        CREATE INDEX idx_message_headers_name_claimant ON message_headers(name_normalized, claimant_id);
         CREATE TABLE message_participants (
             claimant_id TEXT NOT NULL,
             role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
@@ -179,7 +190,8 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             extractor_module          TEXT NOT NULL DEFAULT '',
             -- The indexer's per-message budget deferred this occurrence's
             -- extraction to a later pass (#1236); NULL otherwise.
-            extraction_deferred_at    TEXT
+            extraction_deferred_at    TEXT,
+            text_complete INTEGER CHECK (text_complete IN (0, 1))
         );
         -- The indexer's partial index over deferred occurrences (#1236).
         CREATE INDEX idx_attachments_deferred ON attachments(claimant_id, attachment_id)

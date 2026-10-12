@@ -143,6 +143,8 @@ PARSE_CAPS: tuple[str, ...] = (
     "address_unparsed",
     "participant_names",
     "subject_length",
+    "headers_budget",
+    "headers_parse",
     "in_reply_to_length",
     "references_length",
     "address_repeated",
@@ -542,6 +544,23 @@ def claimant_id(message_id: str, content_hash: str | None) -> str:
     return f"{message_id}#{content_hash[:CLAIMANT_HASH_CHARS]}"
 
 
+# Dimensions are checked together before decoding or retaining a value.
+# Plain timings for 256 values of ~16 KiB: malformed prefixes 0.04 s,
+# encoded words 0.38 s; the aggregate byte cap allows less than that.
+MAX_STORED_HEADER_FIELDS = 256
+MAX_STORED_HEADER_BYTES = 1024 * 1024
+MAX_STORED_HEADER_VALUE_BYTES = 16 * 1024
+
+
+@dataclass(frozen=True)
+class MessageHeader:
+    ordinal: int
+    name: str
+    name_normalized: str
+    raw_value: str
+    decoded_value: str | None
+
+
 @dataclass
 class Message:
     message_id: str
@@ -613,6 +632,8 @@ class Message:
     # the stored content can answer "no" only when its flag is True.
     # ``body_complete`` is stored with the body chunks (phase 2c), the
     # others with the message row.
+    headers: list[MessageHeader] = field(default_factory=list)
+    headers_complete: bool | None = None
     subject_complete: bool = True
     from_addresses_complete: bool = True
     to_addresses_complete: bool = True
@@ -823,6 +844,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     # Work caps that drop content, counted by ``PARSE_CAPS`` name and
     # logged once below.
     caps: Counter[str] = Counter()
+    headers, headers_complete = _read_top_headers(msg, caps)
     in_reply_to = _clean_id(msg.get("In-Reply-To", ""))
     if len(in_reply_to) > MESSAGE_ID_MAX_CHARS:
         caps["in_reply_to_length"] += 1
@@ -936,6 +958,8 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         sender_ambiguous=addresses.sender_ambiguous,
         participant_names=names,
         participant_names_complete=not caps["participant_names"],
+        headers=headers,
+        headers_complete=headers_complete,
         subject_complete=not caps["subject_length"],
         from_addresses_complete=addresses.from_complete,
         to_addresses_complete=addresses.to_complete,
@@ -2225,6 +2249,69 @@ def _safe_decode(payload: bytes, charset: str, degraded: Counter[str] | None = N
         except ValueError:
             degraded[CHARSET_DEGRADED] += 1
     return text
+
+
+def _read_top_headers(
+    msg: email.message.Message, caps: Counter[str]
+) -> tuple[list[MessageHeader], bool]:
+    """Retain top-level fields, including duplicates, under one budget.
+
+    raw_items yields undecoded strings with surrogateescaped bytes. Raw
+    values use a reversible Latin-1 byte mapping for SQLite TEXT; decoding
+    uses compat32's stdlib Header handling and the existing linear decoder.
+    Only kept fields are decoded and retained. A cap drops the remainder.
+    """
+    rows: list[MessageHeader] = []
+    spent = 0
+    complete = not any(
+        isinstance(
+            d,
+            (
+                email.errors.FirstHeaderLineIsContinuationDefect,
+                email.errors.MisplacedEnvelopeHeaderDefect,
+                email.errors.MissingHeaderBodySeparatorDefect,
+                email.errors.InvalidHeaderDefect,
+            ),
+        )
+        for d in msg.defects
+    )
+    if not complete:
+        caps["headers_parse"] += 1
+    for ordinal, (name, value) in enumerate(msg.raw_items()):
+        # Lengths reject huge fields without even encoding their bytes.
+        if (
+            ordinal >= MAX_STORED_HEADER_FIELDS
+            or len(name) + len(value) > MAX_STORED_HEADER_VALUE_BYTES
+        ):
+            caps["headers_budget"] += 1
+            return rows, False
+        name_bytes = name.encode("utf-8", "surrogateescape")
+        value_bytes = value.encode("utf-8", "surrogateescape")
+        size = len(name_bytes) + len(value_bytes)
+        if size > MAX_STORED_HEADER_VALUE_BYTES or spent + size > MAX_STORED_HEADER_BYTES:
+            caps["headers_budget"] += 1
+            return rows, False
+        spent += size
+        degraded: Counter[str] = Counter()
+        try:
+            fetched = email.policy.compat32.header_fetch_parse(name, value)
+            decoded = _decode_text_header(fetched, degraded)
+            # Some codecs can return lone surrogates; SQLite TEXT cannot.
+            decoded.encode("utf-8")
+        except email.errors.MessageError, email.errors.MessageDefect, UnicodeError, LookupError:
+            decoded = None
+            warn_rate_limited(
+                log, "header evidence decode failed; kept raw value", attachment=False
+            )
+        if degraded:
+            decoded = None
+        stored_name = name_bytes.decode("latin-1")
+        rows.append(
+            MessageHeader(
+                ordinal, stored_name, stored_name.lower(), value_bytes.decode("latin-1"), decoded
+            )
+        )
+    return rows, complete
 
 
 def _clean_id(value: str) -> str:

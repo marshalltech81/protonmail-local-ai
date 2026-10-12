@@ -68,6 +68,7 @@ _VERBATIM_FIELDS = (
     "sender_ambiguous",
     "participant_names_complete",
     "subject_complete",
+    "headers_complete",
     "from_addresses_complete",
     "to_addresses_complete",
     "cc_addresses_complete",
@@ -84,6 +85,7 @@ _DERIVED_FIELDS = (
     "mtime_ns",
     "content_hash",
     "participant_names",
+    "headers",
 )
 # Not recorded: the parse time (#1080), a clock reading rather than a
 # property of the bytes.
@@ -98,6 +100,16 @@ def _record(msg: Message, root: Path) -> dict[str, Any]:
     record: dict[str, Any] = {name: getattr(msg, name) for name in _VERBATIM_FIELDS}
     record["date"] = msg.date.isoformat() if msg.date else None
     record["occurred_at"] = msg.occurred_at.isoformat() if msg.occurred_at else None
+    record["headers"] = _digest(
+        json.dumps(
+            [
+                [h.ordinal, h.name, h.name_normalized, h.raw_value, h.decoded_value]
+                for h in msg.headers
+            ],
+            ensure_ascii=True,
+        ).encode("utf-8")
+    )
+    record["headers_count"] = len(msg.headers)
     record["body_text_length"] = len(msg.body_text)
     record["body_text"] = _digest(msg.body_text.encode("utf-8"))
     record["filepath"] = Path(msg.filepath).relative_to(root).as_posix()

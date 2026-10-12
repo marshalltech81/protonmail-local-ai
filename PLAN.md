@@ -74,7 +74,9 @@ Outcomes:
    is done (#1086), explicit leaves through `where` (#1088) and the
    bounded `any` / `negate` form over them (#1087), and grouped counts
    by sender, domain, folder, year, month and authority class
-   (`aggregate_messages`). Open: the rest of #823 (selectable clocks,
+   (`aggregate_messages`), and subject, header and attachment-text
+   leaves in `where` (#1079, #1089, #1091). Open: the rest of #823
+   (selectable clocks,
    further dimensions and identity counts) and exhaustive thread
    grouping (#1166).
 3. **Source metadata stays evidence:** bounded ordered headers,
@@ -358,13 +360,16 @@ schema change needs a numbered migration.
    groups rejected) and three-valued evaluation, fixed at two levels so
    there is no nesting to bound (#1087), and grouped aggregation as its
    own tool over the same engine (`aggregate_messages`, first slice of
-   #823). **Open, in order:** the rest of #823 (selectable clocks,
+   #823), subject_contains, header_exists / header_contains (#1089),
+   and attachment_text_words (#1091). The header capability reports
+   unassessed and incomplete messages (#1093 header slice). **Open, in order:**
+   the rest of #823 (selectable clocks,
    further dimensions and identity counts); the
    selectable clock `date_basis` (#1150, depending on #1080 for
    `sent`; updated 2026-10-11: #1080 is done), counting its own NULL clocks the same way so no basis ever
    drops unknown rows silently; leaves
-   that wait on the evidence model (#1089 headers, #1090 Bcc, #1091
-   attachment text, #1092 internal date); a capability report in
+   that wait on the evidence model (#1090 Bcc, #1092 internal date);
+   a capability report in
    `get_mailbox_status` (#1093). Omitted by decision: IMAP UID,
    KEYWORD, DRAFT and DELETED.
 
@@ -436,7 +441,8 @@ indexer; mbsync is not replaced (Deferred).
    one guard); values never reach logs (#1079). Keyed by claimant ID,
    and added to the AGENTS.md per-message-row list by the same PR. The
    same migration stores whether the budget was hit, so a header
-   predicate on a capped message is indeterminate, not false. Narrows
+   predicate on a capped message is indeterminate, not false. **Done**
+   (schema v13). Narrows
    #825 to normalization; prerequisite for #463 options 2 and 3.
 4. **Unknown dates stay unknown** — nullable `sent_at` with a status;
    `effective_at` remains the ordering fallback, documented as not

@@ -250,3 +250,14 @@ def test_benchmark_schema_is_the_indexers(bench, tmp_path, table):
     ):
         ours.executescript(bench._SCHEMA)
         assert _schema(ours, table) == _schema(prod, table)
+
+
+def test_benchmark_header_budgets_match_the_parser(bench):
+    from src import parser
+
+    for name in (
+        "MAX_STORED_HEADER_FIELDS",
+        "MAX_STORED_HEADER_BYTES",
+        "MAX_STORED_HEADER_VALUE_BYTES",
+    ):
+        assert getattr(bench, name) == getattr(parser, name)

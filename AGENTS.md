@@ -254,7 +254,7 @@ Do not make any of the following changes unless the repository owner explicitly 
   `message_pk`; attachment chunks use
   `message_pk = f"{claimant_id}::{attachment_id}"`.
 - Every per-message row (`messages`, `message_thread_map`,
-  `message_participants`, `message_participant_names`, `message_chunks`,
+  `message_participants`, `message_participant_names`, `message_headers`, `message_chunks`,
   `attachments`, `reaped_messages`, and the `claimant_id` of
   `pending_deletions`) is keyed by the claimant ID — the Message-ID plus
   `#` and the first sixteen hex digits of the SHA-256 of the file's raw
