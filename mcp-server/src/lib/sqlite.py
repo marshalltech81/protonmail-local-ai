@@ -4512,6 +4512,14 @@ class Database:
             row = conn.execute("SELECT MIN(date_first), MAX(date_last) FROM threads").fetchone()
             stats["oldest_message"] = row[0]
             stats["newest_message"] = row[1]
+            header_counts = conn.execute(
+                "SELECT TOTAL(headers_complete IS NULL), TOTAL(headers_complete = 0) FROM messages"
+            ).fetchone()
+            stats["header_predicates"] = {
+                "status": "supported after backfill" if header_counts[0] else "supported",
+                "unassessed_messages": int(header_counts[0]),
+                "incomplete_messages": int(header_counts[1]),
+            }
             permission, rename = QUEUE_DEFERRED_PARSE_ERRORS
             buckets = {
                 row["bucket"]: (row["n"], row["reparse"])

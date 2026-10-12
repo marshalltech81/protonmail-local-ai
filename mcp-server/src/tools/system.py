@@ -138,6 +138,7 @@ def _mailbox_status(db) -> MailboxStatusOutput:
         newest_message=stats["newest_message"],
         conflicting_message_ids=stats["conflicting_message_ids"],
         extra_claimant_files=stats["extra_claimant_files"],
+        header_predicates=stats["header_predicates"],
         checked_at=now,
     )
 
@@ -155,6 +156,11 @@ def _render(out: MailboxStatusOutput) -> str:
         f"Current:        {'yes' if out.current else 'no'}",
     ]
     lines += [f"  - {reason}" for reason in out.not_current_reasons]
+    h = out.header_predicates
+    lines.append(
+        f"Header predicates: {h.status}; {h.unassessed_messages:,} unassessed, "
+        f"{h.incomplete_messages:,} incomplete messages"
+    )
     q = out.queue
     lines += [
         f"Last mail sync: {_when(out.last_sync_at, out.checked_at)}",

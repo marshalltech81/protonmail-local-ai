@@ -393,6 +393,7 @@ _INDETERMINATE_CAUSES: tuple[tuple[str, frozenset[str], str], ...] = (
         frozenset({"has_attachments"}),
         "attachment list incomplete (a parse cap), or not yet checked",
     ),
+    ("headers", frozenset(), "header evidence incomplete or not yet assessed"),
     ("size", frozenset({"size_min", "size_max"}), "no stored size"),
     (
         "date",
@@ -411,6 +412,12 @@ def _where_cause_keys(where: list[WhereLeaf]) -> set[str]:
     for w in where:
         if w.leaf.name == "body_words":
             keys.add("body")
+            continue
+        if w.leaf.name == "subject_contains":
+            keys.add("subject")
+            continue
+        if w.leaf.name in {"header_exists", "header_contains"}:
+            keys.add("headers")
             continue
         role, _ = w.leaf.value
         keys.add("address_list")
@@ -449,7 +456,14 @@ def _describe_where(where: list[WhereLeaf]) -> list[str]:
         prefix = f"{w.path} {'not ' if w.negate else ''}"
         if w.leaf.name == "body_words":
             words = ", ".join(repr(t) for t in w.leaf.value)
-            parts.append(f"{prefix}body_words({words})")
+            parts.append(f"{prefix}{w.leaf.name}({words})")
+        elif w.leaf.name == "header_exists":
+            parts.append(f"{prefix}header_exists({w.leaf.value!r})")
+        elif w.leaf.name == "header_contains":
+            name, value = w.leaf.value
+            parts.append(f"{prefix}header_contains({name!r}, {value!r})")
+        elif w.leaf.name == "subject_contains":
+            parts.append(f"{prefix}subject_contains({w.leaf.value!r})")
         else:
             role, value = w.leaf.value
             parts.append(f"{prefix}{w.leaf.name}({role}, {value!r})")
@@ -1358,10 +1372,16 @@ def register_retrieval_tools(server, db):
                    address_or_name_contains: of either (how
                    ``sender`` matches a name). domain_is: the
                    address's exact domain; a subdomain does not
-                   match. body_words: like ``text``. Roles: from, to,
+                   match. body_words: like ``text``. subject_contains: like
+                   ``subject``. header_exists: name only, any top-level
+                   occurrence. header_contains: name and value, a caseless
+                   substring of any decoded occurrence (raw on decode
+                   failure); absence is unknown without complete headers.
+                   Header names hold 1 to 128 ASCII token characters and
+                   values at most 500 characters. Roles: from, to,
                    cc, visible_recipient (To or Cc). ``role`` is
                    required on the five address leaves and refused,
-                   null included, on ``body_words``. An ``all`` item
+                   null included, on non-address leaves. An ``all`` item
                    may be {"any": [leaf, ...]}, true when one leaf is;
                    ``negate: true`` inverts a leaf. A message no item
                    rejects but some leaf cannot decide is

@@ -722,11 +722,11 @@ class WhereLeafResult(_Output):
     distinct_addresses: int | None = Field(
         description="Address leaves: distinct addresses this leaf matched across every "
         "match (total_matches only) it is itself true of, not just this page. Null for "
-        "body_words and negated leaves."
+        "non-address and negated leaves."
     )
     addresses: list[str] | None = Field(
         description=f"Address leaves: the matched addresses, most matching messages first, "
-        f"at most {MAX_LISTED_MATCHED_ADDRESSES}. Null for body_words and negated leaves."
+        f"at most {MAX_LISTED_MATCHED_ADDRESSES}. Null for non-address and negated leaves."
     )
 
 
@@ -1036,6 +1036,16 @@ class QueueCounts(_Output):
     )
 
 
+class HeaderPredicateCapability(_Output):
+    status: Literal["supported", "supported after backfill"]
+    unassessed_messages: int = Field(
+        description="Indexed messages awaiting header evidence assessment, including Trash."
+    )
+    incomplete_messages: int = Field(
+        description="Indexed messages whose header budget or parse lost fields, including Trash."
+    )
+
+
 class MailboxStatusOutput(_Output):
     server_version: str = Field(
         description="MCP server's deployed source commit, with -dirty for local changes; "
@@ -1065,6 +1075,7 @@ class MailboxStatusOutput(_Output):
         "get_message on such a Message-ID lists its claimant IDs; pass one to read "
         "that file."
     )
+    header_predicates: HeaderPredicateCapability
     extra_claimant_files: int = Field(
         description="Indexed files beyond the first claimant of each conflicting Message-ID."
     )

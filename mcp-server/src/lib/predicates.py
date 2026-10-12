@@ -740,6 +740,25 @@ def _compile_body_words(terms: tuple[str, ...], params: list) -> str:
     return _decided_by(f"({match})", "body_complete")
 
 
+def _compile_header_exists(name: str, params: list) -> str:
+    params.append(name)
+    return _decided_by(
+        "m.claimant_id IN (SELECT claimant_id FROM message_headers WHERE name_normalized = ?)",
+        "headers_complete",
+    )
+
+
+def _compile_header_contains(value: tuple[str, str], params: list) -> str:
+    name, text = value
+    params.extend((name, text.casefold()))
+    return _decided_by(
+        "m.claimant_id IN (SELECT claimant_id FROM message_headers "
+        "WHERE name_normalized = ? AND "
+        "instr(mcp_casefold(COALESCE(decoded_value, raw_value)), ?) > 0)",
+        "headers_complete",
+    )
+
+
 def _compile_folder(folders: tuple[str, ...], params: list) -> str:
     params.extend(folders)
     return f"m.folder IN ({','.join('?' * len(folders))})"
@@ -888,7 +907,17 @@ LEAVES: dict[str, LeafKind] = {
                 ("domain_is", "role, domain"),
             )
         ),
+        LeafKind(
+            "header_exists", "header name", _compile_header_exists, Evaluability.UNKNOWN_WHEN_NULL
+        ),
+        LeafKind(
+            "header_contains",
+            "header name, text",
+            _compile_header_contains,
+            Evaluability.UNKNOWN_WHEN_NULL,
+        ),
         LeafKind("subject", "text", _compile_subject, Evaluability.UNKNOWN_WHEN_NULL),
+        LeafKind("subject_contains", "text", _compile_subject, Evaluability.UNKNOWN_WHEN_NULL),
         # ``text`` is the flat filter's name for ``body_words`` (#1088).
         LeafKind("text", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind("body_words", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
@@ -1033,7 +1062,13 @@ WHERE_ADDRESS_LEAVES = (
     "address_or_name_contains",
     "domain_is",
 )
-WHERE_LEAVES = (*WHERE_ADDRESS_LEAVES, "body_words")
+WHERE_LEAVES = (
+    *WHERE_ADDRESS_LEAVES,
+    "body_words",
+    "subject_contains",
+    "header_exists",
+    "header_contains",
+)
 # The ``ROLE_SETS`` roles a caller names. ``visible_participant`` stays
 # internal (the flat ``participant``); the Bcc-inclusive ``recipient``
 # and ``any`` arrive with #1090.
@@ -1049,6 +1084,8 @@ MAX_WHERE_VALUE_CHARS = {
     "address_or_name_contains": 320,
     "domain_is": 255,
     "body_words": 1000,
+    "subject_contains": 500,
+    "header_contains": 500,
 }
 MAX_WHERE_ID_CHARS = 64
 
@@ -1063,6 +1100,9 @@ WhereLeafName = Literal[
     "address_or_name_contains",
     "domain_is",
     "body_words",
+    "subject_contains",
+    "header_exists",
+    "header_contains",
 ]
 WhereRole = Literal["from", "to", "cc", "visible_recipient"]
 
@@ -1078,7 +1118,8 @@ class WhereLeafItem(BaseModel):
 
     leaf: WhereLeafName
     role: WhereRole | None = None
-    value: str
+    name: str | None = None
+    value: str | None = None
     negate: bool = False
     id: str | None = None
 
@@ -1088,7 +1129,17 @@ class WhereLeafItem(BaseModel):
             if self.role is None:
                 raise ValueError("role is required on an address leaf")
         elif "role" in self.model_fields_set:
-            raise ValueError("role is not accepted on body_words")
+            raise ValueError(f"role is not accepted on {self.leaf}")
+        if self.leaf in {"header_exists", "header_contains"}:
+            if self.name is None:
+                raise ValueError("name is required on a header leaf")
+        elif "name" in self.model_fields_set:
+            raise ValueError("name is accepted only on header leaves")
+        if self.leaf == "header_exists":
+            if "value" in self.model_fields_set:
+                raise ValueError("value is not accepted on header_exists")
+        elif self.value is None:
+            raise ValueError("value is required on this leaf")
         return self
 
 
@@ -1158,6 +1209,21 @@ def _where_value(path: str, item: WhereLeafItem) -> Any:
     limit, a blank one, a non-address ``address_is``, an invalid
     ``domain_is`` or a ``body_words`` without words or with too many."""
     name, value = item.leaf, item.value
+    header_name = ""
+    if name in {"header_exists", "header_contains"}:
+        header_name = item.name or ""
+        # ASCII token characters only; check size before any normalization.
+        if not 1 <= len(header_name) <= 128 or any(
+            not (c.isascii() and (c.isalnum() or c in "!#$%&'*+-.^_`|~")) for c in header_name
+        ):
+            raise InvalidFilterError(
+                "where", f"{path}: name must hold 1 to 128 ASCII token characters"
+            )
+        header_name = header_name.lower()
+        if name == "header_exists":
+            return header_name
+    if value is None:
+        raise InvalidFilterError("where", f"{path}: value is required")
     limit = MAX_WHERE_VALUE_CHARS[name]
     if len(value) > limit:
         raise InvalidFilterError("where", f"{path}: {name} value is longer than {limit} characters")
@@ -1167,12 +1233,16 @@ def _where_value(path: str, item: WhereLeafItem) -> Any:
     if name == "body_words":
         terms = _text_terms(value)
         if not terms:
-            raise InvalidFilterError("where", f"{path}: body_words value holds no word")
+            raise InvalidFilterError("where", f"{path}: {name} value holds no word")
         if len(terms) > _MAX_TEXT_TERMS:
             raise InvalidFilterError(
-                "where", f"{path}: body_words holds at most {_MAX_TEXT_TERMS} words"
+                "where", f"{path}: {name} holds at most {_MAX_TEXT_TERMS} words"
             )
         return tuple(terms)
+    if name == "header_contains":
+        return (header_name, value)
+    if name == "subject_contains":
+        return value
     if name == "address_is":
         if address_match_mode(value) != "exact":
             raise InvalidFilterError(
