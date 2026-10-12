@@ -1215,6 +1215,43 @@ same, as a label per message) and for `search_emails`' thread filters
 predicate is written once there; `docs/mcp-tools.md`, "Filter
 predicates", lists the leaves.
 
+### Top-level header evidence
+
+`message_headers` keeps top-level fields in their source order, duplicates
+included, keyed by `(claimant_id, ordinal)`. It stores the original name,
+its lowercase `name_normalized`, `raw_value`, and nullable `decoded_value`.
+The `(name_normalized, claimant_id)` index serves header predicates.
+Raw values map each source byte to its Latin-1 character, preserving
+folding and encoded words without SQLite surrogate characters; the raw
+message remains the original byte evidence. Decoding uses the existing
+stdlib header path; a failure or degraded decode keeps `decoded_value`
+NULL and predicates use the raw value.
+
+Before decoding, one per-message guard limits fields to 256, total name
+and value bytes to 1 MiB, and one name plus value to 16 KiB. It stops at
+the first overflow, retains the earlier fields, and records
+`headers_budget=1` through the existing rate-limited parser warning.
+Stdlib defects that discard a header or stop its header scan also
+record `headers_parse=1` without logging defect text.
+`messages.headers_complete` is 1 for a complete capture, 0 for a cap or
+header parse loss,
+and NULL until assessed. Header predicates decide true on any stored
+match; a miss is false only under 1. Header rows and their flag are
+replaced in the same message-write transaction and cascade on deletion.
+A synthetic macOS measurement on 2026-10-12 used 50,000 messages with
+nine common fields, a tenth field on 500 messages, and duplicate
+X-Metadata fields: 450,500 header rows occupied 122,167,296 bytes
+(116.5 MiB), including both indexes. Full `query_messages(limit=1)`
+calls, including unknown counts and leaf diagnostics, took median
+50.7 ms for selective presence (500 matches), 176.1 ms for containment
+in a common field (500 matches), and 122.4 ms for common-field presence
+(50,000 matches), over five sequential warm-cache calls. Both header
+plans used `idx_message_headers_name_claimant`; these figures describe
+this synthetic corpus, not a live mailbox or a general latency bound.
+
+Migration 0013 queues the existing reparse path; unchanged chunks keep
+their IDs and vectors. `get_message` does not return this table.
+
 ## Message time
 
 The index records two times per message, `sent_at` and `occurred_at`,
@@ -3004,6 +3041,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 13 | `0013_message_headers.sql` | Bounded ordered `message_headers` and nullable `messages.headers_complete` (#1079); existing rows start unknown and a queued reparse fills them. |
 | 12 | `0012_extraction_identifier.sql` | `attachment_extractions.identifier` (#1416; see the `attachment_extractions` row above and *Extractor dispatch*): how the payload's container was certified, `container@<n>` or `none@<n>`, NULL (unknown) on every row cached before it. The bytes are not in the database, so the migration ends with the shared reparse statement (see *Reparse in place*): every occurrence passes through the lookup once, which records `none@<n>` on a row whose payload has neither signature and identifies and re-extracts the rest. Unchanged chunks keep their IDs and vectors; text a re-identified container now yields is new chunks, sent to the configured embedder, so the upgrade embeds the newly readable Office attachments once. A container sent under a `message/*` label is kept as sent from this release, so its occurrence gets a new attachment ID on the reparse: the old occurrence, FTS row, chunks and vectors are removed and the new one is extracted and embedded. The startup sweep's identification arm queues the same rows and clears their occurrences' `text_complete` first, so a message whose extraction continuation the reparse leaves queued refreshes them too. |
 | 11 | `0011_extraction_cap_record.sql` | `attachment_extractions.ocr_pages_cap`, `digital_pages_cap` and `extracted_chars_cap` (#1418; see the `attachment_extractions` row above): the configured limit that cut the result, 0 when it did not, NULL (unknown) on every row cached before it. The extractor writes them, so no reparse is queued; the startup sweep re-queues once the messages using an incomplete `success` / `empty` row with no record (the bootstrap arm), and the re-extraction records the columns. |
 | 10 | `0010_thread_vector_sums.sql` | `thread_vector_sums` (#1356; see *Thread vector sums*): each thread's exact chunk-vector sum and count, so the thread vector is derived without reading every chunk vector. The migration writes no row: the first write that touches a thread fills its row, and the backfill sweep fills the rest in bounded batches. Nothing is re-parsed or re-embedded. |

@@ -2485,7 +2485,9 @@ class TestDecodeHeader:
         assert msg.subject == f"Re: {marker} café"
         assert msg.from_addr == "a@example.test"
         assert msg.body_text == "Body."
-        assert self._charset_fallback_warnings(caplog) == [self._charset_fallback_line(exc_name)]
+        assert (
+            self._charset_fallback_warnings(caplog) == [self._charset_fallback_line(exc_name)] * 2
+        )
         assert marker not in caplog.text
 
     @pytest.mark.parametrize("shape", sorted(UNDECODABLE_CHARSET_LABELS))
@@ -2504,7 +2506,9 @@ class TestDecodeHeader:
         assert msg.from_addrs == []
         assert msg.from_addr == f"{marker} café <>"
         assert msg.subject == "Hello"
-        assert self._charset_fallback_warnings(caplog) == [self._charset_fallback_line(exc_name)]
+        assert (
+            self._charset_fallback_warnings(caplog) == [self._charset_fallback_line(exc_name)] * 2
+        )
         assert marker not in caplog.text
 
     def test_nul_charset_label_filename_logs_the_charset_fallback(self, tmp_path, caplog):
@@ -2713,6 +2717,24 @@ class TestDecodeHeader:
         from src import extractors
 
         headers, expected, (replaced, unknown_label, kept_encoded) = self.RAW_8BIT_SHAPES[shape]
+        # Header evidence now decodes each complete top-level field too.
+        extra = {
+            "subject-raw-latin1": (1, 0, 0),
+            "subject-raw-utf8-and-encoded-word": (0, 0, 1),
+            "subject-raw-latin1-and-encoded-word": (1, 0, 1),
+            "from-raw-utf8-no-address-and-encoded-word": (0, 0, 1),
+            "from-raw-utf8-name-and-encoded-word": (0, 0, 1),
+            "from-raw-latin1-no-address-and-encoded-word": (1, 0, 1),
+            "to-raw-utf8-name-and-encoded-word": (0, 0, 1),
+            "subject-encoded-word-unknown-8bit-latin1": (1, 0, 0),
+            "subject-encoded-word-unknown-label": (0, 1, 0),
+            "from-raw-latin1-name": (1, 0, 0),
+            "from-raw-latin1-no-address": (1, 0, 0),
+            "to-cc-raw-latin1-names": (2, 0, 0),
+        }.get(shape, (0, 0, 0))
+        replaced += extra[0]
+        unknown_label += extra[1]
+        kept_encoded += extra[2]
         with caplog.at_level(logging.DEBUG):
             msg = parse_email(self._write_raw_header_message(tmp_path, headers))
         assert msg is not None
@@ -2764,7 +2786,7 @@ class TestDecodeHeader:
             assert msg.subject == "RAWMARKER1147 caf\ufffd"
         lines = [r for r in caplog.records if "raw 8-bit header" in r.getMessage()]
         assert [r.levelname for r in lines] == ["WARNING", "WARNING"]
-        assert extractors.drain_suppressed_lines() == 3
+        assert extractors.drain_suppressed_lines() == 8
         assert extractors.drain_extractor_counts()["warnings_suppressed"] == 0
         assert self.RAW_8BIT_MARKER not in caplog.text
 
@@ -4208,6 +4230,18 @@ def _nested_rfc822_with_note(levels: int) -> bytes:
 # budget, so a few short headers can exhaust it). ``pinned`` checks the
 # parse result the cap produces.
 _CAP_SHAPES = {
+    "headers_parse": (
+        b" SYNTHETIC_HEADER_MARKER\r\n" + _CAP_HEAD + b"\r\nbody",
+        False,
+        "headers_parse=1",
+        lambda msg: not msg.headers_complete,
+    ),
+    "headers_budget": (
+        _CAP_HEAD + b"\r\nbody",
+        {"MAX_STORED_HEADER_FIELDS": 2},
+        "headers_budget=1",
+        lambda msg: not msg.headers_complete and len(msg.headers) == 2,
+    ),
     "attached_depth": (
         _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822(21), _TXT_FILENAME),
         False,
@@ -4439,13 +4473,13 @@ _CAP_SHAPES = {
     "address_header": (
         _addresses(b"bob@example.test, " + b"SYNTHETIC_HEADER_MARKER@example.test, " * 7_000),
         False,
-        "address_header=1",
+        "address_header=1,headers_budget=1",
         lambda msg: msg.to_addrs == [] and msg.body_text == "PARENT_BODY",
     ),
     "address_element": (
         _addresses(b"bob@example.test, " + b"SYNTHETIC_HEADER_MARKER" * 6_000 + b"@example.test"),
         False,
-        "address_element=1",
+        "address_element=1,headers_budget=1",
         lambda msg: msg.to_addrs == ["bob@example.test"],
     ),
     "address_length": (
@@ -4585,6 +4619,8 @@ def test_cap_that_drops_content_logs_one_warning(tmp_path, monkeypatch, caplog, 
 _ROLES = {"from_addresses_complete", "to_addresses_complete", "cc_addresses_complete"}
 _MANIFEST = {"attachments_manifest_complete"}
 _CAP_COMPLETENESS: dict[str, set[str]] = {
+    "headers_budget": set(),
+    "headers_parse": set(),
     "attached_depth": _MANIFEST,
     "attached_fields": _MANIFEST,
     "attached_depth_decoded": _MANIFEST,
@@ -4769,7 +4805,7 @@ class TestCompletenessByRole:
         msg, _ = _parse_headers(b"To: " + to + b"\r\n")
         elapsed = time.perf_counter() - start
         (budget,) = made
-        assert msg.parse_caps == {"address_unparsed": 5_000}
+        assert msg.parse_caps == {"address_unparsed": 5_000, "headers_budget": 1}
         assert budget.parse_calls == 5_000
         assert calls["n"] == budget.parse_calls
         assert elapsed < 10
@@ -5455,8 +5491,9 @@ class TestRepeatedAddressHeaders:
         to = b"To: " + ("é" * (size // 2)).encode() + b"@example.test\r\n"
         msg, _ = _parse_headers(b"From: s@example.test\r\n" + to)
         assert msg.to_addrs == []
-        # The Subject is decoded; the To header never is.
-        assert decoded == [1]
+        # Header evidence decodes the four small top-level fields too;
+        # neither path decodes the over-long To field.
+        assert decoded == [1] * 5
 
     def test_an_over_long_first_from_leaves_no_fallback_text(self):
         """The undecodable-From fallback reads the first From only when
