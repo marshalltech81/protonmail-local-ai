@@ -1174,6 +1174,60 @@ AGGREGATE_DIMENSIONS = (
 
 
 @dataclass
+class QueriedThread:
+    """Matching counts and dates are scoped; other metadata covers the whole thread."""
+
+    thread_id: str
+    subject: str
+    matching_message_count: int
+    indeterminate_message_count: int
+    total_message_count: int
+    first_matching_at: str | None
+    last_matching_at: str | None
+    newest_matching_claimant_id: str
+    participant_count: int | None
+    has_attachments: bool | None
+
+
+@dataclass
+class QueryThreadPage:
+    total_threads: int
+    total_matching_messages: int
+    indeterminate_messages: int
+    indeterminate_threads: int
+    threads: list[QueriedThread]
+    offset: int
+    has_more: bool
+    next_cursor: str | None
+
+
+def _encode_thread_cursor(digest: str, thread_id: str, offset: int) -> str:
+    payload = json.dumps({"v": 1, "t": "threads", "q": digest, "id": thread_id, "o": offset})
+    return base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
+
+
+def _decode_thread_cursor(cursor: str, digest: str) -> tuple[str, int]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise InvalidFilterError("cursor", _INVALID_CURSOR) from exc
+    if not (
+        isinstance(data, dict)
+        and data.get("v") == 1
+        and data.get("t") == "threads"
+        and isinstance(data.get("q"), str)
+        and isinstance(data.get("id"), str)
+        and type(data.get("o")) is int
+        and data["o"] >= 0
+    ):
+        raise InvalidFilterError("cursor", _INVALID_CURSOR)
+    if data["q"] != digest:
+        raise InvalidFilterError("cursor", _FOREIGN_CURSOR)
+    return data["id"], data["o"]
+
+
+@dataclass
 class MessageGroup:
     """One ``aggregate_messages`` group: the messages the filters match
     whose ``value`` on the dimension is this one (``None``: no value,
@@ -4841,6 +4895,124 @@ class Database:
             address_matches=address_matches,
             indeterminate=indeterminate,
             leaf_results=leaf_results,
+        )
+
+    def query_threads(
+        self,
+        *,
+        sender: str | None = None,
+        recipient: str | None = None,
+        participant: str | None = None,
+        subject: str | None = None,
+        text: str | None = None,
+        folder: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+        authority_class: str | None = None,
+        seen: bool | None = None,
+        flagged: bool | None = None,
+        replied: bool | None = None,
+        size_min: int | None = None,
+        size_max: int | None = None,
+        where: Sequence[WhereLeaf] = (),
+        limit: int = 25,
+        cursor: str | None = None,
+    ) -> QueryThreadPage:
+        """Group the shared three-valued message expression before paging by thread ID.
+
+        One statement reads counts, rows and whole-thread metadata in one snapshot.
+        The page limit bounds output, not the message set evaluated and grouped.
+        """
+        leaves = query_messages_leaves(
+            sender=sender,
+            recipient=recipient,
+            participant=participant,
+            subject=subject,
+            text=text,
+            folder=folder,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+            authority_class=authority_class,
+            seen=seen,
+            flagged=flagged,
+            replied=replied,
+            size_min=size_min,
+            size_max=size_max,
+        )
+        expr, params = _message_expression(leaves, where)
+        digest = hashlib.sha256(
+            json.dumps(["query_threads", leaf_digest(leaves, where=where)]).encode()
+        ).hexdigest()[:16]
+        last_id, offset = _decode_thread_cursor(cursor, digest) if cursor else (None, 0)
+        # Materialize the expression once per claimant. Ranking definite matches
+        # first identifies their newest claimant without a correlated scan per thread.
+        # Whole-thread metadata is enriched only for the capped page IDs.
+        sql = (
+            "WITH e AS MATERIALIZED (SELECT m.claimant_id AS cid, m.thread_id AS tid, "  # nosec B608
+            f"m.effective_at AS clock, {EFFECTIVE_EVIDENCE_SQL} AS at, ({expr}) AS ok "
+            "FROM messages m), "
+            "r AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY tid "
+            "ORDER BY ok IS 1 DESC, clock DESC, cid DESC) AS rn FROM e WHERE ok IS NOT 0), "
+            "g AS MATERIALIZED (SELECT tid, TOTAL(ok IS 1) AS matches, "
+            "TOTAL(ok IS NULL) AS undecided, MIN(CASE WHEN ok IS 1 THEN at END) AS first_at, "
+            "MAX(CASE WHEN ok IS 1 THEN at END) AS last_at, "
+            "MAX(CASE WHEN ok IS 1 AND rn=1 THEN cid END) AS newest FROM r GROUP BY tid), "
+            "t AS (SELECT COUNT(CASE WHEN matches>0 THEN 1 END) AS threads, "
+            "COALESCE(SUM(matches), 0) AS matches, COALESCE(SUM(undecided), 0) AS undecided, "
+            "COUNT(CASE WHEN matches=0 AND undecided>0 THEN 1 END) AS unknown_threads FROM g), "
+            "pg AS MATERIALIZED (SELECT * FROM g WHERE matches>0 AND (? IS NULL OR tid>?) "
+            "ORDER BY tid LIMIT ?), "
+            "meta AS (SELECT m.thread_id AS tid, COUNT(*) AS total, "
+            "MIN(m.from_addresses_complete IS 1 AND m.to_addresses_complete IS 1 "
+            "AND m.cc_addresses_complete IS 1) AS people_complete, "
+            "CASE WHEN MAX(m.has_attachments)=1 THEN 1 "
+            "WHEN MIN(m.attachments_manifest_complete IS 1)=1 THEN 0 ELSE NULL END AS att "
+            "FROM pg JOIN messages m ON m.thread_id=pg.tid GROUP BY m.thread_id), "
+            "people AS (SELECT m.thread_id AS tid, COUNT(DISTINCT p.address) AS n "
+            "FROM pg JOIN messages m ON m.thread_id=pg.tid "
+            "LEFT JOIN message_participants p ON p.claimant_id=m.claimant_id "
+            "GROUP BY m.thread_id) "
+            "SELECT t.threads, t.matches, t.undecided, t.unknown_threads, pg.tid, "
+            "COALESCE(th.subject, ''), pg.matches, pg.undecided, meta.total, "
+            "pg.first_at, pg.last_at, pg.newest, "
+            "CASE WHEN meta.people_complete=1 THEN people.n ELSE NULL END, meta.att "
+            "FROM t LEFT JOIN pg ON 1 LEFT JOIN threads th ON th.thread_id=pg.tid "
+            "LEFT JOIN meta ON meta.tid=pg.tid LEFT JOIN people ON people.tid=pg.tid ORDER BY pg.tid"
+        )
+        with closing(self._connect()) as conn:
+            rows = conn.execute(sql, [*params, last_id, last_id, limit + 1]).fetchall()
+        totals = [int(n) for n in rows[0][:4]]
+        records = [
+            QueriedThread(
+                thread_id=row[4],
+                subject=row[5],
+                matching_message_count=int(row[6]),
+                indeterminate_message_count=int(row[7]),
+                total_message_count=int(row[8]),
+                first_matching_at=row[9],
+                last_matching_at=row[10],
+                newest_matching_claimant_id=row[11],
+                participant_count=None if row[12] is None else int(row[12]),
+                has_attachments=None if row[13] is None else bool(row[13]),
+            )
+            for row in rows
+            if row[4] is not None
+        ]
+        has_more = len(records) > limit
+        records = records[:limit]
+        return QueryThreadPage(
+            total_threads=totals[0],
+            total_matching_messages=totals[1],
+            indeterminate_messages=totals[2],
+            indeterminate_threads=totals[3],
+            threads=records,
+            offset=offset,
+            has_more=has_more,
+            next_cursor=_encode_thread_cursor(digest, records[-1].thread_id, offset + len(records))
+            if has_more
+            else None,
         )
 
     def aggregate_messages(

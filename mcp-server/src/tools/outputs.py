@@ -776,6 +776,57 @@ def query_messages_output_schema() -> dict[str, Any]:
     return schema
 
 
+class QueriedThreadRow(_Output):
+    thread_id: str
+    subject: str = Field(description="Whole-thread display label; need not satisfy the filters.")
+    matching_message_count: int = Field(description="Definitely matching claimants in this thread.")
+    indeterminate_message_count: int = Field(description="Request-scoped undecided claimants.")
+    total_message_count: int = Field(
+        description="All indexed claimants in the thread, including Trash and out-of-query messages."
+    )
+    first_matching_at: str | None = Field(
+        description="Earliest known delivery or parsed send date among matches; null without date evidence."
+    )
+    last_matching_at: str | None = Field(
+        description="Latest known delivery or parsed send date among matches; null without date evidence."
+    )
+    newest_matching_claimant_id: str = Field(
+        description="Newest match by effective_at, then claimant_id; undated messages use first-indexed time for ordering only."
+    )
+    participant_count: int | None = Field(
+        description="Whole-thread distinct canonical claimed From/To/Cc addresses, not people or Bcc; null if any role is incomplete or unchecked."
+    )
+    has_attachments: bool | None = Field(
+        description="Whole-thread attachment presence: true if observed, false only with complete manifests, otherwise null."
+    )
+
+
+class QueryThreadsOutput(_Output):
+    filters: list[FilterUse]
+    date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
+    total_threads: int = Field(
+        description="Threads containing a definite match in this call's snapshot; complete qualifying count only when indeterminate_threads is 0."
+    )
+    total_matching_messages: int = Field(
+        description="Definitely matching claimants; equals query_messages.total_matches for the same filters."
+    )
+    indeterminate_messages: int = Field(
+        description="All undecided claimants, including those in listed threads; equals query_messages.indeterminate."
+    )
+    indeterminate_threads: int = Field(
+        description="Threads containing undecided claimants but no definite match; excluded from total_threads and rows."
+    )
+    returned: int
+    offset: int = Field(
+        description="Thread rows returned by earlier pages; not proof of unchanged population coverage."
+    )
+    has_more: bool
+    next_cursor: str | None
+    threads: list[QueriedThreadRow] = Field(
+        description="Thread ID ascending; each page reads a fresh snapshot, not frozen cross-page membership."
+    )
+
+
 class MessageGroupRow(_Output):
     value: str | None = Field(
         description="The group's address, domain, folder, year (YYYY), month (YYYY-MM) or "
