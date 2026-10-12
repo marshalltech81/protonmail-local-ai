@@ -556,7 +556,9 @@ def _only_the_v12_reparse(db: Database) -> bool:
 
 
 def _drop_v14_tables(db: Database) -> None:
-    """Drop what v14 adds: the account registry (#1596)."""
+    """Drop what v14 adds: the account registry (#1596) and mailbox
+    occurrences (#1566)."""
+    db._conn.execute("DROP TABLE message_occurrences")
     for trigger in ("accounts_never_updated", "accounts_never_deleted"):
         db._conn.execute(f"DROP TRIGGER {trigger}")
     db._conn.execute("DROP TABLE accounts")
@@ -564,7 +566,7 @@ def _drop_v14_tables(db: Database) -> None:
 
 def _v13_from_fresh(db: Database) -> None:
     """Turn a fresh database into the v13 shape: v13 is the current schema
-    without the account registry (#1596)."""
+    without the account registry (#1596) and mailbox occurrences (#1566)."""
     _drop_v14_tables(db)
     db._conn.execute("UPDATE schema_version SET version = 13")
     db._conn.commit()

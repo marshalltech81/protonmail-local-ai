@@ -924,6 +924,13 @@ extraction cache by extractor module; after it, an attachment whose
 label selects a different extractor from the one that first read its
 bytes is re-extracted once, the next time its message is reprocessed.
 
+v14 (#1566) stores each message's file relative to the Maildir root
+(`MAILDIR_PATH`, `/maildir` in Compose). "A message path lies outside
+the configured Maildir root" means the index holds a path that is not
+below it, for example one built under another root; the migration
+stops with nothing applied. Restore the original `MAILDIR_PATH`, or
+rebuild the index. The message never names the path.
+
 ## Reparse or rebuild after an upgrade
 
 Some releases change what the parser stores for each message. Which

@@ -42,7 +42,8 @@ from .extractors import (
     SCANNED_PDF_OCR_DISABLED_ERROR,
     warn_rate_limited,
 )
-from .maildir import message_state
+from .maildir import is_trashed, message_state
+from .occurrences import OccurrenceLocatorError, SeedFunctions, locate
 from .parser import PARSE_CAPS, participant_names
 from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL
 from .threader import (
@@ -174,10 +175,13 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # v13 (#1079): ``message_headers`` keeps bounded top-level header
 # evidence and ``messages.headers_complete`` whether it is whole; a
 # reparse fills both (``migrations/0013_message_headers.sql``).
-# v14 (#1596): ``accounts`` registers the configured account
+# v14 (#1596, #1566): ``accounts`` registers the configured account
 # (``ACCOUNT_SCOPE`` and the ``SOURCE_MODE`` provider), bound in the
 # migration through ``account.register_account_functions``; rows are
-# never changed or removed (``migrations/0014_account_registry.sql``).
+# never changed or removed. ``message_occurrences`` keeps each Maildir
+# copy of a message as its own occurrence, seeded with one per message
+# whose file record carries its hash, then a reparse; dormant until the
+# readers move to it (``migrations/0014_account_occurrences.sql``).
 SCHEMA_VERSION = 14
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
@@ -205,6 +209,37 @@ ACCOUNT_SCHEMA_STATEMENTS = (
         SELECT RAISE(ABORT, 'accounts rows are never removed');
     END
     """,
+)
+
+# Mailbox occurrences' DDL (#1566), shared by the initial schema; the v14
+# migration file repeats it.
+OCCURRENCE_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE message_occurrences (
+        id                INTEGER PRIMARY KEY,
+        account_id        INTEGER NOT NULL REFERENCES accounts(id),
+        folder            TEXT NOT NULL,
+        uniq              TEXT NOT NULL,
+        claimant_id       TEXT NOT NULL REFERENCES messages(claimant_id) ON DELETE CASCADE,
+        relative_path     TEXT NOT NULL,
+        seen              INTEGER NOT NULL CHECK (seen IN (0, 1)),
+        flagged           INTEGER NOT NULL CHECK (flagged IN (0, 1)),
+        replied           INTEGER NOT NULL CHECK (replied IN (0, 1)),
+        trashed           INTEGER NOT NULL CHECK (trashed IN (0, 1)),
+        first_observed_at TEXT,
+        last_observed_at  TEXT,
+        internal_at       TEXT,
+        state             TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+        retired_at        TEXT,
+        provenance        TEXT NOT NULL CHECK (provenance IN ('parse', 'rename', 'migration')),
+        CHECK ((state = 'retired') = (retired_at IS NOT NULL))
+    )
+    """,
+    "CREATE UNIQUE INDEX idx_message_occurrences_key "
+    "ON message_occurrences(account_id, folder, uniq, claimant_id) WHERE state = 'active'",
+    "CREATE UNIQUE INDEX idx_message_occurrences_path "
+    "ON message_occurrences(account_id, relative_path) WHERE state = 'active'",
+    "CREATE INDEX idx_message_occurrences_claimant ON message_occurrences(claimant_id)",
 )
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -695,17 +730,49 @@ class Database:
 
         migration_dir = Path(__file__).parent / "migrations"
         log.info(f"Migrating database at {self.path}: v{stored} -> v{SCHEMA_VERSION}")
-        applied = migration_runner.apply_pending(
-            self._conn,
-            current_version=stored,
-            target_version=SCHEMA_VERSION,
-            migration_dir=migration_dir,
-        )
+        # The v14 seed relativizes every stored path against the
+        # configured root (#1566); a path outside it fails the migration.
+        seed = SeedFunctions(self.account.maildir_root)
+        seed.register(self._conn)
+        try:
+            applied = migration_runner.apply_pending(
+                self._conn,
+                current_version=stored,
+                target_version=SCHEMA_VERSION,
+                migration_dir=migration_dir,
+            )
+        except sqlite3.OperationalError:
+            if seed.refused:
+                # SQLite reports only that a function raised; say which
+                # rule refused, never the path.
+                raise OccurrenceLocatorError from None
+            raise
         log.info(
             f"Database ready at {self.path} (schema v{SCHEMA_VERSION}, "
             f"applied migrations: {applied})"
         )
         self._verify_account()
+        if 14 in applied:
+            self._log_occurrence_seed()
+
+    def _log_occurrence_seed(self) -> None:
+        """Report what the v14 migration bound (#1566), as counts. A
+        message left without an occurrence (its path holds other bytes
+        now) waits for the queued reparse, which binds whatever its file
+        holds."""
+        seeded, unbound = self._conn.execute(
+            "SELECT (SELECT COUNT(*) FROM message_occurrences), "
+            "(SELECT COUNT(*) FROM messages m WHERE NOT EXISTS ("
+            "SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id))"
+        ).fetchone()
+        log.info("Migration v14 seeded %d mailbox occurrence(s)", seeded)
+        if unbound:
+            log.warning(
+                "Migration v14 bound no occurrence for %d message(s) whose file record "
+                "does not carry their content hash; the queued reparse binds the files "
+                "still present",
+                unbound,
+            )
 
     def _verify_account(self) -> None:
         """Require the one stored account to be the configured one (#1596),
@@ -1350,9 +1417,11 @@ class Database:
 
     @staticmethod
     def _run_account_schema_script(cur: sqlite3.Cursor) -> None:
-        """The account registry (#1596), inside the initial schema's open
-        transaction; ``migrations/0014_account_registry.sql`` creates the
-        same table on an existing index and binds its row there.
+        """The account registry (#1596) and mailbox occurrences (#1566),
+        inside the initial schema's open transaction;
+        ``migrations/0014_account_occurrences.sql`` creates the same
+        tables on an existing index, binds the account and seeds the
+        occurrences there.
 
         One row per account the index serves; today exactly one, the
         configured ``ACCOUNT_SCOPE`` and its ``SOURCE_MODE`` provider.
@@ -1360,8 +1429,20 @@ class Database:
         observation. Triggers abort any UPDATE or DELETE, so a row is
         never changed or removed: a different scope is a different
         account, never a rename.
+
+        ``message_occurrences`` holds each Maildir copy of a message. The
+        account, its account-relative folder, the file's Maildir uniq and
+        the claimant ID key an active row; its path is relative to the
+        account's Maildir root and unique among active rows. A retired
+        row keeps its path for diagnostics and is never revived.
+        ``provenance`` says how the row was created (``parse``, an
+        observed ``rename``, or the ``migration`` seed); the observation
+        dates say when the indexer first and last saw the file (NULL on a
+        seeded row until a parse sees it); ``internal_at`` stays NULL,
+        unknown, until #1081 writes it. Rows go with their message
+        (``ON DELETE CASCADE``).
         """
-        for statement in ACCOUNT_SCHEMA_STATEMENTS:
+        for statement in ACCOUNT_SCHEMA_STATEMENTS + OCCURRENCE_SCHEMA_STATEMENTS:
             cur.execute(statement)
 
     # -------------------------------------------------------------------------
@@ -3858,7 +3939,9 @@ class Database:
                 "AND EXISTS (SELECT 1 FROM indexing_jobs WHERE filepath = ?)",
                 (old_path, new_path),
             )
-            self.update_filepath(old_path, new_path, folder=folder)
+            # The copy is a file with its own occurrence; the gone or
+            # trashed path's occurrence is not renamed onto it (#1566).
+            self.update_filepath(old_path, new_path, folder=folder, move_occurrence=False)
         return True
 
     @staticmethod
@@ -4004,6 +4087,107 @@ class Database:
                 (int(complete), claimant_id),
             )
 
+    def _bind_occurrence(
+        self, cur: sqlite3.Cursor, claimant_id: str, filepath: str, *, provenance: str
+    ) -> None:
+        """Bind the file at ``filepath`` to ``claimant_id``'s occurrence
+        there (#1566): the active row with its key (account, folder,
+        uniq, claimant) takes the path, flags and observation time, or a
+        new row is created. Any other active row at the path is retired
+        first: the path now holds other bytes (``claimant_id`` comes from
+        the file's full content hash), and a new file never inherits a
+        retired row. Raises ``OccurrenceLocatorError`` (fixed text) when
+        the path is outside the account's Maildir root. The caller owns
+        the transaction.
+        """
+        where = locate(filepath, self.account.maildir_root)
+        state = message_state(filepath)
+        now = datetime.now(UTC).isoformat()
+        cur.execute(
+            "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
+            "WHERE account_id = ? AND relative_path = ? AND state = 'active' "
+            "AND NOT (folder = ? AND uniq = ? AND claimant_id = ?)",
+            (now, self.account_id, where.relative_path, where.folder, where.uniq, claimant_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO message_occurrences
+                (account_id, folder, uniq, claimant_id, relative_path, seen, flagged,
+                 replied, trashed, first_observed_at, last_observed_at, state, provenance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            ON CONFLICT (account_id, folder, uniq, claimant_id) WHERE state = 'active'
+            DO UPDATE SET
+                relative_path     = excluded.relative_path,
+                seen              = excluded.seen,
+                flagged           = excluded.flagged,
+                replied           = excluded.replied,
+                trashed           = excluded.trashed,
+                first_observed_at = COALESCE(message_occurrences.first_observed_at,
+                                             excluded.first_observed_at),
+                last_observed_at  = excluded.last_observed_at
+            """,
+            (
+                self.account_id,
+                where.folder,
+                where.uniq,
+                claimant_id,
+                where.relative_path,
+                int(state.seen),
+                int(state.flagged),
+                int(state.replied),
+                int(is_trashed(filepath)),
+                now,
+                now,
+                provenance,
+            ),
+        )
+
+    def _move_occurrence(self, cur: sqlite3.Cursor, old_path: str, new_path: str) -> None:
+        """Carry the occurrence at ``old_path`` through an observed rename
+        to ``new_path`` (#1566). A flag rename or a ``new``/``cur`` move
+        keeps the folder and uniq, so it keeps the occurrence; a change of
+        folder or uniq retires it and binds the destination to the same
+        claimant, in the caller's transaction, so the move is atomic. A
+        path with no active occurrence (indexed before v14 and not yet
+        reparsed) changes nothing.
+        """
+        old = locate(old_path, self.account.maildir_root)
+        row = cur.execute(
+            "SELECT id, folder, uniq, claimant_id FROM message_occurrences "
+            "WHERE account_id = ? AND relative_path = ? AND state = 'active'",
+            (self.account_id, old.relative_path),
+        ).fetchone()
+        new = locate(new_path, self.account.maildir_root)
+        if row is None:
+            return
+        now = datetime.now(UTC).isoformat()
+        if (new.folder, new.uniq) != (row["folder"], row["uniq"]):
+            cur.execute(
+                "UPDATE message_occurrences SET state = 'retired', retired_at = ? WHERE id = ?",
+                (now, row["id"]),
+            )
+            self._bind_occurrence(cur, row["claimant_id"], new_path, provenance="rename")
+            return
+        state = message_state(new_path)
+        cur.execute(
+            "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
+            "WHERE account_id = ? AND relative_path = ? AND state = 'active' AND id != ?",
+            (now, self.account_id, new.relative_path, row["id"]),
+        )
+        cur.execute(
+            "UPDATE message_occurrences SET relative_path = ?, seen = ?, flagged = ?, "
+            "replied = ?, trashed = ?, last_observed_at = ? WHERE id = ?",
+            (
+                new.relative_path,
+                int(state.seen),
+                int(state.flagged),
+                int(state.replied),
+                int(is_trashed(new_path)),
+                now,
+                row["id"],
+            ),
+        )
+
     def _write_message_record(self, cur: sqlite3.Cursor, msg, thread_id: str) -> None:
         """Upsert ``msg``'s ``messages`` row and replace its participants.
 
@@ -4106,6 +4290,8 @@ class Database:
                 int(msg.headers_complete) if msg.headers_complete is not None else None,
             ),
         )
+        # The parsed file is this message's occurrence at its path (#1566).
+        self._bind_occurrence(cur, msg.claimant_id, msg.filepath, provenance="parse")
         cur.execute("DELETE FROM message_headers WHERE claimant_id = ?", (msg.claimant_id,))
         cur.executemany(
             "INSERT INTO message_headers "
@@ -4253,6 +4439,7 @@ class Database:
         *,
         folder: str | None = None,
         clear_tombstone: bool = False,
+        move_occurrence: bool = True,
     ) -> None:
         """Update message_thread_map, indexed_files and the queue row after a Maildir rename.
 
@@ -4274,6 +4461,11 @@ class Database:
         ``_rollback_if_started``, so it joins an enclosing
         ``db.transaction()`` (as ``remap_to_identical_copy`` uses it)
         instead of failing on a nested ``BEGIN``.
+
+        The file's occurrence moves with it (#1566, ``_move_occurrence``)
+        in the same transaction. ``move_occurrence=False`` is for a
+        caller whose ``old_path`` was not renamed to ``new_path``: a remap
+        to a byte-identical copy, which is a file with its own occurrence.
         """
         if old_path == new_path:
             return
@@ -4281,6 +4473,8 @@ class Database:
         started = False
         try:
             started = self._begin_if_needed(cur)
+            if move_occurrence:
+                self._move_occurrence(cur, old_path, new_path)
             cur.execute(
                 "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),

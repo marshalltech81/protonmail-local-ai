@@ -149,7 +149,10 @@ class _Index:
         self.inbox = self.maildir / "INBOX" / "cur"
         self.inbox.mkdir(parents=True)
         monkeypatch.setattr(main, "MAILDIR_PATH", self.maildir)
-        self.db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
+        self.db = Database(
+            tmp_path / "mail.db",
+            account=dataclasses.replace(TEST_ACCOUNT, maildir_root=self.maildir),
+        )
         self.threader = Threader(self.db)
         self.embedder = make_mock_embedder(_UNIT_VECTOR)
         self.queue = _make_queue(self.db)
@@ -789,11 +792,25 @@ class TestClaimantsStayIndependent:
         held_a = idx.rows_of(a)
         assert held_a.pop("pending_deletions") == [(str(trashed), a, thread_a, mock.ANY)]
         # Every other row of the first claimant is as it was, apart from
-        # the sweep following the flag rename to the trashed path.
+        # the sweep following the flag rename to the trashed path; the
+        # mailbox occurrence follows it too (#1566), with the ``T`` flag
+        # and the time it was observed.
+        occurrence_columns = [
+            c[1] for c in idx.db._conn.execute("PRAGMA table_info(message_occurrences)")
+        ]
+
+        def follow(table: str, row: tuple) -> tuple:
+            row = tuple(str(trashed) if v == str(first) else v for v in row)
+            if table != "message_occurrences":
+                return row
+            values = dict(zip(occurrence_columns, row, strict=True))
+            values["relative_path"] = trashed.relative_to(idx.maildir).as_posix()
+            values["trashed"] = 1
+            values["last_observed_at"] = mock.ANY
+            return tuple(values.values())
+
         renamed = {
-            table: sorted(
-                tuple(str(trashed) if v == str(first) else v for v in row) for row in rows
-            )
+            table: sorted(follow(table, row) for row in rows)
             for table, rows in rows_a.items()
             if table != "pending_deletions"
         }

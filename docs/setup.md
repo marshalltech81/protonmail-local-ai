@@ -933,7 +933,8 @@ see "mbsync refuses to sync — Bridge cert pin mismatch" in
 ## Upgrading to the account registry (schema v14)
 
 From schema v14 the index records the account it serves (#1596):
-`ACCOUNT_SCOPE` in `.env` and the `SOURCE_MODE` provider. Upgrade with
+`ACCOUNT_SCOPE` in `.env` and the `SOURCE_MODE` provider, and each
+Maildir copy of a message as its own occurrence (#1566). Upgrade with
 `make up`, not a plain `docker compose up`:
 
 1. Take a snapshot first: `make backup-index BACKUP_DIR=<directory
@@ -942,8 +943,14 @@ From schema v14 the index records the account it serves (#1596):
    which writes a new `ACCOUNT_SCOPE` to `.env` when the line is missing
    or empty, and `make validate-env`, which refuses a missing or
    malformed one before any container starts. The indexer then migrates
-   the index to v14 and records the account in the same transaction as
-   the version stamp.
+   the index to v14: it records the account, seeds one occurrence per
+   message and queues a reparse of every indexed message, all in the
+   same transaction as the version stamp. The log shows `Migration v14
+   seeded N mailbox occurrence(s)`. The reparse then re-reads every
+   message without embedding calls, so it takes time on a large
+   mailbox but costs nothing at the embedder; search keeps working
+   throughout ([Reparse or rebuild after an
+   upgrade](troubleshooting.md#reparse-or-rebuild-after-an-upgrade)).
 3. Keep the new `.env` line with your backups. From now on the index
    only opens under that value.
 

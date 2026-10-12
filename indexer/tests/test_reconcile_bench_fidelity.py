@@ -20,6 +20,7 @@ import sqlite3
 import sys
 from collections import Counter
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -66,10 +67,20 @@ _WRITER_TABLES = (
     "entity_aliases",
     "message_chunks_vec",
     "indexing_jobs",
+    "message_occurrences",
 )
 
 # Values only the wall clock decides: the time the indexer wrote the row.
-_CLOCK = {"indexed_at", "first_indexed_at", "chunked_at", "seen_at", "extracted_at"}
+_CLOCK = {
+    "indexed_at",
+    "first_indexed_at",
+    "chunked_at",
+    "seen_at",
+    "extracted_at",
+    "first_observed_at",
+    "last_observed_at",
+    "retired_at",
+}
 
 
 @pytest.fixture(scope="module")
@@ -102,7 +113,7 @@ def _index_with_the_indexer(bench, tmp_path, monkeypatch, n, **shape) -> Path:
             cls, _rule = bench.authority(address)
             if cls != "unclassified":
                 vendors[address] = cls
-    db = Database(tmp_path / "indexer.db", account=TEST_ACCOUNT)
+    db = Database(tmp_path / "indexer.db", account=replace(TEST_ACCOUNT, maildir_root=maildir))
     db.set_authority_rules(AuthorityRules(addresses=vendors))
     embedder = make_mock_embedder([0.0] * EMBEDDING_DIM)
     monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
@@ -267,7 +278,7 @@ def _with_vec(conn):
     return conn
 
 
-@pytest.mark.parametrize("table", [*_TABLES, *_WRITER_TABLES])
+@pytest.mark.parametrize("table", [*_TABLES, *_WRITER_TABLES, "accounts"])
 def test_benchmark_schema_is_the_indexers(bench, tmp_path, table):
     # Columns (type, NOT NULL, default, key) and indexes (columns,
     # uniqueness, partial condition) as the indexer creates them, so the
@@ -365,7 +376,7 @@ def _indexer_commits(bench, tmp_path, monkeypatch, n: int, batch: int):
         return conn
 
     monkeypatch.setattr(sqlite3, "connect", traced)
-    db = Database(tmp_path / "indexer.db", account=TEST_ACCOUNT)
+    db = Database(tmp_path / "indexer.db", account=replace(TEST_ACCOUNT, maildir_root=maildir))
     # The settings the indexer's connection applies (secure_delete, the
     # page cache, ...): each changes which pages a commit writes, so the
     # writer applies every one of them (``_writer_commits``).
@@ -560,6 +571,7 @@ _WRITER_ROWS = {
     "indexed_files": "filepath",
     "thread_vector_sums": "thread_id",
     "indexing_jobs": "filepath",
+    "message_occurrences": "id",
 }
 _FTS_WRITES = (
     "INSERT INTO threads_fts",
@@ -625,7 +637,7 @@ def test_wal_writer_writes_the_rows_the_indexer_writes(bench, tmp_path, monkeypa
         return conn
 
     monkeypatch.setattr(Database, "_connect", traced)
-    db = Database(tmp_path / "indexer.db", account=TEST_ACCOUNT)
+    db = Database(tmp_path / "indexer.db", account=replace(TEST_ACCOUNT, maildir_root=maildir))
     db.set_authority_rules(AuthorityRules(addresses=vendors))
     monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
     monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", 4)
@@ -746,7 +758,7 @@ def _indexer_passes(bench, tmp_path, monkeypatch, n, batch, per_message, seconds
         return conn
 
     monkeypatch.setattr(Database, "_connect", traced)
-    db = Database(tmp_path / "indexer.db", account=TEST_ACCOUNT)
+    db = Database(tmp_path / "indexer.db", account=replace(TEST_ACCOUNT, maildir_root=maildir))
     db.set_authority_rules(AuthorityRules(addresses=vendors))
     if seed:
         _seed_cache(bench, db._conn, per_message)
@@ -1038,7 +1050,7 @@ def _indexer_baseline_and_replies(bench, tmp_path, monkeypatch, shape, n, batch,
         return conn
 
     monkeypatch.setattr(Database, "_connect", traced)
-    db = Database(tmp_path / "indexer.db", account=TEST_ACCOUNT)
+    db = Database(tmp_path / "indexer.db", account=replace(TEST_ACCOUNT, maildir_root=maildir))
     db.set_authority_rules(AuthorityRules(addresses=vendors))
     monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
     monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", batch)

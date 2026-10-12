@@ -25,6 +25,7 @@ from src.account import (
 )
 from src.database import EMBEDDING_DIM, SCHEMA_VERSION, Database
 from src.migrations import runner
+from src.occurrences import SeedFunctions
 
 from tests.conftest import TEST_ACCOUNT, make_message, make_thread
 from tests.test_database import _schema_shape, _v13_from_fresh
@@ -304,6 +305,7 @@ class TestMigrationV14:
         target.write_text(target.read_text() + "\nINSERT INTO no_such_table VALUES (1);\n")
         conn = sqlite3.connect(path)
         register_account_functions(conn, TEST_ACCOUNT)
+        SeedFunctions(TEST_ACCOUNT.maildir_root).register(conn)
         try:
             with pytest.raises(sqlite3.OperationalError, match="no such table"):
                 runner.apply_pending(
