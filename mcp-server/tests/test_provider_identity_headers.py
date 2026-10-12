@@ -1,12 +1,13 @@
-"""#1316: header predicates match Proton identity headers as raw text.
+"""#1316: header predicates match Proton identity headers as stored text.
 
 Since #1079 every top-level header, ``X-Pm-Internal-Id`` and
 ``X-Pm-Gluon-Id`` included, is stored as ``message_headers`` evidence of
 its own claimant. ``header_contains`` on such a header is a caseless
-substring match over each stored file, not a validated logical lookup
-(#1313): it counts claimants, so byte versions of one message count
-apart, it matches a forged or duplicated field as readily as a genuine
-one, and it matches every ID containing the value. All values here are
+substring match of each stored field's decoded value (its raw value
+only when decoding failed), not a validated logical lookup (#1313): it
+counts claimants, so byte versions of one message count apart, it
+matches a forged or duplicated field as readily as a genuine one, and
+it matches every ID containing the value. All values here are
 synthetic.
 """
 
@@ -19,15 +20,22 @@ from tests.test_sqlite import _open_built_db_conn
 
 _PM_ID = "SYNTHPMID1316aaaa=="
 _PM_OTHER = "SYNTHPMID1316bbbb=="
+_PM_ENCODED = "SYNTHPMID1316cccc=="
+_PM_UNDECODED = "SYNTHPMID1316dddd=="
 
-# (message_id, variant, headers_complete, X-Pm-Internal-Id values in order)
+# (message_id, variant, headers_complete, X-Pm-Internal-Id fields in order
+# as (raw_value, decoded_value))
 _FILES = [
-    ("built@mail.example", "", 1, [_PM_ID]),
+    ("built@mail.example", "", 1, [(_PM_ID, _PM_ID)]),
     # The same message rebuilt with a new MIME boundary: other bytes.
-    ("built@mail.example", "rebuilt", 1, [_PM_ID]),
+    ("built@mail.example", "rebuilt", 1, [(_PM_ID, _PM_ID)]),
     # A forged field above the genuine one, in another file.
-    ("forged@mail.example", "", 1, [_PM_OTHER, _PM_ID]),
-    ("other@mail.example", "", 1, [_PM_OTHER]),
+    ("forged@mail.example", "", 1, [(_PM_OTHER, _PM_OTHER), (_PM_ID, _PM_ID)]),
+    ("other@mail.example", "", 1, [(_PM_OTHER, _PM_OTHER)]),
+    # An encoded word: the decoded value differs from the raw text.
+    ("encoded@mail.example", "", 1, [("=?utf-8?q?SYNTHPMID1316cccc=3D=3D?=", _PM_ENCODED)]),
+    # Decoding failed: only the raw value is stored.
+    ("undecoded@mail.example", "", 1, [(_PM_UNDECODED, None)]),
     # Header capture stopped before any identity field (headers_budget).
     ("capped@mail.example", "", 0, []),
     # Not yet re-parsed since migration 0013.
@@ -54,8 +62,8 @@ def identity_db(tmp_path):
         conn.executemany(
             "INSERT INTO message_headers VALUES (?, ?, ?, ?, ?, ?)",
             [
-                (claimant, n, "X-Pm-Internal-Id", "x-pm-internal-id", value, value)
-                for n, value in enumerate(values)
+                (claimant, n, "X-Pm-Internal-Id", "x-pm-internal-id", raw, decoded)
+                for n, (raw, decoded) in enumerate(values)
             ],
         )
     conn.commit()
@@ -89,5 +97,21 @@ def test_identity_value_is_a_caseless_substring_not_an_equality(identity_db):
         identity_db,
         {"leaf": "header_contains", "name": "x-pm-internal-id", "value": "synthpmid1316"},
     )
-    assert (page.total_matches, page.indeterminate) == (4, 2)
+    assert (page.total_matches, page.indeterminate) == (6, 2)
     assert claimant_of("other@mail.example") in _matched(page)
+
+
+def _contains(db, value):
+    return _matched(
+        _query(db, {"leaf": "header_contains", "name": "X-Pm-Internal-Id", "value": value})
+    )
+
+
+def test_identity_value_is_matched_decoded_first(identity_db):
+    """A decoded value is matched in place of its raw text: the ID an
+    encoded word decodes to matches, the encoded-word text does not; a
+    field whose decoding failed is matched on its raw value."""
+    encoded = claimant_of("encoded@mail.example")
+    assert _contains(identity_db, _PM_ENCODED) == {encoded}
+    assert encoded not in _contains(identity_db, "?q?SYNTHPMID1316cccc=3D")
+    assert _contains(identity_db, _PM_UNDECODED) == {claimant_of("undecoded@mail.example")}

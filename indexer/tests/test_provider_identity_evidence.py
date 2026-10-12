@@ -85,6 +85,7 @@ def _eml(
     identity_first: bool = False,
     boundary: str = "b1316one",
     subject: str = "Identity evidence",
+    received: str | None = None,
 ) -> bytes:
     """A small multipart message: a text body and a text attachment,
     with display names on the addresses so every claimant-keyed table
@@ -92,7 +93,8 @@ def _eml(
     fields, written in order (so a name can repeat), after
     ``Message-ID`` or, with ``identity_first``, at the top of the header
     block, above ``From``; ``boundary`` changes only the MIME
-    representation."""
+    representation. ``received``, when given, is the date of a
+    ``Received:`` field written first, above everything else."""
     identity_fields = [f"{name}: {value}" for name, value in identity]
     headers = [
         "From: Sender One <sender@mail.example>",
@@ -104,6 +106,8 @@ def _eml(
     if message_id is not None:
         headers.append(f"Message-ID: <{message_id}>")
     headers = [*identity_fields, *headers] if identity_first else [*headers, *identity_fields]
+    if received is not None:
+        headers.insert(0, f"Received: from relay.mail.example by mx.mail.example; {received}")
     headers += ["MIME-Version: 1.0", f'Content-Type: multipart/mixed; boundary="{boundary}"']
     return (
         "\r\n".join(headers)
@@ -629,19 +633,21 @@ class TestParserIgnoresIdentityHeaders:
         assert not _leaks(caplog.text)
 
     @pytest.mark.parametrize(
-        ("identity_first", "past_the_read"),
-        [(False, True), (True, False), (True, True)],
-        ids=["after-ids", "top-within-read", "top-past-read"],
+        ("identity_first", "past_the_read", "with_received"),
+        [(False, True, False), (True, False, False), (True, True, False), (True, True, True)],
+        ids=["after-ids", "top-within-read", "top-past-read", "top-past-read-received"],
     )
     def test_identity_headers_above_the_date_past_the_sort_read_hide_it(
-        self, tmp_path, monkeypatch, identity_first, past_the_read
+        self, tmp_path, monkeypatch, identity_first, past_the_read, with_received
     ):
         """``message_sort_time``, which orders a first full index, reads
-        only the first ``SORT_HEADER_MAX_BYTES`` of the header block.
-        Identity headers below the ``Date`` leave it alone; identity
-        headers above it that push it past that read leave the sort time
-        unknown, and the oldest-first walk then queues the file due at
-        the walk's start time instead of its date."""
+        only the first ``SORT_HEADER_MAX_BYTES`` of the header block and
+        takes the topmost ``Received:`` date before ``Date``. Identity
+        headers below the ``Date`` leave it alone; identity headers above
+        it that push it past that read, in a file with no ``Received:``
+        within the read, leave the sort time unknown, and the oldest-first
+        walk then queues the file due at the walk's start time instead of
+        its date. A ``Received:`` above them still gives the sort time."""
         idx = _Index(tmp_path, monkeypatch)
         plain_raw = _eml("plain@mail.example", "Same body.")
         field = len(f"{_INTERNAL}: SYNTHPMID1316000000==\r\n")
@@ -651,11 +657,13 @@ class TestParserIgnoresIdentityHeaders:
             "Same body.",
             identity=_filler(count),
             identity_first=identity_first,
+            received="Tue, 02 Jan 2024 08:00:00 +0000" if with_received else None,
         )
         plain = idx.write("1700000000.M1.host", plain_raw)
         tagged = idx.write("1700000001.M2.host", tagged_raw)
-        hidden = identity_first and past_the_read
-        assert (tagged_raw.index(b"\r\nDate:") > parser.SORT_HEADER_MAX_BYTES) == hidden
+        date_past_read = identity_first and past_the_read
+        assert (tagged_raw.index(b"\r\nDate:") > parser.SORT_HEADER_MAX_BYTES) == date_past_read
+        hidden = date_past_read and not with_received
 
         before = datetime.now(UTC)
         main._enqueue_unindexed_messages(
@@ -664,8 +672,10 @@ class TestParserIgnoresIdentityHeaders:
         after = datetime.now(UTC)
 
         dated = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+        received = datetime(2024, 1, 2, 8, 0, tzinfo=UTC)
+        tagged_time = None if hidden else (received if with_received else dated)
         assert parser.message_sort_time(plain) == dated
-        assert parser.message_sort_time(tagged) == (None if hidden else dated)
+        assert parser.message_sort_time(tagged) == tagged_time
         due = {
             r["filepath"]: datetime.fromisoformat(r["next_attempt_at"])
             for r in idx.db._conn.execute("SELECT filepath, next_attempt_at FROM indexing_jobs")
@@ -674,7 +684,7 @@ class TestParserIgnoresIdentityHeaders:
         if hidden:
             assert before <= due[str(tagged)] <= after
         else:
-            assert due[str(tagged)] == dated
+            assert due[str(tagged)] == tagged_time
 
 
 class TestClaimantsStayIndependent:
@@ -685,7 +695,7 @@ class TestClaimantsStayIndependent:
     def test_identity_headers_never_merge_overwrite_or_delete(
         self, tmp_path, monkeypatch, caplog, shape, identity_first, same_message_id, order
     ):
-        """Two different files, whatever identity headers they carry
+        """Two files with different bytes, whatever identity headers they carry
         (equal, forged, duplicated, conflicting, absent; after the other
         headers or at the top) and whatever their Message-IDs, are two
         claimants, each with its own rows in every table keyed by
@@ -908,28 +918,29 @@ class TestByteVersionsOfOneLogicalMessage:
 
 
 class TestIdLessRecoveryStyleInput:
-    @pytest.mark.parametrize(
-        "identity",
-        [
-            (),
-            ((_INTERNAL, _PM_ID),),
-            ((_INTERNAL, _PM_ID), (_GLUON, _GLUON_ID), (_INTERNAL, _PM_OTHER)),
-        ],
-        ids=["no-identity", "internal-id", "duplicate-identity"],
-    )
+    @pytest.mark.parametrize("identity_first", [False, True], ids=["after-ids", "top"])
+    @pytest.mark.parametrize("shape", sorted(_SECOND_IDENTITY))
     def test_no_message_id_is_dead_lettered_whatever_identity_it_carries(
-        self, tmp_path, monkeypatch, caplog, identity
+        self, tmp_path, monkeypatch, caplog, shape, identity_first
     ):
         """Gluon keeps a failed APPEND's literal unchanged, so a
         ``Recovered Messages`` file need not have the Message-ID Bridge
         synthesizes for messages it builds. Today the parser returns
         ``None`` for it and the worker dead-letters it with fixed text;
-        an identity header does not make it indexable. Recorded apart
-        from the #1082 decision on content-hash identity."""
+        an identity header does not make it indexable, in any of the
+        identity-header shapes, above or below the other headers.
+        Recorded apart from the #1082 decision on content-hash
+        identity."""
         caplog.set_level(logging.DEBUG)
         idx = _Index(tmp_path, monkeypatch)
         path = idx.write(
-            "1700000000.M1.host", _eml(None, "Recovered deltaword.", identity=identity)
+            "1700000000.M1.host",
+            _eml(
+                None,
+                "Recovered deltaword.",
+                identity=_SECOND_IDENTITY[shape],
+                identity_first=identity_first,
+            ),
         )
 
         assert parser.parse_email(path) is None
