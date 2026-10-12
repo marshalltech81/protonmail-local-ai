@@ -603,10 +603,11 @@ class TestDegradedRetrieval:
 
 
 # The seven tools #886 gave a completion line, query_attachments and
-# get_attachment (#796), and aggregate_messages (#823).
+# get_attachment (#796), aggregate_messages (#823), and query_threads (#1166).
 _COMPLETION_TOOLS = (
     "query_messages",
     "aggregate_messages",
+    "query_threads",
     "query_attachments",
     "get_attachment",
     "get_message",
@@ -688,6 +689,18 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
         {"sender": _MARKER_ADDRESS, "text": MARKER, "folder": _MARKER_FOLDER},
         {"total_matches": 1, "indeterminate": 0, "returned": 1},
     ),
+    "query_threads": (
+        {"sender": _MARKER_ADDRESS, "text": MARKER, "folder": _MARKER_FOLDER},
+        {
+            "total_threads": 1,
+            "total_matching_messages": 1,
+            "indeterminate_messages": 0,
+            "indeterminate_threads": 0,
+            "returned": 1,
+            "incomplete_participant_threads": 0,
+            "unknown_attachment_threads": 0,
+        },
+    ),
     "aggregate_messages": (
         {
             "group_by": "sender_address",
@@ -720,6 +733,7 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
 _DB_METHODS = {
     "query_messages": "query_messages",
     "aggregate_messages": "aggregate_messages",
+    "query_threads": "query_threads",
     "query_attachments": "query_attachments",
     "get_attachment": "get_attachment_text",
     "get_message": "get_message_view",

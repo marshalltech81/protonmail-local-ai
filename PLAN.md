@@ -75,10 +75,9 @@ Outcomes:
    bounded `any` / `negate` form over them (#1087), and grouped counts
    by sender, domain, folder, year, month and authority class
    (`aggregate_messages`), and subject, header and attachment-text
-   leaves in `where` (#1079, #1089, #1091). Open: the rest of #823
-   (selectable clocks,
-   further dimensions and identity counts) and exhaustive thread
-   grouping (#1166).
+   leaves in `where` (#1079, #1089, #1091), and exhaustive thread
+   grouping (`query_threads`). Open: the rest of #823 (selectable clocks,
+   further dimensions and identity counts).
 3. **Source metadata stays evidence:** bounded ordered headers,
    unknown send dates kept unknown, verified arrival time, participant
    and Bcc semantics, authority from the stored sender only when it is
@@ -1000,6 +999,15 @@ superseded entries keep their number and one line.
     source categories derive from the folder at read time. The
     migration seeds one occurrence per message and reparses without
     re-embedding. The near-side UID and `.mbsyncstate` stay unread.
+
+48. **Exhaustive thread queries (2026-10-12, #1166):** `query_threads`
+    shares the public message filters and evaluates the whole expression on
+    each claimant before grouping. It lists definite matching threads in
+    thread-ID keyset order, counts unknown messages separately from
+    unknown-only threads, and retains whole-thread context with nullable
+    participant counts and three-valued attachment presence. Each page is
+    one fresh read snapshot; frozen cross-page populations are not claimed.
+    No schema change or selectable date basis is introduced.
 
 ## Notes for Agents
 

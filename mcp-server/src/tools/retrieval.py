@@ -58,8 +58,10 @@ from .outputs import (
     ListFoldersOutput,
     ListThreadsOutput,
     MessageGroupRow,
+    QueriedThreadRow,
     QueryAttachmentsOutput,
     QueryMessagesOutput,
+    QueryThreadsOutput,
     ReapedMessage,
     ThreadMessage,
     WhereLeafResult,
@@ -636,6 +638,7 @@ def register_retrieval_tools(server, db):
             "list_threads",
             "query_messages",
             "aggregate_messages",
+            "query_threads",
             "query_attachments",
             "get_attachment",
             "find_contact",
@@ -1599,6 +1602,196 @@ def register_retrieval_tools(server, db):
             lines.append("")
 
         return _projected(tool_result("\n".join(lines), output), projection)
+
+    @server.tool(
+        output_schema=QueryThreadsOutput.model_json_schema(),
+        annotations=read_only("Query Threads"),
+    )
+    @timings.timed_tool("query_threads")
+    async def query_threads(
+        sender: str | None = None,
+        recipient: str | None = None,
+        participant: str | None = None,
+        subject: str | None = None,
+        text: str | None = None,
+        folder: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+        authority_class: str | None = None,
+        seen: bool | None = None,
+        flagged: bool | None = None,
+        replied: bool | None = None,
+        size_min: SizeBound = None,
+        size_max: SizeBound = None,
+        where: Where | None = None,
+        limit: int = 25,
+        cursor: str | None = None,
+    ) -> CallToolResult:
+        """Enumerate threads containing at least one definite matching message,
+        using exactly query_messages' filters. Each complete expression is
+        evaluated per claimant before grouping, never across different messages.
+        Duplicate Message-ID claimants count separately. Trash is excluded
+        from matches unless folder="Trash".
+
+        total_threads counts definite matching threads. indeterminate_threads
+        counts unknown-only threads, which are not listed. total_matching_messages
+        and indeterminate_messages equal query_messages' counts; unknown messages
+        inside listed threads still count. Report both uncertainty counts when
+        nonzero. Matching message counts and dates are request-scoped; total
+        messages, subject, participant count and attachment presence describe the
+        whole indexed thread, including Trash and messages outside the filters.
+        Participants are distinct claimed From/To/Cc addresses, not people or Bcc;
+        their count is null if any role is incomplete. has_attachments is true
+        if observed, false only with complete manifests, otherwise null.
+        Matching dates use delivery dates, else parsed send dates; null without
+        evidence. Newest matching claimant uses effective_at and claimant_id,
+        with first-indexed time only as an undated ordering fallback.
+
+        Rows are ordered by thread ID ascending with a filter-bound keyset
+        cursor. Follow next_cursor with the same filters. Each call reads one
+        fresh snapshot for rows, totals and metadata. Membership changes,
+        reparse and thread merges can alter later pages; newly qualifying IDs
+        before the cursor can be missed. Equal totals do not certify frozen
+        cross-page coverage. Exhaustive only for an unchanged indexed population.
+        Subjects go to the calling model, which may be remote: before bulk
+        paging, tell the user how many threads you will read. Prefer the smallest
+        page that answers the question. No inference or embedding call is made.
+
+        Args:
+            sender: As in query_messages.
+            recipient: As in query_messages.
+            participant: As in query_messages.
+            subject: As in query_messages.
+            text: As in query_messages.
+            folder: As in query_messages; without it Trash is excluded from matches.
+            date_from: As in query_messages.
+            date_to: As in query_messages.
+            has_attachments: As in query_messages.
+            authority_class: As in query_messages.
+            seen: As in query_messages.
+            flagged: As in query_messages.
+            replied: As in query_messages.
+            size_min: As in query_messages.
+            size_max: As in query_messages.
+            where: As in query_messages (all / any / negate).
+            limit: Threads per page (default 25, clamped to [1, 100]).
+            cursor: next_cursor from the previous page with the same filters.
+        """
+        args = {
+            "sender": sender,
+            "recipient": recipient,
+            "participant": participant,
+            "subject": subject,
+            "text": text,
+            "folder": folder,
+            "date_from": date_from,
+            "date_to": date_to,
+            "has_attachments": has_attachments,
+            "authority_class": authority_class,
+            "seen": seen,
+            "flagged": flagged,
+            "replied": replied,
+            "size_min": size_min,
+            "size_max": size_max,
+        }
+        log_tool_call(
+            log, "query_threads", {**args, "where": where, "limit": limit, "cursor": cursor}
+        )
+        limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
+        try:
+            bounds = date_bounds(*validate_date_range(date_from, date_to))
+            where_leaves = normalize_where(where) if where is not None else []
+            page = await asyncio.to_thread(
+                db.query_threads,
+                **args,
+                where=where_leaves,
+                limit=limit,
+                cursor=cursor,
+            )
+        except InvalidFilterError as e:
+            rejections.reject("query_threads", e.field_name)
+            raise ToolError(f"Error: {e}") from e
+        except Exception as e:
+            log.error("query_threads failed: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
+
+        for name in (
+            "total_threads",
+            "total_matching_messages",
+            "indeterminate_messages",
+            "indeterminate_threads",
+        ):
+            timings.count(name, getattr(page, name))
+        timings.count("returned", len(page.threads))
+        timings.count(
+            "incomplete_participant_threads", sum(r.participant_count is None for r in page.threads)
+        )
+        timings.count(
+            "unknown_attachment_threads", sum(r.has_attachments is None for r in page.threads)
+        )
+        uses = _filter_uses(args)
+        if page.indeterminate_messages:
+            for key, _ in _indeterminate_cause_entries(uses, where_leaves):
+                timings.count(f"indeterminate_cause_{key}", 1)
+        output = QueryThreadsOutput(
+            filters=uses,
+            date_bounds=bounds,
+            total_threads=page.total_threads,
+            total_matching_messages=page.total_matching_messages,
+            indeterminate_messages=page.indeterminate_messages,
+            indeterminate_threads=page.indeterminate_threads,
+            returned=len(page.threads),
+            offset=page.offset,
+            has_more=page.has_more,
+            next_cursor=page.next_cursor,
+            threads=[
+                QueriedThreadRow(
+                    thread_id=r.thread_id,
+                    subject=clip(r.subject or "(no subject)", HEADER_CHAR_LIMIT),
+                    matching_message_count=r.matching_message_count,
+                    indeterminate_message_count=r.indeterminate_message_count,
+                    total_message_count=r.total_message_count,
+                    first_matching_at=r.first_matching_at,
+                    last_matching_at=r.last_matching_at,
+                    newest_matching_claimant_id=r.newest_matching_claimant_id,
+                    participant_count=r.participant_count,
+                    has_attachments=r.has_attachments,
+                )
+                for r in page.threads
+            ],
+        )
+        parts = [_describe_filters(uses, none=""), *_describe_where(where_leaves)]
+        lines = [f"Query: {', '.join(p for p in parts if p) or _describe_filters([])}"]
+        if bounds_line := describe_date_bounds(bounds):
+            lines.append(bounds_line)
+        lines.extend(
+            [
+                f"total_threads: {page.total_threads}",
+                f"total_matching_messages: {page.total_matching_messages}",
+                f"indeterminate_messages: {page.indeterminate_messages}",
+                f"indeterminate_threads: {page.indeterminate_threads} (unknown-only; not listed)",
+                f"returned: {len(page.threads)}; has_more: {'true' if page.has_more else 'false'}",
+                "Matching counts/dates are request-scoped; total and context metadata cover the whole thread, including Trash.",
+                "Each page is a fresh snapshot; membership changes can prevent complete cross-page coverage.",
+            ]
+        )
+        if page.indeterminate_messages:
+            lines.append(
+                "Undecided message causes: " + "; ".join(_indeterminate_causes(uses, where_leaves))
+            )
+        if page.next_cursor:
+            lines.append(f"next_cursor: {page.next_cursor}")
+        for i, row in enumerate(output.threads, page.offset + 1):
+            lines.extend(
+                [
+                    f"{i}. [{row.thread_id}] {row.subject}",
+                    f"matching_message_count: {row.matching_message_count}; indeterminate_message_count: {row.indeterminate_message_count}; total_message_count: {row.total_message_count}",
+                    f"first_matching_at: {row.first_matching_at}; last_matching_at: {row.last_matching_at}; newest_matching_claimant_id: {row.newest_matching_claimant_id}",
+                    f"participant_count: {row.participant_count}; has_attachments: {row.has_attachments}",
+                ]
+            )
+        return tool_result("\n".join(lines), output)
 
     @server.tool(
         output_schema=AggregateMessagesOutput.model_json_schema(),

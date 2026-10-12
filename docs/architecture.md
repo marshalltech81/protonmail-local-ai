@@ -1197,6 +1197,14 @@ enumerates over these tables (count plus keyset pages ordered by
 `message_participants` instead of parsing each thread's participant
 JSON.
 
+`query_threads` evaluates the same complete expression per claimant, then
+groups by `messages.thread_id`. It returns definite matching threads with
+separate undecided-message and unknown-only-thread counts. One grouped SQL
+statement reads each page and its counts in one snapshot; the thread-ID
+keyset order is stable while membership changes between pages remain visible
+limitations. Whole-thread metadata includes out-of-query messages and Trash;
+participant counts and attachment absence require complete source evidence.
+
 Both are written inside `upsert_thread`'s transaction, after the
 message's `message_thread_map` row. `messages` references
 `message_thread_map`, `message_participants` references `messages`,

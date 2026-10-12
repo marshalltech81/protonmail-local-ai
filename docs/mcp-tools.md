@@ -1714,6 +1714,73 @@ docker run --rm --entrypoint python \
 Run it only while the live indexer is idle: a busy indexer shares the
 host's CPU and disk and inflates every timing.
 
+### `query_threads`
+
+Enumerates every indexed thread containing at least one message that
+**definitely matches the complete filter expression**. It accepts exactly
+`query_messages`' filters, including `where` (`all` / `any` / `negate`),
+with the same validation and three-valued semantics. Different messages
+cannot satisfy different AND leaves for one thread. Duplicate claimants
+of one Message-ID count separately. Matching messages in Trash are excluded
+unless `folder="Trash"`; this does not exclude Trash from whole-thread context.
+No inference, embedding or ranking call is made.
+
+`limit` defaults to 25 and is clamped to 1–100. Rows are ordered by
+`thread_id` ascending. Pass `next_cursor` with the same filters while
+`has_more` is true. Cursors are bound to this tool, their format version
+and the normalized filters; malformed or foreign cursors are rejected.
+
+The envelope reports whole-query counts, not just this page:
+
+| Field | Unit and meaning |
+|---|---|
+| `total_threads` | Distinct threads containing a definite matching claimant |
+| `total_matching_messages` | Definite matching claimants; equals `query_messages.total_matches` |
+| `indeterminate_messages` | All undecided claimants; equals `query_messages.indeterminate`, including unknown messages in listed threads |
+| `indeterminate_threads` | Threads with undecided claimants but **no** definite match; excluded from rows and `total_threads` |
+| `returned`, `offset` | Thread rows on this page and returned by earlier pages |
+| `has_more`, `next_cursor` | Whether another page follows, and its cursor (null at the end) |
+
+Report both uncertainty counts when nonzero. Thread membership is fully
+decidable when `indeterminate_threads` is zero, even if matching-message
+counts remain incomplete because `indeterminate_messages` is nonzero.
+For example, two definite matches and one unknown in one thread give
+one definite thread, two matching messages, one unknown message and zero
+unknown-only threads. A second thread with only unknown messages is not
+listed and adds one to `indeterminate_threads`.
+
+Each `threads[]` row contains:
+
+| Field | Scope and meaning |
+|---|---|
+| `thread_id`, `subject` | Thread identity and clipped whole-thread display subject; the label need not match the filters |
+| `matching_message_count`, `indeterminate_message_count` | Request-scoped definite and undecided claimants in this thread |
+| `total_message_count` | Every current indexed claimant in the thread, including Trash and messages outside the filters |
+| `first_matching_at`, `last_matching_at` | Earliest/latest **known** matching delivery date, else parsed send date; null when no match has date evidence; undated matches do not contribute |
+| `newest_matching_claimant_id` | Newest definite match by `(effective_at, claimant_id)` descending, with first-indexed time only as the undated ordering fallback |
+| `participant_count` | Whole-thread distinct canonical claimed From/To/Cc addresses, not people or Bcc; null unless every current message's three role-completeness flags are 1 |
+| `has_attachments` | Whole-thread presence: true if observed anywhere, false only when every manifest is complete and none reports an attachment, otherwise null |
+
+`total_message_count - matching_message_count` is not a count of messages
+that failed the query: it also includes excluded folders and undecided messages.
+Use `newest_matching_claimant_id` with `get_message`, or `thread_id` with
+`get_thread` for whole-thread context; that context can extend beyond the filters.
+
+**Consistency and work.** One grouped SQL statement reads counts, the page
+and metadata from one snapshot per call. The expression is materialized
+per claimant, grouped once, and whole-thread metadata is enriched only for
+page IDs. Exact totals require evaluating/grouping the message population
+on each page; `limit` caps returned rows, not that work.
+
+Enumeration is exhaustive for the stated filters on an unchanged indexed
+population. Each page uses a fresh snapshot: qualifying membership can
+change during indexing, reparse or thread merges, and newly qualifying
+thread IDs before the cursor can be missed. Equal totals do not prove
+point-in-time coverage across pages. Scope claims to indexed results
+observed during the run. Before bulk paging, tell the user how many thread
+subjects will be read; results go to the calling model, which may be remote.
+Prefer the smallest sufficient page.
+
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,
 grouped by one dimension, without listing them
