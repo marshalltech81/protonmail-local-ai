@@ -5,6 +5,7 @@ import collections
 import inspect
 import logging
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 from src.lib import predicates
@@ -222,7 +223,7 @@ def test_one_statement_and_one_evaluation_per_claimant_at_two_sizes(tmp_path, mo
     shapes = []
     for size in (40, 400):
         db = _work_corpus(tmp_path, size)
-        calls, statements, connections = {}, [], []
+        calls, statements, connections, executions = {}, [], [], []
         connect = db._connect
 
         def probe(tag, value):
@@ -236,7 +237,12 @@ def test_one_statement_and_one_evaluation_per_claimant_at_two_sizes(tmp_path, mo
             conn.set_trace_callback(
                 lambda sql: None if sql.startswith("-- ") else statements.append(sql)
             )
-            return conn
+
+            def execute(sql, parameters=()):
+                executions.append(sql)
+                return conn.execute(sql, parameters)
+
+            return SimpleNamespace(execute=execute, close=conn.close)
 
         with monkeypatch.context() as patch:
             patch.setattr(db, "_connect", traced)
@@ -255,10 +261,15 @@ def test_one_statement_and_one_evaluation_per_claimant_at_two_sizes(tmp_path, mo
         assert (page.total_matching_messages, page.indeterminate_messages) == (size // 2, size // 4)
         assert set(calls) == {"address_is", "body_words", "address_contains"}
         assert all(count <= size for count in calls.values())
+        assert len(executions) == 1
+        assert executions[0].startswith("WITH e AS MATERIALIZED")
         assert sum(sql.startswith("WITH e AS MATERIALIZED") for sql in statements) == 1
-        # SQLite also reads the FTS5 config table during statement preparation.
+        # FTS5 preparation adds internal statements whose count varies by SQLite
+        # build. Count every trace, but require constant work across corpus sizes
+        # rather than the macOS build's particular total.
         shapes.append((len(connections), len(statements)))
-    assert shapes == [(1, 2), (1, 2)]
+    assert shapes[0] == shapes[1]
+    assert shapes[0][0] == 1
 
 
 def test_newest_match_changes_do_not_repeat_returned_threads(agg_db):
