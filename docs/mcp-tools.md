@@ -55,8 +55,12 @@ the result it belongs to. To verify a cited passage, hash the file:
 Structured output is bounded because headers are sender-controlled.
 Lists hold at most 10 entries (recipients per role, References, thread
 participants, attachment senders), each with a full count (`to_count`,
-`references_count`, `participant_count`, `sender_count`, ...). Header
-values past 500 characters (subjects, display names, addresses, reply
+`references_count`, `participant_count`, `sender_count`, ...). Message
+header reads for `query_messages`, `get_thread` and `get_message` select only
+the first 10 participants per role and the first 10 References into Python, keeping
+their exact totals. Computing those totals still visits the stored lists
+in SQLite; this does not limit the database work of a query.
+Header values past 500 characters (subjects, display names, addresses, reply
 headers, participant and sender strings, attachment filenames and MIME
 types) are cut with a marker. Every tool applies the same cut in its
 prose, the intelligence tools apply it to the headers they send to the
@@ -220,6 +224,13 @@ real client and fails on a tool it does not know. A tool that would
 change mail or state, or reach arbitrary external entities, needs the
 owner's approval and its own classification.
 
+`get_mailbox_status.header_predicates` reports `status` as `supported`
+or `supported after backfill` while any indexed message's header flag is
+NULL, plus `unassessed_messages` and `incomplete_messages` counts over
+all indexed message rows, including Trash. Incomplete messages (a cap or header parse loss) still
+permit positive header matches but cannot certify absence. This is the
+header slice of the capability report tracked by #1093.
+
 ## Stage timings in the server log
 
 Every tool, the experimental `brief_issue` and `check_conclusion`
@@ -258,7 +269,7 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `aggregate_messages`' or `query_attachments`' `indeterminate` is not 0, one
   `indeterminate_cause_<cause>` count of 1 per cause its filters can
   have (`sender_ambiguous`, `address_list`, `display_names`, `subject`,
-  `body`, `attachment_list`, `size`; [Response
+  `body`, `attachment_list`, `attachment_text`, `headers`, `size`; [Response
   contract](#query_messages)), `messages`
   (`get_thread`, `get_message`), `attachments` (`get_attachment`, with
   `text_unavailable_<status>` when it returns no text; `none` for no
@@ -494,6 +505,10 @@ different filters"), never read against them.
 | `domain_is` | role, domain | `query_messages` `where` | an address in the role has exactly that domain, lowercased; a subdomain does not match |
 | `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded; unknown when it does not and the stored subject was cut or not checked |
 | `text` | words | `query_messages` `text` | as `body_words`, which it compiles to |
+| `header_exists` | header name | `query_messages` and `aggregate_messages` `where` | any occurrence of the named top-level header exists, even with an empty value; absence is unknown unless header evidence is complete |
+| `header_contains` | header name, text | `query_messages` and `aggregate_messages` `where` | any occurrence contains the Unicode caseless substring in its decoded value (raw value when decoding failed); a miss is unknown unless header evidence is complete |
+| `subject_contains` | text | `query_messages` and `aggregate_messages` `where` | same as `subject`, including unknown on a miss against an incomplete subject |
+| `attachment_text_words` | words | `query_messages` and `aggregate_messages` `where` | every word occurs in the message's attachment chunks (FTS, stemmed; at most 16 words); a miss is unknown unless the manifest and every occurrence's committed text are complete |
 | `body_words` | words | `query_messages` `text` and `where` | every word occurs in its indexed body (FTS, stemmed; at most 16 words); unknown when one does not and the indexed body is not complete |
 | `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it is filed in one of them |
 | `not_in_folders` | folder names | the default scope, when no folder is named | it is filed in none of them (`Trash`; [Trash](#trash-is-left-out-by-default)) |
@@ -1016,6 +1031,13 @@ filters and `extracted_only=false`. A text query cannot reveal unextracted
 files whose filename and MIME type do not match. There is no pagination beyond
 the 50-result cap. Report limited results and unread document text as
 coverage limits rather than claiming an exhaustive attachment audit.
+For an exhaustive message population whose attachment text contains
+words, use `query_messages(where={"all": [{"leaf":
+"attachment_text_words", "value": "budget approved"}]})` or
+`aggregate_messages` with that same expression. It searches committed
+attachment chunks, reports indeterminate misses when text is incomplete,
+and does not search filenames.
+
 For every match with a count (and the number it could not decide,
 `indeterminate`), use [`query_attachments`](#query_attachments).
 With `from_addr`, sender filtering happens after a bounded candidate scan,
@@ -1336,8 +1358,15 @@ through the flat parameters' inferred mode:
 - **Leaves:** `address_is`, `address_contains`,
   `display_name_contains`, `address_or_name_contains` and `domain_is`
   take a `role` (`from`, `to`, `cc` or `visible_recipient`);
-  `body_words` takes none. `role` is required on the five address
-  leaves and refused, `null` included, on `body_words`. The flat
+  `body_words`, `subject_contains` and `attachment_text_words` take none.
+  `header_exists` takes a `name` and no `value`; `header_contains` takes
+  a `name` and `value`. Names are 1–128 ASCII token characters, matched
+  case-insensitively. Other leaves refuse `name`, including null.
+  `header_contains` values are nonblank and at most 500 characters.
+  Duplicate fields match if any occurrence matches; a miss is unknown
+  when header evidence was capped or has not been assessed.
+  `role` is required on the five address leaves and refused, `null`
+  included, on non-address leaves. The flat
   parameters' names (`sender`, `text`, ...) and the internal
   `visible_participant` role are not accepted. Unknown keys are
   refused.
@@ -1374,8 +1403,16 @@ through the flat parameters' inferred mode:
   `jane@example.com`); `domain_is` is lowercased with one leading `@`
   dropped, and refused when it then holds `@`, whitespace or an empty
   label; `body_words` follows `text` (at least one word, at most 16).
-  A value may hold at most 320 characters (`domain_is` 255,
-  `body_words` 1000).
+  `attachment_text_words` uses the same tokens and stemming over attachment
+  chunks only; words may occur in different attachments of the same
+  message. A stored match decides it true. A miss is false only when
+  the attachment manifest and every occurrence's committed text are
+  complete; otherwise it is indeterminate, including under negation.
+  A complete empty manifest decides a miss false. `subject_contains`
+  follows the flat `subject` filter (Unicode caseless substring, a miss
+  on an incomplete subject is unknown). A value may hold at most 320
+  characters (`domain_is` 255, `subject_contains` 500,
+  `body_words` and `attachment_text_words` 1000).
 - **Limits:** at most 16 nodes, each leaf and each `any` group
   counting one; neither `all` nor an `any` group may be empty. The
   schema also caps each `all` and `any` list at 16 items (`maxItems`),
@@ -1409,7 +1446,7 @@ through the flat parameters' inferred mode:
   most 10 `addresses` its own match selects on the messages the query
   returns that the leaf itself is true of (under `any` a returned
   message need not satisfy every member), most matching messages first;
-  both are `null` for `body_words` and for a negated leaf, which
+  both are `null` for non-address leaves and for a negated leaf, which
   reports counts only. The two populations differ on purpose:
   the counts are diagnostics that include undecided candidates, while
   the addresses are mail content and come from returned messages only.
@@ -1604,7 +1641,8 @@ shows it is missing (see the keyword-coverage paragraph above and
 #776). Report the lanes, their counts, the union size and the three
 buckets, not "all messages about X". The address and `body_words`
 lanes can also run as one query, with a `where` `any` group
-([#1087](#where-explicit-leaves)); subject has no `where` leaf yet.
+([#1087](#where-explicit-leaves)); subject lanes use `subject_contains` and attachment-text lanes use
+`attachment_text_words` in that same `any` group.
 
 For outstanding-item questions, look for completion, corrections,
 reopening and later guidance across threads and senders before calling
@@ -1638,7 +1676,7 @@ retention under a concurrent writer, the other part of this sizing, is
 
 **The benchmark.** `mcp-server/scripts/reconcile_bench.py` builds a
 synthetic index (generated values only, never mail) whose tables mirror
-indexer schema v12 and hold the rows the indexer writes for the
+indexer schema v13 and hold the rows the indexer writes for the
 messages the benchmark renders
 (`indexer/tests/test_reconcile_bench_fidelity.py` indexes those files
 with the indexer and compares every row). `--identity utf8x4` is the
@@ -1679,6 +1717,73 @@ docker run --rm --entrypoint python \
 
 Run it only while the live indexer is idle: a busy indexer shares the
 host's CPU and disk and inflates every timing.
+
+### `query_threads`
+
+Enumerates every indexed thread containing at least one message that
+**definitely matches the complete filter expression**. It accepts exactly
+`query_messages`' filters, including `where` (`all` / `any` / `negate`),
+with the same validation and three-valued semantics. Different messages
+cannot satisfy different AND leaves for one thread. Duplicate claimants
+of one Message-ID count separately. Matching messages in Trash are excluded
+unless `folder="Trash"`; this does not exclude Trash from whole-thread context.
+No inference, embedding or ranking call is made.
+
+`limit` defaults to 25 and is clamped to 1–100. Rows are ordered by
+`thread_id` ascending. Pass `next_cursor` with the same filters while
+`has_more` is true. Cursors are bound to this tool, their format version
+and the normalized filters; malformed or foreign cursors are rejected.
+
+The envelope reports whole-query counts, not just this page:
+
+| Field | Unit and meaning |
+|---|---|
+| `total_threads` | Distinct threads containing a definite matching claimant |
+| `total_matching_messages` | Definite matching claimants; equals `query_messages.total_matches` |
+| `indeterminate_messages` | All undecided claimants; equals `query_messages.indeterminate`, including unknown messages in listed threads |
+| `indeterminate_threads` | Threads with undecided claimants but **no** definite match; excluded from rows and `total_threads` |
+| `returned`, `offset` | Thread rows on this page and returned by earlier pages |
+| `has_more`, `next_cursor` | Whether another page follows, and its cursor (null at the end) |
+
+Report both uncertainty counts when nonzero. Thread membership is fully
+decidable when `indeterminate_threads` is zero, even if matching-message
+counts remain incomplete because `indeterminate_messages` is nonzero.
+For example, two definite matches and one unknown in one thread give
+one definite thread, two matching messages, one unknown message and zero
+unknown-only threads. A second thread with only unknown messages is not
+listed and adds one to `indeterminate_threads`.
+
+Each `threads[]` row contains:
+
+| Field | Scope and meaning |
+|---|---|
+| `thread_id`, `subject` | Thread identity and clipped whole-thread display subject; the label need not match the filters |
+| `matching_message_count`, `indeterminate_message_count` | Request-scoped definite and undecided claimants in this thread |
+| `total_message_count` | Every current indexed claimant in the thread, including Trash and messages outside the filters |
+| `first_matching_at`, `last_matching_at` | Earliest/latest **known** matching delivery date, else parsed send date; null when no match has date evidence; undated matches do not contribute |
+| `newest_matching_claimant_id` | Newest definite match by `(effective_at, claimant_id)` descending, with first-indexed time only as the undated ordering fallback |
+| `participant_count` | Whole-thread distinct canonical claimed From/To/Cc addresses, not people or Bcc; null unless every current message's three role-completeness flags are 1 |
+| `has_attachments` | Whole-thread presence: true if observed anywhere, false only when every manifest is complete and none reports an attachment, otherwise null |
+
+`total_message_count - matching_message_count` is not a count of messages
+that failed the query: it also includes excluded folders and undecided messages.
+Use `newest_matching_claimant_id` with `get_message`, or `thread_id` with
+`get_thread` for whole-thread context; that context can extend beyond the filters.
+
+**Consistency and work.** One grouped SQL statement reads counts, the page
+and metadata from one snapshot per call. The expression is materialized
+per claimant, grouped once, and whole-thread metadata is enriched only for
+page IDs. Exact totals require evaluating/grouping the message population
+on each page; `limit` caps returned rows, not that work.
+
+Enumeration is exhaustive for the stated filters on an unchanged indexed
+population. Each page uses a fresh snapshot: qualifying membership can
+change during indexing, reparse or thread merges, and newly qualifying
+thread IDs before the cursor can be missed. Equal totals do not prove
+point-in-time coverage across pages. Scope claims to indexed results
+observed during the run. Before bulk paging, tell the user how many thread
+subjects will be read; results go to the calling model, which may be remote.
+Prefer the smallest sufficient page.
 
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,
@@ -2121,6 +2226,49 @@ and one-repair limit remain unchanged. Prompt-budget omissions are
 reported by the server in text `content` and the additive structured
 `coverage_note` field, outside `answer` and its checked statements.
 
+**A ranked sample, not the mailbox
+([#1233](https://github.com/marshalltech81/protonmail-local-ai/issues/1233)).**
+The answer comes from at most `max_threads` ranked threads. Fewer reach
+the model when the prompt budget leaves a thread out or has no room for
+its passages, or when a thread has no indexed text to show.
+It is never a search of every matching message, so an answer cannot
+establish that something is absent from the mailbox or that a list is
+complete. Three places say so:
+
+- The answer prompt tells the model that the excerpts are a ranked
+  sample of the mailbox, not all of it, that their silence says nothing
+  about the rest, and never to say that something is absent from the
+  mailbox or that a list or count covers all of it. A list or count
+  within one message or attachment can still be complete. Like the
+  other answer instructions, this one is not checked: the citation check
+  does not detect a mailbox-wide claim, so the `retrieval` field, not
+  the answer's wording, says what was searched.
+- Every result, the empty ones included, carries the structured
+  `retrieval` disclosure (table below) and one fixed sentence in text
+  `content`: `Retrieval note: this answer comes from a ranked sample of
+  N retrieved thread(s) (max_threads=M), K with evidence in the prompt,
+  not an exhaustive search; whether other mail matches is unknown.`
+  When retrieval did not run, the sentence says so instead.
+- The `ask_mailbox` and `search_emails` descriptions send mailbox-wide
+  which, all, every, none, how many and how often questions about
+  messages to [`query_messages`](#query_messages), which enumerates
+  every message its filters match, and to
+  [`aggregate_messages`](#aggregate_messages) for counts by sender,
+  domain, folder or date. A question about what a message or attachment
+  says stays with `ask_mailbox`: `query_messages` does not search
+  attachment text and `aggregate_messages` only counts.
+
+Neither empty return claims anything about the mailbox, and neither
+calls the inference model. Both open with
+`No relevant emails were retrieved`. An unmatched `from_name` returns
+before any search (and before the question is embedded), and its answer
+says retrieval did not run (`retrieval_ran: false`). A search that
+returned no thread has already sent the question to the embedding
+provider; its answer says the search ran and ranked no threads for the
+question and its filters (`retrieval_ran: true`,
+`threads_retrieved: 0`). `coverage_note` stays the prompt-budget notice
+only. It is null when nothing was left out, sample or not.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `question` | string | required | Your question in plain English |
@@ -2149,8 +2297,8 @@ included, so with `folders` set its top address can have no thread in
 scope; the description tells the model to try the next matching contact
 or pass the name itself as `participant`, which then matches within the
 folder scope. `from_name` is sender-only, like `from_addr`. An unmatched
-`from_name` returns an empty answer naming it, with no model call,
-rather than searching without the filter. A blank `participant` or
+`from_name` returns an empty answer naming it, saying retrieval did not
+run, with no model call, rather than searching without the filter. A blank `participant` or
 `from_name` (`""` or whitespace, as some clients send unset optionals)
 is treated as absent, and a padded one is stripped, here and in
 `search_emails`, `extract_from_emails` and `get_evidence`.
@@ -2385,6 +2533,7 @@ Structured output:
 | Field | Description |
 |---|---|
 | `answer` | The model's answer with its inline labels |
+| `retrieval` | Always set: `retrieval_ran` (`false` only when an unmatched `from_name` returned before any search), `threads_retrieved` (threads the ranked search returned, at most `max_threads`), `threads_supplied` (distinct threads with at least one passage in the prompt, counted from the passages rendered; lower than `threads_retrieved` when the prompt budget left a thread out or had no room for its passages, which `coverage_note` reports, or when a thread has no indexed text to show, which it does not), `max_threads` (the effective value after clamping), `exhaustive` (always `false`) and `remainder` (always `"unknown"`: whether other mail matches is not known) |
 | `coverage_note` | Server-written notice of prompt-budget omissions/truncation and possible incompleteness; `null` when nothing was left out or cut to fit. This is separate from model prose and citation validation |
 | `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sender_ambiguous` ([Sender attribution](#sender-attribution); null for `thread`), `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model), `scope` (`in_scope` or `context`, [Evidence scope](#evidence-scope-in-scope-or-context)), `extraction_deferred` (the passage is retained indexed text of an attachment whose re-extraction is pending, #1236; its prompt header and prose citation end with `retained indexed text; extraction refresh pending`, and the timing line counts such passages shown as `evidence_extraction_deferred`) |
 | `statements` | The answer cut into statements: `text`, `labels` (the supplied passages it cites) and `status` (`cited`, `unsupported`, `uncertain`, `uncited`, `invalid` for only unknown labels, or `not_checked`) |
@@ -2397,8 +2546,9 @@ Structured output:
 The prose in `content` is the answer, a `Citations:` list, any
 citation-check lines (fixed text with counts and labels, never the
 model's words), a `Quote check:` count when the answer quotes, any
-server-written `coverage_note`, and
-the `Sources searched:` list. To audit a
+server-written `coverage_note`, the `Retrieval note:` sentence, and
+the `Sources searched:` list (every retrieved thread, including any the
+prompt budget left out). To audit a
 citation, call `get_evidence` with the same question and the
 citation's `thread_id`: the cited `chunk_id` is among the first six
 returned chunks, attachment-matched passages included. To audit the

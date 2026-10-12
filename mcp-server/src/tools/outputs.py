@@ -33,6 +33,7 @@ from ..lib.predicates import SentAtStatus
 from ..lib.sqlite import (
     MAX_LISTED_CLAIMANTS,
     MAX_LISTED_MATCHED_ADDRESSES,
+    MAX_LISTED_MESSAGE_HEADERS,
     REAPED_RECORD_RETENTION_DAYS,
     MessageRecord,
     SourceFile,
@@ -42,7 +43,7 @@ from ..lib.sqlite import Participant as ParticipantRecord
 
 # Entries listed per bounded list (thread participants, senders, one
 # message's recipients per role, References) before the rest are counted.
-MAX_LISTED = 10
+MAX_LISTED = MAX_LISTED_MESSAGE_HEADERS
 # Senders counted per ``from_name`` lookup (#864): ``from_name_matches``
 # saturates here, so one lookup never ranks more contacts than this.
 MAX_FROM_NAME_MATCHES = 10
@@ -287,13 +288,13 @@ def message_headers(m: MessageRecord) -> MessageHeaders:
         replied=m.replied,
         in_reply_to=None if m.in_reply_to is None else clip(m.in_reply_to, chars),
         references=[clip(r, chars) for r in m.references[:refs]],
-        references_count=len(m.references),
+        references_count=len(m.references) if m.references_count is None else m.references_count,
         from_=listed(m.from_, people),
-        from_count=len(m.from_),
+        from_count=len(m.from_) if m.from_count is None else m.from_count,
         to=listed(m.to, people),
-        to_count=len(m.to),
+        to_count=len(m.to) if m.to_count is None else m.to_count,
         cc=listed(m.cc, people),
-        cc_count=len(m.cc),
+        cc_count=len(m.cc) if m.cc_count is None else m.cc_count,
         sender_ambiguous=m.sender_ambiguous,
         source_file=source(m.source_file),
     )
@@ -722,11 +723,11 @@ class WhereLeafResult(_Output):
     distinct_addresses: int | None = Field(
         description="Address leaves: distinct addresses this leaf matched across every "
         "match (total_matches only) it is itself true of, not just this page. Null for "
-        "body_words and negated leaves."
+        "non-address and negated leaves."
     )
     addresses: list[str] | None = Field(
         description=f"Address leaves: the matched addresses, most matching messages first, "
-        f"at most {MAX_LISTED_MATCHED_ADDRESSES}. Null for body_words and negated leaves."
+        f"at most {MAX_LISTED_MATCHED_ADDRESSES}. Null for non-address and negated leaves."
     )
 
 
@@ -774,6 +775,57 @@ def query_messages_output_schema() -> dict[str, Any]:
     schema = QueryMessagesOutput.model_json_schema()
     schema["$defs"]["ListedMessage"]["required"] = ["claimant_id", "thread_id"]
     return schema
+
+
+class QueriedThreadRow(_Output):
+    thread_id: str
+    subject: str = Field(description="Whole-thread display label; need not satisfy the filters.")
+    matching_message_count: int = Field(description="Definitely matching claimants in this thread.")
+    indeterminate_message_count: int = Field(description="Request-scoped undecided claimants.")
+    total_message_count: int = Field(
+        description="All indexed claimants in the thread, including Trash and out-of-query messages."
+    )
+    first_matching_at: str | None = Field(
+        description="Earliest known delivery or parsed send date among matches; null without date evidence."
+    )
+    last_matching_at: str | None = Field(
+        description="Latest known delivery or parsed send date among matches; null without date evidence."
+    )
+    newest_matching_claimant_id: str = Field(
+        description="Newest match by effective_at, then claimant_id; undated messages use first-indexed time for ordering only."
+    )
+    participant_count: int | None = Field(
+        description="Whole-thread distinct canonical claimed From/To/Cc addresses, not people or Bcc; null if any role is incomplete or unchecked."
+    )
+    has_attachments: bool | None = Field(
+        description="Whole-thread attachment presence: true if observed, false only with complete manifests, otherwise null."
+    )
+
+
+class QueryThreadsOutput(_Output):
+    filters: list[FilterUse]
+    date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
+    total_threads: int = Field(
+        description="Threads containing a definite match in this call's snapshot; complete qualifying count only when indeterminate_threads is 0."
+    )
+    total_matching_messages: int = Field(
+        description="Definitely matching claimants; equals query_messages.total_matches for the same filters."
+    )
+    indeterminate_messages: int = Field(
+        description="All undecided claimants, including those in listed threads; equals query_messages.indeterminate."
+    )
+    indeterminate_threads: int = Field(
+        description="Threads containing undecided claimants but no definite match; excluded from total_threads and rows."
+    )
+    returned: int
+    offset: int = Field(
+        description="Thread rows returned by earlier pages; not proof of unchanged population coverage."
+    )
+    has_more: bool
+    next_cursor: str | None
+    threads: list[QueriedThreadRow] = Field(
+        description="Thread ID ascending; each page reads a fresh snapshot, not frozen cross-page membership."
+    )
 
 
 class MessageGroupRow(_Output):
@@ -1036,6 +1088,16 @@ class QueueCounts(_Output):
     )
 
 
+class HeaderPredicateCapability(_Output):
+    status: Literal["supported", "supported after backfill"]
+    unassessed_messages: int = Field(
+        description="Indexed messages awaiting header evidence assessment, including Trash."
+    )
+    incomplete_messages: int = Field(
+        description="Indexed messages whose header budget or parse lost fields, including Trash."
+    )
+
+
 class MailboxStatusOutput(_Output):
     server_version: str = Field(
         description="MCP server's deployed source commit, with -dirty for local changes; "
@@ -1065,6 +1127,7 @@ class MailboxStatusOutput(_Output):
         "get_message on such a Message-ID lists its claimant IDs; pass one to read "
         "that file."
     )
+    header_predicates: HeaderPredicateCapability
     extra_claimant_files: int = Field(
         description="Indexed files beyond the first claimant of each conflicting Message-ID."
     )
@@ -1182,8 +1245,42 @@ class QuoteCheck(_Output):
     )
 
 
+class AskRetrieval(_Output):
+    """What ask_mailbox's answer was drawn from (#1233): a ranked sample
+    of threads, never the whole mailbox."""
+
+    retrieval_ran: bool = Field(
+        description="False when no search ran (from_name matched no contact); true when the "
+        "ranked search ran, whether or not it returned threads."
+    )
+    threads_retrieved: int = Field(
+        description="Threads the ranked search returned, at most max_threads."
+    )
+    threads_supplied: int = Field(
+        description="Distinct threads with at least one passage in the prompt the model "
+        "answered from. Lower than threads_retrieved when the prompt budget left a thread "
+        "out or had no room for its passages (coverage_note then says so), or when a thread "
+        "has no indexed text to show (no coverage_note for that)."
+    )
+    max_threads: int = Field(description="The effective max_threads, after clamping to [1, 10].")
+    exhaustive: Literal[False] = Field(
+        description="Always false: the answer comes from a ranked sample, not from every "
+        "matching message."
+    )
+    remainder: Literal["unknown"] = Field(
+        description="Always unknown: whether mail outside the sample matches the question is "
+        "not known. Use query_messages or aggregate_messages for mailbox-wide which / all / "
+        "every / none / how-many questions about messages."
+    )
+
+
 class AskMailboxOutput(_Output):
     answer: str = Field(description="The model's answer, with inline labels such as [E1].")
+    retrieval: AskRetrieval = Field(
+        description="Always set: the ranked sample the answer was drawn from. The model is "
+        "told its excerpts are a sample, but that is an instruction, not a check: read this "
+        "field, not the answer's wording, for what was searched."
+    )
     coverage_note: str | None = Field(
         default=None,
         description="Server-written prompt-budget omission/truncation notice, separate from "

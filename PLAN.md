@@ -74,9 +74,10 @@ Outcomes:
    is done (#1086), explicit leaves through `where` (#1088) and the
    bounded `any` / `negate` form over them (#1087), and grouped counts
    by sender, domain, folder, year, month and authority class
-   (`aggregate_messages`). Open: the rest of #823 (selectable clocks,
-   further dimensions and identity counts) and exhaustive thread
-   grouping (#1166).
+   (`aggregate_messages`), and subject, header and attachment-text
+   leaves in `where` (#1079, #1089, #1091), and exhaustive thread
+   grouping (`query_threads`). Open: the rest of #823 (selectable clocks,
+   further dimensions and identity counts).
 3. **Source metadata stays evidence:** bounded ordered headers,
    unknown send dates kept unknown, verified arrival time, participant
    and Bcc semantics, authority from the stored sender only when it is
@@ -358,13 +359,16 @@ schema change needs a numbered migration.
    groups rejected) and three-valued evaluation, fixed at two levels so
    there is no nesting to bound (#1087), and grouped aggregation as its
    own tool over the same engine (`aggregate_messages`, first slice of
-   #823). **Open, in order:** the rest of #823 (selectable clocks,
+   #823), subject_contains, header_exists / header_contains (#1089),
+   and attachment_text_words (#1091). The header capability reports
+   unassessed and incomplete messages (#1093 header slice). **Open, in order:**
+   the rest of #823 (selectable clocks,
    further dimensions and identity counts); the
    selectable clock `date_basis` (#1150, depending on #1080 for
    `sent`; updated 2026-10-11: #1080 is done), counting its own NULL clocks the same way so no basis ever
    drops unknown rows silently; leaves
-   that wait on the evidence model (#1089 headers, #1090 Bcc, #1091
-   attachment text, #1092 internal date); a capability report in
+   that wait on the evidence model (#1090 Bcc, #1092 internal date);
+   a capability report in
    `get_mailbox_status` (#1093). Omitted by decision: IMAP UID,
    KEYWORD, DRAFT and DELETED.
 
@@ -436,7 +440,8 @@ indexer; mbsync is not replaced (Deferred).
    one guard); values never reach logs (#1079). Keyed by claimant ID,
    and added to the AGENTS.md per-message-row list by the same PR. The
    same migration stores whether the budget was hit, so a header
-   predicate on a capped message is indeterminate, not false. Narrows
+   predicate on a capped message is indeterminate, not false. **Done**
+   (schema v13). Narrows
    #825 to normalization; prerequisite for #463 options 2 and 3.
 4. **Unknown dates stay unknown** — nullable `sent_at` with a status;
    `effective_at` remains the ordering fallback, documented as not
@@ -994,6 +999,15 @@ superseded entries keep their number and one line.
     source categories derive from the folder at read time. The
     migration seeds one occurrence per message and reparses without
     re-embedding. The near-side UID and `.mbsyncstate` stay unread.
+
+48. **Exhaustive thread queries (2026-10-12, #1166):** `query_threads`
+    shares the public message filters and evaluates the whole expression on
+    each claimant before grouping. It lists definite matching threads in
+    thread-ID keyset order, counts unknown messages separately from
+    unknown-only threads, and retains whole-thread context with nullable
+    participant counts and three-valued attachment presence. Each page is
+    one fresh read snapshot; frozen cross-page populations are not claimed.
+    No schema change or selectable date basis is introduced.
 
 ## Notes for Agents
 

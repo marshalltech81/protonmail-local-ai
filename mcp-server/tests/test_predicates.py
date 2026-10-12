@@ -345,6 +345,8 @@ _DOCS = Path(__file__).resolve().parents[2] / "docs" / "mcp-tools.md"
 # One sample value per declared parameter shape. A leaf declaring a new
 # shape must add its sample here, so its compiler gets exercised.
 _SAMPLES: dict[str, object] = {
+    "header name": "list-id",
+    "header name, text": ("list-id", "synthetic"),
     "address": "jane@example.test",
     "text": "budget",
     "words": ("budget", "plan"),
@@ -367,7 +369,15 @@ _SAMPLES: dict[str, object] = {
 # ``where`` (``normalize_where``), which that check does not cover.
 _NOT_BUILT: dict[str, str] = {
     name: "built only from the where parameter (normalize_where)"
-    for name in ("address_contains", "display_name_contains", "domain_is")
+    for name in (
+        "address_contains",
+        "display_name_contains",
+        "domain_is",
+        "subject_contains",
+        "attachment_text_words",
+        "header_exists",
+        "header_contains",
+    )
 }
 
 # Leaves deliberately left out of docs/mcp-tools.md, each with its
@@ -467,7 +477,7 @@ class TestLeafRegistry:
 
     def test_registry_is_keyed_by_leaf_name(self):
         assert all(name == kind.name for name, kind in LEAVES.items())
-        assert len(LEAVES) == 27
+        assert len(LEAVES) == 31
 
     @pytest.mark.parametrize("name", sorted(LEAVES))
     def test_leaf_compiles_with_a_rule_and_a_docs_entry(self, name, mixed_db):
@@ -1016,6 +1026,10 @@ class TestClockSizeAndRepliedLeaves:
             "address_or_name_contains",
             "domain_is",
             "body_words",
+            "subject_contains",
+            "attachment_text_words",
+            "header_exists",
+            "header_contains",
         }
         for name, kind in LEAVES.items():
             expected = (

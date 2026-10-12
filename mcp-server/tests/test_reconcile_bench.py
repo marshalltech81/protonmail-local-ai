@@ -145,22 +145,21 @@ def test_worst_records_carry_four_byte_fields_past_their_clips(report):
     # type likewise.
     messages = report["reconcile"]["messages"]["stream"]["10"]
     assert messages["record_bytes_max"] > 30 * (500 * 4 + 500)
-    assert messages["participant_rows"] == 10 * 33
-    assert messages["references"] == 10 * 11
+    assert messages["participant_rows"] == 10 * 30
+    assert messages["references"] == 10 * 10
     occurrences = report["reconcile"]["occurrences"]["stream"]["10"]
     assert occurrences["record_bytes_max"] > 500 * 4 + 500
     assert occurrences["participant_rows"] == occurrences["references"] == 0
 
 
-def test_cardinality_records_read_every_stored_row(bench, cardinality):
-    # The record readers load every participant row and References entry
-    # before the output clips them, so a round's work is K times the
-    # stored cardinality, not K times the listed one.
+def test_cardinality_records_transfer_only_the_listed_rows(cardinality):
+    # SQLite still visits the stored lists to compute exact totals,
+    # but only ten entries per list cross into Python per returned record.
     for k, round_ in cardinality["reconcile"]["messages"]["stream"].items():
         assert round_["returned"] == int(k)
-        assert round_["participant_rows"] == int(k) * bench.MAX_MESSAGE_ADDRESSES
-        # 1,000 entries each, plus the parent on a reply.
-        assert int(k) * 1000 <= round_["references"] <= int(k) * 1001
+        # One From, ten To and ten Cc entries per message.
+        assert round_["participant_rows"] == int(k) * 21
+        assert round_["references"] == int(k) * 10
 
 
 def test_filtered_certificate_counts_what_a_page_counts(report):

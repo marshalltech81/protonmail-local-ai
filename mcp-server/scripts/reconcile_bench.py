@@ -31,7 +31,7 @@ paged run: sizing"). The tables mirror the indexer's ``messages``,
 ``pending_deletions`` with all their indexes, and hold the rows the
 indexer writes for the messages ``render_eml`` describes
 (indexer/tests/test_reconcile_bench_fidelity.py indexes those files
-with the indexer and compares). Other tables (threads, vectors, the
+with the indexer and compares). Other tables (threads, vectors, header evidence and the
 queue) are left out because no measured statement reads them.
 """
 
@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import email
 import hashlib
 import json
 import math
@@ -97,7 +98,8 @@ CREATE TABLE messages (
     cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
     attachments_manifest_complete INTEGER CHECK (attachments_manifest_complete IN (0, 1)),
     body_complete INTEGER CHECK (body_complete IN (0, 1)),
-    caps_json TEXT
+    caps_json TEXT,
+    headers_complete INTEGER CHECK (headers_complete IN (0, 1))
 );
 CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
 CREATE INDEX idx_messages_message_effective ON messages(message_id, effective_at, claimant_id);
@@ -558,6 +560,29 @@ PDF_EXTRACTOR = "pdf-digital@6"
 PDF_IDENTIFIER = "none@2"
 
 
+# Header evidence budgets (#1079); fidelity tests lock these to the parser.
+MAX_STORED_HEADER_FIELDS = 256
+MAX_STORED_HEADER_BYTES = 1024 * 1024
+MAX_STORED_HEADER_VALUE_BYTES = 16 * 1024
+
+
+def header_capture_complete(raw: bytes) -> bool:
+    """Whether this valid synthetic message fits the header evidence budget."""
+    spent = 0
+    for ordinal, (name, value) in enumerate(email.message_from_bytes(raw).raw_items()):
+        size = len(name.encode("utf-8", "surrogateescape")) + len(
+            value.encode("utf-8", "surrogateescape")
+        )
+        spent += size
+        if (
+            ordinal >= MAX_STORED_HEADER_FIELDS
+            or size > MAX_STORED_HEADER_VALUE_BYTES
+            or spent > MAX_STORED_HEADER_BYTES
+        ):
+            return False
+    return True
+
+
 def build(
     db_path: Path,
     messages: int,
@@ -614,6 +639,7 @@ def build(
             raw = render_eml(i, identity, records, references, chunks, chunk_tokens, per_message)
             mid = message_id(i, identity)
             cid = claimant_of(mid, raw)
+            headers_complete = header_capture_complete(raw)
             tid = message_id(i - i % 4, identity)
             folder = shape.get("folder") or _folder(i)
             path = maildir_path(i, identity, records)
@@ -624,9 +650,9 @@ def build(
                 "has_attachments, size_bytes, content_hash, indexed_at, first_indexed_at, "
                 "seen, flagged, replied, sender_ambiguous, participant_names_complete, "
                 "subject_complete, from_addresses_complete, to_addresses_complete, "
-                "cc_addresses_complete, attachments_manifest_complete, body_complete, caps_json) "
+                "cc_addresses_complete, attachments_manifest_complete, body_complete, caps_json, headers_complete) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, "
-                "1, 1, 1, 1, 1, 1, 1, '{}')",
+                "1, 1, 1, 1, 1, 1, 1, ?, ?)",
                 (
                     cid,
                     mid,
@@ -644,6 +670,8 @@ def build(
                     now,
                     now,
                     i % 2,
+                    "{}" if headers_complete else json.dumps({"headers_budget": 1}),
+                    int(headers_complete),
                 ),
             )
             # One participant row per (role, address), named by its first
@@ -979,8 +1007,9 @@ def _materialize(
 ) -> tuple[list[dict], dict[str, int]]:
     """The response records of ``missing``, read on ``conn`` (the
     round's transaction) and serialized as the query tools do, with the
-    participant rows and References entries read for them: the server's
-    readers load every one before the output clips each list."""
+    participant rows and References entries transferred into Python.
+    The server's readers retain only the listed entries, with exact
+    totals; computing those totals still visits the lists in SQLite."""
     from src.lib import sqlite as db
     from src.tools.outputs import listed_message
     from src.tools.retrieval import _listed_attachment

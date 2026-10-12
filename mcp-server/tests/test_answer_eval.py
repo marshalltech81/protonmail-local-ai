@@ -949,7 +949,9 @@ class TestDeterministicGraders:
         assert cited.checks["abstention"] == FAIL
         empty = grade_run(
             CASES["ask-trash-empty"],
-            _run("No relevant emails found to answer your question.", [], []),
+            _run(
+                "No relevant emails were retrieved: the search ran and ranked no threads.", [], []
+            ),
         )
         assert empty.passed
 
