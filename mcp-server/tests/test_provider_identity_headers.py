@@ -38,6 +38,8 @@ _FILES = [
     ("undecoded@mail.example", "", 1, [(_PM_UNDECODED, None)]),
     # Header capture stopped before any identity field (headers_budget).
     ("capped@mail.example", "", 0, []),
+    # Header capture stopped after a matching identity field was kept.
+    ("capped-match@mail.example", "", 0, [(_PM_ID, _PM_ID)]),
     # Not yet re-parsed since migration 0013.
     ("pending@mail.example", "", None, []),
 ]
@@ -76,9 +78,11 @@ def _matched(page) -> set[str]:
 
 
 def test_identity_value_counts_files_not_logical_messages(identity_db):
-    """One Proton ID held by two byte versions and by a forged field in
-    a third file matches three claimants; files whose capture is
-    incomplete or not yet assessed are indeterminate, not misses."""
+    """One Proton ID held by two byte versions, by a forged field in a
+    third file and by a kept field of a capped file matches four
+    claimants: a stored match decides even when capture is incomplete.
+    Files whose capture is incomplete or not yet assessed and that hold
+    no matching field are indeterminate, not misses."""
     page = _query(
         identity_db, {"leaf": "header_contains", "name": "X-Pm-Internal-Id", "value": _PM_ID}
     )
@@ -86,8 +90,9 @@ def test_identity_value_counts_files_not_logical_messages(identity_db):
         claimant_of("built@mail.example"),
         claimant_of("built@mail.example", "rebuilt"),
         claimant_of("forged@mail.example"),
+        claimant_of("capped-match@mail.example"),
     }
-    assert (page.total_matches, page.indeterminate) == (3, 2)
+    assert (page.total_matches, page.indeterminate) == (4, 2)
 
 
 def test_identity_value_is_a_caseless_substring_not_an_equality(identity_db):
@@ -97,7 +102,7 @@ def test_identity_value_is_a_caseless_substring_not_an_equality(identity_db):
         identity_db,
         {"leaf": "header_contains", "name": "x-pm-internal-id", "value": "synthpmid1316"},
     )
-    assert (page.total_matches, page.indeterminate) == (6, 2)
+    assert (page.total_matches, page.indeterminate) == (7, 2)
     assert claimant_of("other@mail.example") in _matched(page)
 
 
