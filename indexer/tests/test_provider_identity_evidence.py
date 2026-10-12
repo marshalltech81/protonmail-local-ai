@@ -3,8 +3,8 @@
 The Proton Mail Bridge writes ``X-Pm-Internal-Id`` (Proton's message
 ID) into the messages it builds, and Gluon writes ``X-Pm-Gluon-Id``
 (its own internal ID). A file can also carry them forged, duplicated
-or not at all: Gluon keeps a failed APPEND's literal unchanged in
-``Recovered Messages``, and Bridge keeps existing ``X-Pm-Internal-Id``
+or not at all: Gluon keeps a failed APPEND's literal, when it can
+parse it, unchanged in ``Recovered Messages``, and Bridge keeps existing ``X-Pm-Internal-Id``
 fields below one that matches (see the "Proton identity evidence"
 section of ``docs/architecture.md`` for the upstream source review). These tests pin what the index does with such files today,
 before any proposed use of the headers (#1313):

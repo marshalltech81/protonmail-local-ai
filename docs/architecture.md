@@ -1219,8 +1219,10 @@ predicates", lists the leaves.
 
 Bridge writes Proton's message ID into the messages it builds as
 `X-Pm-Internal-Id`, and Gluon (Bridge's IMAP library) writes its own
-internal ID as `X-Pm-Gluon-Id`. The index reads neither: they are bytes
-of the file like any other, so they enter only the claimant ID's hash.
+internal ID as `X-Pm-Gluon-Id`. The index extracts neither as an
+identity: they are bytes of the file like any other, so they change its
+size and the claimant ID's hash, and they count toward the
+address-field cap and the header bytes the sort-time read covers (T1).
 #1313 proposes accepting `X-Pm-Internal-Id` as a logical identity
 under a validated policy; this section is the evidence that proposal
 waits on (#1316). Three kinds of evidence are kept apart, and only the
@@ -1248,7 +1250,7 @@ No row describes an actual Bridge binary.
 | S4 | A created message gets one Gluon ID shared by all its mailboxes; `X-Pm-Gluon-Id` is prepended to the literal without removing existing fields of that name. | Gluon `internal/backend/connector_updates.go` `applyMessagesCreated`, `rfc822/header.go` `SetHeaderValue` |
 | S5 | A content update equal to the stored literal, byte for byte or by `CompareLiterals` (a normalized comparison of content and of every part's headers that ignores MIME boundaries and `X-Pm-Gluon-Id`), keeps the Gluon ID and UID; any other gets a new Gluon ID. | `connector_updates.go`, `rfc822/hash.go` |
 | S6 | Label and flag events update mailboxes only; draft and sent content events rebuild the literal. A failed build, at initial sync or on an event, publishes nothing. | Bridge `internal/services/imapservice/service_message_events.go`, `internal/services/syncservice/stage_build.go` |
-| S7 | A failed APPEND or import is stored unchanged in `Recovered Messages` (listed only when non-empty), with no `X-Pm-Gluon-Id` added, unless a literal with the same `GetMessageHash` is already there; that hash leaves out `Date`, `Message-Id` and `X-Pm-*`. | Gluon `internal/state/actions.go` `actionCreateRecoveredMessage`, `internal/utils/message_hashmap.go`, `internal/state/state.go` `List` |
+| S7 | A failed APPEND or import whose literal Gluon can parse is stored unchanged in `Recovered Messages` (listed only when non-empty), with no `X-Pm-Gluon-Id` added, unless a literal with the same `GetMessageHash` is already there; that hash leaves out `Date`, `Message-Id` and `X-Pm-*`. A literal Gluon cannot parse is not stored there: the recovery returns the parse error first. | Gluon `internal/state/actions.go` `actionCreateRecoveredMessage`, `internal/utils/message_hashmap.go`, `internal/state/state.go` `List` |
 | S8 | A lost recovery literal is an error (never refetched). Any other lost literal is refetched from Bridge with `X-Pm-Gluon-Id` prepended. Moving or copying out of recovery imports it and stores the literal Bridge returns. | `state.go` `getLiteral`, `actions.go` `actionImportRecoveredMessage` |
 | S9 | An APPEND outside Drafts carrying an existing, undeleted message's `X-Pm-Gluon-Id` adds that message to the mailbox without comparing bytes; Drafts drops the header and creates a message. | Gluon `internal/state/mailbox.go` `AppendRegular` |
 | S10 | Any body-section FETCH, `BODY.PEEK[HEADER.FIELDS ...]` included, loads the full literal; `PEEK` does not set `\Seen`. `EXAMINE` is read-only; `UNSELECT` does not expunge; `CLOSE` expunges unless read-only. | `internal/state/mailbox_fetch.go`, `state.go`, `internal/session/handle_close.go`, `handle_unselect.go` |
