@@ -1,8 +1,8 @@
 """``query_messages``' ``where`` parameter (#1088, PR 2: the contract).
 
 ``where: {"all": [leaf | {"any": [leaf, ...]}]}`` is one closed leaf
-model: ``leaf`` from the six explicit leaves, ``role`` (required on the
-five address leaves, refused on ``body_words``), ``value``, ``negate``
+model: ``leaf`` from the explicit leaves, ``role`` (required on the
+five address leaves, refused on non-address leaves), header ``name``, ``value``, ``negate``
 and an optional ``id``. ``all`` runs as a conjunction with the flat
 parameters; the ``any`` groups and ``negate`` are evaluated from #1087
 (``test_where_boolean.py``). A node cap, per-leaf
@@ -93,7 +93,7 @@ class TestModel:
         # leaves are not part of ``where``.
         ["sender", "recipient", "participant", "text", "subject", "folder", "authority_class"],
     )
-    def test_only_the_six_explicit_leaves(self, leaf):
+    def test_flat_names_are_not_explicit_leaves(self, leaf):
         with pytest.raises(ValidationError):
             _where({"leaf": leaf, "role": "from", "value": "x"})
 
@@ -140,6 +140,10 @@ class TestModel:
             "address_or_name_contains",
             "domain_is",
             "body_words",
+            "subject_contains",
+            "attachment_text_words",
+            "header_exists",
+            "header_contains",
         )
         assert WHERE_ROLES == ("from", "to", "cc", "visible_recipient")
         assert set(WHERE_LEAVES) <= set(predicates.LEAVES)
@@ -194,11 +198,11 @@ class TestNormalize:
         assert normalize_where(_where(_leaf("body_words", "a", negate=True)))
         assert normalize_where(_where(_leaf("body_words", "a", negate=False)))
 
-    @pytest.mark.parametrize("leaf", WHERE_LEAVES)
+    @pytest.mark.parametrize("leaf", [n for n in WHERE_LEAVES if not n.startswith("header_")])
     def test_blank_values_are_refused(self, leaf):
         assert _reject(_where(_leaf(leaf, "  \t"))) == f"where.all[0]: {leaf} value is empty"
 
-    @pytest.mark.parametrize("leaf", WHERE_LEAVES)
+    @pytest.mark.parametrize("leaf", [n for n in WHERE_LEAVES if not n.startswith("header_")])
     def test_value_limit_per_leaf(self, leaf):
         limit = MAX_WHERE_VALUE_CHARS[leaf]
         text = _reject(_where(_leaf(leaf, MARKER + "x" * limit)))
@@ -494,7 +498,7 @@ class TestTool:
         desc = " ".join(schema["properties"]["where"]["description"].split())
         assert (
             "``role`` is required on the five address leaves and refused, null included, "
-            "on ``body_words``." in desc
+            "on non-address leaves." in desc
         )
 
     def test_leaf_results_and_flat_address_matches(self, messages_db):

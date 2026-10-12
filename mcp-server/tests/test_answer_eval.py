@@ -949,7 +949,9 @@ class TestDeterministicGraders:
         assert cited.checks["abstention"] == FAIL
         empty = grade_run(
             CASES["ask-trash-empty"],
-            _run("No relevant emails found to answer your question.", [], []),
+            _run(
+                "No relevant emails were retrieved: the search ran and ranked no threads.", [], []
+            ),
         )
         assert empty.passed
 
@@ -1487,7 +1489,7 @@ class TestChronologyGraders:
     def test_relative_date_accepts_either_source(self, date_source):
         """ "phoned me this morning" dates the call by the
         message itself, so either date source is right."""
-        case = CASES["brief-dispenser-hire-charge"]
+        case = CASES["brief-fc4410-hire-charge"]
         event = self._event("2026-07-16", date_source, "Ruben Kestle", ["E1"])
         run = _run(event.text, [_passage("E1", "t100.11")], ["E1"], statements=[event])
         assert grade_run(case, run).checks["chronology_dated"] == PASS

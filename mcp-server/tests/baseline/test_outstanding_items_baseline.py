@@ -1,6 +1,6 @@
-"""Outstanding-items scenarios against the built baseline: layer A (#798).
+"""Outstanding-items scenarios against the built baseline: layer A.
 
-Is the decisive evidence of each planted matter reachable through the
+Is the decisive evidence of each planted item reachable through the
 real read tools, and where is it lost when it is not? The ground truth
 (``tests/eval/outstanding_items.json``) lists, per scenario, each
 decisive passage and which layers hold it (``corpus_evidence`` lists
@@ -66,8 +66,8 @@ CORPUS_EVIDENCE = _TRUTH_FILE["corpus_evidence"]
 EVIDENCE = [e for truth in TRUTH.values() for e in truth["evidence"]] + CORPUS_EVIDENCE
 TOOL_LAYERS = ("get_message", "get_thread", "get_evidence", "search_attachments")
 
-AVERY = "avery.cole@colereedlaw.example"
-BLAIR = "blair.reed@colereedlaw.example"
+AVERY = "avery.cole@colereed.example"
+BLAIR = "blair.reed@colereed.example"
 
 
 def _norm(text: str) -> str:
@@ -262,8 +262,8 @@ def test_truth_refs_are_indexed_messages(baseline_db: Database) -> None:
     assert set(SCENARIOS) == set(TRUTH)
 
 
-def test_a_counsel_participant_lookup_pages_past_100(tools: dict) -> None:
-    """More than 100 messages name Blair Reed; the leasing follow-up is
+def test_a_vendor_participant_lookup_pages_past_100(tools: dict) -> None:
+    """More than 100 messages name Blair Reed; the logo follow-up is
     only on the second page, so an agent that stops at page 1 misses it."""
     pages = _query_all(tools, participant=BLAIR, date_from="2026-01-01T00:00:00-05:00")
     assert pages[0]["total_matches"] > 100
@@ -289,7 +289,7 @@ def test_the_late_message_is_past_the_thread_text_cap(baseline_db: Database) -> 
             "SELECT body_text FROM threads WHERE thread_id = ?", (_mid("t62.1"),)
         ).fetchone()
     assert "October 16" not in text
-    assert "Hall update 1:" in text
+    assert "Build update 1:" in text
 
 
 def test_get_thread_cuts_the_long_report_and_get_message_does_not(tools: dict) -> None:
@@ -309,10 +309,10 @@ def test_the_next_step_is_on_the_second_message_page(tools: dict) -> None:
 
 
 def test_quoted_repeats_do_not_match_a_text_lookup(tools: dict) -> None:
-    """The collection-policy request is quoted in three later messages;
+    """The onboarding-guide request is quoted in three later messages;
     query_messages(text=...) reads each message's own text only, so the
     request is listed where it was written, not once per quote."""
-    pages = _query_all(tools, text="revised collection policy")
+    pages = _query_all(tools, text="revised onboarding guide")
     assert sorted(_listed(pages)) == ["t58.1", "t58.2"]
 
 
@@ -345,24 +345,20 @@ def test_the_new_year_boundary_is_utc_unless_the_bound_has_an_offset(tools: dict
 
 
 def test_a_failed_extraction_is_listed_but_has_no_text(tools: dict) -> None:
-    hits = _call(tools, "search_attachments", query="engagement amendment")["results"]
+    hits = _call(tools, "search_attachments", query="scope amendment")["results"]
     (hit,) = [h for h in hits if h["message_id"] == _mid("t64.1")]
     assert hit["extraction_status"] == "failed"
     assert not hit["text_snippet"]
-    extracted = _call(
-        tools, "search_attachments", query="engagement amendment", extracted_only=True
-    )
+    extracted = _call(tools, "search_attachments", query="scope amendment", extracted_only=True)
     assert _mid("t64.1") not in [h["message_id"] for h in extracted["results"]]
-    evidence = _call(
-        tools, "get_evidence", query="engagement amendment scope", thread_id=_mid("t64.1")
-    )
+    evidence = _call(tools, "get_evidence", query="scope amendment work", thread_id=_mid("t64.1"))
     assert all(c["source"] == "body" for t in evidence["threads"] for c in t["chunks"])
 
 
 def test_attachment_only_evidence_is_not_in_the_body_tools(tools: dict) -> None:
     """t55.1's body says only "attached": a text lookup for the decisive
     words lists nothing, and get_message has no attachment text."""
-    assert _listed(_query_all(tools, text="stipulated dismissal")) == []
+    assert _listed(_query_all(tools, text="completion certificate")) == []
     (page,) = _message_pages(tools, _mid("t55.1"))
     assert "June 12" not in page["body"]
 
@@ -370,9 +366,9 @@ def test_attachment_only_evidence_is_not_in_the_body_tools(tools: dict) -> None:
 def test_only_sent_shows_a_transmission_and_none_shows_the_prepared_consent(
     tools: dict,
 ) -> None:
-    """The claim cases (#798): Jordan's railing transmission to Avery is
+    """The claim cases: Jordan's shutter transmission to Avery is
     listed by a Sent lookup and nowhere else in its thread, while the
-    consent management prepared for Jordan to send is in no Sent message."""
+    consent the coordinator prepared for Jordan to send is in no Sent message."""
     sent_to_avery = _listed(_query_all(tools, folder="Sent", participant=AVERY))
     assert "t121.2" in sent_to_avery and "t121.1" not in sent_to_avery
     assert sorted(_listed(_query_all(tools, text="written consent"))) == ["t120.1", "t120.2"]
@@ -380,9 +376,9 @@ def test_only_sent_shows_a_transmission_and_none_shows_the_prepared_consent(
 
 
 def test_later_guidance_is_in_another_thread(tools: dict) -> None:
-    """Avery's handover of the towing amendment is not in the thread where
+    """Avery's handover of the signage revision is not in the thread where
     Blair took it on, so reading that thread alone misses it."""
-    (towing,) = _thread_pages(tools, _mid("t122.1"))
-    assert _mid("t123.1") not in [m["message_id"] for m in towing["messages"]]
+    (signage,) = _thread_pages(tools, _mid("t122.1"))
+    assert _mid("t123.1") not in [m["message_id"] for m in signage["messages"]]
     (handover,) = _thread_pages(tools, _mid("t123.1"))
     assert [m["message_id"] for m in handover["messages"]] == [_mid("t123.1")]

@@ -12,11 +12,13 @@ stored (#1376: the corpus had drifted from production
 one dimension at a time).
 """
 
+import email
 import importlib.util
 import os
 import re
 import sqlite3
 import sys
+from collections import Counter
 from contextlib import closing
 from pathlib import Path
 
@@ -54,6 +56,7 @@ _TABLES = (
 # commits touch what the indexer's do. The cadence test checks this list
 # against the tables the indexer's own commits write.
 _WRITER_TABLES = (
+    "message_headers",
     "threads",
     "threads_fts",
     "threads_vec",
@@ -344,7 +347,9 @@ def _indexer_commits(bench, tmp_path, monkeypatch, n: int, batch: int):
     messages at batch size ``batch``: its walk enqueues each, then its
     drain indexes them a batch at a time."""
     maildir = tmp_path / "maildir"
-    for i in range(n):
+    # The writer starts after its eight-message seed. Compare those exact
+    # files: header counts vary with the folder and reply position.
+    for i in range(8, 8 + n):
         path = Path(bench.maildir_path(i, "typical", "typical", str(maildir)))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(
@@ -542,6 +547,7 @@ def test_wal_writer_constants_are_the_indexers(bench):
 _WRITER_UNCOMPARED = _CLOCK | {"mtime_ns", "sum"}
 _WRITER_ROWS = {
     "messages": "claimant_id",
+    "message_headers": "claimant_id, ordinal",
     "message_participants": "claimant_id, role, address",
     "message_participant_names": "claimant_id, role, address, name",
     "entities": "entity_id",
@@ -1182,3 +1188,114 @@ def test_wal_baseline_estimate_is_near_a_measured_build(bench, tmp_path, argv):
     measured = time.perf_counter() - started
     estimate = bench.wal_baseline_estimate(args)
     assert measured / 4 <= estimate <= measured * 4, (estimate, measured)
+
+
+def test_benchmark_header_budgets_match_the_parser(bench):
+    from src import parser
+
+    for name in (
+        "MAX_STORED_HEADER_FIELDS",
+        "MAX_STORED_HEADER_BYTES",
+        "MAX_STORED_HEADER_VALUE_BYTES",
+    ):
+        assert getattr(bench, name) == getattr(parser, name)
+    for name in ("_ENCODED_WORD_RE", "_ENCODED_WORD_RUN_RE"):
+        assert getattr(bench, name).pattern == getattr(parser, name).pattern
+        assert getattr(bench, name).flags == getattr(parser, name).flags
+
+
+def _assert_header_capture_matches_parser(bench, raw):
+    from src.parser import _read_top_headers
+
+    caps = Counter()
+    expected, complete = _read_top_headers(email.message_from_bytes(raw), caps)
+    rows, captured_complete = bench.header_capture(raw)
+    assert rows == [
+        (h.ordinal, h.name, h.name_normalized, h.raw_value, h.decoded_value) for h in expected
+    ]
+    assert captured_complete is complete
+    assert dict(caps) == ({} if complete else {"headers_budget": 1})
+
+
+@pytest.mark.parametrize("identity", ["typical", "ascii998", "ascii998common"])
+@pytest.mark.parametrize(
+    "records", ["typical", "worst", "mixed", "cardinality", "cardinality_names"]
+)
+@pytest.mark.parametrize("i", [0, 1, 50])
+@pytest.mark.parametrize("per_message", [0, 1])
+def test_generated_header_capture_matches_all_parser_producible_shapes(
+    bench, identity, records, i, per_message
+):
+    raw = bench.render_eml(i, identity, records, 5, 1, 40, per_message)
+    _assert_header_capture_matches_parser(bench, raw)
+
+
+def test_generated_header_catalogue_covers_cli_shapes(bench):
+    choices = {arg.name: set(arg.choices) for arg in bench.ARGS if arg.choices}
+    # utf8x4 cannot be produced by the parser and never sizes limits.
+    assert choices["identity"] - {"utf8x4"} == {"typical", "ascii998", "ascii998common"}
+    assert choices["records"] == {"typical", "worst", "mixed", "cardinality", "cardinality_names"}
+    _assert_header_capture_matches_parser(
+        bench, bench.render_eml(0, "typical", "cardinality", 100_000, 1, 40, 0)
+    )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        ["x"] * 256,
+        ["x"] * 257,
+        ["x" * (16 * 1024 - 6)],
+        ["x" * (16 * 1024 - 5)],
+        ["aa" + "😀" * 4094],
+        ["aaa" + "😀" * 4094],
+        ["x" * (8192 - 6)] * 128,
+        ["x" * (8192 - 6)] * 128 + ["x"],
+    ],
+    ids=[
+        "field-edge",
+        "field-over",
+        "value-edge",
+        "value-over",
+        "utf8-edge",
+        "utf8-over",
+        "total-edge",
+        "total-over",
+    ],
+)
+def test_generated_header_capture_matches_each_budget_boundary(bench, fields):
+    raw = ("\n".join("X-Test: " + value for value in fields) + "\n\nbody\n").encode()
+    _assert_header_capture_matches_parser(bench, raw)
+
+
+def test_generated_header_capture_keeps_folds_between_encoded_names(bench):
+    value = bench._address_header(
+        [("from", "one@example.com", "雪" * 30), ("from", "two@example.com", "😀" * 30)],
+        "from",
+    )
+    _assert_header_capture_matches_parser(bench, ("From: " + value + "\n\nbody\n").encode())
+
+
+def test_generated_header_capture_stops_at_the_first_oversized_field(bench):
+    raw = ("X-First: kept\nX-Big: " + "x" * (16 * 1024) + "\nX-Last: dropped\n\nbody\n").encode()
+    _assert_header_capture_matches_parser(bench, raw)
+    rows, complete = bench.header_capture(raw)
+    assert not complete
+    assert [row[1] for row in rows] == ["X-First"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "  plain\u00a0  ",
+        "=?utf-8?B?6Zuq?=\r\n\t=?utf-8?B?6Zuq?=  ",
+        "雪 =?utf-8?B?6Zuq?=",
+    ],
+)
+def test_generated_header_capture_preserves_decoding_and_strip(bench, value):
+    _assert_header_capture_matches_parser(bench, ("X-Test: " + value + "\n\nbody\n").encode())
+
+
+def test_generated_header_capture_refuses_unsupported_encodings(bench):
+    with pytest.raises(ValueError, match="^unsupported generated header encoding$"):
+        bench.header_capture(b"X-Test: =?iso-8859-1?Q?caf=E9?=\n\nbody\n")

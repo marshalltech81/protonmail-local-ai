@@ -46,7 +46,7 @@ from tests.test_answer_eval import MARKER, ScriptedClient, _identity, _judge_con
 
 CASES = {c.id: c for c in load_cases()}
 SUMMARIZE = "summarize-pool-bids"
-SUMMARIZE_WINDOW = "summarize-hall-open-points"
+SUMMARIZE_WINDOW = "summarize-qh62-open-points"
 # The experimental tools' smoke cases (#1240): one answer and one
 # abstention each.
 BRIEF = "brief-pool-bids"
@@ -872,7 +872,7 @@ class TestViews:
         the abstention flag instead), so a summary or answer that merely
         opens with the same words is an answer."""
         assert is_abstention("Not found in the provided emails: nothing answers this.")
-        assert is_abstention("No relevant emails found for this question.")
+        assert is_abstention("No relevant emails were retrieved: retrieval did not run.")
         assert not is_abstention("No records extracted from the thread were disputed [E1].")
         assert not is_abstention(NO_RECORDS) and not is_abstention(EXTRACTION_INCOMPLETE)
 
@@ -1013,7 +1013,7 @@ class TestGrading:
         shown = [_passage("E1", "t62", source="thread"), _passage("E7", "t62.56")]
         note = "Evidence note: to fit the prompt budget, 5 retrieved passages were left out."
         honest = _summarize_run(
-            "Morgan reports the hall work is on track [E7].",
+            "Morgan reports the build work is on track [E7].",
             shown,
             ["E7"],
             coverage_note=note,
@@ -1035,7 +1035,7 @@ class TestGrading:
         assert det.checks["required_evidence_cited"] == FAIL
         assert "synthesis" in attribute(case, guess, det, False, False)
         silent = _summarize_run(
-            "Morgan reports the hall work is on track [E7].", shown, ["E7"], thread="t62"
+            "Morgan reports the build work is on track [E7].", shown, ["E7"], thread="t62"
         )
         assert grade_run(case, silent).checks["omission_disclosed"] == FAIL
 

@@ -170,7 +170,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # (owner decision on #1416, 2026-10-10), NULL on rows cached before it; the
 # migration queues a reparse, whose lookup certifies or refreshes each
 # row (``migrations/0012_extraction_identifier.sql``).
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -693,7 +693,7 @@ class Database:
 
         Plus the cross-cutting tables: ``message_thread_map`` (message
         → thread index), ``messages`` / ``message_participants`` /
-        ``message_participant_names`` (per-message records),
+        ``message_participant_names`` / ``message_headers`` (per-message records),
         ``thread_vector_sums``, ``reaped_messages``, ``indexed_files`` (file identity for rename
         detection), ``pending_deletions`` (tombstones for the
         deletion reconciler), ``indexing_jobs`` (durable retry +
@@ -1030,6 +1030,7 @@ class Database:
                 -- object of fixed names to integers, never content;
                 -- NULL before v5's reparse.
                 caps_json TEXT,
+                headers_complete INTEGER CHECK (headers_complete IN (0, 1)),
                 -- A send date is stored exactly when it was parsed, and a
                 -- row not yet assessed keeps the one it had before v8.
                 CHECK ((sent_at_status = 'parsed') = (sent_at IS NOT NULL)),
@@ -1049,6 +1050,19 @@ class Database:
             CREATE INDEX idx_messages_effective ON messages(effective_at);
             -- Flag renames and cross-folder moves update by filepath.
             CREATE INDEX idx_messages_filepath ON messages(filepath);
+
+            CREATE TABLE message_headers (
+                claimant_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                name_normalized TEXT NOT NULL,
+                raw_value TEXT NOT NULL,
+                decoded_value TEXT,
+                PRIMARY KEY (claimant_id, ordinal),
+                FOREIGN KEY (claimant_id) REFERENCES messages(claimant_id) ON DELETE CASCADE
+            );
+            CREATE INDEX idx_message_headers_name_claimant
+                ON message_headers(name_normalized, claimant_id);
 
             -- Normalized From / To / Cc. ``address`` is the canonical
             -- lowercased bare address, so "every message from/to X" is an
@@ -3942,9 +3956,9 @@ class Database:
                  size_bytes, content_hash, indexed_at, first_indexed_at, seen, flagged,
                  replied, sender_ambiguous, participant_names_complete, subject_complete,
                  from_addresses_complete, to_addresses_complete, cc_addresses_complete,
-                 attachments_manifest_complete, body_complete, caps_json)
+                 attachments_manifest_complete, body_complete, caps_json, headers_complete)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, NULL, ?)
+                    ?, ?, NULL, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
@@ -3979,7 +3993,8 @@ class Database:
                 attachments_manifest_complete = excluded.attachments_manifest_complete,
                 -- Not known until phase 2c commits this parse's chunks.
                 body_complete = NULL,
-                caps_json = excluded.caps_json
+                caps_json = excluded.caps_json,
+                headers_complete = excluded.headers_complete
             """,
             (
                 msg.claimant_id,
@@ -4009,7 +4024,25 @@ class Database:
                 int(msg.cc_addresses_complete),
                 int(msg.attachments_manifest_complete),
                 caps_json,
+                int(msg.headers_complete) if msg.headers_complete is not None else None,
             ),
+        )
+        cur.execute("DELETE FROM message_headers WHERE claimant_id = ?", (msg.claimant_id,))
+        cur.executemany(
+            "INSERT INTO message_headers "
+            "(claimant_id, ordinal, name, name_normalized, raw_value, decoded_value) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    msg.claimant_id,
+                    h.ordinal,
+                    h.name,
+                    h.name_normalized,
+                    h.raw_value,
+                    h.decoded_value,
+                )
+                for h in msg.headers
+            ],
         )
         # Cascades to the message's ``message_participant_names`` rows.
         cur.execute("DELETE FROM message_participants WHERE claimant_id = ?", (msg.claimant_id,))

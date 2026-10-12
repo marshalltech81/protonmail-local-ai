@@ -84,8 +84,10 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
   and mcp-server, `_IDENTITY_SETTINGS` in `src/main.py`, with everything
   else the service reads listed with its reason in
   `_IDENTITY_EXCLUDED`; a test fails when a new setting is in neither),
-  or `BRIDGE_HOST` (trimmed, in lower case), `BRIDGE_IMAP_PORT`,
-  `BRIDGE_CERT_HOST`, `PROTON_IMAP_ACCOUNT_NAME`,
+  or `SOURCE_MODE` and `BRIDGE_HOST` (each trimmed, in lower case),
+  `BRIDGE_IMAP_PORT`, `BRIDGE_CERT_HOST`, `PROTON_FOLDER_EXCLUSIONS`
+  (as `default` or its number of patterns, never the folder names),
+  `PROTON_IMAP_ACCOUNT_NAME`,
   `PROTON_REMOTE_STORE_NAME`, `PROTON_LOCAL_STORE_NAME`,
   `PROTON_CHANNEL_NAME`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
   `BRIDGE_CERT_FINGERPRINT` (normalized, and not secret) and
@@ -125,7 +127,14 @@ IMAP port if it differs); no credential is sent:
 printf 'a1 LOGOUT\r\n' | timeout 20 openssl s_client -connect 127.0.0.1:1143 -quiet -ign_eof
 ```
 
-The `verify error:num=18:self-signed certificate` line is expected: this
+`timeout` is not part of macOS: it comes with GNU coreutils
+(`brew install coreutils`). Without it, leave out `timeout 20`; the
+probe still ends on its own when Bridge answers, and Ctrl-C stops one
+that hangs. macOS's own `/usr/bin/openssl` (LibreSSL) accepts these
+options.
+
+The `verify error:num=18:self-signed certificate` line (`self signed
+certificate` from LibreSSL) is expected: this
 probe only checks that TLS works and IMAP answers, and trusts nothing (mbsync
 checks the certificate against `BRIDGE_CERT_FINGERPRINT` and its pin). If
 IMAP is ready, the TLS lines are followed by the Bridge greeting and the
@@ -141,7 +150,7 @@ A greeting shows the listener and TLS work, not that an account is logged
 in: Bridge greets the same way with no account. A handshake error
 (usually `wrong version number`) means the app's IMAP connection mode is
 STARTTLS rather than SSL; switch it to SSL. A probe that hangs until
-`timeout` stops it means Bridge is still in its initial sync or has
+`timeout` (or Ctrl-C) stops it means Bridge is still in its initial sync or has
 stopped responding — check the app.
 
 ## Verifying mbsync is working
@@ -269,9 +278,12 @@ and the connection.
   checks the certificate against the expected fingerprint and the pin,
   not its name, so this error comes after `Bridge cert extracted
   successfully` and before any login.
-- **`BRIDGE_HOST must be one of ...`, `BRIDGE_CERT_HOST must be ...`,
-  or `PROTON_..._NAME must be ...`** (from `make validate-env` or at
-  mbsync's startup, before it renders its config or connects). These
+- **`SOURCE_MODE must be proton-bridge`, `BRIDGE_HOST must be one of
+  ...`, `BRIDGE_IMAP_PORT must be ...`, `BRIDGE_CERT_HOST must be ...`,
+  `BRIDGE_CERT_PIN_ROTATE must be true or false`,
+  `PROTON_FOLDER_EXCLUSIONS must ...` or `PROTON_..._NAME must be ...`**
+  (from `make validate-env` or at mbsync's startup, before it renders
+  its config or connects). These
   settings are checked by `mbsync/proton-settings.sh` at both places
   (PLAN.md decision 46); the message names the setting, never the value.
   `BRIDGE_HOST` takes only names that forward to this Mac's
@@ -285,6 +297,20 @@ and the connection.
   `127.x.y.z` written without leading zeros, or `::1`, exactly as
   written. The four isync names take 1 to 64 of `A-Z a-z 0-9 _ -`,
   starting with a letter or digit, and the two store names must differ.
+  `SOURCE_MODE` accepts only `proton-bridge`, in any case and without
+  surrounding spaces. `BRIDGE_IMAP_PORT` is a port from 1 to 65535
+  without leading zeros or spaces. `BRIDGE_CERT_PIN_ROTATE` is exactly
+  `true` or `false`, in lower case: `TRUE`, `yes` or `1` is refused
+  rather than read as false. `PROTON_FOLDER_EXCLUSIONS` is folder
+  patterns separated by `|`, none empty or with a space at either end,
+  written with `A-Z a-z 0-9`, spaces, `. / _ * % & + , ( ) @ -` and
+  non-ASCII characters (a folder name in UTF-8, as Proton shows it); it
+  must keep `All Mail`, `Labels/*` and `Starred`, which mbsync never
+  syncs (labels come from message metadata, #1313): add folders after
+  them, for example `All Mail|Labels/*|Starred|Folders/Old*`. Adding a
+  folder stops mbsync syncing it from then on; mail already synced from
+  it stays in the Maildir and the index until you remove it, as in
+  [Remove mail from a folder you have just excluded](#remove-mail-from-a-folder-you-have-just-excluded).
   Unset a setting, or leave it empty, for its default.
   These names are not resolved to check them: DNS cannot show that a
   name is local, so the container engine and its resolver are trusted
@@ -339,6 +365,53 @@ The warning repeats for as long as the local copy exists. Nothing removes
 it automatically. Removing or moving the folder out of the Maildir yourself
 stops the warning, but its messages then count as deleted for the indexer
 (see [Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)).
+
+## Remove mail from a folder you have just excluded
+
+Adding a folder to `PROTON_FOLDER_EXCLUSIONS` stops mbsync from syncing
+it from then on. Mail already synced from it stays: its files remain in
+the Maildir, and its messages stay in the index, searchable, with their
+text already sent to the embedder (and, if those layers are enabled, to
+the inference and rerank providers for any answer that used it). Nothing
+removes them automatically, and text already sent to a provider cannot
+be recalled. To remove the local copy as well:
+
+1. Set the new exclusions in `.env` and run `make up`, so mbsync is
+   recreated with them. Once its folder is excluded, isync leaves it
+   alone and does not create it again after you remove it
+   (`mbsync/tests/layout_check.sh` check 10).
+2. Remove the folder's directory from the Maildir. A top-level folder
+   is the directory of its name; each level below adds `/.` and the
+   name (`SubFolders Legacy`), so `Folders/Old` is `/maildir/Folders/.Old`:
+
+   ```bash
+   docker exec mbsync rm -rf -- '/maildir/Folders/.Old'
+   ```
+
+   The directory holds the folder's subfolders too. Exclude those as
+   well (`Folders/Old*` matches `Folders/Old` and everything below it),
+   or they sync again into a new directory.
+3. What happens next depends on the indexer's retention mode
+   ([Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)):
+   - **Mirror** (`INDEXER_DELETION_ENABLED=true`, the default): the next
+     reconciler sweep (at indexer startup and every
+     `INDEXER_DELETION_SWEEP_INTERVAL_SECS`) tombstones each message
+     whose file is gone, unless a byte-identical copy remains in another
+     folder, in which case the message stays indexed under that copy.
+     The reaper removes tombstoned messages from the index after
+     `INDEXER_DELETION_GRACE_DAYS`; until then they stay searchable. If
+     more are past the grace window at once than
+     `INDEXER_DELETION_MAX_BATCH_PCT` of the index allows (at least 10
+     always are), the mass-delete brake skips the whole reap and the
+     indexer logs `reaper aborted: ... set INDEXER_DELETION_FORCE=true
+     to override`. For this cleanup, set `INDEXER_DELETION_FORCE=true`,
+     run `make up`, wait for the next reap, then set it back to `false`
+     and run `make up` again, so the brake protects later passes.
+   - **Archive** (`INDEXER_DELETION_ENABLED=false`): the index never
+     removes a message, so its rows stay. Removing them means rebuilding
+     the index from the Maildir, as in
+     [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume),
+     which embeds every remaining message again.
 
 ## Folder names in mbsync's log
 
@@ -439,27 +512,14 @@ read part of the Maildir (usually a permission problem); it gives only a
 count of `find`'s errors, for the same reason. Run the `docker exec`
 command it prints to see them in your terminal.
 
-Start the Maildir over. Mail is pulled again from Proton, so nothing is
-lost, but remove the index with it: its rows point at the old files, which
-would otherwise go through
+Back up the Maildir, then start it over together with the index, as in
+[Recover from a genuine change](#recover-from-a-genuine-change): it
+backs the Maildir up and checks the archive before it removes either
+volume. mbsync pulls again only the mail Proton still holds; mail and
+folders deleted in Proton are kept only in this Maildir
+(`Expunge None`), so the archive is their only copy. The index goes
+too: its rows point at the old files, which would otherwise go through
 [deletion reconciliation](#deletion-reconciliation-mirror-vs-archive).
-Run these from the checkout, with the project name the stack runs under:
-
-```bash
-names=$(docker compose config --format json | python3 -c 'import json, sys
-v = json.load(sys.stdin)["volumes"]
-print(v["maildir-volume"]["name"], v["sqlite-volume"]["name"])')
-make down
-docker volume rm $names
-make up
-```
-
-To keep a copy of the old Maildir first, back it up as in
-[Recover from a genuine change](#recover-from-a-genuine-change).
-The Bridge app and mbsync's certificate pin (the `mbsync-state` volume)
-are untouched. mbsync then pulls the whole mailbox, and the indexer
-rebuilds the index from it, which re-embeds every message (a cost with a
-paid embedding provider).
 
 ## mbsync reports a UIDVALIDITY change
 
@@ -522,27 +582,35 @@ stack runs under:
 
 ```bash
 make down
-names=$(docker compose config --format json | python3 -c 'import json, sys
-v = json.load(sys.stdin)["volumes"]
-print(v["maildir-volume"]["name"], v["sqlite-volume"]["name"])')
-maildir=${names%% *}
+maildir=$(docker compose config --format json \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["maildir-volume"]["name"])')
+index=$(docker compose config --format json \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["sqlite-volume"]["name"])')
+archive="maildir-$(date -u +%Y%m%dT%H%M%SZ).tgz"
 mkdir -m 700 -p ~/protonmail-local-ai-backup
-docker run --rm -v "$maildir:/maildir:ro" -v ~/protonmail-local-ai-backup:/backup \
-    debian:bookworm-slim bash -c '
-        tar -C /maildir -czf /backup/maildir-uidvalidity.tgz . &&
+docker run --rm -e archive="$archive" -v "$maildir:/maildir:ro" \
+    -v ~/protonmail-local-ai-backup:/backup debian:bookworm-slim bash -c '
+        tar -C /maildir -czf "/backup/$archive" . &&
         find /maildir -type f \( -path "*/cur/*" -o -path "*/new/*" \) | wc -l &&
-        tar -tzf /backup/maildir-uidvalidity.tgz | grep -cE "/(cur|new)/[^/]+$"'
-chmod 600 ~/protonmail-local-ai-backup/maildir-uidvalidity.tgz
+        tar -tzf "/backup/$archive" | grep -cE "/(cur|new)/[^/]+$"'
+chmod 600 ~/protonmail-local-ai-backup/"$archive"
 ```
 
 The two numbers it prints are the message files in the Maildir and in
-the archive. Continue only if they match:
+the archive. Continue only if they match, in the same shell (the
+volume names are quoted separately, so this works in zsh, macOS's
+default shell, as well as bash):
 
 ```bash
-docker volume rm $names
+docker volume rm "$maildir" "$index"
 make up
-docker logs mbsync     # no UIDVALIDITY errors
+docker logs mbsync     # no UIDVALIDITY or earlier-layout errors
 ```
+
+If the stack runs with an overlay (such as
+`docker-compose.hardened.yml`), use `docker compose` with the same `-f`
+files in place of `make down` and `make up`, or the recreated
+containers drop the overlay.
 
 What this keeps and changes:
 
@@ -890,9 +958,11 @@ kind of reindex that needs depends on whether search data changes too:
   draining has stalled. Progress is in the log every five
   minutes (`reparse: remaining=... parked_trashed=...
   reparsed_since_last_heartbeat=... dead=...`), then one `reparse
-  complete: ...` line once no job that can drain is left; jobs for
-  messages in Trash are counted in `parked_trashed`, not `remaining`,
-  and drain only if the message is restored; `make status`
+  complete: ...` line once no job that can drain is left. In mirror
+  mode, jobs for files carrying the Maildir `T` (deleted) flag are
+  counted in `parked_trashed`, not `remaining`, and drain only if the
+  flag is cleared (the message is restored in Proton); a message in the
+  Trash folder without the flag is reparsed like any other. `make status`
   shows the remaining count (`queue.reparse`). A message that fails to
   parse dead-letters like any other; fix the cause, then
   `make requeue-dead`.
@@ -908,9 +978,17 @@ parser fix now decodes differently), with their filename search rows
 and, when no other occurrence of the message carries the same bytes,
 their chunks (#1375); the attachments line counts them as `dropped`.
 `make reparse` queues the same reparse by hand, for recovery (for
-example when a reparse's jobs were cleared another way), and run once
-after upgrading to the release with #1375 it clears such leftovers
-from earlier parser fixes. Messages that
+example when a reparse's jobs were cleared another way). Two releases
+shipped no migration and asked for one `make reparse` after deploying
+them: #1375, to clear such leftovers from earlier parser fixes, and the
+attached-email extractor (#1311), to refresh every message's stored
+attachment completeness flags (`attachments_manifest_complete` and
+each attachment's `text_complete`). (The startup sweep after #1311
+re-queues only the messages whose attached emails had no extractor;
+the other messages' flags change only on a reparse.) The schema v12
+migration (#1416) queues a reparse of every indexed file, so an index
+upgraded to v12 or later needs neither; one left on a release between
+#1311 and v12 needs `make reparse` once. Messages that
 already have a job keep it, and dead-lettered ones stay dead until
 `make requeue-dead`. It runs inside the indexer container, so the
 stack must be up:
@@ -1379,8 +1457,9 @@ Queue and maintenance (all INFO unless noted):
   opens new files to the indexer only after its sync; deferred for up
   to 24 h, after which a still-unreadable file takes the normal retry
   path and counts as `retrying` until it is dead);
-  `parked_trashed` jobs belong to trashed messages waiting for the
-  reaper, which is normal in mirror mode, not a failure;
+  `parked_trashed` jobs belong to files carrying the Maildir `T`
+  (deleted) flag, waiting for the reaper, which is normal in mirror
+  mode, not a failure;
   `extraction_deferred` jobs are messages whose attachment extraction
   reached the per-message budget (64 process launches or 5 seconds per
   pass, `docs/architecture.md` "Per-message extraction budget"),
@@ -1780,9 +1859,10 @@ only, never filenames or text (`make logs`):
   budget that was recorded `failed` (`DocxPackageBudgetError`) before
   #1032 is re-queued once at the first start after the `docx@7` bump
   (#1031) and recorded `unsupported`. A password-protected `.ppt` recorded `failed`
-  (`ToolExitError`) before #983 converts the same way, since the `ppt`
-  version was not bumped either: on its first re-run more than 7 days
-  after it was recorded.
+  (`ToolExitError`) before #983 is re-queued once at the first start
+  after the `ppt@2` bump (#1308), which re-runs every cached `.ppt`
+  result, and recorded `unsupported`. In both cases a dead-lettered
+  message is skipped until `make requeue-dead`.
 - `PDF OCR fallback failed: <ExceptionType>` (WARNING): OCR of a PDF's
   pages without a text layer raised (a Tesseract error or timeout). A
   PDF with enough digital text keeps it and loses the scanned pages;
@@ -2218,15 +2298,18 @@ text and logged as `attachment filename charset could not decode it
 limit, #1330).
 
 The fix applies when a message is parsed. Filenames stored by an
-earlier image keep the encoded text until their message is re-indexed;
-a flag change or folder move does not re-parse a message, so to correct
-them all rebuild the index as in
-[Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
-The rebuild re-embeds every message, so it is optional. Extraction
-dispatches by content type first, so for most such attachments only the
-displayed name and filename search change; one sent as
-`application/octet-stream` is also dispatched by its decoded extension
-once re-indexed.
+earlier image keep the encoded text until their message is parsed
+again; a flag change or folder move does not re-parse a message. To
+correct them all, run `make reparse`
+([Reparse or rebuild after an upgrade](#reparse-or-rebuild-after-an-upgrade)):
+it re-reads every indexed message in place and replaces each
+occurrence stored under the old filename (#1375). No rebuild is
+needed. Extraction dispatches by content type first, so for most such
+attachments only the displayed name and filename search change, and the
+attachment's cached text and chunks are reused; one sent as
+`application/octet-stream` is also dispatched by its decoded extension,
+so it may be extracted and its text embedded (sent to the embed
+provider if it is remote).
 
 ## ChatGPT says a tool call was blocked by OpenAI
 

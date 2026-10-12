@@ -91,6 +91,9 @@ PROTON_IMAP_ACCOUNT_NAME="$PROTON_DEFAULT_IMAP_ACCOUNT_NAME"
 PROTON_REMOTE_STORE_NAME="$PROTON_DEFAULT_REMOTE_STORE_NAME"
 PROTON_LOCAL_STORE_NAME="$PROTON_DEFAULT_LOCAL_STORE_NAME"
 PROTON_CHANNEL_NAME="$PROTON_DEFAULT_CHANNEL_NAME"
+# Likewise the source selector and Proton's folder exclusions.
+SOURCE_MODE="$PROTON_DEFAULT_SOURCE_MODE"
+PROTON_FOLDER_EXCLUSIONS="$PROTON_DEFAULT_FOLDER_EXCLUSIONS"
 
 # Synthetic fingerprints in the pin's format: 64 lowercase hex digits.
 FP_OLD="$(printf 'a%.0s' {1..64})"
@@ -903,7 +906,9 @@ catalogue_shapes_are_redacted_by_class() {
     local near="${3:-$PROTON_DEFAULT_LOCAL_STORE_NAME}"
     sync_setup "catalogue-$channel"
     PROTON_CHANNEL_NAME="$channel" PROTON_REMOTE_STORE_NAME="$far" PROTON_LOCAL_STORE_NAME="$near"
-    proton_settings_problem "$PROTON_DEFAULT_BRIDGE_HOST" "$PROTON_DEFAULT_BRIDGE_CERT_HOST" \
+    proton_settings_problem "$PROTON_DEFAULT_SOURCE_MODE" "$PROTON_DEFAULT_BRIDGE_HOST" \
+        "$PROTON_DEFAULT_BRIDGE_IMAP_PORT" "$PROTON_DEFAULT_BRIDGE_CERT_HOST" \
+        "$PROTON_DEFAULT_BRIDGE_CERT_PIN_ROTATE" "$PROTON_DEFAULT_FOLDER_EXCLUSIONS" \
         "$PROTON_IMAP_ACCOUNT_NAME" "$far" "$near" "$channel" || return 1
     path="${MAILDIR_PATH}/.mbsyncstateFolders!MarkerZq9: a 'b' (c)/cur/1:2,S"
     while IFS= read -r entry; do
@@ -1293,6 +1298,7 @@ invalid_deadlines_are_refused_at_startup() {
     BRIDGE_IMAP_PORT=1143
     BRIDGE_CERT_HOST="127.0.0.1"
     BRIDGE_CERT_FINGERPRINT="$FP_OLD"
+    BRIDGE_CERT_PIN_ROTATE="false"
     load expected_fingerprint validate_proton_settings validate_bridge_endpoint require_prerequisites
     SYNC_DEADLINE_SECONDS=86400
     (require_prerequisites) || return 1
@@ -1690,9 +1696,10 @@ endpoint_setup() {
     BRIDGE_CERT_HOST="127.0.0.1"
     BRIDGE_CERT_FINGERPRINT="$FP_OLD"
     export BRIDGE_USER="synthetic@example.com"
-    load_constants PROTON_FOLDER_EXCLUSIONS ISYNC_LAYOUT_EXCLUSIONS
+    PROTON_FOLDER_EXCLUSIONS="$PROTON_DEFAULT_FOLDER_EXCLUSIONS"
+    load_constants ISYNC_LAYOUT_EXCLUSIONS
     load expected_fingerprint validate_bridge_endpoint bridge_imap_host bridge_imap_connect \
-        render_mbsync_config
+        provider_exclusion_patterns render_mbsync_config
 }
 
 # The settings the config must keep: implicit TLS (#638) with the
@@ -2340,9 +2347,12 @@ check "the rendered config varies only in the substituted values" \
 # --- each Patterns exclusion set has its own source (#1481) ----------------
 #
 # PLAN.md decision 45: Proton's virtual folders are provider policy, the
-# child names isync keeps for its own files are transport. Each set is a
-# named constant in the entrypoint, substituted into its own placeholder
-# on the template's Patterns line; the golden case above pins the result.
+# child names isync keeps for its own files are transport. Proton's set
+# is the PROTON_FOLDER_EXCLUSIONS setting (PLAN.md decision 46; the
+# values are walked at both sites below), the transport's a named
+# constant in the entrypoint; each is substituted into its own
+# placeholder on the template's Patterns line, and the golden case above
+# pins the result.
 
 # shellcheck disable=SC2016 # the template's placeholders, not expansions
 PATTERNS_TEMPLATE_LINE='Patterns * ${MBSYNC_PROVIDER_EXCLUSIONS} ${MBSYNC_LAYOUT_EXCLUSIONS}'
@@ -2359,13 +2369,18 @@ template_patterns_line_is_the_two_placeholders() {
     fi
 }
 
-# Proton's set is exactly the three virtual folders (AGENTS.md); the
-# transport set names only isync's own files, each with everything
-# below it, in the order the golden file holds.
+# Proton's set defaults to exactly the three virtual folders, which every
+# value must keep (AGENTS.md); the transport set names only isync's own
+# files, each with everything below it, in the order the golden file
+# holds.
 each_exclusion_set_holds_only_its_owners_patterns() {
     local name expected=""
-    load_constants PROTON_FOLDER_EXCLUSIONS ISYNC_LAYOUT_EXCLUSIONS
-    [[ "$PROTON_FOLDER_EXCLUSIONS" == '!"All Mail" !"Labels/*" !"Starred"' ]] || return 1
+    load_constants ISYNC_LAYOUT_EXCLUSIONS
+    [[ "$PROTON_DEFAULT_FOLDER_EXCLUSIONS" == 'All Mail|Labels/*|Starred' ]] || return 1
+    [[ "${PROTON_PROTECTED_FOLDER_EXCLUSIONS[*]}" == 'All Mail Labels/* Starred' ]] || return 1
+    [[ "${#PROTON_PROTECTED_FOLDER_EXCLUSIONS[@]}" == 3 ]] || return 1
+    [[ "$(proton_folder_exclusion_patterns "$PROTON_DEFAULT_FOLDER_EXCLUSIONS")" \
+        == '!"All Mail" !"Labels/*" !"Starred"' ]] || return 1
     for name in uidvalidity isyncuidmap.db mbsyncstate mbsyncstate.journal mbsyncstate.new \
         mbsyncstate.lock; do
         expected+="${expected:+ }!\"*/${name}\" !\"*/${name}/*\""
@@ -2373,28 +2388,36 @@ each_exclusion_set_holds_only_its_owners_patterns() {
     [[ "$ISYNC_LAYOUT_EXCLUSIONS" == "$expected" ]] || return 1
 }
 
-# Changing one constant changes only its part of the Patterns line, and
+# Changing one source changes only its part of the Patterns line, the
+# layout set stays last after any exclusion an operator adds, and
 # dropping Starred from Proton's set fails the golden comparison.
 # shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
 each_exclusion_set_reaches_patterns_from_its_own_constant() {
     local proton layout expected
     endpoint_setup sources-proton
     layout="$ISYNC_LAYOUT_EXCLUSIONS"
-    PROTON_FOLDER_EXCLUSIONS='!"synthetic-provider-marker"'
+    PROTON_FOLDER_EXCLUSIONS='synthetic-provider-marker'
     render_mbsync_config
     expected="$(grep -v '^Patterns ' "$GOLDEN")"
     [[ "$(grep -v '^Patterns ' "$CONFIG_FILE")" == "$expected" ]] || return 1
     grep -qxF "Patterns * !\"synthetic-provider-marker\" $layout" "$CONFIG_FILE" || return 1
 
+    endpoint_setup sources-added
+    PROTON_FOLDER_EXCLUSIONS='All Mail|Labels/*|Starred|Folders/Old *|%-x'
+    render_mbsync_config
+    [[ "$(grep -v '^Patterns ' "$CONFIG_FILE")" == "$expected" ]] || return 1
+    grep -qxF "Patterns * !\"All Mail\" !\"Labels/*\" !\"Starred\" !\"Folders/Old *\" !\"%-x\" $layout" \
+        "$CONFIG_FILE" || return 1
+
     endpoint_setup sources-layout
-    proton="$PROTON_FOLDER_EXCLUSIONS"
+    proton="$(proton_folder_exclusion_patterns "$PROTON_FOLDER_EXCLUSIONS")"
     ISYNC_LAYOUT_EXCLUSIONS='!"*/synthetic-transport-marker"'
     render_mbsync_config
     [[ "$(grep -v '^Patterns ' "$CONFIG_FILE")" == "$expected" ]] || return 1
     grep -qxF "Patterns * $proton !\"*/synthetic-transport-marker\"" "$CONFIG_FILE" || return 1
 
     endpoint_setup sources-starred
-    PROTON_FOLDER_EXCLUSIONS='!"All Mail" !"Labels/*"'
+    PROTON_FOLDER_EXCLUSIONS='All Mail|Labels/*'
     render_mbsync_config
     if cmp -s "$CONFIG_FILE" "$GOLDEN"; then
         echo "dropping Starred from Proton's set did not change the config"
@@ -2402,8 +2425,9 @@ each_exclusion_set_reaches_patterns_from_its_own_constant() {
     fi
 }
 
-# Neither set is configuration: the substituted names in the environment
-# change nothing.
+# The substituted names in the environment change nothing: Proton's set
+# comes only from PROTON_FOLDER_EXCLUSIONS, the transport's only from its
+# constant.
 exclusions_ignore_the_environment() {
     export MBSYNC_PROVIDER_EXCLUSIONS='!"synthetic-env-marker"'
     export MBSYNC_LAYOUT_EXCLUSIONS='!"synthetic-env-marker"'
@@ -2480,6 +2504,7 @@ order_run() {
     env -i PATH="$ORDER_DIR/bin:$PATH" ORDER_DIR="$ORDER_DIR" \
         REAL_OPENSSL="$(command -v openssl)" REAL_ENVSUBST="$(command -v envsubst)" \
         REAL_SLEEP="$(command -v sleep)" \
+        SOURCE_MODE= PROTON_FOLDER_EXCLUSIONS= \
         BRIDGE_HOST=host.docker.internal BRIDGE_IMAP_PORT=1143 BRIDGE_CERT_HOST=127.0.0.1 \
         BRIDGE_USER=synthetic@example.com SYNC_INTERVAL=3600 SYNC_DEADLINE_SECONDS=86400 \
         BRIDGE_CERT_PIN_ROTATE=false "$@" \
@@ -2650,9 +2675,13 @@ check "startup order: an approved rotation stores the pin before mbsync" \
 # exported as a shell would). Both sites must accept or refuse the row
 # alike. A refusal comes before anything is rendered or connected, with
 # the same fixed text at both sites. An accepted value is the one the
-# rendered config holds. Each row, tab-separated: accept, refuse (the
-# refusal of the first setting named) or refuse-stores (the two store
-# names are the same), then one or two NAME=VALUE assignments.
+# rendered config holds; SOURCE_MODE and BRIDGE_CERT_PIN_ROTATE leave the
+# config as the golden file has it, and rotation is announced only when
+# true. Each row, tab-separated: accept, refuse (the refusal of the first
+# setting named), refuse-stores (the two store names are the same) or
+# refuse-protected (PROTON_FOLDER_EXCLUSIONS leaves out All Mail,
+# Labels/* or Starred), then one or two NAME=VALUE assignments. A row
+# refusing two settings shows which one is checked first.
 
 SIXTY_FOUR="$(printf 'n%.0s' {1..64})"
 readonly SIXTY_FOUR
@@ -2751,6 +2780,105 @@ SETTING_CASES=(
     $'refuse-stores\tPROTON_LOCAL_STORE_NAME=protonmail-remote' # pragma: allowlist secret
     $'refuse-stores\tPROTON_REMOTE_STORE_NAME=same-store\tPROTON_LOCAL_STORE_NAME=same-store'
     $'accept\tPROTON_REMOTE_STORE_NAME=protonmail-local\tPROTON_LOCAL_STORE_NAME=protonmail-remote' # pragma: allowlist secret
+    $'accept\tSOURCE_MODE=proton-bridge'
+    $'accept\tSOURCE_MODE='
+    $'accept\tSOURCE_MODE=PROTON-BRIDGE'
+    $'accept\tSOURCE_MODE=  Proton-Bridge  '
+    $'accept\tSOURCE_MODE=\vproton-bridge\n' # pragma: allowlist secret
+    $'refuse\tSOURCE_MODE= '
+    $'refuse\tSOURCE_MODE=proton'
+    $'refuse\tSOURCE_MODE=bridge'
+    $'refuse\tSOURCE_MODE=imap'
+    $'refuse\tSOURCE_MODE=proton_bridge'
+    $'refuse\tSOURCE_MODE=proton bridge'
+    $'refuse\tSOURCE_MODE=proton-bridge-zq9marker' # pragma: allowlist secret
+    $'refuse\tSOURCE_MODE=zq9marker'
+    $'refuse\tSOURCE_MODE=proton-bridge;zq9marker'
+    $'refuse\tSOURCE_MODE=proton-bridge\nzq9marker' # pragma: allowlist secret
+    $'refuse\tSOURCE_MODE=pr\xc3\xb6ton-bridge-zq9marker' # pragma: allowlist secret
+    $'refuse\tSOURCE_MODE=zq9marker\tBRIDGE_HOST=zq9marker.local'
+    $'refuse\tSOURCE_MODE=zq9marker\tPROTON_FOLDER_EXCLUSIONS=zq9marker' # pragma: allowlist secret
+    $'accept\tBRIDGE_IMAP_PORT=1143'
+    $'accept\tBRIDGE_IMAP_PORT='
+    $'accept\tBRIDGE_IMAP_PORT=1'
+    $'accept\tBRIDGE_IMAP_PORT=993'
+    $'accept\tBRIDGE_IMAP_PORT=65535'
+    $'refuse\tBRIDGE_IMAP_PORT=0'
+    $'refuse\tBRIDGE_IMAP_PORT=01143' # pragma: allowlist secret
+    $'refuse\tBRIDGE_IMAP_PORT=65536'
+    $'refuse\tBRIDGE_IMAP_PORT=99999'
+    $'refuse\tBRIDGE_IMAP_PORT=100000'
+    $'refuse\tBRIDGE_IMAP_PORT=-1'
+    $'refuse\tBRIDGE_IMAP_PORT=+1143' # pragma: allowlist secret
+    $'refuse\tBRIDGE_IMAP_PORT=1e3'
+    $'refuse\tBRIDGE_IMAP_PORT=0x47' # pragma: allowlist secret
+    $'refuse\tBRIDGE_IMAP_PORT= 1143'
+    $'refuse\tBRIDGE_IMAP_PORT=1143 '
+    $'refuse\tBRIDGE_IMAP_PORT=1143\n' # pragma: allowlist secret
+    $'refuse\tBRIDGE_IMAP_PORT= '
+    $'refuse\tBRIDGE_IMAP_PORT=zq9marker' # pragma: allowlist secret
+    $'refuse\tBRIDGE_IMAP_PORT=1143;zq9marker'
+    $'refuse\tBRIDGE_IMAP_PORT=0\tPROTON_FOLDER_EXCLUSIONS=zq9marker' # pragma: allowlist secret
+    $'accept\tBRIDGE_CERT_PIN_ROTATE=false'
+    $'accept\tBRIDGE_CERT_PIN_ROTATE='
+    $'accept\tBRIDGE_CERT_PIN_ROTATE=true'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=TRUE'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=True'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=False'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=yes'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=no'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=1'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=0'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=on'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE= true'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=true '
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=true\n'
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE= '
+    $'refuse\tBRIDGE_CERT_PIN_ROTATE=zq9marker' # pragma: allowlist secret
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred'
+    $'accept\tPROTON_FOLDER_EXCLUSIONS='
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=Starred|Labels/*|All Mail'
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|Folders/Old'
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|*'
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|%'
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|*/Archive'
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|Folders/Caf\xc3\xa9'
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|Starred'
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|a.b_c-d (1),e+f@g%h/i j'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS= '
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=|'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=|All Mail|Labels/*|Starred'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail||Labels/*|Starred'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS= All Mail|Labels/*|Starred'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail |Labels/*|Starred'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred\n'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred| zq9marker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9marker '
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9"marker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9\'marker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9\\marker' # pragma: allowlist secret
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|!zq9marker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9$marker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9#marker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9`marker`'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9:marker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9;marker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9\x01marker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9\x7fmarker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9\x1bmarker'
+    $'refuse\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9marker\nPatterns *'
+    $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|\xe6\x97\xa5|Folders/\xc3\xa4 b'
+    $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*'
+    $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=All Mail|Starred'
+    $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=Labels/*|Starred'
+    $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=zq9marker' # pragma: allowlist secret
+    $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=*'
+    $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=all mail|Labels/*|Starred'
+    $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=AllMail|Labels/*|Starred'
+    $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/%|Starred'
+    $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels|Starred'
+    $'refuse-protected\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Folders/Starred|zq9marker'
 )
 readonly SETTING_CASES
 
@@ -2767,24 +2895,43 @@ expected_config_line() {
         PROTON_REMOTE_STORE_NAME) printf 'Far :%s:\n' "${value:-$PROTON_DEFAULT_REMOTE_STORE_NAME}" ;;
         PROTON_LOCAL_STORE_NAME) printf 'Near :%s:\n' "${value:-$PROTON_DEFAULT_LOCAL_STORE_NAME}" ;;
         PROTON_CHANNEL_NAME) printf 'Channel %s\n' "${value:-$PROTON_DEFAULT_CHANNEL_NAME}" ;;
+        BRIDGE_IMAP_PORT)
+            printf 'Tunnel "exec socat - TCP:%s:%s"\n' "$PROTON_DEFAULT_BRIDGE_HOST" \
+                "${value:-$PROTON_DEFAULT_BRIDGE_IMAP_PORT}"
+            ;;
+        PROTON_FOLDER_EXCLUSIONS)
+            load_constants ISYNC_LAYOUT_EXCLUSIONS
+            printf 'Patterns * %s %s\n' \
+                "$(proton_folder_exclusion_patterns "${value:-$PROTON_DEFAULT_FOLDER_EXCLUSIONS}")" \
+                "$ISYNC_LAYOUT_EXCLUSIONS"
+            ;;
     esac
 }
 
 # The fixed refusal for a setting, from the shared function itself.
 fixed_refusal() {
-    local host="$PROTON_DEFAULT_BRIDGE_HOST" cert="$PROTON_DEFAULT_BRIDGE_CERT_HOST"
+    local mode="$PROTON_DEFAULT_SOURCE_MODE" host="$PROTON_DEFAULT_BRIDGE_HOST"
+    local port="$PROTON_DEFAULT_BRIDGE_IMAP_PORT" cert="$PROTON_DEFAULT_BRIDGE_CERT_HOST"
+    local rotate="$PROTON_DEFAULT_BRIDGE_CERT_PIN_ROTATE"
+    local exclusions="$PROTON_DEFAULT_FOLDER_EXCLUSIONS"
     local account="$PROTON_DEFAULT_IMAP_ACCOUNT_NAME" far="$PROTON_DEFAULT_REMOTE_STORE_NAME"
     local near="$PROTON_DEFAULT_LOCAL_STORE_NAME" channel="$PROTON_DEFAULT_CHANNEL_NAME"
     case "$1" in
+        SOURCE_MODE) mode="refused" ;;
         BRIDGE_HOST) host="refused" ;;
+        BRIDGE_IMAP_PORT) port="0" ;;
         BRIDGE_CERT_HOST) cert="refused" ;;
+        BRIDGE_CERT_PIN_ROTATE) rotate="refused" ;;
+        PROTON_FOLDER_EXCLUSIONS) exclusions="|" ;;
+        protected) exclusions="Starred" ;;
         PROTON_IMAP_ACCOUNT_NAME) account="-" ;;
         PROTON_REMOTE_STORE_NAME) far="-" ;;
         PROTON_LOCAL_STORE_NAME) near="-" ;;
         PROTON_CHANNEL_NAME) channel="-" ;;
         stores) far="$near" ;;
     esac
-    proton_settings_problem "$host" "$cert" "$account" "$far" "$near" "$channel" || true
+    proton_settings_problem "$mode" "$host" "$port" "$cert" "$rotate" "$exclusions" \
+        "$account" "$far" "$near" "$channel" || true
 }
 
 # Runs scripts/validate-env.sh from a scratch root with a passing .env and
@@ -2812,7 +2959,7 @@ validate_env_with() {
 
 # One row at both sites.
 setting_row_agrees() {
-    local row="$1" verdict assignments=() rest refusal entry_error
+    local row="$1" verdict assignments=() rest refusal entry_error rotation
     verdict="${row%%$'\t'*}"
     rest="${row#*$'\t'}"
     while [[ "$rest" == *$'\t'* ]]; do
@@ -2831,19 +2978,35 @@ setting_row_agrees() {
             printf 'validate-env refused: %q\n%s\n' "$row" "$VALIDATE_OUT"
             return 1
         }
-        order_is "identity render wait probe cert-fetch pin-first-boot cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143 || {
+        rotation=""
+        if [[ " ${assignments[*]} " == *" BRIDGE_CERT_PIN_ROTATE=true "* ]]; then
+            rotation=" rotation-on"
+        fi
+        order_is "identity${rotation} render wait probe cert-fetch pin-first-boot cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143 || {
             printf 'the entrypoint did not accept: %q\n' "$row"
             return 1
         }
-        grep -qxF "$(expected_config_line "${assignments[0]}")" "$ORDER_DIR/seen/mbsyncrc" || {
-            printf 'the rendered config does not hold the value: %q\n' "$row"
-            return 1
-        }
+        case "${assignments[0]%%=*}" in
+            SOURCE_MODE | BRIDGE_CERT_PIN_ROTATE)
+                cmp -s "$ORDER_DIR/seen/mbsyncrc" "$GOLDEN" || {
+                    printf 'the rendered config is not the golden file: %q\n' "$row"
+                    return 1
+                }
+                ;;
+            *)
+                grep -qxF "$(expected_config_line "${assignments[0]}")" "$ORDER_DIR/seen/mbsyncrc" || {
+                    printf 'the rendered config does not hold the value: %q\n' "$row"
+                    return 1
+                }
+                ;;
+        esac
         return 0
     fi
 
     if [[ "$verdict" == refuse-stores ]]; then
         refusal="$(fixed_refusal stores)"
+    elif [[ "$verdict" == refuse-protected ]]; then
+        refusal="$(fixed_refusal protected)"
     else
         refusal="$(fixed_refusal "${assignments[0]%%=*}")"
     fi
@@ -2873,7 +3036,7 @@ every_setting_row_agrees_at_both_sites() {
     for ((i = 0; i < ${#SETTING_CASES[@]}; i++)); do
         setting_row_agrees "${SETTING_CASES[i]}" "$i" || return 1
     done
-    ((${#SETTING_CASES[@]} == 94)) || return 1
+    ((${#SETTING_CASES[@]} == 193)) || return 1
 }
 
 check "the Proton settings: each value is accepted or refused alike at both sites" \
@@ -3010,6 +3173,62 @@ isync_names_change_the_hash() {
     done
 }
 
+# The source selector and Proton's folder exclusions (PLAN.md decision
+# 46) change what runs and what is synced, so each one is an input; a
+# value is hashed as resolved (the exclusions as "default" or their
+# count, never their folder names), so an unset selector and proton-bridge
+# give the same hash.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+source_mode_and_exclusions_change_the_hash() {
+    local before changed
+    identity_setup
+    before="$(identity_fields)"
+    (
+        SOURCE_MODE="synthetic-other-mode"
+        changed="$(identity_fields)"
+        [[ "${changed##* }" != "${before##* }" ]] || exit 1
+    ) || {
+        printf 'SOURCE_MODE does not change the hash\n'
+        return 1
+    }
+    (
+        PROTON_FOLDER_EXCLUSIONS="${PROTON_DEFAULT_FOLDER_EXCLUSIONS}|Folders/Old"
+        changed="$(identity_fields)"
+        [[ "${changed##* }" != "${before##* }" ]] || exit 1
+    ) || {
+        printf 'PROTON_FOLDER_EXCLUSIONS does not change the hash\n'
+        return 1
+    }
+    # An added pattern names a folder (mailbox content): only the number
+    # of patterns is hashed, so two names give the same hash and neither
+    # reaches the line.
+    (
+        PROTON_FOLDER_EXCLUSIONS="${PROTON_DEFAULT_FOLDER_EXCLUSIONS}|Folders/zq9marker-one"
+        before="$(identity_fields)"
+        PROTON_FOLDER_EXCLUSIONS="${PROTON_DEFAULT_FOLDER_EXCLUSIONS}|Folders/zq9marker-two"
+        changed="$(identity_fields)"
+        [[ "${changed##* }" == "${before##* }" ]] || exit 1
+        if grep -q zq9marker <<<"$(log_startup_identity)"; then
+            exit 1
+        fi
+    ) || {
+        printf 'a folder name in PROTON_FOLDER_EXCLUSIONS reaches the hash or the line\n'
+        return 1
+    }
+    order_setup identity-source-mode
+    printf '%s\n' "$WORK/cert-a.pem" >"$ORDER_DIR/served"
+    order_run BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-a.pem")" SOURCE_MODE=
+    before="$(grep '^>>> Startup identity:' "$ORDER_LOG")"
+    : >"$ORDER_LOG"
+    order_run BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-a.pem")" \
+        SOURCE_MODE=' Proton-Bridge '
+    changed="$(grep '^>>> Startup identity:' "$ORDER_LOG")"
+    [[ -n "$before" && "${before##*config=}" == "${changed##*config=}" ]] || {
+        printf 'an unset SOURCE_MODE and proton-bridge hash differently\n'
+        return 1
+    }
+}
+
 # #893: the line is logged before validation, so a
 # refused setting still leaves it in the log.
 the_identity_line_precedes_validation() {
@@ -3042,6 +3261,8 @@ check "an unusable commit is logged as unknown" unusable_commit_is_logged_as_unk
 check "secrets do not change the hash or reach the identity line" \
     secrets_do_not_change_the_hash_or_reach_the_line
 check "isync's account, store and channel names change the hash" isync_names_change_the_hash
+check "the source selector and the folder exclusions change the hash" \
+    source_mode_and_exclusions_change_the_hash
 check "the fingerprint and pin rotation change the hash" \
     fingerprint_and_pin_rotation_change_the_hash
 # #893: every variable the entrypoint reads from its
@@ -3136,14 +3357,16 @@ check "malformed settings still give the identity line" \
 readonly PROVIDER_BEGIN='# --- Proton provider integration: begin ---'
 readonly PROVIDER_END='# --- Proton provider integration: end ---'
 PROVIDER_ENTRY_POINTS=(bridge_imap_connect bridge_imap_host expected_fingerprint extract_bridge_cert
+    provider_exclusion_patterns
     validate_bridge_endpoint validate_proton_settings warn_if_pin_rotation_enabled)
 PROVIDER_INTERNAL=(cert_fingerprint verify_cert_pin verify_expected_fingerprint write_pin)
 PROVIDER_CONSTANTS=(BRIDGE_CERT_FINGERPRINT BRIDGE_CERT_HOST BRIDGE_CERT_PIN_ROTATE BRIDGE_HOST
     BRIDGE_IMAP_PORT BRIDGE_PASS_FILE CERT_EXTRACT_TIMEOUT_SECONDS CERT_FILE PIN_FILE
     PROTON_CHANNEL_NAME PROTON_FOLDER_EXCLUSIONS PROTON_IMAP_ACCOUNT_NAME PROTON_LOCAL_STORE_NAME
-    PROTON_REMOTE_STORE_NAME PROTON_SETTINGS_FILE STATE_DIR)
+    PROTON_REMOTE_STORE_NAME PROTON_SETTINGS_FILE SOURCE_MODE STATE_DIR)
 # Code (not comments) that only the provider section may hold.
-PROVIDER_ONLY_CODE=(socat s_client PIN_FILE CERT_FILE proton_settings_problem)
+PROVIDER_ONLY_CODE=(socat s_client PIN_FILE CERT_FILE proton_settings_problem
+    proton_folder_exclusion_patterns)
 readonly PROVIDER_ENTRY_POINTS PROVIDER_INTERNAL PROVIDER_CONSTANTS PROVIDER_ONLY_CODE
 
 # Prints each problem with the provider section of the given entrypoint,

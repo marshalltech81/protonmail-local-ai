@@ -1045,18 +1045,18 @@ class TestSummarize:
         assert "Failures by category: none" in summarize([good])
 
 
-# Outstanding-items scoring (#798). A synthetic ground truth with one
+# Outstanding-items scoring. A synthetic ground truth with one
 # open action (a.2 sets its due date, superseding a.3's earlier one), one
 # action closed by another message (c.1), a disputed action with a source
 # on each side (d.1, d.2), an action whose only evidence the index loses
-# (l.1), a decoy sharing counsel's display name (x.1) and a message whose
+# (l.1), a decoy sharing the vendor's display name (x.1) and a message whose
 # attachment failed to extract (f.1).
 def _truth(**overrides: object) -> OutstandingTruth:
     fields: dict = {
         "actions": [
             OutstandingAction(
                 id="open-1",
-                owner="counsel_a",
+                owner="vendor_a",
                 status="open",
                 due="2026-09-04",
                 required_sources=["a.2@x.example"],
@@ -1064,21 +1064,21 @@ def _truth(**overrides: object) -> OutstandingTruth:
             ),
             OutstandingAction(
                 id="closed-1",
-                owner="management",
+                owner="coordinator",
                 status="closed",
                 due=None,
                 required_sources=["c.1@x.example"],
             ),
             OutstandingAction(
                 id="disputed-1",
-                owner="management",
+                owner="coordinator",
                 status="disputed",
                 due=None,
                 required_sources=["d.1@x.example", "d.2@x.example"],
             ),
             OutstandingAction(
                 id="lost-1",
-                owner="counsel_b",
+                owner="vendor_b",
                 status="open",
                 due=None,
                 required_sources=["l.1@x.example"],
@@ -1117,14 +1117,14 @@ def _outstanding_answer(**overrides: object) -> dict:
         "items": [
             {
                 "action": "open-1",
-                "owner": "counsel_a",
+                "owner": "vendor_a",
                 "status": "open",
                 "due": "2026-09-04",
                 "cited": [_claim("a.2@x.example")],
             },
             {
                 "action": "disputed-1",
-                "owner": "management",
+                "owner": "coordinator",
                 "status": "disputed",
                 "due": None,
                 "cited": [_claim("d.1@x.example"), _claim("d.2@x.example")],
@@ -1179,7 +1179,7 @@ def _outstanding_trace(
     page = _page(
         [f"{m}@x.example" for m in listed],
         has_more=False,
-        filters={"participant": "counsel@x.example", "limit": 100},
+        filters={"participant": "vendor@x.example", "limit": 100},
     )
     reads = [f"{m}@x.example" for m in (listed if read is None else read)]
     return {"scenario": "s1", "calls": [page, _thread_read(reads)], "answer": answer}
@@ -1310,7 +1310,7 @@ class TestOutstandingItems:
         answer["items"].append(
             {
                 "action": "lost-1",
-                "owner": "counsel_b",
+                "owner": "vendor_b",
                 "status": "open",
                 "due": None,
                 "cited": [_claim("l.1@x.example")],
@@ -1337,7 +1337,7 @@ class TestOutstandingItems:
         answer["items"].append(
             {
                 "action": "closed-1",
-                "owner": "management",
+                "owner": "coordinator",
                 "status": "open",
                 "due": None,
                 "cited": [_claim("c.1@x.example")],
@@ -1350,7 +1350,7 @@ class TestOutstandingItems:
     def test_an_unknown_action_lowers_precision_and_support(self) -> None:
         answer = _outstanding_answer()
         answer["items"].append(
-            {"action": "invented", "owner": "counsel_a", "status": "open", "due": None, "cited": []}
+            {"action": "invented", "owner": "vendor_a", "status": "open", "due": None, "cited": []}
         )
         score = score_trace(_outstanding(), _outstanding_trace(answer))
         assert score.action_precision == 2 / 3
@@ -1358,7 +1358,7 @@ class TestOutstandingItems:
 
     def test_a_wrong_owner_fails(self) -> None:
         answer = _outstanding_answer()
-        answer["items"][1]["owner"] = "counsel_a"
+        answer["items"][1]["owner"] = "vendor_a"
         score = score_trace(_outstanding(), _outstanding_trace(answer))
         assert score.owner_accuracy == 0.5
         assert "owner_accuracy" in score.failures
@@ -1436,7 +1436,7 @@ class TestOutstandingItems:
         assert score.required_evidence_coverage == 1.0
 
     def test_citing_a_forbidden_source_fails(self) -> None:
-        # The decoy shares a display name with counsel.
+        # The decoy shares a display name with the vendor.
         answer = _outstanding_answer()
         answer["items"][0]["cited"].append(_claim("x.1@x.example"))
         score = score_trace(_outstanding(), _outstanding_trace(answer))
@@ -1556,7 +1556,7 @@ class TestOutstandingCitationSets:
         assert score.citations_consistent is None
 
 
-# Per-claim labels (#798, owner decision 2026-10-08). open-1 has a
+# Per-claim labels (owner decision 2026-10-08). open-1 has a
 # transmission in Sent (s.1) and no acknowledgement; closed-1's
 # completion is c.1.
 _CLAIM_METRICS = (

@@ -1032,7 +1032,7 @@ class TestLimitHitsAreCounted:
         for t in threads:
             t.subject = f"{_MARKER} " + "h" * 600
             t.participants = [f"{_MARKER} " + "h" * 600] * 3
-        budget = PromptBudget(context_tokens=3480, max_output_tokens=1024)
+        budget = PromptBudget(context_tokens=3575, max_output_tokens=1024)
         llm = FakeInferenceClient(response="ok [E1]")
         asyncio.run(_tools(_StubDb(threads), llm, budget)["ask_mailbox"](question="q?"))
         line = _one_limit_line(caplog)

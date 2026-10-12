@@ -32,7 +32,7 @@ paged run: sizing"). The tables mirror the indexer's ``messages``,
 ``pending_deletions`` with all their indexes, and hold the rows the
 indexer writes for the messages ``render_eml`` describes
 (indexer/tests/test_reconcile_bench_fidelity.py indexes those files
-with the indexer and compares). Other tables (threads, vectors, the
+with the indexer and compares). Other tables (threads, vectors, header evidence, the
 queue) are left out because no measured statement reads them (a test
 checks every measured statement with an authorizer). The WAL phase
 (``--wal``) runs after every other step on its own index, which has
@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import email
+import email.policy
 import fcntl
 import functools
 import hashlib
@@ -110,6 +112,7 @@ CREATE TABLE messages (
     attachments_manifest_complete INTEGER CHECK (attachments_manifest_complete IN (0, 1)),
     body_complete INTEGER CHECK (body_complete IN (0, 1)),
     caps_json TEXT,
+    headers_complete INTEGER CHECK (headers_complete IN (0, 1)),
     FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
@@ -605,6 +608,8 @@ class _Record:
     # (occurrence ID, attachment ID, payload size, extracted text: the
     # stress text under ``extracted_chars``).
     attachments: list
+    headers: list
+    headers_complete: bool
 
 
 def _record(
@@ -648,6 +653,7 @@ def _record(
             chunk_rows.append(
                 (f"{cid}::{attachment_id}", attachment_id, "attachment", 0, text, 0, len(text))
             )
+    headers, headers_complete = header_capture(raw)
     return _Record(
         i=i,
         cid=cid,
@@ -665,6 +671,8 @@ def _record(
         ],
         chunks=chunk_rows,
         attachments=attachments,
+        headers=headers,
+        headers_complete=headers_complete,
     )
 
 
@@ -674,9 +682,9 @@ _INSERT_MESSAGE = (
     "has_attachments, size_bytes, content_hash, indexed_at, first_indexed_at, "
     "seen, flagged, replied, sender_ambiguous, participant_names_complete, "
     "subject_complete, from_addresses_complete, to_addresses_complete, "
-    "cc_addresses_complete, attachments_manifest_complete, body_complete, caps_json) "
+    "cc_addresses_complete, attachments_manifest_complete, body_complete, caps_json, headers_complete) "
     "VALUES (?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, "
-    "1, 1, 1, 1, 1, 1, ?, '{}')"
+    "1, 1, 1, 1, 1, 1, ?, ?, ?)"
 )
 
 
@@ -699,7 +707,8 @@ _UPSERT_MESSAGE = _INSERT_MESSAGE + (
     "to_addresses_complete = excluded.to_addresses_complete, "
     "cc_addresses_complete = excluded.cc_addresses_complete, "
     "attachments_manifest_complete = excluded.attachments_manifest_complete, "
-    "body_complete = NULL, caps_json = excluded.caps_json"
+    "body_complete = NULL, caps_json = excluded.caps_json, "
+    "headers_complete = excluded.headers_complete"
 )
 
 
@@ -723,6 +732,8 @@ def _message_values(rec: _Record, now: str, body_complete: int | None) -> tuple:
         now,
         rec.i % 2,
         body_complete,
+        "{}" if rec.headers_complete else json.dumps({"headers_budget": 1}),
+        int(rec.headers_complete),
     )
 
 
@@ -772,6 +783,79 @@ def _chunk_values(
         attachment_id,
         kind,
     )
+
+
+# Header evidence budgets (#1079); fidelity tests lock these to the parser.
+MAX_STORED_HEADER_FIELDS = 256
+MAX_STORED_HEADER_BYTES = 1024 * 1024
+MAX_STORED_HEADER_VALUE_BYTES = 16 * 1024
+_ENCODED_WORD_RE = re.compile(r"=\?([^?\s]+)\?([QqBb])\?([^?\s]*)\?=")
+_ENCODED_WORD_RUN_RE = re.compile(
+    _ENCODED_WORD_RE.pattern + r"(?:\s+" + _ENCODED_WORD_RE.pattern + r")*"
+)
+
+
+def _generated_header_parts(value: str | email.header.Header) -> str:
+    pieces = []
+    for part, charset in email.header.decode_header(value):
+        if isinstance(part, bytes):
+            encoding = (charset or "utf-8").lower()
+            if encoding == "unknown-8bit":
+                encoding = "utf-8"
+            if encoding not in ("utf-8", "us-ascii"):
+                raise ValueError("unsupported generated header encoding")
+            try:
+                pieces.append(part.decode(encoding))
+            except UnicodeError:
+                raise ValueError("invalid generated header encoding") from None
+        else:
+            pieces.append(part)
+    return " ".join(pieces)
+
+
+def header_capture(raw: bytes) -> tuple[list[tuple], bool]:
+    """Header evidence for ``render_eml``'s controlled generated grammar.
+
+    This is not a general mail decoder. Differential tests use the actual
+    indexer decoder for every generated shape and retained-prefix budget.
+    Unsupported generated encodings fail instead of approximating rows.
+    """
+    msg = email.message_from_bytes(raw)
+    if msg.defects:
+        raise ValueError("generated message has header defects")
+    rows = []
+    spent = 0
+    for ordinal, (name, value) in enumerate(msg.raw_items()):
+        if (
+            ordinal >= MAX_STORED_HEADER_FIELDS
+            or len(name) + len(value) > MAX_STORED_HEADER_VALUE_BYTES
+        ):
+            return rows, False
+        name_bytes = name.encode("utf-8", "surrogateescape")
+        value_bytes = value.encode("utf-8", "surrogateescape")
+        size = len(name_bytes) + len(value_bytes)
+        if size > MAX_STORED_HEADER_VALUE_BYTES or spent + size > MAX_STORED_HEADER_BYTES:
+            return rows, False
+        spent += size
+        fetched = email.policy.compat32.header_fetch_parse(name, value)
+        if isinstance(fetched, email.header.Header):
+            decoded = _generated_header_parts(fetched).strip()
+            # The parser marks a raw 8-bit header containing encoded words degraded.
+            if _ENCODED_WORD_RE.search(decoded):
+                decoded = None
+        else:
+            decoded = _ENCODED_WORD_RUN_RE.sub(
+                lambda run: "".join(
+                    _generated_header_parts(word.group(0))
+                    for word in _ENCODED_WORD_RE.finditer(run.group(0))
+                ),
+                fetched,
+            ).strip()
+        stored_name = name_bytes.decode("latin-1")
+        rows.append(
+            (ordinal, stored_name, stored_name.lower(), value_bytes.decode("latin-1"), decoded)
+        )
+    return rows, True
 
 
 def build(
@@ -1100,8 +1184,9 @@ def _materialize(
 ) -> tuple[list[dict], dict[str, int]]:
     """The response records of ``missing``, read on ``conn`` (the
     round's transaction) and serialized as the query tools do, with the
-    participant rows and References entries read for them: the server's
-    readers load every one before the output clips each list."""
+    participant rows and References entries transferred into Python.
+    The server's readers retain only the listed entries, with exact
+    totals; computing those totals still visits the lists in SQLite."""
     from src.lib import sqlite as db
     from src.tools.outputs import listed_message
     from src.tools.retrieval import _listed_attachment
@@ -1488,7 +1573,7 @@ def phase_request_shape(path: str, shape: str) -> dict:
 
 # --- the WAL writer -----------------------------------------------------
 
-# The indexer's tables (schema v12) that it writes for every message but
+# The indexer's tables (schema v13) that it writes for every message but
 # no measured statement reads. ``build`` leaves them out, so a measured
 # statement that read one would fail there and read them only in the WAL
 # phase: ``test_measured_statements_read_no_table_only_the_wal_baseline_has``
@@ -1497,6 +1582,18 @@ def phase_request_shape(path: str, shape: str) -> dict:
 # commits write every table the indexer's do. Copies:
 # indexer/tests/test_reconcile_bench_fidelity.py checks them.
 _WRITER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS message_headers (
+    claimant_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    name_normalized TEXT NOT NULL,
+    raw_value TEXT NOT NULL,
+    decoded_value TEXT,
+    PRIMARY KEY (claimant_id, ordinal),
+    FOREIGN KEY (claimant_id) REFERENCES messages(claimant_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_message_headers_name_claimant
+    ON message_headers(name_normalized, claimant_id);
 CREATE TABLE IF NOT EXISTS threads (
     thread_id       TEXT PRIMARY KEY,
     subject         TEXT NOT NULL,
@@ -1576,6 +1673,7 @@ CREATE INDEX IF NOT EXISTS idx_indexing_jobs_status_next
     ON indexing_jobs(status, next_attempt_at);
 """
 WRITER_TABLES = (
+    "message_headers",
     "threads",
     "threads_fts",
     "threads_vec",
@@ -1939,6 +2037,12 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
         (rec.path, now, len(rec.raw), time.time_ns(), hashlib.sha256(rec.raw).hexdigest()),
     )
     conn.execute(_UPSERT_MESSAGE, _message_values(rec, now, None))
+    conn.execute("DELETE FROM message_headers WHERE claimant_id = ?", (rec.cid,))
+    conn.executemany(
+        "INSERT INTO message_headers (claimant_id, ordinal, name, name_normalized, raw_value, decoded_value) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [(rec.cid, *header) for header in rec.headers],
+    )
     conn.execute("DELETE FROM message_participants WHERE claimant_id = ?", (rec.cid,))
     # indexer/src/database.py ``_write_message_record``: every header
     # address in order, each followed by its entity writes the first time

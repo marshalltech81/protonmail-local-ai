@@ -414,7 +414,12 @@ proton_settings_from_env_file() {
         'BRIDGE_CERT_HOST=zq9marker.local' 'BRIDGE_CERT_HOST=127.0.0.01' \
         'PROTON_CHANNEL_NAME=zq9marker.chan' "PROTON_IMAP_ACCOUNT_NAME='zq9marker acct'" \
         'PROTON_REMOTE_STORE_NAME=zq9marker:far' 'PROTON_LOCAL_STORE_NAME=-zq9marker' \
-        'PROTON_REMOTE_STORE_NAME=protonmail-local'; do
+        'PROTON_REMOTE_STORE_NAME=protonmail-local' 'SOURCE_MODE=zq9marker' \
+        'SOURCE_MODE=" "' 'BRIDGE_IMAP_PORT=0' 'BRIDGE_IMAP_PORT=zq9marker' \
+        'BRIDGE_CERT_PIN_ROTATE=TRUE' 'BRIDGE_CERT_PIN_ROTATE=zq9marker' \
+        'PROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*' \
+        "PROTON_FOLDER_EXCLUSIONS=\"All Mail|Labels/*|Starred|zq9\$marker\"" \
+        "PROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9marker #comment"; do
         setup "$line"
         fails_with "${line%%=*}" || {
             printf 'not refused: %s\n' "$line"
@@ -426,7 +431,12 @@ proton_settings_from_env_file() {
         fi
     done
     setup 'BRIDGE_HOST=" HOST.ORB.INTERNAL "' 'BRIDGE_CERT_HOST=::1' 'PROTON_CHANNEL_NAME=Chan_2-x' \
-        'PROTON_IMAP_ACCOUNT_NAME=' 'PROTON_REMOTE_STORE_NAME=far' 'PROTON_LOCAL_STORE_NAME=near'
+        'PROTON_IMAP_ACCOUNT_NAME=' 'PROTON_REMOTE_STORE_NAME=far' 'PROTON_LOCAL_STORE_NAME=near' \
+        'SOURCE_MODE=" Proton-Bridge "' 'BRIDGE_IMAP_PORT= 993 ' 'BRIDGE_CERT_PIN_ROTATE=true' \
+        "PROTON_FOLDER_EXCLUSIONS='All Mail|Labels/*|Starred|Folders/Old *'"
+    passes
+    # Empty values take the defaults, as Compose passes them.
+    setup 'SOURCE_MODE=' 'BRIDGE_IMAP_PORT=' 'BRIDGE_CERT_PIN_ROTATE=' 'PROTON_FOLDER_EXCLUSIONS='
     passes
 }
 

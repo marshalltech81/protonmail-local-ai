@@ -53,13 +53,17 @@ services:
     # Bridge runs outside Compose, so there is no health check to wait for;
     # the entrypoint's bounded IMAP wait covers an app that is not running.
     environment:
+      # The source selector; empty means proton-bridge, the only value
+      # accepted (PLAN.md decision 46). Read once at startup; no control
+      # depends on it.
+      SOURCE_MODE: ${SOURCE_MODE:-}
       # The container's name for this Mac, which forwards to its 127.0.0.1;
       # empty means host.docker.internal. Only the names in
       # mbsync/proton-settings.sh are accepted, by validate-env.sh and by
       # the entrypoint (PLAN.md decision 46); a Bridge elsewhere waits on
       # #1499.
       BRIDGE_HOST: ${BRIDGE_HOST:-}
-      # The app's IMAP port, shown with its IMAP credentials.
+      # The app's IMAP port, shown with its IMAP credentials; 1 to 65535.
       BRIDGE_IMAP_PORT: ${BRIDGE_IMAP_PORT:-1143}
       # The name the app's certificate is issued for (its CN); empty means
       # 127.0.0.1, the only name the app's own certificate holds. The
@@ -74,6 +78,11 @@ services:
       PROTON_REMOTE_STORE_NAME: ${PROTON_REMOTE_STORE_NAME:-}
       PROTON_LOCAL_STORE_NAME: ${PROTON_LOCAL_STORE_NAME:-}
       PROTON_CHANNEL_NAME: ${PROTON_CHANNEL_NAME:-}
+      # Folder patterns mbsync stops syncing (mail already synced stays;
+      # docs/troubleshooting.md), separated by |; empty means
+      # All Mail|Labels/*|Starred, and those three must always stay in the
+      # list (mbsync/proton-settings.sh).
+      PROTON_FOLDER_EXCLUSIONS: ${PROTON_FOLDER_EXCLUSIONS:-}
       # Required: the SHA-256 fingerprint of the app's certificate, taken
       # on the host (docs/setup.md). Another local account could hold the
       # app's loopback port while it is down, so the first certificate is
@@ -87,7 +96,8 @@ services:
       # deliberately rotated (and BRIDGE_CERT_FINGERPRINT updated to it),
       # then recreate mbsync with it false: the value survives restarts of
       # the same container. mbsync refuses to sync on a fingerprint
-      # mismatch otherwise. See docs/troubleshooting.md.
+      # mismatch otherwise. See docs/troubleshooting.md. Only true or false,
+      # in lower case, is accepted.
       BRIDGE_CERT_PIN_ROTATE: ${BRIDGE_CERT_PIN_ROTATE:-false}
     volumes:
       - maildir-volume:/maildir
@@ -163,8 +173,8 @@ services:
       # EMBED_API_KEY and EMBED_BASE_URL are required. The value
       # ``default`` selects the SDK default (``https://api.openai.com/v1``)
       # and an empty value fails startup (#750). Otherwise set it to
-      # any provider that speaks /v1/embeddings (DeepInfra, OpenRouter, LM Studio, vLLM, TEI, or
-      # a host-side mlx_lm.server). Indexer + mcp-server must point at
+      # any provider that speaks /v1/embeddings (DeepInfra, OpenRouter,
+      # or a host-side LM Studio, vLLM or TEI). Indexer + mcp-server must point at
       # the same provider + model so vectors are comparable.
       # ``EMBED_MODE=openai`` is the only valid value.
       EMBED_MODE: ${EMBED_MODE:-openai}
@@ -182,9 +192,10 @@ services:
       # into one embed call.
       INDEXER_STEADY_STATE_BATCH_SIZE: ${INDEXER_STEADY_STATE_BATCH_SIZE:-8}
       # How often the main loop runs PRAGMA wal_checkpoint(TRUNCATE).
-      # The single shared sqlite3 connection pins a WAL read snapshot for
-      # the duration of the indexer process; without an explicit
-      # truncate-checkpoint the WAL grows monotonically.
+      # SQLite's automatic checkpoint reuses the WAL but never shrinks it,
+      # and an open transaction on any connection (an open connection
+      # alone pins nothing) lets it grow further; without an explicit
+      # truncate-checkpoint the file stays at its high-water size.
       INDEXER_WAL_CHECKPOINT_INTERVAL_SECS: ${INDEXER_WAL_CHECKPOINT_INTERVAL_SECS:-600}
       # How often the main loop re-runs the chunkless-zero-vector
       # recovery sweep. Both startup and periodic sweeps respect the

@@ -11,7 +11,7 @@ reranking goes to whichever endpoints the operator configures.
 Embedding and inference are operator-supplied
 external dependencies — the project itself ships no model-serving
 components, and whether they run on the host (LM Studio, vLLM,
-`mlx_lm.server`, etc.) or against a remote provider is a deployment
+`mlx_lm.server` for inference only, etc.) or against a remote provider is a deployment
 choice.
 
 ## Data Flow
@@ -176,8 +176,11 @@ mbsync writes one Maildir per Proton folder (`mbsync/mbsyncrc.template`):
   does not. Labels are left out by project policy, not by a Bridge
   restriction: the index does not model label membership apart from
   physical folders, so a label copy would add duplicates it could not
-  describe. A custom folder named `Starred` is `Folders/Starred` and
-  syncs.
+  describe; labels are to come from message metadata (#1313), never from
+  syncing these folders. A custom folder named `Starred` is
+  `Folders/Starred` and syncs. The exclusions are the
+  `PROTON_FOLDER_EXCLUSIONS` setting, which may add folders but is
+  refused without these three (see "Bridge" below).
 - **Names isync needs for itself:** a child folder named `uidvalidity`,
   `isyncuidmap.db`, `mbsyncstate`, `mbsyncstate.journal`, `mbsyncstate.new`
   or `mbsyncstate.lock` would be one of those files, so the channel's
@@ -274,9 +277,12 @@ Login and updates happen in the app. On Linux, `host.docker.internal`
 loopback the app binds, so this setup is not supported there (see
 [setup.md](setup.md#platform-support)).
 
-The Bridge stays on this Mac (PLAN.md decision 46). `BRIDGE_HOST`,
-`BRIDGE_CERT_HOST` and isync's account, store and channel names are
-settings, checked by one implementation, `mbsync/proton-settings.sh`,
+The Bridge stays on this Mac (PLAN.md decision 46). `SOURCE_MODE`,
+`BRIDGE_HOST`, `BRIDGE_IMAP_PORT`, `BRIDGE_CERT_HOST`,
+`BRIDGE_CERT_PIN_ROTATE`, `PROTON_FOLDER_EXCLUSIONS` and isync's
+account, store and channel names are settings, each defaulting to the
+value mbsync used before it was one, checked by one implementation,
+`mbsync/proton-settings.sh`,
 at two sites: `scripts/validate-env.sh` and the entrypoint's
 `require_prerequisites`, before anything is rendered or connected. A
 refused value stops both with fixed text that names the setting, never
@@ -320,8 +326,45 @@ the value.
   and cuts any channel line it cannot match (#1498). Each folder keeps
   its sync state in its own directory (`SyncState *`), so renaming them
   downloads nothing again (`layout_check.sh` check 9).
+- `SOURCE_MODE` (empty means `proton-bridge`) is trimmed and lowercased,
+  as every `*_MODE` setting is, and checked first: `proton-bridge` is
+  the only value accepted. It is read once at startup; no control,
+  sourced file or function name depends on it, so it selects nothing.
+- `BRIDGE_IMAP_PORT` (Compose's default `1143`) must be a port from 1 to
+  65535 without leading zeros; `validate_bridge_endpoint` keeps its own
+  check of it as well.
+- `BRIDGE_CERT_PIN_ROTATE` (Compose's default `false`) must be exactly
+  `true` or `false`; any other spelling is refused rather than read as
+  false.
+- `PROTON_FOLDER_EXCLUSIONS` (empty means `All Mail|Labels/*|Starred`)
+  is a list of folder patterns separated by `|`. The whole value is
+  checked first: of ASCII, only `A-Z a-z 0-9`, spaces,
+  `. / _ * % & + , ( ) @ -` and the `|` separator, with no empty pattern
+  (a leading, trailing or doubled `|`). Non-ASCII characters are
+  accepted, because isync 1.5 matches `Patterns` against folder names
+  decoded to UTF-8 (`layout_check.sh` check 10 excludes a folder named
+  in UTF-8). Each pattern must then have no space at either end, and
+  `All Mail`, `Labels/*` and `Starred` must each be one of them: these
+  stay excluded whatever else is added (see "Virtual folders" above).
+  Each pattern is rendered as a quoted `!"…"` exclusion, in order, by
+  parameter expansion alone (no `eval`, word splitting or globbing),
+  before isync's own layout exclusions, which stay last. Quotes,
+  backslashes, `!`, `$`, `#` and control characters are never accepted,
+  so a pattern cannot end isync's quoting or re-include a folder, and a
+  `.env` line Compose would read differently from `validate-env.sh` is
+  refused. `layout_check.sh` check 10 shows an added exclusion leaving
+  its folder out. An exclusion only stops further syncing: mail synced
+  from the folder before it stays in the Maildir and the index
+  (searchable, its text already sent to the embedder) until the operator
+  removes the folder from the Maildir, after which isync does not create
+  it again and the deletion reconciler handles its messages
+  ([troubleshooting.md](troubleshooting.md#remove-mail-from-a-folder-you-have-just-excluded)).
+  Nothing removes local mail automatically when a pattern is added.
 
-The startup identity hash includes all six.
+The startup identity hash includes all of these settings, each as
+resolved (an unset `SOURCE_MODE` and `proton-bridge` hash alike), except
+that `PROTON_FOLDER_EXCLUSIONS` enters it as `default` or as its number
+of patterns: an added pattern names a folder, which is mailbox content.
 
 The app's certificate is upstream Bridge's: self-signed, `CA:TRUE`,
 common name and only subject alternative name `127.0.0.1`. isync 1.5.1
@@ -382,7 +425,7 @@ The embedder surface is OpenAI-compatible (`/v1/embeddings`). The
 indexer's `OpenAIEmbedder` client and mcp-server's `EmbedClient` both
 use the official `openai` SDK with a custom `base_url`, so an
 operator can point `EMBED_BASE_URL` at any compliant provider —
-DeepInfra, OpenRouter, LM Studio, vLLM, TEI, `mlx_lm.server` —
+DeepInfra, OpenRouter, LM Studio, vLLM, TEI —
 without changing any code, provided the model returns 4096-dim
 vectors. The schema reserves a fixed 4096-dim
 vector, so `EMBED_MODEL` must keep producing 4096-dim vectors
@@ -1095,7 +1138,10 @@ on every occurrence whose `text_extractor` is an older version than
 `EXTRACTOR_VERSIONS` (whatever the OCR or extraction setting, and for
 dead-lettered messages too) and logs the count; only a later commit of
 the occurrence's chunks sets it again. The 7-day retry of a `failed`
-row is unchanged. No filter reads the flag yet.
+row is unchanged. `attachment_text_words` reads the occurrence flags:
+a stored hit decides true; a miss decides false only with a complete
+manifest and complete committed text for every occurrence. Otherwise
+it is indeterminate.
 
 The MCP leaves read the per-message `messages` flags above
 (`docs/mcp-tools.md`, "Filter predicates"): a stored match decides a leaf; finding nothing decides it
@@ -1151,6 +1197,14 @@ enumerates over these tables (count plus keyset pages ordered by
 `message_participants` instead of parsing each thread's participant
 JSON.
 
+`query_threads` evaluates the same complete expression per claimant, then
+groups by `messages.thread_id`. It returns definite matching threads with
+separate undecided-message and unknown-only-thread counts. One grouped SQL
+statement reads each page and its counts in one snapshot; the thread-ID
+keyset order is stable while membership changes between pages remain visible
+limitations. Whole-thread metadata includes out-of-query messages and Trash;
+participant counts and attachment absence require complete source evidence.
+
 Both are written inside `upsert_thread`'s transaction, after the
 message's `message_thread_map` row. `messages` references
 `message_thread_map`, `message_participants` references `messages`,
@@ -1171,6 +1225,43 @@ same, as a label per message) and for `search_emails`' thread filters
 (each leaf decided on its own against the thread, as before). A new
 predicate is written once there; `docs/mcp-tools.md`, "Filter
 predicates", lists the leaves.
+
+### Top-level header evidence
+
+`message_headers` keeps top-level fields in their source order, duplicates
+included, keyed by `(claimant_id, ordinal)`. It stores the original name,
+its lowercase `name_normalized`, `raw_value`, and nullable `decoded_value`.
+The `(name_normalized, claimant_id)` index serves header predicates.
+Raw values map each source byte to its Latin-1 character, preserving
+folding and encoded words without SQLite surrogate characters; the raw
+message remains the original byte evidence. Decoding uses the existing
+stdlib header path; a failure or degraded decode keeps `decoded_value`
+NULL and predicates use the raw value.
+
+Before decoding, one per-message guard limits fields to 256, total name
+and value bytes to 1 MiB, and one name plus value to 16 KiB. It stops at
+the first overflow, retains the earlier fields, and records
+`headers_budget=1` through the existing rate-limited parser warning.
+Stdlib defects that discard a header or stop its header scan also
+record `headers_parse=1` without logging defect text.
+`messages.headers_complete` is 1 for a complete capture, 0 for a cap or
+header parse loss,
+and NULL until assessed. Header predicates decide true on any stored
+match; a miss is false only under 1. Header rows and their flag are
+replaced in the same message-write transaction and cascade on deletion.
+A synthetic macOS measurement on 2026-10-12 used 50,000 messages with
+nine common fields, a tenth field on 500 messages, and duplicate
+X-Metadata fields: 450,500 header rows occupied 122,167,296 bytes
+(116.5 MiB), including both indexes. Full `query_messages(limit=1)`
+calls, including unknown counts and leaf diagnostics, took median
+50.7 ms for selective presence (500 matches), 176.1 ms for containment
+in a common field (500 matches), and 122.4 ms for common-field presence
+(50,000 matches), over five sequential warm-cache calls. Both header
+plans used `idx_message_headers_name_claimant`; these figures describe
+this synthetic corpus, not a live mailbox or a general latency bound.
+
+Migration 0013 queues the existing reparse path; unchanged chunks keep
+their IDs and vectors. `get_message` does not return this table.
 
 ## Message time
 
@@ -2551,9 +2642,12 @@ like any image.
 
 `pillow-heif` bundles its own copies of the native libheif and libde265
 (HEVC) decoders, plus a libx265 encoder that is never used. Both
-decoders have a long record of memory-safety CVEs and run inside the
-indexer process on attacker-supplied files. The owner accepted that
-risk on 2026-10-04. Debian security updates do not cover the bundled
+decoders have a long record of memory-safety CVEs and run on
+attacker-supplied files. They run in the image extractor child
+(`image_child.py`, #1292), under its address-space and CPU limits, not
+in the indexer process; process separation is not filesystem or network
+confinement (PLAN.md decision 42). The owner accepted that risk on
+2026-10-04, when they still ran inside the indexer process. Debian security updates do not cover the bundled
 copies: a fix arrives only by bumping `pillow-heif`. Dependabot and
 Trivy see only the `pillow-heif` version, not the bundled libraries, so
 watch libheif and libde265 advisories and bump `pillow-heif` when a
@@ -2958,6 +3052,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 13 | `0013_message_headers.sql` | Bounded ordered `message_headers` and nullable `messages.headers_complete` (#1079); existing rows start unknown and a queued reparse fills them. |
 | 12 | `0012_extraction_identifier.sql` | `attachment_extractions.identifier` (#1416; see the `attachment_extractions` row above and *Extractor dispatch*): how the payload's container was certified, `container@<n>` or `none@<n>`, NULL (unknown) on every row cached before it. The bytes are not in the database, so the migration ends with the shared reparse statement (see *Reparse in place*): every occurrence passes through the lookup once, which records `none@<n>` on a row whose payload has neither signature and identifies and re-extracts the rest. Unchanged chunks keep their IDs and vectors; text a re-identified container now yields is new chunks, sent to the configured embedder, so the upgrade embeds the newly readable Office attachments once. A container sent under a `message/*` label is kept as sent from this release, so its occurrence gets a new attachment ID on the reparse: the old occurrence, FTS row, chunks and vectors are removed and the new one is extracted and embedded. The startup sweep's identification arm queues the same rows and clears their occurrences' `text_complete` first, so a message whose extraction continuation the reparse leaves queued refreshes them too. |
 | 11 | `0011_extraction_cap_record.sql` | `attachment_extractions.ocr_pages_cap`, `digital_pages_cap` and `extracted_chars_cap` (#1418; see the `attachment_extractions` row above): the configured limit that cut the result, 0 when it did not, NULL (unknown) on every row cached before it. The extractor writes them, so no reparse is queued; the startup sweep re-queues once the messages using an incomplete `success` / `empty` row with no record (the bootstrap arm), and the re-extraction records the columns. |
 | 10 | `0010_thread_vector_sums.sql` | `thread_vector_sums` (#1356; see *Thread vector sums*): each thread's exact chunk-vector sum and count, so the thread vector is derived without reading every chunk vector. The migration writes no row: the first write that touches a thread fills its row, and the backfill sweep fills the rest in bounded batches. Nothing is re-parsed or re-embedded. |
@@ -3990,10 +4085,10 @@ covers is docs only.
 
 | Boundary and threat | Controls in place | Shared assumptions | Accepted limitations and pending decisions | Locked by |
 | --- | --- | --- | --- | --- |
-| **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools, the `xls`, `docx`, `pptx`, `xlsx`, `eml`, `image`, `pdf` and `html` extractors container identification and the HTML conversion of message bodies run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. One pass of one message may start at most a budget of extraction processes and seconds on attachments the cache cannot serve; the rest are deferred to later passes, between other mail (`indexer/src/attachment_indexing.py` `ExtractionBudget`, #1236). Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | Every extractor but `text` runs in a child; `text` stays in-process by decision 42, and the CI test that is to lock its implementation is not written yet (#1295). The dispatcher's OOXML ZIP-size guard reads the central directory in the indexer process until #1438. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_image_child.py`; `indexer/tests/test_html_child.py`; `indexer/tests/test_pdf_child.py`; `indexer/tests/test_extraction_budget.py`; `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
+| **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools, the `xls`, `docx`, `pptx`, `xlsx`, `eml`, `image`, `pdf` and `html` extractors, container identification and the HTML conversion of message bodies run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. One pass of one message may start at most a budget of extraction processes and seconds on attachments the cache cannot serve; the rest are deferred to later passes, between other mail (`indexer/src/attachment_indexing.py` `ExtractionBudget`, #1236). Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | Every extractor but `text` runs in a child; `text` stays in-process by decision 42, and the CI test that is to lock its implementation is not written yet (#1295). The dispatcher's OOXML ZIP-size guard reads the central directory in the indexer process until #1438. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_image_child.py`; `indexer/tests/test_html_child.py`; `indexer/tests/test_pdf_child.py`; `indexer/tests/test_extraction_budget.py`; `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
 | **Secrets.** The Bridge password, provider API keys or the MCP token reach the repository, `docker inspect`, a log, or another local account. | Each secret is a Docker secret read from `.secrets/` (the `secrets` section of `docker-compose.yml`). `scripts/validate-env.sh`, which `make up` runs first, requires mode 600 on every secret file (`require_mode_600`) and rejects the API keys and `MCP_AUTH_TOKEN` in `.env` (`reject_secret_in_env`). `.gitignore` excludes `.env`, `.secrets/` and `*.pem`; the `detect-secrets` pre-commit hook also runs in CI (`lint.yml`). Clients get the token from a file, never an argument (`scripts/mcp-auth-headers.sh`; `mcp-server/src/stdio_adapter.py` refuses a group- or other-readable file). | Every secret rests on the operator's account and mode 600 on the host's disk: processes running as the operator are trusted (see [Endpoint authentication](#endpoint-authentication)). | Secrets are stored unencrypted on the host's disk. A plain `docker compose up` skips `validate-env.sh`. | `scripts/tests/validate_env_test.sh` (`loose_secret_mode_fails`, `loose_mcp_token_mode_fails`, `api_key_in_env_fails`, `mcp_token_in_env_fails`); `mcp-server/tests/test_stdio_adapter.py` `test_group_or_other_access_fails_closed`; `mcp-server/tests/test_http_transport.py` `test_tokens_stay_out_of_the_log`; Semgrep `shell-xtrace-enabled`. The `.gitignore` entries and the `detect-secrets` hook are docs only. <!-- pragma: allowlist secret --> |
 | **Network exposure.** Another machine, another local account or a web page reaches the MCP endpoint, or a container other than mbsync logs in to Bridge. | Only `mcp-server` publishes a port, `127.0.0.1:${MCP_PORT:-3000}` (`docker-compose.yml`). mbsync alone joins `bridge-net` and alone mounts the `bridge_pass` secret. No service shares the host's network namespace. `mcp-server/src/main.py`: `_HostOriginGuard` rejects a bad Host (421) or Origin (403), and `_StaticBearerTokenVerifier` checks the bearer token with `hmac.compare_digest` before any session exists. `docker-compose.hardened.yml` makes `app-net` internal. mbsync reaches the Bridge app only through a name for this Mac's `127.0.0.1`: `BRIDGE_HOST` must be exactly one of `host.docker.internal`, `host.orb.internal`, `host.internal` (each with a recorded forwarding test, `mbsync/tests/host_alias_check.sh`), and `BRIDGE_CERT_HOST` a loopback name, checked by `mbsync/proton-settings.sh` in `scripts/validate-env.sh` and in the entrypoint's `require_prerequisites` before any render or connection; mbsync has no `extra_hosts`. | The loopback bind keeps other machines out; the token is what stops other local accounts. The container engine and its resolver send the `BRIDGE_HOST` names to this Mac's loopback: the name is not resolved to check it. | The bearer token is the only caller-authentication control against another local account, and it does not separate code running as the operator. `app-net` is not internal by default, so the indexer and mcp-server can reach remote providers. No network control limits Bridge's port to mbsync: on macOS `host.docker.internal` reaches the host's loopback from any container, so only the Bridge password, which mbsync alone mounts, keeps the others from logging in. Decision 46 (owner, 2026-10-11, #1497) replaced the fixed `BRIDGE_HOST` and `BRIDGE_CERT_HOST` in `docker-compose.yml` with this exact-value validation; decision 43 stands, with the caveat that the two sites share one implementation, so a fault in `proton-settings.sh` reaches both. The forwarding test runs on the Mac, not in CI. A Bridge on another machine waits on #1499. | `scripts/tests/compose_test.sh` (ports and `bridge-net` membership on every overlay combination); Semgrep `compose-port-on-other-service`, `compose-port-not-loopback`, `compose-bridge-net-member`, `compose-host-namespace`; `mbsync/tests/entrypoint_test.sh` `every_setting_row_agrees_at_both_sites` (each accepted and refused value at both sites, refused before any render or connection); `mbsync/tests/tls_check.sh` check 7; `scripts/tests/compose_test.sh` (no `extra_hosts` on mbsync); `mbsync/tests/host_alias_check.sh` (on the Mac only); `mcp-server/tests/test_http_transport.py` (`test_missing_token_is_unauthorized`, `test_wrong_token_is_unauthorized`, `test_empty_token_fails_closed`, `test_compare_is_constant_time`, `test_streamable_http_rejects_other_host`, `test_streamable_http_rejects_other_origin`). |
-| **Bridge TLS.** Another listener on the Bridge app's loopback port (another local account while the app is down) receives the Bridge password, or the connection falls back to plaintext. | `mbsync/entrypoint.sh` `extract_bridge_cert` connects over implicit TLS only, with no STARTTLS or plaintext fallback, and checks the certificate against the required `BRIDGE_CERT_FINGERPRINT` (`verify_expected_fingerprint`) and then the pin in `mbsync-state` (`verify_cert_pin`) on every start, before the first sync sends the password. With `BRIDGE_CERT_PIN_ROTATE=true` a changed certificate that matches the fingerprint replaces the pin instead of failing. The certificate lives on tmpfs at `/tmp/mbsync/bridge-cert.pem`, which isync uses as `CertificateFile` with `TLSType IMAPS` (`mbsync/mbsyncrc.template`). `validate-env.sh` refuses a missing or malformed fingerprint. isync checks the certificate's name against `BRIDGE_CERT_HOST`, which both sites limit to loopback names (`127.0.0.1` by default, the only name in the app's own certificate); extraction itself does no name check. The template is pull-only: `Sync Pull`, `Expunge None`. | The fingerprint check, the pin and isync's `CertificateFile` all check the certificate extracted at start. On first boot or during a rotation the pin is written from that certificate, so a fingerprint taken from the wrong certificate passes all three; after that, the pin also refuses a certificate other than the pinned one. | Pull-only sync is one configuration control, the template's settings. isync's own validity and host name checks run on each sync, not at startup. `BRIDGE_CERT_PIN_ROTATE=true` stays in effect until mbsync is recreated with it false, and while it does the pin check does not stop a certificate change; the fingerprint check still does. | `mbsync/tests/entrypoint_test.sh` (`mismatch_is_refused_without_rotation`, `first_boot_with_another_expected_fingerprint_is_refused_unpinned`, `missing_expected_fingerprint_is_refused_at_startup`, `config_keeps_sync_safety`, `rendered_config_matches_the_golden_file`, and the whole-entrypoint startup order cases such as `expected_fingerprint_mismatch_stops_before_the_pin`); `mbsync/tests/tls_check.sh` (check 6: a certificate for another name is refused before `LOGIN` under each accepted `BRIDGE_CERT_HOST`); `mbsync/tests/layout_check.sh`; `scripts/tests/validate_env_test.sh` `missing_bridge_cert_fingerprint_fails`; Semgrep `shell-tls-verification-disabled`. |
+| **Bridge TLS.** Another listener on the Bridge app's loopback port (another local account while the app is down) receives the Bridge password, or the connection falls back to plaintext. | `mbsync/entrypoint.sh` `extract_bridge_cert` connects over implicit TLS only, with no STARTTLS or plaintext fallback, and checks the certificate against the required `BRIDGE_CERT_FINGERPRINT` (`verify_expected_fingerprint`) and then the pin in `mbsync-state` (`verify_cert_pin`) on every start, before the first sync sends the password. With `BRIDGE_CERT_PIN_ROTATE=true` a changed certificate that matches the fingerprint replaces the pin instead of failing; `mbsync/proton-settings.sh` accepts that setting only as `true` or `false`, at `validate-env.sh` and before the entrypoint renders or connects. The certificate lives on tmpfs at `/tmp/mbsync/bridge-cert.pem`, which isync uses as `CertificateFile` with `TLSType IMAPS` (`mbsync/mbsyncrc.template`). `validate-env.sh` refuses a missing or malformed fingerprint. isync checks the certificate's name against `BRIDGE_CERT_HOST`, which both sites limit to loopback names (`127.0.0.1` by default, the only name in the app's own certificate); extraction itself does no name check. The template is pull-only: `Sync Pull`, `Expunge None`. | The fingerprint check, the pin and isync's `CertificateFile` all check the certificate extracted at start. On first boot or during a rotation the pin is written from that certificate, so a fingerprint taken from the wrong certificate passes all three; after that, the pin also refuses a certificate other than the pinned one. | Pull-only sync is one configuration control, the template's settings. isync's own validity and host name checks run on each sync, not at startup. `BRIDGE_CERT_PIN_ROTATE=true` stays in effect until mbsync is recreated with it false, and while it does the pin check does not stop a certificate change; the fingerprint check still does. | `mbsync/tests/entrypoint_test.sh` (`mismatch_is_refused_without_rotation`, `first_boot_with_another_expected_fingerprint_is_refused_unpinned`, `missing_expected_fingerprint_is_refused_at_startup`, `config_keeps_sync_safety`, `rendered_config_matches_the_golden_file`, `every_setting_row_agrees_at_both_sites` for `BRIDGE_CERT_PIN_ROTATE`, and the whole-entrypoint startup order cases such as `expected_fingerprint_mismatch_stops_before_the_pin`); `mbsync/tests/tls_check.sh` (check 6: a certificate for another name is refused before `LOGIN` under each accepted `BRIDGE_CERT_HOST`); `mbsync/tests/layout_check.sh`; `scripts/tests/validate_env_test.sh` `missing_bridge_cert_fingerprint_fails`; Semgrep `shell-tls-verification-disabled`. |
 
 ## Privacy Model
 
@@ -4186,4 +4281,5 @@ Set `INFERENCE_MODE` in `.env`:
   a host-side server you install yourself; only the latter keeps
   retrieved chunks on your machine.
 
-The toggle applies per-deployment. A per-session toggle is on the roadmap.
+The toggle applies per-deployment. A per-session toggle is not planned
+(`PLAN.md`, "Not doing").
