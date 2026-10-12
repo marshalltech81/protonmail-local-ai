@@ -1670,9 +1670,10 @@ here when it ships.
 No figures are recorded yet: the measurement on the indexer's rows is
 tracked in
 [#1469](https://github.com/marshalltech81/protonmail-local-ai/issues/1469),
-and the limits it proposes will be stated here from those figures. WAL
-retention under a concurrent writer, the other part of this sizing, is
-[#1476](https://github.com/marshalltech81/protonmail-local-ai/issues/1476).
+and the limits it proposes will be stated here from those figures,
+WAL retention under a concurrent writer
+([#1476](https://github.com/marshalltech81/protonmail-local-ai/issues/1476))
+included.
 
 **The benchmark.** `mcp-server/scripts/reconcile_bench.py` builds a
 synthetic index (generated values only, never mail) whose tables mirror
@@ -1689,7 +1690,8 @@ child process on the server's own read-only connection and with the
 server's own predicate compiler (unfiltered, Trash is left out), and
 records are read and serialized with the server's own `query_messages`
 and `query_attachments` helpers. Timings are plain `perf_counter`
-medians of `--repeat` runs, never a profiler. The page cache is not
+medians of `--repeat` runs (the WAL phase runs each configuration once,
+so its figures are single samples), never a profiler. The page cache is not
 controlled: it holds whatever the build and the earlier steps left, so
 a step's figures depend on the order of the steps and on how much of
 the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
@@ -1703,7 +1705,95 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
   records in the same transaction, with request and response bytes;
 - with `--filtered`, filtered predicates (participant, subject, body
   text, authority, dates) against one production page of the same
-  query.
+  query;
+- with `--wal`, after every other step, WAL growth while a second
+  process commits during one round's snapshot (largest K, each kind
+  and scan method), and whether a `TRUNCATE` checkpoint then reclaims
+  it. The WAL phase runs on its own index: the corpus indexed again
+  from empty tables by the writer's own commits, as a first index makes
+  them (batches of 50, oldest first, continuation passes included), so
+  every table a deployed index fills (threads, their full-text rows,
+  vectors and sums, the thread map, indexed files) holds the corpus;
+  it is checked to hold the same identities and counts as the read
+  steps' index, which stays as it is
+  ([#1577](https://github.com/marshalltech81/protonmail-local-ai/issues/1577)).
+  The writer makes the indexer's commits while it indexes mail,
+  claiming up to `--writer-batch` due jobs at a time (absent: 8 and 50,
+  the indexer's steady-state and first-index batch sizes) in the
+  indexer's order and pausing `--writer-interval` seconds after each
+  batch. `--writer-lifecycle` says how jobs reach its queue (absent:
+  both, each a result of its own): `arrival`, the steady state, queues
+  a batch of new mail, one commit a message, whenever no job is due;
+  `drain`, a first index, queues `--writer-backlog` messages (absent:
+  20,000) before the round, in one commit outside the measured window,
+  due at their message time as the indexer's walk queues them, and
+  drains them. A drain that runs out before the round ends fails the
+  measurement, and each drain result reports the jobs it had left.
+  For each message it commits a charge, the message's thread and
+  message rows, a refund, a charge and refund around chunking, its
+  chunks, vectors and attachments, and the job's deletion; each batch
+  adds one more commit, the lone message's charge and refund at batch
+  size 1 or one mark on every message at larger sizes. Like the
+  indexer it extracts a message's fresh attachments only within the
+  per-pass budget (64 process launches or 5 seconds, each extraction
+  counting `--writer-extract-seconds`, absent 0.1, a plain timing of
+  the benchmark's PDF); the rest are marked deferred in the same
+  commit as the pass's chunks, and the job is continued on a later
+  pass, due at once behind the jobs already due, which repeats the
+  queue and thread commits, keeps the occurrences already resolved and
+  deletes the job only on its last pass. Each message is rendered and
+  chunked, and its vectors made, before the commits that write it, as
+  the indexer parses and embeds before it writes. Its tables are the ones the
+  indexer writes and its messages have the corpus's shape, each stored
+  in its own folder, so new mail joins the round's set as it does in
+  production; it overwrites deleted content as the indexer does. The
+  upload stays the one written before the writer started: after the
+  writer stops, outside the window, the round's count, certificate,
+  missing and extra hashes, returned records and completeness are
+  checked against the rows committed before its snapshot (any
+  difference fails the measurement), and each result reports how many
+  members the snapshot gained (`snapshot_growth`). `indexer/tests/test_reconcile_bench_fidelity.py`
+  traces the indexer's own commits and checks the writer's sequence, the
+  tables and statements of each commit, the rows (folders included)
+  and full-text entries it writes, and each continuation pass, with the
+  indexer's extraction budget clock driven so each extraction takes the
+  writer's seconds. Header rows, their retained-prefix budgets, completeness
+  flags and cap counts match the current parser; the benchmark decodes only
+  its controlled generated header grammar, with a differential test for
+  every parser-producible CLI shape. Unsupported generated encodings fail.
+  With identical synthetic embeddings it also checks
+  the vectors and thread sums, for the WAL index's construction and
+  for new mail joining the one large thread `--identity
+  ascii998common` makes.
+  It cuts thread bodies at the indexer's 4,000-token cap with the
+  indexer's own tokenizer asset (`indexer/src/data/qwen3-embedding`,
+  read only; `tokenizers` is already in the image at the indexer's
+  pinned version), so `--wal` is refused when the asset is not found
+  beside the script or mounted at `/app/tokenizer`. Its bytes and
+  extraction time are not calibrated against the live indexer, and the
+  pace is a parameter
+  ([#1469](https://github.com/marshalltech81/protonmail-local-ai/issues/1469)).
+  The writer runs with automatic checkpoints off, so the WAL file's
+  size is the WAL's end. Each configuration runs on a fresh copy of the
+  WAL phase's index, so the phase needs disk for that index and a copy
+  beside the read steps' index: measured on a laptop with typical
+  records and one attachment a message, the WAL index took 63 s and
+  543 MB for 10,000 messages (the read index: 68 MB). With
+  `--identity ascii998common` every message rewrites the one thread's
+  list of 1,015-byte claimant IDs, so a message's cost rises with the
+  corpus: 173 s and 342 MB for 2,000 messages (about 86 ms a message,
+  against 6 ms for typical records), 414 s for 4,000 and 534 s and
+  831 MB for 5,000. Before anything is built, `--wal` estimates the
+  WAL index's build from every cost dimension together (messages;
+  per message its attachments, the dominant term at about 2 ms each,
+  body chunks, bytes written, participant rows and continuation
+  passes; the common-ID thread's growth), with coefficients fitted to
+  those plain timings on that laptop, and refuses a run estimated over
+  30 minutes. The documented command below is estimated at about 8
+  minutes; 5,000 messages accept at most 162 attachments each, and the
+  common-ID shape with one attachment at most 11,766 messages (an
+  extrapolation past the 5,000 measured). Another host's build differs:
+  the estimate bounds the work, it is not a deadline.
 
 Run it inside the mcp-server image so SQLite and Python match the
 server's; `--help` lists every option:
@@ -1711,8 +1801,9 @@ server's; `--help` lists every option:
 ```bash
 docker build -t mcp-bench mcp-server
 docker run --rm --entrypoint python \
-  -v "$PWD/mcp-server/scripts:/app/scripts:ro" mcp-bench \
-  scripts/reconcile_bench.py --messages 50000 --identity typical --filtered
+  -v "$PWD/mcp-server/scripts:/app/scripts:ro" \
+  -v "$PWD/indexer/src/data/qwen3-embedding:/app/tokenizer:ro" mcp-bench \
+  scripts/reconcile_bench.py --messages 50000 --identity typical --wal --filtered
 ```
 
 Run it only while the live indexer is idle: a busy indexer shares the
