@@ -679,6 +679,40 @@ class TestReapedSources:
         out = asyncio.run(handlers["get_message"](message_id=claimant_of(reaped)))
         assert "zqxcrafted body" in _text(out)
 
+    def test_reaped_version_is_not_answered_by_a_surviving_version(self, fake_server, tmp_path):
+        """#1316: two byte versions of one message (same Message-ID,
+        different bytes) are two claimants. Once one is reaped, its
+        claimant ID reports the reap and never returns the surviving
+        version's bytes; the survivor stays reachable by its own
+        claimant ID and by the bare Message-ID."""
+        with _open_fixture_db(tmp_path) as (conn, db):
+            reaped = insert_reaped(
+                conn, message_id="dup@example.com", thread_id="t1", reaped_at=self._REAPED_AT
+            )
+            _insert_message(
+                conn,
+                message_id="dup@example.com",
+                variant="b",
+                thread_id="t1",
+                sent_at="2024-01-11T09:00:00+00:00",
+                body="zqxsurvivor version body",
+            )
+            conn.close()
+        survivor = claimant_of("dup@example.com", "b")
+        handlers = _handlers(fake_server, db)
+
+        message = _error(handlers["get_message"](message_id=reaped))
+        assert f"reaped from the index on {RECENT_REAP_DAY} (mirror retention)" in message
+        assert "zqxsurvivor" not in message
+        for identifier in (survivor, "dup@example.com"):
+            out = asyncio.run(handlers["get_message"](message_id=identifier))
+            assert out.structured_content["message"]["claimant_id"] == survivor
+            assert "zqxsurvivor version body" in _text(out)
+        out = asyncio.run(handlers["get_thread"](thread_id="t1"))
+        assert out.structured_content["reaped_messages"] == [
+            {"claimant_id": reaped, "reaped_at": self._REAPED_AT}
+        ]
+
     def test_message_states_only_what_the_record_shows(self, fake_server, tmp_path):
         """The stored time is the local reap, not the
         upstream deletion, and a file missing from the Maildir is reaped

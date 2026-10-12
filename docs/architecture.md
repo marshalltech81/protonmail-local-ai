@@ -1263,6 +1263,101 @@ this synthetic corpus, not a live mailbox or a general latency bound.
 Migration 0013 queues the existing reparse path; unchanged chunks keep
 their IDs and vectors. `get_message` does not return this table.
 
+## Proton identity evidence
+
+Bridge writes Proton's message ID into the messages it builds as
+`X-Pm-Internal-Id`, and Gluon (Bridge's IMAP library) writes its own
+internal ID as `X-Pm-Gluon-Id`. The index extracts neither as an
+identity: they are bytes of the file like any other, so they change its
+size and the claimant ID's hash, and they count toward the stored-header,
+address-field and sort-time read caps (T1). Like every top-level field
+they are kept as header evidence of their own claimant in
+`message_headers` (above) and removed with it on reap (T2), so the
+`header_exists` and `header_contains` predicates can match them. That
+match is a caseless substring test of each stored field's decoded value
+(its raw value only when decoding failed), not a validated logical
+lookup: it counts claimants (byte-identical copies are one, T6, and
+byte versions are several), forged and duplicated fields
+match as readily as genuine ones, and a value matches every ID that
+contains it (T9).
+#1313 proposes accepting `X-Pm-Internal-Id` as a logical identity
+under a validated policy; this section is the evidence that proposal
+waits on (#1316). Three kinds of evidence are kept apart, and only the
+second runs anything:
+
+- **Source review, not executed:** reading Bridge
+  `b9c5dac1651437100c40896dacd778a0518a26f2` and its pinned Gluon
+  `7e800978ab4a9942829eb6116e33ea0278c03e91` (and the `go-message`
+  fork Bridge pins). Says what the code is written to do, not what a
+  running Bridge delivers.
+- **Tests of this repository's code**, on synthetic files.
+- **Unresolved:** needs the upstream code run in a local harness
+  (#1583), a live synthetic account (#1584), or a mechanism this
+  repository does not have yet (#1313, #1317, #1566).
+
+No row describes an actual Bridge binary.
+
+**Source review, not executed.**
+
+| # | Observation | Where |
+|---|---|---|
+| S1 | Default builds set `X-Pm-Internal-Id` to the Proton ID. When the topmost existing field already equals it, every existing field is kept, so further, different fields can stay below it; otherwise all are replaced by one field. | Bridge `pkg/message/build.go` `setHeaderIfNeeded`, `internal/services/imapservice/sync_build.go` `defaultMessageJobOpts`; `go-message` `Header.Set` (delete, then add) |
+| S2 | A built message without a Message-ID gets a synthesized one. | `build.go` `setMessageIDIfNeeded` |
+| S3 | Multipart builds use random boundaries, so one Proton message can be built as different bytes. | `build.go` `newBoundary` |
+| S4 | A created message gets one Gluon ID shared by all its mailboxes; `X-Pm-Gluon-Id` is prepended to the literal without removing existing fields of that name. | Gluon `internal/backend/connector_updates.go` `applyMessagesCreated`, `rfc822/header.go` `SetHeaderValue` |
+| S5 | A content update equal to the stored literal, byte for byte or by `CompareLiterals` (a normalized comparison of content and of every part's headers that ignores MIME boundaries and `X-Pm-Gluon-Id`), keeps the Gluon ID and the memberships it stays in (so their UIDs), adding and removing only the mailboxes the update changes; any other gets a new Gluon ID. | `connector_updates.go` (`applyMessageMailboxesOnlyUpdate`), `rfc822/hash.go` |
+| S6 | Label and flag events update mailboxes only; draft and sent content events rebuild the literal. A failed build, at initial sync or on an event, publishes nothing. | Bridge `internal/services/imapservice/service_message_events.go`, `internal/services/syncservice/stage_build.go` |
+| S7 | A failed APPEND or import whose literal Gluon can parse is stored unchanged in `Recovered Messages` (listed only when non-empty), with no `X-Pm-Gluon-Id` added, unless a literal with the same `GetMessageHash` is already there; that hash leaves out `Date`, `Message-Id` and `X-Pm-*`. A literal Gluon cannot parse is not stored there: the recovery returns the parse error first. Nor is an APPEND that fails as over the size limit (`ErrMessageSizeExceedsLimits`): `Append` returns before any recovery. | Gluon `internal/state/mailbox.go` `Append`, `internal/state/actions.go` `actionCreateRecoveredMessage`, `internal/utils/message_hashmap.go`, `internal/state/state.go` `List` |
+| S8 | A lost recovery literal is an error (never refetched). Any other lost literal is refetched from Bridge, given `X-Pm-Gluon-Id` (S4) and stored; a failed fetch, header write or store is an error and returns no literal. Moving or copying out of recovery imports it: when Bridge returns a remote ID already known locally, the existing message is used and nothing is stored; otherwise the literal Bridge returns is parsed, given `X-Pm-Gluon-Id` and stored, and a failure at any of those steps is an error that stores nothing. | `state.go` `getLiteral`, `actions.go` `actionImportRecoveredMessage` |
+| S9 | An APPEND outside Drafts carrying an existing, undeleted message's `X-Pm-Gluon-Id` adds that message to the mailbox without comparing bytes; Drafts erases the header and creates a message, and when the erase fails it logs the error and creates the message from the original literal, header included. | Gluon `internal/state/mailbox.go` `AppendRegular` |
+| S10 | Any body-section FETCH, `BODY.PEEK[HEADER.FIELDS ...]` included, loads the full literal; `PEEK` does not set `\Seen`. `EXAMINE` is read-only; `UNSELECT` does not expunge; `CLOSE` expunges unless read-only. | `internal/state/mailbox_fetch.go`, `state.go`, `internal/session/handle_close.go`, `handle_unselect.go` |
+| S11 | A mailbox snapshot takes UID, `\Recent` and `\Deleted` per mailbox, other flags from a table keyed by message. | `internal/db_impl/sqlite3/read_ops.go` |
+
+**Tests of this repository's code.** Test files are under
+`indexer/tests/` unless named otherwise.
+
+| # | Supported claim | Test |
+|---|---|---|
+| T1 | Parsed with the same source metadata, a message with identity headers (at the top of the header block or below the others) differs from one without only in its size and content hash (so its claimant ID) and in its `headers` list, which keeps every identity field as an ordinary header at its source position, within the header budget (at most `MAX_STORED_HEADER_FIELDS`, 256, top-level fields, none over 16 KiB of name and value, 1 MiB in all); every other compared `Message` field is equal, and `Message` has no provider-identity field. Past any of the three, header capture stops at the first field over it: the earlier fields are kept, the rest (`From` and `Date` too, when identity headers fill the capture above them) are not stored, `headers_complete` is false, and the cap is counted as `headers_budget` in `parse_caps` and logged as a WARNING; the other `Message` fields are unchanged up to `MAX_ADDRESS_HEADER_FIELDS` (10,000) fields. Past that many, wherever the identity headers sit, the From/To/Cc scan stops as well (#1144): `address_fields` is counted too, the sender is flagged ambiguous and all three address roles incomplete, and From, To and Cc headers after the cut-off are lost (all of them when identity headers fill the scan above `From`). Identity headers above `Date` that push it past the first `SORT_HEADER_MAX_BYTES` (64 KiB), in a file with no `Received:` within that read, leave the sort time of a first full index unknown, so the file is ordered at the walk's start time; a `Received:` above them still gives it. | `test_provider_identity_evidence.py` `TestParserIgnoresIdentityHeaders` |
+| T2 | Two files whose bytes differ (byte-identical files share one claimant, T6) with equal, forged, duplicated, conflicting or absent identity headers, at the top of the header block or below the others, with the same or different Message-IDs, in either order, are two claimants with their own rows. Trashing one tombstones only its claimant ID (never the bare Message-ID or the other claimant) and, within the grace window, removes no row; reaping it removes all of its rows except the `reaped_messages` record it adds, and leaves every row of the other unchanged. Every table with a `claimant_id` column in the schema is seen holding rows. A file whose identity headers fill the address scan (T1) is still its own claimant, stored with both caps recorded, `headers_complete` 0, its first 256 fields and no participant rows. No identity value is logged; the only stored copies are each claimant's own `message_headers` rows, exactly the fields its file carries (within the header budget), and reaping the claimant removes them. | `TestClaimantsStayIndependent` there; `test_main.py` `TestMessageIdClaimants` (#217) |
+| T3 | Two byte versions of one message (S3: same text and identity headers, new boundary) have disjoint chunk IDs and each its own identity header rows; reaping the older removes only its chunks and header rows and records it as reaped. | `TestByteVersionsOfOneLogicalMessage` |
+| T4 | While its reap record is inside the retention window (`REAPED_RECORD_RETENTION_DAYS`, 30 days), a reaped version's claimant ID reports the reap, never the surviving version; after it, a lookup by that claimant ID reads as not found; a bare Message-ID naming several live claimants lists them rather than choosing. | `mcp-server/tests/test_retrieval.py` `test_reaped_version_is_not_answered_by_a_surviving_version`, `test_bare_message_id_with_several_claimants_lists_them`, `TestReapedSources` `test_expired_record_reads_as_not_found` |
+| T5 | A file without a Message-ID (as recovery can hold, S7) is dead-lettered with fixed text whatever identity headers it carries (every T2 shape, at the top of the header block or below the others). Today's behaviour, apart from the #1082 decision. | `TestIdLessRecoveryStyleInput` |
+| T6 | Byte-identical copies share one claimant and one row; removing one copy keeps the message (#1102). | `test_synthetic_source.py` `TestByteIdenticalCopiesAcrossFolders`, `test_reconciler.py` `TestByteIdenticalCopies` |
+| T7 | A source with no Proton headers and non-Proton folder names parses normally and is indexed through the queue and writer into its folder; a missing send date stays unknown. | `test_synthetic_source.py` (#1483); `TestGenericSourceIndexes` |
+| T8 | A claimant ID depends only on the file's bytes: flag renames and folder moves keep it. | `test_parser.py` `TestClaimantId` |
+| T9 | `header_contains` on `X-Pm-Internal-Id` matches each claimant (byte-identical copies are one, T6) holding a field whose decoded value (raw value when decoding failed) contains the value, so an encoded word matches the ID it decodes to and not its wire text: two byte versions of one message count as two, a claimant with duplicated fields matches on any of them, a shared prefix in another case matches every ID containing it, and a claimant whose header capture is incomplete or not yet assessed is indeterminate when no stored field matches, not a miss; a stored match counts even then. The indexer stores an encoded word's wire text as the raw value and the decoded ID as the decoded value. | `mcp-server/tests/test_provider_identity_headers.py`; `test_provider_identity_evidence.py` `TestEncodedIdentityHeaderThroughTheWriter` |
+
+**Observations an identity policy must reject.** These follow from
+the rows above; they bind #1313's policy, which does not exist yet.
+
+- `X-Pm-Gluon-Id` as a logical identity: it is Gluon-local, changes on
+  unequal content updates and on recovery imports Bridge does not map
+  to a known message (S4, S5, S8), and a client can use it to
+  file an existing message without a byte check (S9).
+- Any identity header in a `Recovered Messages` file, which keeps the
+  submitted bytes (S7); recovery is an untrusted category (#1317).
+- A header's presence in a file whose provenance is not established,
+  and a folder name as provenance.
+- Equal bytes or an equal Message-ID as proof of one logical message
+  (PLAN.md decision 45).
+- Several `X-Pm-Internal-Id` fields in one file are ambiguous, not
+  accepted. S1 means a Bridge-built file can carry them when the
+  topmost matches, so duplication alone does not prove forgery either.
+- A `header_exists` or `header_contains` match on an identity header,
+  or its count, as a logical identity or a count of logical messages:
+  it is a text match over each claimant's stored fields (T9), and a miss on a
+  file whose header capture stopped (T1) is unknown, not absence.
+
+**Unresolved.**
+
+| # | Question | Needs |
+|---|---|---|
+| U1 | Which header shapes (S1, S4) reach mbsync; recovery deduplication counts and bytes, recovery cache loss and COPY versus MOVE out of recovery (S7, S8); the APPEND hint (S9); whether a refill or equivalent update changes bytes under an existing UID (S5, S8); flag scope as mbsync writes it (S11); read-only command behaviour and header-only fetch cost (S10). | #1583 |
+| U2 | Proton ID stability across moves, labels, draft replacement, send and imports; whether Proton keeps sender-supplied `X-Pm-*` headers; cache rebuild, resync, account re-add, split or combined address mode and primary-address changes; header-only reads of a real label set and races with moves. | #1584 (owner-approved plan first) |
+| U3 | Account namespace, the acceptance rule, binding an observation to the exact retained bytes through the mbsync handoff, logical lookup and counts (header predicates match stored text only, T9), membership generations and partial scans. | #1313, #1317 |
+| U4 | Independent occurrences of equal bytes (own folder and flags); stored flags still come from the file name. | #1566, #1485 |
+
 ## Message time
 
 The index records two times per message, `sent_at` and `occurred_at`,
