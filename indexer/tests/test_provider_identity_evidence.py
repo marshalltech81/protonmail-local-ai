@@ -18,7 +18,8 @@ before any proposed use of the headers (#1313):
   another claimant's rows, in either arrival order, whether the
   headers sit at the top of the header block or below the others.
 - Like any header fields, enough of them reach existing work caps: past
-  ``MAX_STORED_HEADER_FIELDS`` top-level fields header capture stops
+  the header budget (``MAX_STORED_HEADER_FIELDS`` top-level fields, or
+  its per-field or total bytes) header capture stops
   and says so (``headers_budget``, ``headers_complete`` false), past
   ``MAX_ADDRESS_HEADER_FIELDS`` the address scan stops and says so
   (#1144), and above ``Date`` past ``SORT_HEADER_MAX_BYTES`` they leave
@@ -69,6 +70,13 @@ _GLUON_OTHER = "SYNTHGLUON1316-0000-0000-0000-000000000002"
 _ID_MARKERS = ("SYNTHPMID1316", "SYNTHGLUON1316")
 
 
+def _leaks(text: str, needles: tuple[str, ...] = _ID_MARKERS) -> bool:
+    """Whether ``text`` holds one of ``needles`` in any case, so a copy
+    normalized on the way (lowercased, case-folded) is still found."""
+    folded = text.casefold()
+    return any(n.casefold() in folded for n in needles)
+
+
 def _eml(
     message_id: str | None,
     body: str,
@@ -89,6 +97,7 @@ def _eml(
     headers = [
         "From: Sender One <sender@mail.example>",
         "To: Recipient Two <recipient@mail.example>",
+        "Cc: Copied Three <copied@mail.example>",
         f"Subject: {subject}",
         "Date: Mon, 01 Jan 2024 12:00:00 +0000",
     ]
@@ -224,7 +233,7 @@ class _Index:
 
     def tables_holding(self, needles: tuple[str, ...]) -> set[str]:
         """Every regular table with a text or blob value containing one
-        of ``needles``."""
+        of ``needles``, in any case."""
         found: set[str] = set()
         tables = [
             r[0]
@@ -238,7 +247,7 @@ class _Index:
                 for value in row:
                     if isinstance(value, bytes):
                         value = value.decode("latin-1")
-                    if isinstance(value, str) and any(n in value for n in needles):
+                    if isinstance(value, str) and _leaks(value, needles):
                         found.add(table)
         return found
 
@@ -252,7 +261,7 @@ class _Index:
             "ORDER BY claimant_id, ordinal"
         ):
             values = f"{r['raw_value']}\0{r['decoded_value']}"
-            if any(marker in values for marker in _ID_MARKERS):
+            if _leaks(values):
                 rows.setdefault(r["claimant_id"], []).append((r["name"], r["raw_value"]))
         return rows
 
@@ -332,6 +341,27 @@ def _filler(count: int) -> tuple[tuple[str, str], ...]:
     return tuple((_INTERNAL, f"SYNTHPMID1316{i:06d}==") for i in range(count))
 
 
+def _kept_fields(written: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The leading fields of ``written`` within the documented header
+    budget (#1079): at most ``MAX_STORED_HEADER_FIELDS`` fields, none
+    over ``MAX_STORED_HEADER_VALUE_BYTES`` (name plus value) and at most
+    ``MAX_STORED_HEADER_BYTES`` in all; capture stops at the first field
+    over any of them."""
+    kept: list[tuple[str, str]] = []
+    spent = 0
+    for name, value in written:
+        size = len(name.encode()) + len(value.encode())
+        if (
+            len(kept) >= parser.MAX_STORED_HEADER_FIELDS
+            or size > parser.MAX_STORED_HEADER_VALUE_BYTES
+            or spent + size > parser.MAX_STORED_HEADER_BYTES
+        ):
+            break
+        spent += size
+        kept.append((name, value))
+    return kept
+
+
 def _assert_only_bytes_and_headers_differ(
     tagged: parser.Message, tagged_raw: bytes, plain: parser.Message, plain_raw: bytes
 ) -> None:
@@ -339,8 +369,8 @@ def _assert_only_bytes_and_headers_differ(
     ``tagged_raw``, so its claimant ID differs from ``plain``'s exactly
     when the bytes differ. Its ``headers`` are the fields written into
     ``tagged_raw``, identity fields included, each as an ordinary
-    ``MessageHeader`` at its source ordinal, up to
-    ``MAX_STORED_HEADER_FIELDS``; past that the capture stops, says so
+    ``MessageHeader`` at its source ordinal, within the header budget
+    (``_kept_fields``); past it the capture stops, says so
     (``headers_complete`` false, ``headers_budget`` counted) and keeps
     the earlier fields. Every other compared field equals ``plain``'s
     (``first_indexed_at``, the clock at parse time, is not compared)."""
@@ -350,12 +380,12 @@ def _assert_only_bytes_and_headers_differ(
     )
     assert (tagged.claimant_id == plain.claimant_id) == (tagged_raw == plain_raw)
     written = _written_fields(tagged_raw)
-    kept = written[: parser.MAX_STORED_HEADER_FIELDS]
+    kept = _kept_fields(written)
     assert [(h.ordinal, h.name, h.raw_value, h.decoded_value) for h in tagged.headers] == [
         (i, name, value, value) for i, (name, value) in enumerate(kept)
     ]
     assert all(h.name_normalized == h.name.lower() for h in tagged.headers)
-    capped = len(written) > parser.MAX_STORED_HEADER_FIELDS
+    capped = len(kept) < len(written)
     assert tagged.headers_complete is (not capped)
     assert tagged.parse_caps.get("headers_budget", 0) == int(capped)
     # The plain message is under every cap, so its headers are complete.
@@ -417,17 +447,15 @@ class TestParserIgnoresIdentityHeaders:
         identity = [
             (h.name, h.raw_value)
             for h in tagged.headers
-            if any(marker in h.raw_value for marker in _ID_MARKERS)
+            if _leaks(f"{h.raw_value}\0{h.decoded_value}")
         ]
         assert identity == list(_SECOND_IDENTITY[shape])
-        assert all(
-            marker not in repr(dataclasses.replace(tagged, headers=[])) for marker in _ID_MARKERS
-        )
+        assert not _leaks(repr(dataclasses.replace(tagged, headers=[])))
         # Pinned, so a new ``Message`` field (a provider identity among
         # them, even one equal on both messages) fails here until it is
         # classified and this claim rechecked.
         assert [f.name for f in dataclasses.fields(parser.Message)] == _MESSAGE_FIELDS
-        assert all(marker not in caplog.text for marker in _ID_MARKERS)
+        assert not _leaks(caplog.text)
 
     @pytest.mark.parametrize("identity_first", [False, True], ids=["after-ids", "top"])
     def test_identity_headers_up_to_the_stored_header_cap_are_all_kept(self, identity_first):
@@ -453,46 +481,71 @@ class TestParserIgnoresIdentityHeaders:
 
     @pytest.mark.parametrize("identity_first", [False, True], ids=["after-ids", "top"])
     @pytest.mark.parametrize(
-        "total",
-        [parser.MAX_STORED_HEADER_FIELDS + 1, parser.MAX_ADDRESS_HEADER_FIELDS],
-        ids=["one-over", "address-scan-cap"],
+        "budget",
+        ["fields-one-over", "fields-at-address-scan-cap", "field-bytes", "total-bytes"],
     )
-    def test_identity_headers_past_the_stored_header_cap_are_counted(
-        self, caplog, identity_first, total
+    def test_identity_headers_past_the_stored_header_budget_are_counted(
+        self, caplog, identity_first, budget
     ):
-        """Past ``MAX_STORED_HEADER_FIELDS`` top-level fields, header
-        capture stops at the cap: the earlier fields are kept, the rest
-        (the From, To and Date fields too, when identity headers fill the
-        capture above them) are not stored, ``headers_complete`` is false
-        and the cap is counted as ``headers_budget`` in ``parse_caps`` and
-        a WARNING. Up to ``MAX_ADDRESS_HEADER_FIELDS`` fields in all, the
-        address scan, subject, dates, body and attachments are those of
-        the message without identity headers."""
+        """Past the header budget (more than ``MAX_STORED_HEADER_FIELDS``
+        top-level fields, one field over ``MAX_STORED_HEADER_VALUE_BYTES``
+        or more than ``MAX_STORED_HEADER_BYTES`` in all), header capture
+        stops at the first field over it: the earlier fields are kept, the
+        rest (the From, To and Date fields too, when identity headers fill
+        the capture above them) are not stored, ``headers_complete`` is
+        false and the cap is counted as ``headers_budget`` in
+        ``parse_caps`` and a WARNING. Up to ``MAX_ADDRESS_HEADER_FIELDS``
+        fields in all, the address scan, subject, dates, body and
+        attachments are those of the message without identity headers."""
         caplog.set_level(logging.DEBUG)
         plain_raw = _eml("evidence@mail.example", "Same body.")
+        base = _top_level_fields(plain_raw)
+        identity = {
+            "fields-one-over": _filler(parser.MAX_STORED_HEADER_FIELDS + 1 - base),
+            "fields-at-address-scan-cap": _filler(parser.MAX_ADDRESS_HEADER_FIELDS - base),
+            "field-bytes": (
+                (_INTERNAL, "SYNTHPMID1316" + "a" * parser.MAX_STORED_HEADER_VALUE_BYTES),
+            ),
+            # Each field within its own limit, below the field count, over
+            # the total.
+            "total-bytes": tuple(
+                (_INTERNAL, f"SYNTHPMID1316{i:06d}" + "a" * 15_000) for i in range(80)
+            ),
+        }[budget]
         tagged_raw = _eml(
             "evidence@mail.example",
             "Same body.",
-            identity=_filler(total - _top_level_fields(plain_raw)),
+            identity=identity,
             identity_first=identity_first,
         )
-        assert _top_level_fields(tagged_raw) == total
+        written = _written_fields(tagged_raw)
+        kept = _kept_fields(written)
+        # Each layout trips the dimension it names, and only that one.
+        assert {
+            "fields-one-over": len(written) > parser.MAX_STORED_HEADER_FIELDS == len(kept),
+            "fields-at-address-scan-cap": len(written) == parser.MAX_ADDRESS_HEADER_FIELDS,
+            "field-bytes": len(written) < parser.MAX_STORED_HEADER_FIELDS
+            and max(len(n) + len(v) for n, v in written) > parser.MAX_STORED_HEADER_VALUE_BYTES,
+            "total-bytes": len(written) < parser.MAX_STORED_HEADER_FIELDS
+            and max(len(n) + len(v) for n, v in written) < parser.MAX_STORED_HEADER_VALUE_BYTES
+            and sum(len(n) + len(v) for n, v in written) > parser.MAX_STORED_HEADER_BYTES,
+        }[budget]
 
         plain = parser.parse_email_bytes(plain_raw, _SOURCE)
         tagged = parser.parse_email_bytes(tagged_raw, _SOURCE)
 
         assert plain is not None and tagged is not None
         _assert_only_bytes_and_headers_differ(tagged, tagged_raw, plain, plain_raw)
-        assert len(tagged.headers) == parser.MAX_STORED_HEADER_FIELDS
+        assert len(tagged.headers) == len(kept) < len(written)
         assert tagged.headers_complete is False
         assert tagged.parse_caps == {"headers_budget": 1}
         stored = {h.name_normalized for h in tagged.headers}
-        from_index = [name for name, _ in _written_fields(tagged_raw)].index("From")
-        assert ("from" in stored) is (from_index < parser.MAX_STORED_HEADER_FIELDS)
+        from_index = [name for name, _ in written].index("From")
+        assert ("from" in stored) is (from_index < len(kept))
         assert tagged.from_addr == plain.from_addr and tagged.from_addresses_complete
         warnings = _cap_warnings(caplog)
         assert len(warnings) == 1 and warnings[0].endswith(": headers_budget=1")
-        assert all(marker not in caplog.text for marker in _ID_MARKERS)
+        assert not _leaks(caplog.text)
 
     @pytest.mark.parametrize(
         ("layout", "addresses_kept"),
@@ -534,12 +587,23 @@ class TestParserIgnoresIdentityHeaders:
             or tagged.cc_addresses_complete
         )
         if addresses_kept:
-            kept = (plain.from_addr, plain.from_addrs, plain.to_addrs, plain.participant_names)
+            kept = (
+                plain.from_addr,
+                plain.from_addrs,
+                plain.to_addrs,
+                plain.cc_addrs,
+                plain.participant_names,
+            )
         else:
-            kept = ("", [], [], [])
-        assert (tagged.from_addr, tagged.from_addrs, tagged.to_addrs, tagged.participant_names) == (
-            kept
-        )
+            kept = ("", [], [], [], [])
+        assert plain.cc_addrs and plain.to_addrs and plain.from_addrs
+        assert (
+            tagged.from_addr,
+            tagged.from_addrs,
+            tagged.to_addrs,
+            tagged.cc_addrs,
+            tagged.participant_names,
+        ) == kept
         # Nothing else the parser returns changes.
         _assert_only_bytes_and_headers_differ(
             dataclasses.replace(
@@ -547,6 +611,7 @@ class TestParserIgnoresIdentityHeaders:
                 from_addr=plain.from_addr,
                 from_addrs=plain.from_addrs,
                 to_addrs=plain.to_addrs,
+                cc_addrs=plain.cc_addrs,
                 participant_names=plain.participant_names,
                 sender_ambiguous=plain.sender_ambiguous,
                 from_addresses_complete=plain.from_addresses_complete,
@@ -561,7 +626,7 @@ class TestParserIgnoresIdentityHeaders:
         warnings = _cap_warnings(caplog)
         assert len(warnings) == 1
         assert warnings[0].endswith(": address_fields=1,headers_budget=1")
-        assert all(marker not in caplog.text for marker in _ID_MARKERS)
+        assert not _leaks(caplog.text)
 
     @pytest.mark.parametrize(
         ("identity_first", "past_the_read"),
@@ -736,7 +801,7 @@ class TestClaimantsStayIndependent:
         assert observed == idx.schema_claimant_tables()
         # No identity value is logged, and the only stored copies left
         # are the survivor's own header rows.
-        assert all(marker not in caplog.text for marker in _ID_MARKERS)
+        assert not _leaks(caplog.text)
         idx.assert_identity_stored_only_as_header_evidence({b: _SECOND_IDENTITY[shape]})
 
     def test_identity_headers_past_the_address_scan_cap_index_as_their_own_claimant(
@@ -792,7 +857,7 @@ class TestClaimantsStayIndependent:
 
         assert not any(idx.rows_of(b).values())
         assert idx.rows_of(a) == rows_a
-        assert all(marker not in caplog.text for marker in _ID_MARKERS)
+        assert not _leaks(caplog.text)
         idx.assert_identity_stored_only_as_header_evidence({a: _FIRST_IDENTITY})
 
 
@@ -881,7 +946,7 @@ class TestIdLessRecoveryStyleInput:
         )
         assert idx.db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
         assert not idx.db.is_indexed(str(path))
-        assert all(marker not in caplog.text for marker in _ID_MARKERS)
+        assert not _leaks(caplog.text)
         assert "deltaword" not in caplog.text
         assert idx.tables_holding((*_ID_MARKERS, "deltaword")) == set()
 
