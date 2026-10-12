@@ -9,16 +9,20 @@ fields below one that matches (see the "Proton identity evidence"
 section of ``docs/architecture.md`` for the upstream source review). These tests pin what the index does with such files today,
 before any proposed use of the headers (#1313):
 
-- The headers are ordinary bytes. Two files that differ in anything
-  get two claimant IDs (#217), each with its own rows in every table
-  keyed by claimant ID, and
-  neither header ever merges, overwrites or deletes another claimant's
-  rows, in either arrival order, whether the headers sit at the top of
-  the header block or below the others.
+- The headers are ordinary header evidence (#1079). Like every other
+  top-level field they are kept in ``Message.headers`` and stored as
+  ``message_headers`` rows of their own claimant, and nothing reads
+  them as an identity. Two files that differ in anything get two
+  claimant IDs (#217), each with its own rows in every table keyed by
+  claimant ID, and neither header ever merges, overwrites or deletes
+  another claimant's rows, in either arrival order, whether the
+  headers sit at the top of the header block or below the others.
 - Like any header fields, enough of them reach existing work caps: past
-  ``MAX_ADDRESS_HEADER_FIELDS`` top-level fields the address scan stops
-  and says so (#1144), and above ``Date`` past ``SORT_HEADER_MAX_BYTES``
-  they leave a first full index's sort time unknown.
+  ``MAX_STORED_HEADER_FIELDS`` top-level fields header capture stops
+  and says so (``headers_budget``, ``headers_complete`` false), past
+  ``MAX_ADDRESS_HEADER_FIELDS`` the address scan stops and says so
+  (#1144), and above ``Date`` past ``SORT_HEADER_MAX_BYTES`` they leave
+  a first full index's sort time unknown.
 - Two byte versions of one logical message (a rebuild with a new MIME
   boundary) are two claimants with disjoint chunk IDs; reaping one
   leaves the other's chunks as they were and records the reaped
@@ -26,7 +30,9 @@ before any proposed use of the headers (#1313):
 - A recovery-style file with no Message-ID is dead-lettered with fixed
   text whatever identity headers it carries (the #1082 decision may
   change this; this test records today's behaviour only).
-- No identity value reaches the log, ``last_error`` or any table.
+- No identity value reaches the log or ``last_error``, and the only
+  stored copies are the ``message_headers`` rows of the file that
+  carries them, removed when that claimant is reaped.
 - A source with no Proton headers, in a folder outside Proton's layout,
   is indexed like any other message.
 
@@ -54,7 +60,8 @@ from tests.conftest import make_mock_embedder
 from tests.test_main import _UNIT_VECTOR, _drain, _make_queue
 
 # Synthetic identity values. They must never appear in a log line, a
-# persisted error or a stored row.
+# persisted error or a stored row other than their own claimant's
+# ``message_headers`` rows.
 _PM_ID = "SYNTHPMID1316aaaa=="
 _PM_OTHER = "SYNTHPMID1316bbbb=="
 _GLUON_ID = "SYNTHGLUON1316-0000-0000-0000-000000000001"
@@ -235,6 +242,30 @@ class _Index:
                         found.add(table)
         return found
 
+    def identity_rows(self) -> dict[str, list[tuple[str, str]]]:
+        """Per claimant, the ``(name, raw_value)`` of every
+        ``message_headers`` row holding an identity marker, in source
+        order."""
+        rows: dict[str, list[tuple[str, str]]] = {}
+        for r in self.db._conn.execute(
+            "SELECT claimant_id, name, raw_value, decoded_value FROM message_headers "
+            "ORDER BY claimant_id, ordinal"
+        ):
+            values = f"{r['raw_value']}\0{r['decoded_value']}"
+            if any(marker in values for marker in _ID_MARKERS):
+                rows.setdefault(r["claimant_id"], []).append((r["name"], r["raw_value"]))
+        return rows
+
+    def assert_identity_stored_only_as_header_evidence(
+        self, expected: dict[str, tuple[tuple[str, str], ...]]
+    ) -> None:
+        """The identity markers are stored nowhere but ``message_headers``,
+        and there exactly as the fields ``expected`` lists per claimant
+        (a claimant without identity fields omitted)."""
+        holding = self.tables_holding(_ID_MARKERS)
+        assert holding == ({"message_headers"} if any(expected.values()) else set())
+        assert self.identity_rows() == {c: list(f) for c, f in expected.items() if f}
+
 
 def _claimant(path: Path) -> str:
     msg = parser.parse_email(path)
@@ -267,6 +298,8 @@ _MESSAGE_FIELDS = [
     "sender_ambiguous",
     "participant_names",
     "participant_names_complete",
+    "headers",
+    "headers_complete",
     "subject_complete",
     "from_addresses_complete",
     "to_addresses_complete",
@@ -286,37 +319,83 @@ def _top_level_fields(raw: bytes) -> int:
     return len(email.message_from_bytes(raw).keys())
 
 
+def _written_fields(raw: bytes) -> list[tuple[str, str]]:
+    """The ``(name, value)`` fields ``_eml`` wrote into ``raw``'s
+    top-level header block, in order (it writes one unfolded line per
+    field), read without the parser under test."""
+    head = raw.split(b"\r\n\r\n", 1)[0].decode()
+    return [(name, value) for name, value in (line.split(": ", 1) for line in head.split("\r\n"))]
+
+
 def _filler(count: int) -> tuple[tuple[str, str], ...]:
     """``count`` distinct ``X-Pm-Internal-Id`` fields."""
     return tuple((_INTERNAL, f"SYNTHPMID1316{i:06d}==") for i in range(count))
 
 
-def _assert_only_bytes_differ(
+def _assert_only_bytes_and_headers_differ(
     tagged: parser.Message, tagged_raw: bytes, plain: parser.Message, plain_raw: bytes
 ) -> None:
     """``tagged``'s ``size`` and ``content_hash`` are those of all of
     ``tagged_raw``, so its claimant ID differs from ``plain``'s exactly
-    when the bytes differ, and every other compared field equals
-    ``plain``'s (``first_indexed_at``, the clock at parse time, is not
-    compared)."""
+    when the bytes differ. Its ``headers`` are the fields written into
+    ``tagged_raw``, identity fields included, each as an ordinary
+    ``MessageHeader`` at its source ordinal, up to
+    ``MAX_STORED_HEADER_FIELDS``; past that the capture stops, says so
+    (``headers_complete`` false, ``headers_budget`` counted) and keeps
+    the earlier fields. Every other compared field equals ``plain``'s
+    (``first_indexed_at``, the clock at parse time, is not compared)."""
     assert (tagged.size, tagged.content_hash) == (
         len(tagged_raw),
         hashlib.sha256(tagged_raw).hexdigest(),
     )
     assert (tagged.claimant_id == plain.claimant_id) == (tagged_raw == plain_raw)
-    assert dataclasses.replace(tagged, size=plain.size, content_hash=plain.content_hash) == plain
+    written = _written_fields(tagged_raw)
+    kept = written[: parser.MAX_STORED_HEADER_FIELDS]
+    assert [(h.ordinal, h.name, h.raw_value, h.decoded_value) for h in tagged.headers] == [
+        (i, name, value, value) for i, (name, value) in enumerate(kept)
+    ]
+    assert all(h.name_normalized == h.name.lower() for h in tagged.headers)
+    capped = len(written) > parser.MAX_STORED_HEADER_FIELDS
+    assert tagged.headers_complete is (not capped)
+    assert tagged.parse_caps.get("headers_budget", 0) == int(capped)
+    # The plain message is under every cap, so its headers are complete.
+    assert plain.headers_complete is True and "headers_budget" not in plain.parse_caps
+    assert (
+        dataclasses.replace(
+            tagged,
+            size=plain.size,
+            content_hash=plain.content_hash,
+            headers=plain.headers,
+            headers_complete=plain.headers_complete,
+            parse_caps={k: v for k, v in tagged.parse_caps.items() if k != "headers_budget"},
+        )
+        == plain
+    )
+
+
+def _cap_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "parser work caps" in r.getMessage()
+    ]
 
 
 class TestParserIgnoresIdentityHeaders:
     @pytest.mark.parametrize("identity_first", [False, True], ids=["after-ids", "top"])
     @pytest.mark.parametrize("shape", sorted(_SECOND_IDENTITY))
-    def test_identity_headers_only_change_the_bytes(self, shape, identity_first, caplog):
+    def test_identity_headers_change_only_the_bytes_and_the_header_list(
+        self, shape, identity_first, caplog
+    ):
         """Parsed from the same source metadata, a message with identity
         headers (after its other headers, or at the top above ``From``)
         and one without differ only in the fields taken from the bytes
-        themselves (``size`` and ``content_hash``, so the claimant ID);
-        every other compared ``Message`` field is equal, and ``Message``
-        has no provider-identity field."""
+        themselves (``size`` and ``content_hash``, so the claimant ID) and
+        in ``headers``, which keeps the identity fields as ordinary header
+        evidence at their source position; every other compared
+        ``Message`` field is equal, ``Message`` has no provider-identity
+        field, and no identity value is held outside ``headers`` or
+        logged."""
         caplog.set_level(logging.DEBUG)
         plain_raw = _eml("evidence@mail.example", "Same body.")
         tagged_raw = _eml(
@@ -330,12 +409,20 @@ class TestParserIgnoresIdentityHeaders:
         tagged = parser.parse_email_bytes(tagged_raw, _SOURCE)
 
         assert plain is not None and tagged is not None
-        _assert_only_bytes_differ(tagged, tagged_raw, plain, plain_raw)
+        _assert_only_bytes_and_headers_differ(tagged, tagged_raw, plain, plain_raw)
         if shape == "absent":
             assert tagged.claimant_id == plain.claimant_id
         else:
             assert tagged.claimant_id != plain.claimant_id
-        assert all(marker not in repr(tagged) for marker in _ID_MARKERS)
+        identity = [
+            (h.name, h.raw_value)
+            for h in tagged.headers
+            if any(marker in h.raw_value for marker in _ID_MARKERS)
+        ]
+        assert identity == list(_SECOND_IDENTITY[shape])
+        assert all(
+            marker not in repr(dataclasses.replace(tagged, headers=[])) for marker in _ID_MARKERS
+        )
         # Pinned, so a new ``Message`` field (a provider identity among
         # them, even one equal on both messages) fails here until it is
         # classified and this claim rechecked.
@@ -343,24 +430,69 @@ class TestParserIgnoresIdentityHeaders:
         assert all(marker not in caplog.text for marker in _ID_MARKERS)
 
     @pytest.mark.parametrize("identity_first", [False, True], ids=["after-ids", "top"])
-    def test_identity_headers_up_to_the_address_scan_cap_change_nothing_else(self, identity_first):
-        """With exactly ``MAX_ADDRESS_HEADER_FIELDS`` top-level fields in
-        all, identity headers are still bytes only, wherever they sit."""
+    def test_identity_headers_up_to_the_stored_header_cap_are_all_kept(self, identity_first):
+        """With exactly ``MAX_STORED_HEADER_FIELDS`` top-level fields in
+        all, every field is kept, identity headers included, and header
+        evidence is complete, wherever the identity headers sit."""
         plain_raw = _eml("evidence@mail.example", "Same body.")
-        count = parser.MAX_ADDRESS_HEADER_FIELDS - _top_level_fields(plain_raw)
+        count = parser.MAX_STORED_HEADER_FIELDS - _top_level_fields(plain_raw)
         tagged_raw = _eml(
             "evidence@mail.example",
             "Same body.",
             identity=_filler(count),
             identity_first=identity_first,
         )
-        assert _top_level_fields(tagged_raw) == parser.MAX_ADDRESS_HEADER_FIELDS
+        assert _top_level_fields(tagged_raw) == parser.MAX_STORED_HEADER_FIELDS
 
         plain = parser.parse_email_bytes(plain_raw, _SOURCE)
         tagged = parser.parse_email_bytes(tagged_raw, _SOURCE)
 
         assert plain is not None and tagged is not None
-        _assert_only_bytes_differ(tagged, tagged_raw, plain, plain_raw)
+        _assert_only_bytes_and_headers_differ(tagged, tagged_raw, plain, plain_raw)
+        assert tagged.headers_complete is True and tagged.parse_caps == {}
+
+    @pytest.mark.parametrize("identity_first", [False, True], ids=["after-ids", "top"])
+    @pytest.mark.parametrize(
+        "total",
+        [parser.MAX_STORED_HEADER_FIELDS + 1, parser.MAX_ADDRESS_HEADER_FIELDS],
+        ids=["one-over", "address-scan-cap"],
+    )
+    def test_identity_headers_past_the_stored_header_cap_are_counted(
+        self, caplog, identity_first, total
+    ):
+        """Past ``MAX_STORED_HEADER_FIELDS`` top-level fields, header
+        capture stops at the cap: the earlier fields are kept, the rest
+        (the From, To and Date fields too, when identity headers fill the
+        capture above them) are not stored, ``headers_complete`` is false
+        and the cap is counted as ``headers_budget`` in ``parse_caps`` and
+        a WARNING. Up to ``MAX_ADDRESS_HEADER_FIELDS`` fields in all, the
+        address scan, subject, dates, body and attachments are those of
+        the message without identity headers."""
+        caplog.set_level(logging.DEBUG)
+        plain_raw = _eml("evidence@mail.example", "Same body.")
+        tagged_raw = _eml(
+            "evidence@mail.example",
+            "Same body.",
+            identity=_filler(total - _top_level_fields(plain_raw)),
+            identity_first=identity_first,
+        )
+        assert _top_level_fields(tagged_raw) == total
+
+        plain = parser.parse_email_bytes(plain_raw, _SOURCE)
+        tagged = parser.parse_email_bytes(tagged_raw, _SOURCE)
+
+        assert plain is not None and tagged is not None
+        _assert_only_bytes_and_headers_differ(tagged, tagged_raw, plain, plain_raw)
+        assert len(tagged.headers) == parser.MAX_STORED_HEADER_FIELDS
+        assert tagged.headers_complete is False
+        assert tagged.parse_caps == {"headers_budget": 1}
+        stored = {h.name_normalized for h in tagged.headers}
+        from_index = [name for name, _ in _written_fields(tagged_raw)].index("From")
+        assert ("from" in stored) is (from_index < parser.MAX_STORED_HEADER_FIELDS)
+        assert tagged.from_addr == plain.from_addr and tagged.from_addresses_complete
+        warnings = _cap_warnings(caplog)
+        assert len(warnings) == 1 and warnings[0].endswith(": headers_budget=1")
+        assert all(marker not in caplog.text for marker in _ID_MARKERS)
 
     @pytest.mark.parametrize(
         ("layout", "addresses_kept"),
@@ -374,7 +506,8 @@ class TestParserIgnoresIdentityHeaders:
         cap is counted (``parse_caps``, a WARNING with its count), the
         sender is flagged ambiguous and all three address roles
         incomplete. Address headers before the cut-off are kept; identity
-        headers that fill the scan above ``From`` lose every address. The
+        headers that fill the scan above ``From`` lose every address.
+        Header capture stopped long before (``headers_budget``). The
         body, attachments, subject and dates are unchanged."""
         caplog.set_level(logging.DEBUG)
         plain_raw = _eml("evidence@mail.example", "Same body.")
@@ -393,7 +526,7 @@ class TestParserIgnoresIdentityHeaders:
         tagged = parser.parse_email_bytes(tagged_raw, _SOURCE)
 
         assert plain is not None and tagged is not None
-        assert tagged.parse_caps == {"address_fields": 1}
+        assert tagged.parse_caps == {"address_fields": 1, "headers_budget": 1}
         assert tagged.sender_ambiguous and not plain.sender_ambiguous
         assert not (
             tagged.from_addresses_complete
@@ -408,7 +541,7 @@ class TestParserIgnoresIdentityHeaders:
             kept
         )
         # Nothing else the parser returns changes.
-        _assert_only_bytes_differ(
+        _assert_only_bytes_and_headers_differ(
             dataclasses.replace(
                 tagged,
                 from_addr=plain.from_addr,
@@ -419,18 +552,15 @@ class TestParserIgnoresIdentityHeaders:
                 from_addresses_complete=plain.from_addresses_complete,
                 to_addresses_complete=plain.to_addresses_complete,
                 cc_addresses_complete=plain.cc_addresses_complete,
-                parse_caps=plain.parse_caps,
+                parse_caps={k: v for k, v in tagged.parse_caps.items() if k != "address_fields"},
             ),
             tagged_raw,
             plain,
             plain_raw,
         )
-        warnings = [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelno == logging.WARNING and "parser work caps" in r.getMessage()
-        ]
-        assert len(warnings) == 1 and warnings[0].endswith(": address_fields=1")
+        warnings = _cap_warnings(caplog)
+        assert len(warnings) == 1
+        assert warnings[0].endswith(": address_fields=1,headers_budget=1")
         assert all(marker not in caplog.text for marker in _ID_MARKERS)
 
     @pytest.mark.parametrize(
@@ -497,7 +627,10 @@ class TestClaimantsStayIndependent:
         claimant ID. Trashing the first tombstones only its claimant ID
         and, within the grace window, changes no row of either; reaping
         it then removes all of its rows and leaves every row of the
-        second exactly as it was. Every table with a ``claimant_id``
+        second exactly as it was. Each file's identity fields are stored
+        only as its own ``message_headers`` rows (ordinary header
+        evidence, complete here), so reaping the first removes its copies
+        and leaves the second's. Every table with a ``claimant_id``
         column in the schema holds rows at some step."""
         caplog.set_level(logging.DEBUG)
         idx = _Index(tmp_path, monkeypatch)
@@ -531,6 +664,7 @@ class TestClaimantsStayIndependent:
             "message_thread_map",
             "message_participants",
             "message_participant_names",
+            "message_headers",
             "message_chunks",
             "attachments",
         }
@@ -547,6 +681,10 @@ class TestClaimantsStayIndependent:
         assert "alphaword" in text_a and "betaword" not in text_a
         assert "betaword" in text_b and "alphaword" not in text_b
         observed = {t for rows in (rows_a, rows_b) for t, r in rows.items() if r}
+        both = {a: _FIRST_IDENTITY, b: _SECOND_IDENTITY[shape]}
+        idx.assert_identity_stored_only_as_header_evidence(both)
+        complete = idx.db._conn.execute("SELECT headers_complete FROM messages").fetchall()
+        assert [r[0] for r in complete] == [1, 1]
 
         # Trash the first and hold it in the grace window: the tombstone
         # names its claimant ID, never the bare Message-ID or the other
@@ -579,7 +717,7 @@ class TestClaimantsStayIndependent:
         assert held_a == renamed
         assert idx.rows_of(b) == rows_b
         assert not idx.db._conn.execute("SELECT 1 FROM reaped_messages").fetchall()
-        assert idx.tables_holding(_ID_MARKERS) == set()
+        idx.assert_identity_stored_only_as_header_evidence(both)
         observed |= {t for t, r in held_a.items() if r} | {"pending_deletions"}
 
         idx.reconciler(grace_days=0).reap()
@@ -596,10 +734,10 @@ class TestClaimantsStayIndependent:
         # so none of the checks above passed on an empty table. A new
         # table needs rows in this test, or an exclusion with its reason.
         assert observed == idx.schema_claimant_tables()
-        # No identity value is logged or stored anywhere (no table keeps
-        # raw headers today; #1079's header store will revisit this).
+        # No identity value is logged, and the only stored copies left
+        # are the survivor's own header rows.
         assert all(marker not in caplog.text for marker in _ID_MARKERS)
-        assert idx.tables_holding(_ID_MARKERS) == set()
+        idx.assert_identity_stored_only_as_header_evidence({b: _SECOND_IDENTITY[shape]})
 
     def test_identity_headers_past_the_address_scan_cap_index_as_their_own_claimant(
         self, tmp_path, monkeypatch, caplog
@@ -607,9 +745,11 @@ class TestClaimantsStayIndependent:
         """A file whose identity headers fill the address scan above
         ``From`` (``MAX_ADDRESS_HEADER_FIELDS``, #1144) is still its own
         claimant: indexed with the sender flagged ambiguous, all three
-        address roles incomplete, the cap in ``caps_json`` and no
-        participant rows, while the other file's rows are unchanged; and
-        reaping it leaves them unchanged."""
+        address roles incomplete, both caps in ``caps_json``, no
+        participant rows, header evidence incomplete with only the first
+        ``MAX_STORED_HEADER_FIELDS`` fields stored, while the other
+        file's rows are unchanged; and reaping it removes those header
+        rows and leaves the other file's rows unchanged."""
         caplog.set_level(logging.DEBUG)
         idx = _Index(tmp_path, monkeypatch)
         first = idx.write(
@@ -634,23 +774,26 @@ class TestClaimantsStayIndependent:
         assert b != a
         (row,) = idx.db._conn.execute(
             "SELECT sender_ambiguous, from_addresses_complete, to_addresses_complete, "
-            "cc_addresses_complete, caps_json FROM messages WHERE claimant_id = ?",
+            "cc_addresses_complete, headers_complete, caps_json "
+            "FROM messages WHERE claimant_id = ?",
             (b,),
         ).fetchall()
-        assert tuple(row)[:4] == (1, 0, 0, 0)
-        assert json.loads(row["caps_json"]) == {"address_fields": 1}
+        assert tuple(row)[:5] == (1, 0, 0, 0, 0)
+        assert json.loads(row["caps_json"]) == {"address_fields": 1, "headers_budget": 1}
         rows_b = idx.rows_of(b)
         assert not rows_b["message_participants"] and not rows_b["message_participant_names"]
         assert "betaword" in " ".join(idx.chunks_of(b).values())
         assert idx.rows_of(a) == rows_a
-        assert idx.tables_holding(_ID_MARKERS) == set()
+        kept = _filler(parser.MAX_ADDRESS_HEADER_FIELDS)[: parser.MAX_STORED_HEADER_FIELDS]
+        idx.assert_identity_stored_only_as_header_evidence({a: _FIRST_IDENTITY, b: kept})
+        assert len(rows_b["message_headers"]) == parser.MAX_STORED_HEADER_FIELDS
 
         idx.reap(capped)
 
         assert not any(idx.rows_of(b).values())
         assert idx.rows_of(a) == rows_a
         assert all(marker not in caplog.text for marker in _ID_MARKERS)
-        assert idx.tables_holding(_ID_MARKERS) == set()
+        idx.assert_identity_stored_only_as_header_evidence({a: _FIRST_IDENTITY})
 
 
 class TestByteVersionsOfOneLogicalMessage:
@@ -661,7 +804,9 @@ class TestByteVersionsOfOneLogicalMessage:
         new boundary) are two claimants with disjoint chunk IDs. Reaping
         the first removes its chunks and records its claimant as reaped;
         the second's chunk IDs are untouched, so a citation of the first
-        is never moved to the second's bytes."""
+        is never moved to the second's bytes. Each version keeps its own
+        copy of the identity headers as header evidence, so a header
+        predicate counts two messages, not one logical message."""
         idx = _Index(tmp_path, monkeypatch)
         body = "Unchanged wording gammaword."
         older = idx.write(
@@ -683,6 +828,7 @@ class TestByteVersionsOfOneLogicalMessage:
         assert sorted(chunks_a.values()) == sorted(chunks_b.values())
         (thread,) = idx.db._conn.execute("SELECT message_ids FROM threads").fetchall()
         assert sorted(json.loads(thread["message_ids"])) == sorted([a, b])
+        idx.assert_identity_stored_only_as_header_evidence({a: _FIRST_IDENTITY, b: _FIRST_IDENTITY})
 
         idx.reap(older)
 
@@ -693,6 +839,7 @@ class TestByteVersionsOfOneLogicalMessage:
         assert not remaining & set(chunks_a)
         reaped = idx.db._conn.execute("SELECT claimant_id, message_id FROM reaped_messages")
         assert [tuple(r) for r in reaped] == [(a, "version@mail.example")]
+        idx.assert_identity_stored_only_as_header_evidence({b: _FIRST_IDENTITY})
 
 
 class TestIdLessRecoveryStyleInput:
