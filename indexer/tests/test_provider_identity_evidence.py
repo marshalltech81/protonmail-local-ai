@@ -3,8 +3,10 @@
 The Proton Mail Bridge writes ``X-Pm-Internal-Id`` (Proton's message
 ID) into the messages it builds, and Gluon writes ``X-Pm-Gluon-Id``
 (its own internal ID). A file can also carry them forged, duplicated
-or not at all: Gluon keeps a failed APPEND's literal, when it can
-parse it, unchanged in ``Recovered Messages``, and Bridge keeps existing ``X-Pm-Internal-Id``
+or not at all: Gluon keeps a failed APPEND's literal unchanged in
+``Recovered Messages`` when it can parse it, the failure is not the
+size limit and no literal with the same recovery hash is there already
+(S7), and Bridge keeps existing ``X-Pm-Internal-Id``
 fields below one that matches (see the "Proton identity evidence"
 section of ``docs/architecture.md`` for the upstream source review). These tests pin what the index does with such files today,
 before any proposed use of the headers (#1313):
@@ -255,18 +257,20 @@ class _Index:
                         found.add(table)
         return found
 
-    def identity_rows(self) -> dict[str, list[tuple[str, str]]]:
-        """Per claimant, the ``(name, raw_value)`` of every
-        ``message_headers`` row holding an identity marker, in source
-        order."""
-        rows: dict[str, list[tuple[str, str]]] = {}
+    def identity_rows(self) -> dict[str, list[tuple[str, str, str | None]]]:
+        """Per claimant, the ``(name, raw_value, decoded_value)`` of
+        every ``message_headers`` row holding an identity marker, in
+        source order."""
+        rows: dict[str, list[tuple[str, str, str | None]]] = {}
         for r in self.db._conn.execute(
             "SELECT claimant_id, name, raw_value, decoded_value FROM message_headers "
             "ORDER BY claimant_id, ordinal"
         ):
             values = f"{r['raw_value']}\0{r['decoded_value']}"
             if _leaks(values):
-                rows.setdefault(r["claimant_id"], []).append((r["name"], r["raw_value"]))
+                rows.setdefault(r["claimant_id"], []).append(
+                    (r["name"], r["raw_value"], r["decoded_value"])
+                )
         return rows
 
     def assert_identity_stored_only_as_header_evidence(
@@ -274,10 +278,13 @@ class _Index:
     ) -> None:
         """The identity markers are stored nowhere but ``message_headers``,
         and there exactly as the fields ``expected`` lists per claimant
-        (a claimant without identity fields omitted)."""
+        (a claimant without identity fields omitted). These fields are
+        plain text, so the decoded value equals the raw one."""
         holding = self.tables_holding(_ID_MARKERS)
         assert holding == ({"message_headers"} if any(expected.values()) else set())
-        assert self.identity_rows() == {c: list(f) for c, f in expected.items() if f}
+        assert self.identity_rows() == {
+            c: [(name, value, value) for name, value in f] for c, f in expected.items() if f
+        }
 
 
 def _claimant(path: Path) -> str:
@@ -872,6 +879,25 @@ class TestClaimantsStayIndependent:
         idx.assert_identity_stored_only_as_header_evidence({a: _FIRST_IDENTITY})
 
 
+class TestEncodedIdentityHeaderThroughTheWriter:
+    def test_encoded_word_identity_is_stored_raw_and_decoded(self, tmp_path, monkeypatch):
+        """An identity header written as an RFC 2047 encoded word goes
+        through the queue and writer into ``message_headers`` with its
+        wire text as ``raw_value`` and the decoded ID as
+        ``decoded_value``, which the header predicates match first."""
+        idx = _Index(tmp_path, monkeypatch)
+        encoded = "=?utf-8?q?SYNTHPMID1316eeee=3D=3D?="
+        path = idx.write(
+            "1700000000.M1.host",
+            _eml("encoded@mail.example", "Encoded wording.", identity=((_INTERNAL, encoded),)),
+        )
+        idx.index(path)
+
+        claimant = _claimant(path)
+        assert idx.identity_rows() == {claimant: [(_INTERNAL, encoded, "SYNTHPMID1316eeee==")]}
+        assert idx.tables_holding(_ID_MARKERS) == {"message_headers"}
+
+
 class TestByteVersionsOfOneLogicalMessage:
     def test_rebuilt_representation_is_a_separate_source(self, tmp_path, monkeypatch):
         """Bridge builds multipart messages with random boundaries, so one
@@ -924,8 +950,9 @@ class TestIdLessRecoveryStyleInput:
     def test_no_message_id_is_dead_lettered_whatever_identity_it_carries(
         self, tmp_path, monkeypatch, caplog, shape, identity_first
     ):
-        """Gluon keeps a failed APPEND's literal unchanged, so a
-        ``Recovered Messages`` file need not have the Message-ID Bridge
+        """Gluon keeps a failed APPEND's literal unchanged (when it
+        parses, is within the size limit and is not a recovery-hash
+        duplicate, S7), so a ``Recovered Messages`` file need not have the Message-ID Bridge
         synthesizes for messages it builds. Today the parser returns
         ``None`` for it and the worker dead-letters it with fixed text;
         an identity header does not make it indexable, in any of the
