@@ -197,7 +197,12 @@ def bounded_logging:
         # a collector is its own alternate in-container execution path,
         # running with the same Bridge password, Maildir/state and
         # network a collector keeps, just as an entrypoint or command override would
-        # (review round 3).
+        # (review round 3). extra_hosts is the same gap under a routing
+        # field rather than an execution one: a dedicated check already
+        # holds the legacy mbsync to it (mbsync_keeps_its_hardening_and_no_port_is_exposed),
+        # but nothing held a collector to it, and AGENTS.md forbids
+        # extra_hosts on any mbsync-family service without the #1499
+        # decision (review round 3).
         ($base[0].services["mbsync"] as $bbase
             | (if $bbase.init == true and $s.init != true
                 then "\($c.service): init is not true" else empty end),
@@ -219,7 +224,8 @@ def bounded_logging:
               (if ($s | set("healthcheck")) then "\($c.service): sets a healthcheck override" else empty end),
               (if ($s | set("post_start")) then "\($c.service): sets a post_start hook" else empty end),
               (if ($s | set("pre_stop")) then "\($c.service): sets a pre_stop hook" else empty end),
-              (if ($s | set("configs")) then "\($c.service): mounts a config" else empty end))
+              (if ($s | set("configs")) then "\($c.service): mounts a config" else empty end),
+              (if ($s | set("extra_hosts")) then "\($c.service): sets extra_hosts" else empty end))
       end),
   # A declared collector keeps its own secret (mounted as bridge_pass),
   # both volumes and its network: an overlay with !reset cannot take them.
@@ -739,6 +745,18 @@ UUID_B="00000000-0000-4000-8000-00000000000b"
 UUID_C="00000000-0000-4000-8000-00000000000c"
 readonly UUID_B UUID_C
 
+# GENERATED_CASES must list exactly the cases synthetic_compose.py wrote
+# to $WORK/generated (review round 3): the generator's own output, not
+# this array, is the independent source it is checked against
+# (AGENTS.md "a list that must cover every item of some kind"), so a
+# case the generator adds and this array omits is caught here instead
+# of silently skipping the merged hardening check below while
+# semgrep_generated_test.sh still finds and scans its directory.
+generated_cases_cover_the_generator_output() {
+    diff <(find "$WORK/generated" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort) \
+        <(printf '%s\n' "${GENERATED_CASES[@]}" | sort)
+}
+
 # The merged hardening check on the generated file of case $1, after the
 # compose files that follow it, with the accounts that case declares.
 expect_generated_hardening() {
@@ -999,7 +1017,10 @@ EOF
 # network). A healthcheck, post_start/pre_stop hook or mounted config is
 # the same risk under a different field: each runs its own command
 # inside the container while the image, entrypoint and command stay
-# mbsync's own (review round 3).
+# mbsync's own (review round 3). extra_hosts is the same gap under a
+# routing field: AGENTS.md forbids it on any mbsync-family service
+# without the #1499 decision, but nothing held a collector to that
+# (review round 3).
 generated_collectors_keep_the_mbsync_implementation() {
     expect_generated_rejected three-proton "" \
         "mbsync-$UUID_B: image or build differs from mbsync" \
@@ -1008,7 +1029,8 @@ generated_collectors_keep_the_mbsync_implementation() {
         "mbsync-$UUID_B: sets a healthcheck override" \
         "mbsync-$UUID_B: sets a post_start hook" \
         "mbsync-$UUID_B: sets a pre_stop hook" \
-        "mbsync-$UUID_B: mounts a config" <<EOF
+        "mbsync-$UUID_B: mounts a config" \
+        "mbsync-$UUID_B: sets extra_hosts" <<EOF
 services:
   mbsync-$UUID_B:
     build: !reset null
@@ -1021,6 +1043,8 @@ services:
       - command: ["true"]
     pre_stop:
       - command: ["true"]
+    extra_hosts:
+      - "host.docker.internal:203.0.113.1"
     configs:
       - source: proton_settings
         target: /app/proton-settings.sh
@@ -1281,6 +1305,7 @@ check "merged hardening rejects new users, secrets, hooks and devices" \
     merged_hardening_rejects_new_grants
 check "merged hardening rejects a service a top-level include brings in" \
     merged_hardening_rejects_an_included_service
+check "GENERATED_CASES covers what the generator wrote" generated_cases_cover_the_generator_output
 check "generated collectors keep the hardening" generated_collectors_keep_the_hardening
 check "generated collectors reject another account's secret" \
     generated_collectors_reject_another_accounts_secret
