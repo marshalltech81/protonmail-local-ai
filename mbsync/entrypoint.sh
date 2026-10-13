@@ -1157,15 +1157,29 @@ record_successful_sync() {
     # only after this sync's delivery events. Replaced atomically via
     # rename; world-readable because the indexer runs as a different UID.
     # The completion time is kept in sync_completed_at for
-    # record_collection_outcome.
+    # record_collection_outcome. Called as a condition (errexit is off),
+    # so every step is checked: a failure removes the temporary file and
+    # keeps the previous stamp.
     local completed_at tmp
     completed_at="$(collection_now)"
     sync_completed_at="$completed_at"
     tmp="${MAILDIR_PATH}/.mbsync-last-sync.${completed_at}.${SYNC_INTERVAL}.tmp"
-    printf '{"completed_at": "%s", "sync_interval_secs": %d}\n' \
-        "$completed_at" "$SYNC_INTERVAL" >"$tmp"
-    chmod 644 "$tmp"
-    mv -f "$tmp" "$SYNC_STAMP_FILE"
+    if ! printf '{"completed_at": "%s", "sync_interval_secs": %d}\n' \
+        "$completed_at" "$SYNC_INTERVAL" >"$tmp" \
+        || ! chmod 644 "$tmp" || ! mv -f "$tmp" "$SYNC_STAMP_FILE"; then
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+stamp_write_failed() {
+    # The sync succeeded but its stamp could not be written. Its outcome
+    # is still published (#1592): the success is never delivered, since no
+    # stamp names it, so it does not end an unrecovered failure. Then exit
+    # for a container restart, as before.
+    record_collection_outcome
+    echo ">>> ERROR: could not write the success stamp ${SYNC_STAMP_FILE}; exiting for container restart." >&2
+    exit 1
 }
 
 # =============================================================================
@@ -1221,7 +1235,7 @@ extract_bridge_cert
 consecutive_sync_failures=0
 echo ">>> Running initial sync..."
 if run_sync; then
-    record_successful_sync
+    record_successful_sync || stamp_write_failed
     record_collection_outcome
 else
     record_collection_outcome
@@ -1242,7 +1256,7 @@ while true; do
     echo ">>> Syncing..."
     if run_sync; then
         consecutive_sync_failures=0
-        record_successful_sync
+        record_successful_sync || stamp_write_failed
         record_collection_outcome
         continue
     fi

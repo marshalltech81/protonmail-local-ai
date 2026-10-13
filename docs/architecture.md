@@ -4204,7 +4204,9 @@ the stamp, which is unchanged, and reading it acknowledges nothing.
   file in the Maildir root, made mode 0644 and renamed into place.
 - **When.** Before every attempt (`in_progress`) and after it (its
   terminal outcome). A success is published after its stamp, with the
-  stamp's completion time. A caught stop (TERM or INT) is published as
+  stamp's completion time; when the stamp cannot be written, the
+  success is still published (and is never delivered, since no stamp
+  names it) before mbsync exits for a restart. A caught stop (TERM or INT) is published as
   `failed` with class `interrupted`; a shell killed outright leaves the
   `in_progress` record until the next start publishes. A start carries
   the earlier records forward from the file itself, when it is in the

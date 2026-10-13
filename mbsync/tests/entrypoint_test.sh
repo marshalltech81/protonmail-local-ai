@@ -332,7 +332,7 @@ collection_setup() {
     collection_last_success="null"
     load collection_now load_collection_records \
         publish_collection_status begin_collection_attempt finish_collection_attempt \
-        record_collection_outcome record_successful_sync
+        record_collection_outcome record_successful_sync stamp_write_failed
     load_collection_records
 }
 
@@ -1044,9 +1044,53 @@ kernel_kill_leaves_the_in_progress_record() {
     collection_last_success='{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z"}'
     (install_signal_handlers && run_sync) &
     signal_once_started "$!" KILL
-    pkill -TERM -f "bin-stop-coll-kill/mbsync" || true
+    pkill -TERM -f "$WORK/bin-stop-coll-kill/mbsync" || true
     ((STOP_RC == 137)) || return 1
     status_has_shape in_progress "$(printf '%s' "$earlier" | sed 's/[{}]/\\&/g')" '\{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z"\}'
+}
+
+# A success stamp that cannot be written still ends the attempt: its
+# outcome is published (the success is never delivered, since no stamp
+# names it), then the entrypoint exits for a restart, as before. $1: the
+# block of the entrypoint to run (initial or loop). Each stamp step is
+# checked, so no partial stamp replaces the old one.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+stamp_failure_publishes_the_outcome_and_exits() {
+    local block rc=0 log="$WORK/coll-stamp-log-$1"
+    sync_setup "coll-stamp-$1"
+    if [[ "$1" == initial ]]; then
+        block="$(awk '$0 == "echo \">>> Running initial sync...\"" {p = 1; next} p {print} p && $0 == "fi" {exit}' "$ENTRYPOINT")"
+    else
+        block="$(awk '$0 == "while true; do" {p = 1} p {print} p && $0 == "done" {exit}' "$ENTRYPOINT")"
+    fi
+    [[ -n "$block" ]] || return 1
+    printf '{"completed_at": "2026-10-12T00:00:00Z", "sync_interval_secs": 60}\n' >"$SYNC_STAMP_FILE"
+    # The block runs in a subshell tested with ||, where errexit is off, so
+    # a second attempt fails and the loop's failure limit (1) ends a run
+    # that ignored the stamp failure instead of looping on.
+    STAMP_RAN="$WORK/coll-stamp-$1-ran"
+    mbsync() {
+        [[ ! -e "$STAMP_RAN" ]] || return 1
+        : >"$STAMP_RAN"
+    }
+    find() { :; }
+    sleep() { [[ "$1" == "$SYNC_INTERVAL" ]] || command sleep "$1"; }
+    chmod() {
+        if [[ "$2" == "$MAILDIR_PATH"/.mbsync-last-sync.* ]]; then
+            return 1
+        fi
+        command chmod "$@"
+    }
+    MAX_CONSECUTIVE_SYNC_FAILURES=1
+    consecutive_sync_failures=0
+    (eval "$block") >"$log" 2>&1 || rc=$?
+    cat "$log"
+    ((rc == 1)) || return 1
+    grep -q 'ERROR: could not write the success stamp' "$log" || return 1
+    # The old stamp is kept and no temporary stamp is left.
+    grep -qF '"completed_at": "2026-10-12T00:00:00Z"' "$SYNC_STAMP_FILE" || return 1
+    ! command find "$MAILDIR_PATH" -name '.mbsync-last-sync.*.tmp' | grep -q . || return 1
+    status_has_shape succeeded "$(terminal_re 1 succeeded 0 null)" "$(success_re 1)"
 }
 
 # The refusals are fixed text, never the value.
@@ -2573,6 +2617,10 @@ check "collection: a kernel kill leaves the in_progress record" \
     kernel_kill_leaves_the_in_progress_record
 check "collection: ACCOUNT_SCOPE is required at startup, with fixed text" \
     account_scope_is_required_at_startup
+check "collection: an unwritable stamp after the initial sync publishes the outcome, then exits" \
+    stamp_failure_publishes_the_outcome_and_exits initial
+check "collection: an unwritable stamp in the sync loop publishes the outcome, then exits" \
+    stamp_failure_publishes_the_outcome_and_exits loop
 check "an empty Maildir passes the layout check" an_empty_maildir_is_accepted
 check "the current layout passes the layout check" the_current_layout_is_accepted
 check "sync state at the Maildir root is refused without naming it" \

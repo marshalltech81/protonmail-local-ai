@@ -324,10 +324,15 @@ def _collection_lines(out: MailboxStatusOutput) -> list[str]:
     lines = [f"Mail collection: {head}"]
     if c.withheld_far_side_folders:
         n = c.withheld_far_side_folders
-        lines.append(
-            f"  {n:,} far-side folder{'' if n == 1 else 's'} could not be opened (most likely "
-            "renamed or deleted in Proton); the rest synced and their local copies are kept."
-        )
+        folders = f"{n:,} far-side folder{'' if n == 1 else 's'}"
+        if c.outcome == "failed":
+            # Another error failed the run too, so nothing is said of the rest.
+            lines.append(f"  {folders} could not be opened in that failed collection.")
+        else:
+            lines.append(
+                f"  {folders} could not be opened (most likely renamed or deleted in Proton); "
+                "the rest synced and their local copies are kept."
+            )
     if c.latest_attempt is not None and c.latest_attempt.outcome == "in_progress":
         lines.append(
             f"  Latest attempt started {_when(c.latest_attempt.started_at, out.checked_at)} with "

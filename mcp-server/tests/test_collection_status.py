@@ -112,6 +112,24 @@ def test_a_success_that_withheld_folders_keeps_current_and_shows_the_count(fake_
     assert "2 far-side folders could not be opened" in text
 
 
+@pytest.mark.parametrize("withheld", [1, 3])
+def test_a_failure_with_withheld_folders_does_not_claim_the_rest_synced(
+    fake_server, seeded_db, withheld
+):
+    """A far-side failure together with another error is a failure: the
+    other error may have stopped the rest, so the count is reported
+    without saying anything else synced."""
+    data, text = _status(
+        fake_server,
+        seeded_db,
+        _failed(terminal_failure_class="error", terminal_withheld_folders=withheld),
+    )
+    assert data["collection"]["withheld_far_side_folders"] == withheld
+    folders = "folder" if withheld == 1 else "folders"
+    assert f"  {withheld} far-side {folders} could not be opened in that failed collection." in text
+    assert "the rest synced" not in text
+
+
 @pytest.mark.parametrize(
     "failure_class", ["deadline", "killed", "error", "permission_repair", "interrupted"]
 )
