@@ -120,6 +120,12 @@ def bounded_logging:
     | {service: "mbsync-\($u)", secret: "bridge_pass_\($u)", # pragma: allowlist secret
        volumes: {"/maildir": "maildir-\($u)", "/state": "mbsync-state-\($u)"},
        network: "bridge-net-\($u)", password_file})) as $own
+# Every declared collector, the base mbsync included when an account is at
+# /maildir, keeps each of its own resources.
+| ((if $collectors[0] | any(.[]; .maildir_root == "/maildir") then
+      [{service: "mbsync", secret: "bridge_pass", # pragma: allowlist secret
+        volumes: {"/maildir": "maildir-volume", "/state": "mbsync-state"}, network: "bridge-net"}]
+    else [] end) + $own) as $declared
 # Every service and network the base defines is still there; a network
 # keeps its engine name, and no two networks share one, since services
 # join networks by key and the name picks the engine network.
@@ -178,8 +184,27 @@ def bounded_logging:
         ($s.networks // {} | keys[] | select(. != $c.network)
             | "\($c.service): joins network \(.), not its own")
       end),
+  # A declared collector keeps its own secret (mounted as bridge_pass),
+  # both volumes and its network: an overlay with !reset cannot take them.
+  ($declared[] | . as $c | $m.services[$c.service] // empty | . as $s
+    # (Compose writes the short form target as /run/secrets/bridge_pass.)
+    | (if [$s | list("secrets")[] | select(.source == $c.secret
+            and ((.target // .source) | ltrimstr("/run/secrets/")) == "bridge_pass")]
+            | length != 1
+        then "\($c.service): lacks its own secret \($c.secret) as bridge_pass" else empty end),
+      ($c.volumes | to_entries[] | . as $v
+        | select([$s | list("volumes")[] | select(.type == "volume" and .source == $v.value
+            and .target == $v.key)] | length != 1)
+        | "\($c.service): lacks its own volume \($v.value) at \($v.key)"),
+      (if ($s.networks // {} | has($c.network)) | not
+        then "\($c.service): lacks its own network \($c.network)" else empty end)),
   # Its secret is the password file the account declares, and its network
-  # and volumes are defined as bridge-net and the base volumes are.
+  # and volumes are defined as bridge-net and the base volumes are, under
+  # their own project-scoped engine names.
+  ($own[] | . as $c
+    | (if $m.networks[$c.network].name != "\($m.name)_\($c.network)"
+        then "network \($c.network): renamed" else empty end),
+      ($c.volumes[] | select($m.volumes[.].name != "\($m.name)_\(.)") | "volume \(.): renamed")),
   ($own[] | . as $c
     | (if ($m.secrets[$c.secret] // {} | del(.name)) != {file: $c.password_file}
         then "secret \($c.secret): is not the declared password file of \($c.service)" else empty end),
@@ -855,6 +880,43 @@ services:
 EOF
 }
 
+# A collector keeps its own secret, volumes and network (review round 1):
+# the checks above inspect only what is mounted, so an overlay with !reset
+# would otherwise pass. Its network and volumes keep their own engine
+# names, so it cannot join or mount a shared one.
+generated_collectors_keep_their_own_resources() {
+    expect_generated_rejected two-proton "" \
+        "mbsync-$UUID_B: lacks its own secret bridge_pass_$UUID_B as bridge_pass" \
+        "mbsync-$UUID_B: lacks its own volume maildir-$UUID_B at /maildir" \
+        "mbsync-$UUID_B: lacks its own volume mbsync-state-$UUID_B at /state" \
+        "mbsync-$UUID_B: lacks its own network bridge-net-$UUID_B" \
+        "mbsync: lacks its own secret bridge_pass as bridge_pass" \
+        "mbsync: lacks its own volume maildir-volume at /maildir" <<EOF || return 1
+services:
+  mbsync-$UUID_B:
+    secrets: !reset []
+    volumes: !reset []
+    networks: !reset {}
+  mbsync:
+    secrets: !reset []
+    volumes: !override
+      - mbsync-state:/state
+EOF
+    expect_generated_rejected two-proton "" \
+        "network bridge-net-$UUID_B: renamed" \
+        "volume maildir-$UUID_B: renamed" \
+        "volume mbsync-state-$UUID_B: renamed" <<EOF
+networks:
+  bridge-net-$UUID_B:
+    name: shared-collector-net
+volumes:
+  maildir-$UUID_B:
+    name: shared-maildir
+  mbsync-state-$UUID_B:
+    name: shared-state
+EOF
+}
+
 # An imap collector (#1606) gets neither the Bridge password nor
 # bridge-net, wherever its Maildir is.
 generated_imap_collectors_get_no_bridge_secret_or_network() {
@@ -1131,6 +1193,8 @@ check "generated collectors' secret, volumes and network stay their own" \
     generated_collectors_resources_stay_their_own
 check "generated collectors are declared, present and checked as new services" \
     generated_collectors_are_declared_present_and_checked
+check "generated collectors keep their own secret, volumes, network and names" \
+    generated_collectors_keep_their_own_resources
 check "generated imap collectors get no Bridge secret or bridge-net" \
     generated_imap_collectors_get_no_bridge_secret_or_network
 check "omitted rerank and inference settings render without a warning" \
