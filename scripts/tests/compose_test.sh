@@ -131,20 +131,24 @@ def bounded_logging:
     | {service: "mbsync-\($u)", secret: "bridge_pass_\($u)", # pragma: allowlist secret
        volumes: {"/maildir": "maildir-\($u)", "/state": "mbsync-state-\($u)"},
        network: "bridge-net-\($u)", password_file,
-       # The declared trust values of this account (review round 5,
-       # finding 3), present only for a proton-bridge account: the
-       # certificate fingerprint the entrypoint must pin to, compared
-       # below against the rendered BRIDGE_CERT_FINGERPRINT.
-       provider, certificate_fingerprint})) as $own
+       # The declared environment this account collector must carry,
+       # compared below value-for-value against what is rendered (review
+       # round 6, finding 3). It already includes BRIDGE_CERT_FINGERPRINT
+       # and the hardcoded BRIDGE_CERT_PIN_ROTATE, so this one check also
+       # covers the two trust values round 5 (finding 3) checked
+       # separately: both come from collector_env(), the same function
+       # render_compose() calls, so declaration and render agree by
+       # construction.
+       environment})) as $own
 # Every declared collector, the base mbsync included when an account is at
 # /maildir, keeps each of its own resources. The /maildir entry carries
-# the same shape $own does (including the trust values), just with base
-# own names, so both can be compared to base mbsync identically below
-# (review round 6, finding 1).
+# the same shape $own does (including the declared environment), just
+# with base own names, so both can be compared to base mbsync identically
+# below (review round 6, finding 1).
 | (($collectors[0] | map(select(.maildir_root == "/maildir")
       | {service: "mbsync", secret: "bridge_pass", # pragma: allowlist secret
          volumes: {"/maildir": "maildir-volume", "/state": "mbsync-state"},
-         network: "bridge-net", password_file, provider, certificate_fingerprint}))
+         network: "bridge-net", password_file, environment}))
     + $own) as $declared
 # Every service and network the base defines is still there; a network
 # keeps its engine name, and no two networks share one, since services
@@ -249,6 +253,16 @@ def bounded_logging:
         ($base[0].services["mbsync"] as $bbase
             | (if $bbase.init == true and $s.init != true
                 then "\($c.service): init is not true" else empty end),
+              # The mbsync entrypoint exits after a persistent failure so
+              # the failure is visible rather than silently retried
+              # forever (AGENTS.md "add a max-retry limit"); Docker own
+              # restart policy is what brings it back for a transient
+              # one. restart was never compared, so an overlay resetting
+              # or omitting it left that account permanently unsynced
+              # after the first such exit instead (review round 6,
+              # finding 2).
+              (if $s.restart != $bbase.restart
+                then "\($c.service): restart differs from mbsync" else empty end),
               ($bbase | list("cap_drop")[]
                 | select(. as $cd | $s | list("cap_drop") | index($cd) == null)
                 | "\($c.service): cap_drop lost \(.)"),
@@ -290,22 +304,29 @@ def bounded_logging:
               (if ($s | set("extra_hosts")) then "\($c.service): sets extra_hosts" else empty end),
               ($s.environment // {} | keys[] | select(. as $k | ($bbase.environment // {} | has($k)) | not)
                 | "\($c.service): environment sets \(.), which mbsync does not set"),
-              # The key-name check above allows BRIDGE_CERT_FINGERPRINT and
-              # BRIDGE_CERT_PIN_ROTATE because mbsync itself sets them, but
-              # never checked their values: an overlay keeping both names
-              # could still rotate the persisted pin or swap in another
-              # fingerprint, so the entrypoint would accept an attacker
-              # certificate and send the mounted Bridge password to it
-              # (review round 5, finding 3, security). Rotation is never
-              # configuration (collector_env(),
-              # scripts/config/operator_config.py): every collector value
-              # must stay "false", whatever its declaration says.
-              (if ($s.environment.BRIDGE_CERT_PIN_ROTATE // "") != "false"
-                then "\($c.service): BRIDGE_CERT_PIN_ROTATE is not false" else empty end),
-              (if $c.provider == "proton-bridge" and $c.certificate_fingerprint != null
-                    and ($s.environment.BRIDGE_CERT_FINGERPRINT // "") != $c.certificate_fingerprint
-                then "\($c.service): BRIDGE_CERT_FINGERPRINT does not match its declaration"
-                else empty end))
+              # The key-name check above only rejects an extra key; it never
+              # required the account own declared values to actually be
+              # rendered. A renderer regression or overlay could drop
+              # BRIDGE_USER, or keep the key with an empty value, while
+              # mbsync itself still sets BRIDGE_USER, so the check above
+              # saw nothing wrong -- the entrypoint exits on an empty
+              # BRIDGE_USER, so the account could never start (review
+              # round 6, finding 3). $c.environment is this account own
+              # declaration (collector_env(), scripts/config/operator_config.py,
+              # the same values the translator renders), so every key it
+              # sets must come through with its declared value, not just
+              # BRIDGE_USER.
+              # This also covers the two trust values round 5 (finding 3,
+              # security) checked separately and more narrowly at the
+              # time -- BRIDGE_CERT_FINGERPRINT and the hardcoded
+              # BRIDGE_CERT_PIN_ROTATE -- since both are already part of
+              # $c.environment (collector_env() always sets them, never
+              # from a per-account setting for the latter), so comparing
+              # every declared key catches a rotated pin or a substituted
+              # fingerprint the same way, without a separate check.
+              ($c.environment // {} | to_entries[] | select(. as $kv
+                    | ($s.environment // {})[$kv.key] != $kv.value)
+                | "\($c.service): environment \(.key) does not match its declaration"))
       end),
   # A declared collector keeps its own secret (mounted as bridge_pass),
   # both volumes and its network: an overlay with !reset cannot take them.
@@ -339,8 +360,17 @@ def bounded_logging:
   ($own[] | . as $c
     | (if ($m.secrets[$c.secret] // {} | del(.name)) != {file: $c.password_file}
         then "secret \($c.secret): is not the declared password file of \($c.service)" else empty end),
-      (if ($m.networks[$c.network] // {} | {driver, driver_opts, ipam, external})
-            != ($base[0].networks["bridge-net"] | {driver, driver_opts, ipam, external})
+      # internal is compared here but deliberately left out of the
+      # base-network check above: app-net legitimately gains internal:
+      # true under the hardened overlay (docker-compose.hardened.yml),
+      # but bridge-net never does in either file, in or out of that
+      # overlay, so a collector own network setting it would make the
+      # collector unable to reach the host-side Bridge through
+      # host.docker.internal -- isolated from connectivity its own
+      # comparison here otherwise required unchanged (review round 6,
+      # finding 4).
+      (if ($m.networks[$c.network] // {} | {driver, driver_opts, ipam, external, internal})
+            != ($base[0].networks["bridge-net"] | {driver, driver_opts, ipam, external, internal})
         then "network \($c.network): driver settings differ from bridge-net or it is external"
         else empty end),
       ($c.volumes[] | select(($m.volumes[.] // {} | {driver, driver_opts, external})
@@ -964,6 +994,18 @@ networks:
   bridge-net-$UUID_C:
     external: true
 EOF
+    # internal: true externally isolates the network (Docker's own
+    # docs); bridge-net never sets it, in or out of the hardened
+    # overlay (only app-net does, under docker-compose.hardened.yml),
+    # so a collector's own network setting it would cut off its only
+    # path to the host-side Bridge through host.docker.internal
+    # (review round 6, finding 4).
+    expect_generated_rejected three-proton "" \
+        "network bridge-net-$UUID_B: driver settings differ from bridge-net or it is external" <<EOF
+networks:
+  bridge-net-$UUID_B:
+    internal: true
+EOF
 }
 
 generated_collectors_reject_an_extra_mount() {
@@ -1113,10 +1155,14 @@ EOF
 # security_opt entry, while the same mutation on mbsync itself is
 # rejected. Clearing tmpfs is the same gap (review round 5, finding 1):
 # the entrypoint still needs a writable /tmp under the read-only root
-# filesystem.
+# filesystem. Resetting restart is the same gap again (review round 6,
+# finding 2): mbsync's entrypoint exits on a persistent failure, and
+# Docker's default restart ("no") would then leave that account
+# permanently unsynced rather than retried and visibly failing.
 generated_collectors_keep_the_mbsync_baseline_hardening() {
     expect_generated_rejected three-proton "" \
         "mbsync-$UUID_B: init is not true" \
+        "mbsync-$UUID_B: restart differs from mbsync" \
         "mbsync-$UUID_B: cap_drop lost ALL" \
         "mbsync-$UUID_B: security_opt lost no-new-privileges:true" \
         "mbsync-$UUID_B: tmpfs lost /tmp" \
@@ -1124,6 +1170,7 @@ generated_collectors_keep_the_mbsync_baseline_hardening() {
 services:
   mbsync-$UUID_B:
     init: !reset null
+    restart: !reset null
     cap_drop: !reset []
     security_opt: !reset []
     tmpfs: !reset []
@@ -1154,21 +1201,21 @@ services:
 EOF
 }
 
-# The environment check above compared only key names, which mbsync
-# itself also sets for BRIDGE_CERT_FINGERPRINT and BRIDGE_CERT_PIN_ROTATE,
-# so an overlay keeping both names could still rotate the persisted pin
-# or substitute another account's certificate fingerprint: the
-# entrypoint would then accept an attacker's certificate and send this
-# account's mounted Bridge password to it (review round 5, finding 3,
-# security). Rotation is never configuration (collector_env(),
-# scripts/config/operator_config.py), so every collector's value must
-# stay "false" regardless of its declaration; the fingerprint must match
-# the declaration exactly -- here mbsync-$UUID_B's own is replaced with
+# The environment check above compared only key names at the time, which
+# mbsync itself also sets for BRIDGE_CERT_FINGERPRINT and
+# BRIDGE_CERT_PIN_ROTATE, so an overlay keeping both names could still
+# rotate the persisted pin or substitute another account's certificate
+# fingerprint: the entrypoint would then accept an attacker's
+# certificate and send this account's mounted Bridge password to it
+# (review round 5, finding 3, security). The declared-value check added
+# for round 6, finding 3 now catches both, since collector_env() always
+# sets BRIDGE_CERT_PIN_ROTATE to "false" and the account's own
+# certificate fingerprint -- here mbsync-$UUID_B's own is replaced with
 # $UUID_C's account's.
 generated_collectors_bind_trust_values_to_their_declarations() {
     expect_generated_rejected three-proton "" \
-        "mbsync-$UUID_B: BRIDGE_CERT_PIN_ROTATE is not false" \
-        "mbsync-$UUID_B: BRIDGE_CERT_FINGERPRINT does not match its declaration" <<EOF
+        "mbsync-$UUID_B: environment BRIDGE_CERT_PIN_ROTATE does not match its declaration" \
+        "mbsync-$UUID_B: environment BRIDGE_CERT_FINGERPRINT does not match its declaration" <<EOF
 services:
   mbsync-$UUID_B:
     environment:
@@ -1196,7 +1243,7 @@ generated_collectors_apply_bindings_to_the_legacy_service() {
         "mbsync: user is not the mbsync UID 1001:1001" \
         "mbsync: sets an entrypoint override" \
         "mbsync: environment sets BASH_ENV, which mbsync does not set" \
-        "mbsync: BRIDGE_CERT_PIN_ROTATE is not false" <<EOF
+        "mbsync: environment BRIDGE_CERT_PIN_ROTATE does not match its declaration" <<EOF
 services:
   mbsync:
     build:
@@ -1302,6 +1349,23 @@ services:
   mbsync-$UUID_B:
     environment:
       BASH_ENV: "/tmp/x"
+EOF
+}
+
+# The key-name check above only rejects an extra key; it never required
+# the account's own declared values to actually come through. A
+# renderer regression or overlay could keep BRIDGE_USER but empty it
+# (dropping the key merges the environment map the same way, keeping
+# every other key), and mbsync's entrypoint exits on an empty
+# BRIDGE_USER -- the account could never start despite passing every
+# check above it (review round 6, finding 3).
+generated_collectors_require_declared_environment_values() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: environment BRIDGE_USER does not match its declaration" <<EOF
+services:
+  mbsync-$UUID_B:
+    environment:
+      BRIDGE_USER: ""
 EOF
 }
 
@@ -1618,6 +1682,8 @@ check "generated collectors require the mbsync UID" \
     generated_collectors_require_the_mbsync_uid
 check "generated collectors reject unexpected environment keys" \
     generated_collectors_reject_unexpected_environment_keys
+check "generated collectors require declared environment values" \
+    generated_collectors_require_declared_environment_values
 check "generated collectors' service set catches a case-only extra service" \
     generated_collectors_service_set_catches_a_case_only_extra_service
 check "omitted rerank and inference settings render without a warning" \

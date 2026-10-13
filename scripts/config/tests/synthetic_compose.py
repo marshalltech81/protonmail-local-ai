@@ -3,8 +3,8 @@
 Writes, for each case below, ``<out>/<case>/compose.accounts.yml`` as the
 translator renders it and ``<out>/<case>/collectors.json``, the enabled
 accounts the configuration declares (scope UUID, provider, Maildir root,
-the password file as Compose resolves it, and, for a proton-bridge
-account, its certificate fingerprint). The hardening checks of
+the password file as Compose resolves it, and the rendered environment
+``collector_env()`` builds for it). The hardening checks of
 scripts/tests/compose_test.sh take the declared accounts from that file,
 the input, never from the generated Compose under test, and
 scripts/tests/semgrep_generated_test.sh scans each generated file.
@@ -55,21 +55,25 @@ def cases() -> dict[str, dict[str, Any]]:
     return {"one-proton": one, "two-proton": two, "three-proton": three}
 
 
-def declared(config: dict[str, Any]) -> list[dict[str, str]]:
+def declared(config: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {
             "scope_uuid": account["scope_uuid"],
             "provider": account["provider"],
             "maildir_root": account["maildir_root"],
             "password_file": os.path.normpath(account["password_file"]),
-            # The trust value the entrypoint must pin to (compose_test.sh's
-            # merged hardening check, review round 5, finding 3): only a
-            # proton-bridge account declares one.
-            **(
-                {"certificate_fingerprint": account["proton_bridge"]["certificate_fingerprint"]}
-                if account["provider"] == oc.PROTON
-                else {}
-            ),
+            # The rendered environment this account's collector must
+            # carry (compose_test.sh's merged hardening check, review
+            # round 6, finding 3): the key-name check alone let a
+            # renderer regression drop a required value, such as
+            # BRIDGE_USER, or empty one, such as BRIDGE_CERT_FINGERPRINT,
+            # without tripping anything. Comparing every declared value
+            # also subsumes the two trust-value checks added for round
+            # 5, finding 3 (BRIDGE_CERT_FINGERPRINT, BRIDGE_CERT_PIN_ROTATE):
+            # both are already part of collector_env()'s output, the same
+            # function render_compose() calls, so the declaration and
+            # the render agree by construction.
+            "environment": oc.collector_env(account),
         }
         for account in config["accounts"]
         if account["enabled"]
