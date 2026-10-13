@@ -512,11 +512,13 @@ cmd_execute() {
 # code under test) ends every docker exec into it. Every
 # WATCH_INTERVAL_SECS it also measures the container's writable layer and
 # its bytes written to disk, and kills it when either passes
-# EXEC_MAX_WRITE_BYTES or cannot be read.
+# EXEC_MAX_WRITE_BYTES or cannot be read. Once it fires it ignores TERM
+# and exits 3, whether or not the kill worked, so stop_watchdog can tell.
 start_watchdog() {
     (
-        trap 'kill "$s" 2>/dev/null; exit 0' TERM
-        local start=$SECONDS size written why=""
+        local s="" start=$SECONDS size written why=""
+        # The sleep may already have ended (TERM during a measurement).
+        trap '[[ -z "$s" ]] || kill "$s" 2>/dev/null || true; exit 0' TERM
         while [[ -z "$why" ]]; do
             sleep "$WATCH_INTERVAL_SECS" &
             s=$!
@@ -531,8 +533,10 @@ start_watchdog() {
                 why="wrote more than $EXEC_MAX_WRITE_BYTES bytes"
             fi
         done
+        trap '' TERM
         printf 'run.sh: the execution container %s; killing it\n' "$why" >&2
-        docker kill "$RUNC" >/dev/null
+        docker kill "$RUNC" >/dev/null || true
+        exit 3
     ) &
     WATCHDOG=$!
 }
@@ -560,13 +564,16 @@ require_running() {
         die "the execution container stopped (killed by the watchdog?)"
 }
 
-# Stops the watchdog (and its sleep; a kill it already started finishes
-# first), then fails if the container is no longer running.
+# Stops the watchdog (and its sleep), then fails if it had fired (any
+# nonzero status, even with the container still running) or if the
+# container is no longer running.
 stop_watchdog() {
+    local st=0
     [[ -n "$WATCHDOG" ]] || return 0
     kill "$WATCHDOG" 2>/dev/null || true
-    wait "$WATCHDOG" || true
+    wait "$WATCHDOG" || st=$?
     WATCHDOG=""
+    ((st == 0)) || die "the watchdog fired or failed (status $st); the run is not valid"
     require_running
 }
 
