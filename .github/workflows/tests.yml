@@ -91,6 +91,23 @@ jobs:
       - name: Run the Maven trusted-checksum checks
         run: bash scripts/tests/maven_checksums_test.sh
 
+  # The operator configuration translator (#1607) runs on the host's
+  # Python, 3.11 or later, with the standard library only: tested on the
+  # oldest version it supports.
+  operator-config:
+    name: operator config translator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Run the translator tests
+        run: python3 -m unittest discover -s scripts/config/tests -v
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest
@@ -221,10 +238,12 @@ jobs:
         working-directory: mcp-server
         run: uv sync --locked --dev
 
-      # Parallel as in the indexer job (#1472).
+      # Parallel, then isolated bounded-work checks as in the indexer job (#1472).
       - name: Run pytest with coverage
         working-directory: mcp-server
-        run: uv run pytest -q -n auto --cov-report=xml:coverage.xml --cov-report=term
+        run: |
+          uv run pytest -q -n auto -m "not serial" --cov-fail-under=0
+          uv run pytest -q -m serial --cov-append --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload mcp-server coverage report
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

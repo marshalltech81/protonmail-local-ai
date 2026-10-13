@@ -57,6 +57,11 @@ config/authority.toml
 # The operator's own addresses (#824). The ``.example`` companion is
 # tracked.
 config/identity.toml
+# The operator configuration (#1607): addresses and the Bridge username.
+# The ``.example`` companion is tracked.
+config/config.toml
+# What scripts/config/operator_config.py writes from it.
+.generated/
 
 # Eval queries grounded in a real mailbox — must never be committed.
 # The ``.example`` companions are tracked as schema/templates.

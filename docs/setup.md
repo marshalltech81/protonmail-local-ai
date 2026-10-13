@@ -920,6 +920,208 @@ resources until a restart. A client that comes back after that gets
 `404` for the old session ID and starts a new session; raise the value
 in `.env` if a client of yours does not reconnect on its own.
 
+## Operator configuration file (not yet active)
+
+**Nothing below changes how the stack runs today.** `make up` reads
+`.env`, the secret files and `config/*.toml` exactly as described above.
+A versioned TOML file with several accounts is the approved direction
+(#1353); this section describes its schema and its translator, which
+exist now so the mapping can be checked. The launcher that runs the
+stack from it, and the explicit choice between `.env` and TOML, come
+with #1603.
+
+`config/config.toml` (copy `config/config.toml.example`) holds
+`schema_version = 1`, a `[global]` table (the model layers and their
+API-key files, the indexer, MCP and the source-authority rules) and one
+`[[accounts]]` table per account. It is gitignored and must be mode
+`600`: it holds your Bridge username and addresses. Secrets stay in
+their files; the TOML holds only their paths, relative to `config/`.
+
+```bash
+install -m 600 config/config.toml.example config/config.toml
+# edit it, then check it and see what it produces (needs Python 3.11+):
+python3 scripts/config/operator_config.py translate
+```
+
+The translator reads at most 4 MiB, validates the file, and writes
+`.generated/` (gitignored, directories `700`, files `600`): nothing reads
+it yet.
+
+- `compose.env`: the settings `.env` holds today, for the global keys and
+  the account at `/maildir`, each value in single quotes.
+- `compose.accounts.yml`: one collector per enabled account, each with
+  the hardening of `docker-compose.yml`'s `mbsync` and only its own
+  password secret, Maildir and state volumes and network; the account at
+  `/maildir` keeps the names `mbsync`, `bridge_pass`, `maildir-volume`,
+  `mbsync-state` and `bridge-net`. It also names the model API-key files.
+- `config/identity.toml` and `config/authority.toml`: the files the
+  indexer reads today, from the `/maildir` account's
+  `identity.addresses` and from `global.classification.authority`; each
+  is absent when its table is.
+
+It refuses, naming the key and never the value: an unknown key, a wrong
+type, a value out of range, a blank or missing required value, a schema
+version other than 1, a file others can read, a file that is not TOML,
+and what `make validate-env` would refuse in the result (an enabled
+layer's `base_url` that is not `default` or an http(s) URL without
+credentials, an anthropic `base_url` ending in `/v1`, chunk budgets or
+an inference context that do not fit together, the example's placeholder
+username), and any layer's `base_url`, enabled or not, that carries
+credentials or is not a URL `mcp-server` can split, and an identity
+address or authority pattern the indexer's loaders would refuse (not a
+bare address or domain, or repeated). No secret path may name
+`.secrets/mcp_auth_token.txt`; this and the file rules below hold for
+this checkout's files and for those beside a configuration kept
+elsewhere (its own `../.secrets/` and `config/`). With `--out` set, it refuses an
+output directory where an output would replace the configuration file,
+a secret file it names or a protected file. For the accounts:
+
+- `scope_uuid` is the account's immutable UUID (today's
+  `ACCOUNT_SCOPE`); two accounts with the same one are refused. `name`
+  is an editable display name that identifies nothing.
+- `maildir_root` is `/maildir` for one account at most, and
+  `/accounts/<its scope_uuid>` for any other. An enabled account at
+  `/maildir` is required while the indexer reads only that one (#1605).
+- Each account has its own `password_file`, shared with no other
+  account and no model key. A password file is never a model key's
+  conventional file (`.secrets/embed_api_key.txt`,
+  `.secrets/inference_api_key.txt`, `.secrets/rerank_api_key.txt`), and
+  an `api_key_file` never `.secrets/bridge_pass.txt`, even when that
+  file's own setting points elsewhere. No password or key file is the
+  MCP token's file, `.env`, `config/config.toml`, `config/identity.toml`,
+  `config/authority.toml`, one of the translator's outputs under
+  `.generated/`, or a `*.pem`, `*.key`, `*.p12` or `*.pfx` file.
+- A `proton-bridge` account has a `[accounts.proton_bridge]` table and
+  takes exclusions only: a non-empty `sync.mailboxes.include` is
+  refused, and `exclude` must keep `All Mail`, `Labels/*` and `Starred`.
+  Its connection, certificate, exclusion and isync-name values go
+  through the same check as `make validate-env` and mbsync's startup
+  (`mbsync/proton-settings.sh`).
+- An `imap` account (`[accounts.imap]` with its folder roles) is part of
+  the schema, but enabling one is refused until #1606.
+
+Certificate pin rotation (`BRIDGE_CERT_PIN_ROTATE`) and forced deletion
+(`INDEXER_DELETION_FORCE`) are not configuration in the TOML file: they
+become one-run commands (#1609).
+
+Every `.env.example` setting, every TOML key and what stays fixed (a
+test in `scripts/config/tests` keeps these tables equal to the
+translator's). An integer or number is at most 9223372036854775807, the
+largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
+`-0.0` is read as 0:
+
+<!-- operator-config-mapping:begin -->
+| `.env.example` setting | TOML key | Default | Validation | Consumer | After a change |
+| --- | --- | --- | --- | --- | --- |
+| `SOURCE_MODE` | `accounts[].provider` | required | one of proton-bridge, imap (imap cannot be enabled until #1606) | mbsync, indexer, mcp-server | recreate all three; recorded in the index with the UUID |
+| `ACCOUNT_SCOPE` | `accounts[].scope_uuid` | required | UUID, canonical lower case; unique | indexer, mcp-server | never changed: a different UUID is a different account (#1596) |
+| `BRIDGE_USER` | `accounts[].connection.username` | required | text | mbsync (mbsyncrc User) | recreate mbsync |
+| `BRIDGE_IMAP_PORT` | `accounts[].connection.port` | 1143 (proton-bridge) | integer 1 to 65535; proton-settings.sh | mbsync (Tunnel, probes) | recreate mbsync |
+| `BRIDGE_CERT_FINGERPRINT` | `accounts[].proton_bridge.certificate_fingerprint` | required | text; 64 hex digits | mbsync (certificate check) | recreate mbsync |
+| `BRIDGE_HOST` | `accounts[].connection.host` | host.docker.internal (proton-bridge) | text; proton-settings.sh allowlist | mbsync (Tunnel, probes) | recreate mbsync |
+| `BRIDGE_CERT_HOST` | `accounts[].proton_bridge.certificate_host` | 127.0.0.1 | text; proton-settings.sh loopback names | mbsync (mbsyncrc Host) | recreate mbsync |
+| `PROTON_IMAP_ACCOUNT_NAME` | `accounts[].sync.imap_account_name` | protonmail | text; proton-settings.sh names | mbsync (mbsyncrc) | recreate mbsync |
+| `PROTON_REMOTE_STORE_NAME` | `accounts[].sync.remote_store_name` | protonmail-remote | text; proton-settings.sh names | mbsync (mbsyncrc, output filter) | recreate mbsync |
+| `PROTON_LOCAL_STORE_NAME` | `accounts[].sync.local_store_name` | protonmail-local | text; proton-settings.sh names | mbsync (mbsyncrc) | recreate mbsync |
+| `PROTON_CHANNEL_NAME` | `accounts[].sync.channel_name` | protonmail | text; proton-settings.sh names | mbsync (mbsyncrc, output filter) | recreate mbsync |
+| `PROTON_FOLDER_EXCLUSIONS` | `accounts[].sync.mailboxes.exclude` | All Mail, Labels/\*, Starred (proton-bridge) | list of text, at most 256; joined with \|; must keep All Mail, Labels/\*, Starred | mbsync (mbsyncrc Patterns) | recreate mbsync; mail already synced stays |
+| `BRIDGE_CERT_PIN_ROTATE` | maintenance command (#1609) | - | - | mbsync (pin check) | one-run command |
+| `SYNC_INTERVAL` | `accounts[].sync.interval_seconds` | 60 | integer >= 1 | mbsync (entrypoint, healthcheck) | recreate mbsync |
+| `SYNC_DEADLINE_SECONDS` | `accounts[].sync.deadline_seconds` | 86400 | integer 1 to 999999999 | mbsync (entrypoint, healthcheck) | recreate mbsync |
+| `EMBED_BASE_URL` | `global.embedding.base_url` | required | text; URL or default | indexer, mcp-server | recreate indexer and mcp-server; on an existing index it must match the recorded embedder |
+| `EMBED_MODEL` | `global.embedding.model` | required | text | indexer, mcp-server | recreate indexer and mcp-server; on an existing index it must match the recorded embedder |
+| `EMBED_MODE` | `global.embedding.mode` | openai | one of openai | indexer, mcp-server | recreate indexer and mcp-server |
+| `EMBED_TIMEOUT_SECS` | `global.embedding.timeout_seconds` | 60 | number >= 1 | mcp-server | recreate mcp-server |
+| `EMBED_BATCH_SIZE` | `global.embedding.batch_size` | 64 | integer >= 1 | indexer | recreate indexer |
+| `EMBED_CONCURRENCY` | `global.embedding.concurrency` | 1 | integer >= 1 | indexer | recreate indexer |
+| `INITIAL_INDEX_BATCH_SIZE` | `global.indexer.initial_batch_size` | 50 | integer >= 1 | indexer | recreate indexer |
+| `INDEXER_STEADY_STATE_BATCH_SIZE` | `global.indexer.steady_state_batch_size` | 8 | integer >= 1 | indexer | recreate indexer |
+| `INDEXER_WAL_CHECKPOINT_INTERVAL_SECS` | `global.indexer.wal_checkpoint_interval_seconds` | 600 | integer >= 60 | indexer | recreate indexer |
+| `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` | `global.indexer.recovery_sweep_interval_seconds` | 1800 | integer >= 60 | indexer | recreate indexer |
+| `RERANK_MODE` | `global.reranking.mode` | none | one of cohere, none | mcp-server | recreate mcp-server |
+| `RERANK_BASE_URL` | `global.reranking.base_url` | required when enabled | text; URL or default; required when enabled | mcp-server | recreate mcp-server |
+| `RERANK_MODEL` | `global.reranking.model` | required when enabled | text; required when enabled | mcp-server | recreate mcp-server |
+| `RERANK_CANDIDATES` | `global.reranking.candidates` | 20 | integer >= 1 | mcp-server | recreate mcp-server |
+| `RERANK_TIMEOUT_SECS` | `global.reranking.timeout_seconds` | 60 | number >= 1 | mcp-server | recreate mcp-server |
+| `EMBED_WARMUP_TIMEOUT_SECS` | `global.embedding.warmup_timeout_seconds` | 600 | number >= 1 | indexer | recreate indexer |
+| `INFERENCE_MODE` | `global.inference.mode` | none | one of anthropic, openai, none | mcp-server | recreate mcp-server |
+| `INFERENCE_BASE_URL` | `global.inference.base_url` | required when enabled | text; URL or default; required when enabled | mcp-server | recreate mcp-server |
+| `INFERENCE_MODEL` | `global.inference.model` | required when enabled | text; required when enabled | mcp-server | recreate mcp-server |
+| `INFERENCE_TIMEOUT_SECS` | `global.inference.timeout_seconds` | 300 | number >= 1 | mcp-server | recreate mcp-server |
+| `INFERENCE_MAX_TOKENS` | `global.inference.max_tokens` | unset: the mode's default | integer >= 1; unset: the mode's default | mcp-server | recreate mcp-server |
+| `INFERENCE_CONTEXT_TOKENS` | `global.inference.context_tokens` | unset: the mode's default | integer >= 1; unset: the mode's default | mcp-server | recreate mcp-server |
+| `INFERENCE_STRUCTURED_OUTPUT` | `global.inference.structured_output` | true | true or false | mcp-server | recreate mcp-server |
+| `INDEXER_DELETION_ENABLED` | `global.indexer.deletion.enabled` | true | true or false | indexer (reconciler) | recreate indexer |
+| `INDEXER_DELETION_GRACE_DAYS` | `global.indexer.deletion.grace_days` | 7 | integer >= 0 | indexer (reconciler) | recreate indexer |
+| `INDEXER_DELETION_SWEEP_INTERVAL_SECS` | `global.indexer.deletion.sweep_interval_seconds` | 3600 | integer >= 60 | indexer (reconciler) | recreate indexer |
+| `INDEXER_DELETION_MAX_BATCH_PCT` | `global.indexer.deletion.max_batch_fraction` | 0.05 | number 0 to 1 | indexer (reconciler) | recreate indexer |
+| `INDEXER_DELETION_FORCE` | maintenance command (#1609) | - | - | indexer (reconciler) | one-run command |
+| `INDEXER_MAX_ATTEMPTS` | `global.indexer.retry.max_attempts` | 5 | integer >= 1 | indexer (queue) | recreate indexer |
+| `INDEXER_RETRY_BASE_SECONDS` | `global.indexer.retry.base_seconds` | 30 | integer >= 1 | indexer (queue) | recreate indexer |
+| `INDEXER_MESSAGE_TIMEOUT_SECONDS` | `global.indexer.message_timeout_seconds` | 3600 | integer >= 0; 0 disables | indexer | recreate indexer |
+| `INDEXER_CHUNK_TARGET_TOKENS` | `global.indexer.chunking.target_tokens` | 1000 | integer >= 1; <= max_tokens | indexer | recreate indexer |
+| `INDEXER_CHUNK_MAX_TOKENS` | `global.indexer.chunking.max_tokens` | 1500 | integer >= 1 | indexer | recreate indexer |
+| `INDEXER_CHUNK_OVERLAP_TOKENS` | `global.indexer.chunking.overlap_tokens` | 150 | integer >= 0; < target_tokens | indexer | recreate indexer |
+| `INDEXER_PARSE_MAX_BYTES` | `global.indexer.parse_max_bytes` | 50000000 | integer >= 0; 0 disables | indexer | recreate indexer |
+| `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` | `global.indexer.attachments.enabled` | true | true or false | indexer | recreate indexer |
+| `INDEXER_OCR_ENABLED` | `global.indexer.attachments.ocr.enabled` | true | true or false | indexer | recreate indexer |
+| `INDEXER_ATTACHMENT_MAX_BYTES` | `global.indexer.attachments.max_bytes` | 33554432 | integer >= 1 | indexer | recreate indexer |
+| `INDEXER_OCR_MAX_PAGES` | `global.indexer.attachments.ocr.max_pages` | 20 | integer >= 1 | indexer | recreate indexer |
+| `INDEXER_OCR_TIMEOUT_SECONDS` | `global.indexer.attachments.ocr.timeout_seconds` | 60 | integer >= 0; 0 disables | indexer | recreate indexer |
+| `INDEXER_PDF_MAX_DIGITAL_PAGES` | `global.indexer.attachments.pdf_max_digital_pages` | 500 | integer >= 0; 0 disables | indexer | recreate indexer |
+| `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `global.indexer.attachments.max_extracted_chars` | 2000000 | integer >= 0; 0 disables | indexer | recreate indexer |
+| `MCP_PORT` | `global.mcp.port` | 3000 | integer 1 to 65535 | mcp-server and its loopback port mapping | recreate mcp-server |
+| `MCP_TRANSPORT` | fixed: streamable-http | - | - | mcp-server | - |
+| `MCP_SESSION_IDLE_TIMEOUT_SECS` | `global.mcp.session_idle_timeout_seconds` | 1800 | number >= 1 | mcp-server | recreate mcp-server |
+| `MCP_EXPERIMENTAL_TOOLS` | `global.mcp.experimental_tools` | false | true or false | mcp-server | recreate mcp-server |
+
+| TOML key without a `.env.example` setting | Default | Validation | Consumer | After a change |
+| --- | --- | --- | --- | --- |
+| `accounts[].name` | required | text | none: a display name, never an identifier | - |
+| `accounts[].enabled` | true | true or false | which accounts get a collector in compose.accounts.yml; disabling keeps the data | recreate the collector |
+| `accounts[].maildir_root` | required | /maildir (one account at most) or /accounts/<scope_uuid> | /maildir: today's projection (compose.env); /accounts/<scope_uuid>: its collector only, the indexer mount is #1605 | - |
+| `accounts[].password_file` | required | path, relative to config/; no other account's or model key's, nor a model key's conventional file | the collector's password secret (bridge_pass) | recreate the collector |
+| `accounts[].sync.mailboxes.include` | unset | list of text; empty for proton-bridge | proton-bridge: must be empty; imap: #1606 | - |
+| `accounts[].identity.addresses` | table absent: unconfigured | list of 1 to 1000 bare addresses (name@domain); unique | config/identity.toml for the indexer (the account at /maildir) | restart indexer |
+| `accounts[].proton_bridge.declared_address_scope` | unverified | one of combined, split, unverified | none until #1593 | - |
+| `accounts[].imap.folder_roles.trash` | unset | text | none until #1606 | - |
+| `accounts[].imap.folder_roles.sent` | unset | text | none until #1606 | - |
+| `accounts[].imap.folder_roles.drafts` | unset | text | none until #1606 | - |
+| `accounts[].imap.folder_roles.spam` | unset | text | none until #1606 | - |
+| `global.embedding.api_key_file` | ../.secrets/embed_api_key.txt | path, relative to config/; not .secrets/bridge_pass.txt | the embed_api_key secret (indexer, mcp-server) | recreate indexer and mcp-server |
+| `global.inference.api_key_file` | ../.secrets/inference_api_key.txt | path, relative to config/; not .secrets/bridge_pass.txt | the inference_api_key secret (mcp-server) | recreate mcp-server |
+| `global.reranking.api_key_file` | ../.secrets/rerank_api_key.txt | path, relative to config/; not .secrets/bridge_pass.txt | the rerank_api_key secret (mcp-server) | recreate mcp-server |
+| `global.classification.authority.counsel.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.counsel.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.management.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.management.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.vendor.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.vendor.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.government.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.government.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.personal.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.personal.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.other.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.other.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+
+| Runtime-owned, not configurable | Why |
+| --- | --- |
+| MCP_TRANSPORT | Streamable HTTP at /mcp is the only transport (#498) |
+| MAILDIR_PATH | the Maildir mount path, /maildir |
+| SQLITE_PATH | the index mount path, /data/mail.db |
+| INDEXER_HEALTH_FILE | the indexer's healthcheck file on its tmpfs |
+| HOME | the indexer user's home on its tmpfs |
+| PATH | the search path the PDF extractor child sets |
+| GIT_COMMIT | a build argument make build passes |
+| EMBED_API_KEY | a Docker secret; the variable is a fallback outside containers |
+| INFERENCE_API_KEY | a Docker secret; the variable is a fallback outside containers |
+| RERANK_API_KEY | a Docker secret; the variable is a fallback outside containers |
+| MCP_AUTH_TOKEN | .secrets/mcp_auth_token.txt, a fixed path the client helpers read |
+| mbsync transport | pull-only sync, Expunge None, Create Near, CopyArrivalDate, SubFolders Legacy, SyncState \*, the isync layout exclusions |
+| Bridge trust | implicit TLS through the Tunnel, the fingerprint check, the persistent pin, the host and certificate-name allowlists |
+| hardening | networks, volumes, non-root users, read-only root filesystems, capabilities, the loopback-only MCP port |
+<!-- operator-config-mapping:end -->
+
 ## Updating Bridge
 
 The Bridge app updates itself; nothing in this repository pins or

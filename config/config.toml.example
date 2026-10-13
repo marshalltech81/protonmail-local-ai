@@ -1,0 +1,145 @@
+# Operator configuration, schema version 1 (#1353, #1607). NOT YET ACTIVE:
+# `make up` still reads .env. The launcher that selects this file is #1603.
+#
+# Copy to config/config.toml (gitignored: it holds addresses and your
+# Bridge username) at mode 600. Check it, and see what it would produce,
+# with:
+#   python3 scripts/config/operator_config.py translate
+# which writes .generated/ (mode 700, files 600, gitignored). Nothing reads
+# .generated/ yet. Every value below is a synthetic example.
+#
+# Each key, its default, its validation and its .env.example setting are
+# listed in docs/setup.md ("Operator configuration file"). Keys left out
+# take their defaults. Secrets stay in files: only their paths are here,
+# relative to this file's directory. Certificate pin rotation and forced
+# deletion are one-run commands (#1609), not settings.
+
+schema_version = 1
+
+# --- Shared by every account ---------------------------------------------
+
+[global.embedding]
+mode = "openai"
+# Required: the provider's URL, or "default" for the openai SDK's own
+# endpoint (api.openai.com). Indexer and mcp-server use the same embedder.
+base_url = "http://host.docker.internal:8001/v1"
+model = "Qwen/Qwen3-Embedding-8B"
+api_key_file = "../.secrets/embed_api_key.txt"
+timeout_seconds = 60
+warmup_timeout_seconds = 600
+batch_size = 64
+concurrency = 1
+
+[global.inference]
+# anthropic, openai or none (the default: nothing is sent to an
+# inference provider). base_url and model are required when enabled.
+mode = "none"
+api_key_file = "../.secrets/inference_api_key.txt"
+timeout_seconds = 300
+structured_output = true
+# base_url = "default"
+# model = "claude-sonnet-5-5"
+# max_tokens = 4096
+# context_tokens = 48000
+
+[global.reranking]
+# cohere or none (the default). base_url and model are required when enabled.
+mode = "none"
+api_key_file = "../.secrets/rerank_api_key.txt"
+candidates = 20
+timeout_seconds = 60
+
+[global.indexer]
+initial_batch_size = 50
+steady_state_batch_size = 8
+parse_max_bytes = 50000000
+message_timeout_seconds = 3600
+wal_checkpoint_interval_seconds = 600
+recovery_sweep_interval_seconds = 1800
+
+[global.indexer.retry]
+max_attempts = 5
+base_seconds = 30
+
+[global.indexer.chunking]
+target_tokens = 1000
+max_tokens = 1500
+overlap_tokens = 150
+
+[global.indexer.deletion]
+# true: mirror (mail deleted upstream leaves the index after grace_days);
+# false: archive.
+enabled = true
+grace_days = 7
+sweep_interval_seconds = 3600
+max_batch_fraction = 0.05
+
+[global.indexer.attachments]
+enabled = true
+max_bytes = 33554432
+max_extracted_chars = 2000000
+pdf_max_digital_pages = 500
+
+[global.indexer.attachments.ocr]
+enabled = true
+max_pages = 20
+timeout_seconds = 60
+
+[global.mcp]
+port = 3000
+session_idle_timeout_seconds = 1800
+experimental_tools = false
+
+# Optional source-authority rules, as in config/authority.toml.example:
+# the claimed sender, not authentication. Leave the tables out for none.
+[global.classification.authority.counsel]
+domains = ["lawfirm.example"]
+addresses = ["outside.counsel@mail.example"]
+
+[global.classification.authority.vendor]
+domains = ["contractor.example"]
+
+# --- One table per account -----------------------------------------------
+
+[[accounts]]
+# Immutable: the account the index is registered to (ACCOUNT_SCOPE today).
+# A different UUID is a different account, never a rename.
+scope_uuid = "00000000-0000-4000-8000-000000000001"
+# Editable display name; nothing identifies the account by it.
+name = "Primary"
+enabled = true
+provider = "proton-bridge"
+# One account at most keeps /maildir; any other uses /accounts/<scope_uuid>.
+maildir_root = "/maildir"
+password_file = "../.secrets/bridge_pass.txt"
+
+[accounts.connection]
+host = "host.docker.internal"
+port = 1143
+username = "user@mail.example"
+
+[accounts.sync]
+interval_seconds = 60
+deadline_seconds = 86400
+imap_account_name = "protonmail"
+remote_store_name = "protonmail-remote"
+local_store_name = "protonmail-local"
+channel_name = "protonmail"
+
+[accounts.sync.mailboxes]
+# Proton accounts take exclusions only (include must stay empty), and
+# All Mail, Labels/* and Starred must stay among them.
+exclude = ["All Mail", "Labels/*", "Starred"]
+
+# Optional: your own addresses for this account, as in
+# config/identity.toml.example. Leave the table out for unconfigured.
+[accounts.identity]
+addresses = ["me@mail.example", "alias@other.example"]
+
+[accounts.proton_bridge]
+certificate_host = "127.0.0.1"
+# Required: the SHA-256 fingerprint of the Bridge app's certificate
+# (docs/setup.md, step 4.3). This one is a placeholder.
+certificate_fingerprint = "0000000000000000000000000000000000000000000000000000000000000000"
+# combined, split or unverified (the default); no consumer yet (#1593).
+declared_address_scope = "unverified"

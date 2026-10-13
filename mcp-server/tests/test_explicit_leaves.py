@@ -10,10 +10,10 @@ reads are complete (#1140, for the leaves that read display names), and
 on the From role only when the sender is not ambiguous (#1153).
 
 The flat ``sender`` / ``recipient`` / ``participant`` / ``text``
-leaves compile to these, so their SQL, and so every flat result,
-``address_matches`` and ``indeterminate``, is unchanged: pinned below
-against a verbatim copy of the compilers they replaced. All data is
-synthetic.
+leaves compile to these. Address SQL is pinned below against the
+compilers they replaced; text differs only by FTS-first join ordering
+(#1610). Results, ``address_matches`` and ``indeterminate`` retain
+the same semantics. All data is synthetic.
 """
 
 import pytest
@@ -230,7 +230,11 @@ def test_flat_address_sql_is_unchanged(flat, value):
 @pytest.mark.parametrize("terms", [("budget",), ("budget", "plan"), ('a"b',)])
 def test_flat_text_is_body_words(terms):
     assert compile_leaves([Leaf("text", terms)]) == compile_leaves([Leaf("body_words", terms)])
-    assert compile_leaves([Leaf("text", terms)]) == _legacy_text(terms)
+    old_sql, params = _legacy_text(terms)
+    assert compile_leaves([Leaf("text", terms)]) == (
+        old_sql.replace("JOIN message_chunks", "CROSS JOIN message_chunks"),
+        params,
+    )
 
 
 @pytest.mark.parametrize(
