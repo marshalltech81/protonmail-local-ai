@@ -88,6 +88,23 @@ jobs:
       - name: Run the Maven trusted-checksum checks
         run: bash scripts/tests/maven_checksums_test.sh
 
+  # The operator configuration translator (#1607) runs on the host's
+  # Python, 3.11 or later, with the standard library only: tested on the
+  # oldest version it supports.
+  operator-config:
+    name: operator config translator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Run the translator tests
+        run: python3 -m unittest discover -s scripts/config/tests -v
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest

@@ -3653,6 +3653,53 @@ a_deleted_read_fails_its_behavioural_case() {
 check "every shell-only setting changes what mbsync does" every_shell_only_setting_changes_behaviour
 check "a deleted read fails its behavioural case" a_deleted_read_fails_its_behavioural_case
 
+# --- the TOML projection renders today's mbsyncrc (#1607) ---------------------
+#
+# scripts/config/operator_config.py translates config/config.toml into the
+# settings .env holds today. legacy.toml, a configuration equivalent to
+# the golden file's settings, is translated, and the entrypoint run with
+# its compose.env (its certificate fingerprint set to the served one's)
+# must render mbsyncrc.golden byte for byte. The translator needs Python
+# 3.11 or later; CI has it, and only there is a missing one a failure.
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+toml_projection_renders_the_golden_file() {
+    local line key value assignments=()
+    if ! python3 -c 'import sys, tomllib; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+        if [[ -n "${CI:-}" ]]; then
+            echo "python3 3.11 or later is required in CI"
+            return 1
+        fi
+        echo "skipped: python3 3.11 or later is not installed"
+        return 0
+    fi
+    order_setup toml-golden
+    printf '%s\n' "$WORK/cert-a.pem" >"$ORDER_DIR/served"
+    mkdir -p "$ORDER_DIR/config"
+    sed "s/^certificate_fingerprint = .*/certificate_fingerprint = \"$(cert_fingerprint "$WORK/cert-a.pem")\"/" \
+        "$REPO_ROOT/scripts/config/tests/fixtures/legacy.toml" >"$ORDER_DIR/config/config.toml"
+    chmod 600 "$ORDER_DIR/config/config.toml"
+    python3 "$REPO_ROOT/scripts/config/operator_config.py" translate \
+        --config "$ORDER_DIR/config/config.toml" --out "$ORDER_DIR/generated" >/dev/null
+    while IFS= read -r line; do
+        if [[ -z "$line" || "$line" == \#* ]]; then
+            continue
+        fi
+        key="${line%%=*}"
+        value="${line#*=}"
+        value="${value#\'}"
+        assignments+=("$key=${value%\'}")
+    done <"$ORDER_DIR/generated/compose.env"
+    ((${#assignments[@]} > 50)) || return 1
+    order_run "${assignments[@]}"
+    order_is "$SYNCED_START" 143 || return 1
+    cmp -s "$ORDER_DIR/seen/mbsyncrc" "$GOLDEN" || {
+        diff "$GOLDEN" "$ORDER_DIR/seen/mbsyncrc" || true
+        return 1
+    }
+}
+
+check "the TOML projection renders the golden mbsyncrc" toml_projection_renders_the_golden_file
+
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
     exit 1

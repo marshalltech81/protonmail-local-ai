@@ -37,16 +37,22 @@ with a reason.
   readers with the key at a sentinel and fails when the sentinel changes
   nothing, so a deleted shell read is caught there. The list of keys
   those cases cover must equal ``_SHELL_ONLY``.
+- The operator configuration's mapping (#1607,
+  ``scripts/config/operator_config.py``) must name every ``.env.example``
+  key, and list every name this module excludes as plumbing as
+  runtime-owned.
 
 It lives in the indexer suite because CI has no repo-root pytest job; it
 reads the mcp-server's sources by path."""
 
 import ast
+import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess  # nosec B404 - runs docker compose with a fixed argv
+import sys
 from pathlib import Path
 
 import pytest
@@ -790,3 +796,28 @@ def test_a_shell_only_key_without_a_behavioural_case_is_caught(tmp_path):
     text = _ENTRYPOINT_TEST.read_text(encoding="utf-8")
     copy.write_text(text.replace("KEYS=(BRIDGE_USER ", "KEYS=(", 1), encoding="utf-8")
     assert set(_SHELL_ONLY) - set(_behaviour_keys(copy)) == {"BRIDGE_USER"}
+
+
+# --- #1607: the operator configuration's mapping -----------------------------
+
+
+def _operator_config():
+    path = _REPO / "scripts" / "config" / "operator_config.py"
+    spec = importlib.util.spec_from_file_location("operator_config", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses look the module up by name while the class is built.
+    sys.modules["operator_config"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_every_plumbing_name_is_runtime_owned_in_the_mapping():
+    runtime_owned = {name for name, _ in _operator_config().RUNTIME_OWNED}
+    plumbing = set(_NOT_DOCUMENTED) | {n for names in _NOT_READ_BY_PYTHON.values() for n in names}
+    assert plumbing <= runtime_owned, sorted(plumbing - runtime_owned)
+
+
+def test_the_mapping_names_every_env_example_key():
+    mapped = {s.env for s in _operator_config().MAPPING}
+    assert mapped == _example_keys(_REPO / ".env.example")

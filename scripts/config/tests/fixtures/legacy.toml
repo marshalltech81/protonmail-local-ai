@@ -1,0 +1,42 @@
+# The configuration equivalent to legacy.env, with only the required keys
+# (every other key takes its default), plus the lists of
+# config/identity.toml.example and config/authority.toml.example.
+# Synthetic values only. Used by scripts/config/tests and by
+# mbsync/tests/entrypoint_test.sh (the rendered mbsyncrc).
+schema_version = 1
+
+[global.embedding]
+base_url = "http://host.docker.internal:8001/v1"
+model = "synthetic-embed-model"
+
+[global.classification.authority.counsel]
+domains = ["lawfirm.example"]
+addresses = ["outside.counsel@mail.example"]
+
+[global.classification.authority.management]
+domains = ["management-co.example"]
+
+[global.classification.authority.vendor]
+domains = ["contractor.example", "billing.utility.example"]
+
+[global.classification.authority.government]
+domains = ["city.example"]
+
+[global.classification.authority.personal]
+addresses = ["a.friend@mail.example"]
+
+[[accounts]]
+scope_uuid = "00000000-0000-4000-8000-000000000001"
+name = "Synthetic"
+provider = "proton-bridge"
+maildir_root = "/maildir"
+password_file = "../.secrets/bridge_pass.txt"
+
+[accounts.connection]
+username = "synthetic@example.com"
+
+[accounts.identity]
+addresses = ["me@mail.example", "me+lists@mail.example", "alias@other.example"]
+
+[accounts.proton_bridge]
+certificate_fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
