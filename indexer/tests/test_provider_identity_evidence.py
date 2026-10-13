@@ -1022,7 +1022,8 @@ class TestGenericSourceIndexes:
 
         claimant = _claimant(path)
         (row,) = idx.db._conn.execute(
-            "SELECT claimant_id, folder, sent_at, sent_at_status FROM messages"
+            "SELECT m.claimant_id, o.folder, m.sent_at, m.sent_at_status FROM messages m "
+            "JOIN message_occurrences o ON o.claimant_id = m.claimant_id"
         ).fetchall()
         assert (row["claimant_id"], row["folder"]) == (claimant, "Sent Items")
         assert row["sent_at_status"] == sent_at_status

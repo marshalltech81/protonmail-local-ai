@@ -960,13 +960,15 @@ per-message record.
 `Message` and reads nothing from disk; `parse_email(path)`, the Maildir
 adapter, reads the file under the size cap and builds the
 `SourceMetadata` it hands over: the folder, the Maildir flags, the
-file's size and mtime, and its path, which only names the message in
-log lines and the `filepath` record. Everything below the parser
+file's size and mtime, and its path, which names the message in log
+lines and the `indexed_files` record and locates its occurrence.
+Everything below the parser
 (threading, chunking, extraction, the database writer) sees the
 `Message`, so another source (an mbox import, say) would plug in at
 `parse_email_bytes` with its own adapter. Read state is the exception:
-the writer still takes it from the Maildir flags in `filepath`
-(`maildir.message_state`), and `SourceMetadata.flags` is not read yet.
+the writer takes it from the Maildir flags in the file's path
+(`maildir.message_state`) onto its occurrence, and
+`SourceMetadata.flags` is not read yet.
 
 **Claimant IDs.** A Message-ID is set by the sender, so two different
 files can claim the same one, by accident or to overwrite another
@@ -1015,16 +1017,16 @@ Each indexed message gets one row — its own
 subject (cut to `SUBJECT_MAX_CHARS`, 2,000 decoded characters, at parse
 time, #541), `sent_at` (`Date:` header, NULL when it is missing or
 unparseable) with `sent_at_status`, `occurred_at` (the top `Received:`
-header's date, or NULL), `first_indexed_at` (see Message time), folder,
+header's date, or NULL), `first_indexed_at` (see Message time),
 `in_reply_to` /
-references, attachment flag, read state, and its source: `filepath` (the Maildir
-locator, kept current across flag renames; when a rename crosses
-folders the new `folder` is written in the same transaction, so a failed
-update rolls back whole and the Maildir walk re-indexes the file) plus
-`size_bytes` and
-`content_hash` (SHA-256 of the raw `.eml`). The MCP server returns
-these as `source_file` on every message, evidence chunk, and attachment
-result (see `docs/mcp-tools.md`). `message_participants`
+references, attachment flag, and its bytes' `size_bytes` and
+`content_hash` (SHA-256 of the raw `.eml`). Its folders, file locators
+and read state are its copies' (see *Mailbox occurrences*; v15 dropped
+the row's own `filepath`, `folder`, `seen`, `flagged` and `replied` and
+`message_thread_map.filepath`, #1568). The MCP server returns the
+representative copy's locator with the hash and size as `source_file`
+on every message, evidence chunk, and attachment result (see
+`docs/mcp-tools.md`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.
@@ -1209,21 +1211,22 @@ decodes to nothing is kept as sent too, so the part stays an
 attachment. Filenames stored before this are corrected only when their
 message is re-indexed.
 
-**Read state.** `seen`, `flagged` and `replied` are the `S`, `F` and
-`R` flags in `filepath`'s `:2,<flags>` suffix (`maildir.message_state`,
-built on the same `parse_flags` as the `T` trash check; other letters
-are ignored, and a file without the suffix is unread). mbsync is
-pull-only, but it mirrors a read, star or reply made in Proton by
-renaming the file (`:2,` → `:2,S`, and `new/` → `cur/`), so the flags
-are written wherever `filepath` is: by `upsert_thread` from the parsed
-file's path, and by `update_filepath` in the same `UPDATE` as the new
-locator. Every rename path — the watchdog's `on_moved`, the
-reconciler's `handle_moved` and sweep, and the startup `sweep_paths`
-that heals renames made while the indexer was down — goes through
-`update_filepath`, so a state change is one row update with no reparse
-or re-embed, and the state cannot disagree with the stored path.
+**Read state.** Each occurrence's `seen`, `flagged`, `replied` and
+`trashed` are the `S`, `F`, `R` and `T` flags in its file's `:2,<flags>`
+suffix (`maildir.message_state`, built on the same `parse_flags` as the
+`T` trash check; other letters are ignored, and a file without the
+suffix is unread). mbsync is pull-only, but it mirrors a read, star or
+reply made in Proton by renaming the file (`:2,` → `:2,S`, and `new/` →
+`cur/`), so the flags are written wherever the occurrence's path is: by
+the ingest binding from the parsed file's path, and by an observed or
+verified rename in the same `UPDATE` as the new locator (see *Mailbox
+occurrences*), so a state change is one row update with no reparse or
+re-embed, and the state cannot disagree with the stored path.
 Thread-level questions (`list_threads(filter_type="unread")`) are
-answered from these rows at query time; nothing per-thread is stored.
+answered from these rows at query time, per copy; nothing per-thread is
+stored. `threads.folder` stays the folder the thread's first message
+was filed in when it was first indexed: a representative label, not
+membership.
 An index on `(address, role)` makes "every message from / to X" an
 exact indexed lookup — the basis for exhaustive enumeration, as
 opposed to relevance search. The MCP server's `query_messages`
@@ -1253,7 +1256,10 @@ the attachment, read, flagged and replied flags, the size bounds,
 `authority_class`) is a leaf of one
 predicate module, `mcp-server/src/lib/predicates.py` (#1084): each
 leaf has a name, a value shape, one SQL compiler over a `messages` row
-and an evaluability rule, and adapters build the leaf list for
+or, for the folder, flag, default-scope and Spam terms, over one
+occurrence (all of a query's occurrence terms are conjoined in a single
+`EXISTS`, so they hold on the same copy, #1568), and an evaluability
+rule, and adapters build the leaf list for
 `query_messages` (conjoined on one message, with the keyset cursor
 bound to a digest of the list), for the evidence-scope labels (the
 same, as a label per message) and for `search_emails`' thread filters
@@ -1266,8 +1272,8 @@ predicates", lists the leaves.
 Each Maildir copy of a message is its own occurrence
 (`message_occurrences`, #1566, PLAN.md decision 47), so two
 byte-identical files in different folders keep their own folder, flags
-and observation times instead of sharing the one path, folder and flag
-state the `messages` row holds. An active occurrence is keyed by the
+and observation times; since v15 the `messages` row holds none of them
+(#1568). An active occurrence is keyed by the
 account (`accounts`, see *Account registry*), its folder relative to the
 account, the file's Maildir uniq (the name before `:2,`, which flag
 renames and `new`/`cur` moves keep; `maildir.get_uniq`) and the claimant
@@ -1319,6 +1325,16 @@ a message the v14 seed could not bind a retired one at its stored path,
 since no file was verified to hold its bytes. A message is re-read (a
 re-extraction sweep, a reap's survivor) from an active occurrence, a
 live one first.
+
+The MCP server reads occurrences for every folder, flag and locator
+(#1568): filters match within one active occurrence; the default scope
+(`mcp-server/src/lib/sources.py` `default_scope_sql`) is an active
+occurrence outside the account provider's Trash role, counting only the
+message's live occurrences when it has one; and a message's single
+folder, flags and `source_file` locator are its representative
+occurrence's (active first, then not `T`-flagged, then outside Trash,
+then the oldest). Folder roles (Trash, Spam) are dispatched by the
+occurrence's account provider (`PROVIDER_POLICIES`).
 
 ### Top-level header evidence
 

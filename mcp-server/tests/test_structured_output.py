@@ -221,6 +221,8 @@ class TestQueryMessagesFields:
         "seen",
         "flagged",
         "replied",
+        "occurrences",
+        "occurrence_count",
         "in_reply_to",
         "references",
         "references_count",
@@ -335,7 +337,7 @@ class TestQueryMessagesFields:
             result = _wire(_server(messages_db), "query_messages", {"fields": ["subject"] * 10_000})
         assert result.is_error
         text = result.content[0].text
-        assert "fields lists at most 24 names" in text
+        assert "fields lists at most 26 names" in text
         assert len(text) < 200
         assert "'subject'" not in caplog.text
         assert "query_messages rejected invalid fields" in caplog.text
@@ -362,7 +364,7 @@ class TestQueryMessagesFields:
         with caplog.at_level("DEBUG"):
             for _ in range(5):
                 assert _wire(server, "query_messages", {"fields": [marker]}).is_error
-                assert _wire(server, "query_messages", {"fields": ["subject"] * 25}).is_error
+                assert _wire(server, "query_messages", {"fields": ["subject"] * 27}).is_error
         lines = [
             r.getMessage()
             for r in caplog.records
@@ -763,7 +765,7 @@ def test_listing_tools_cut_long_participant_values(tmp_path):
             body_text="quarterly report attached",
         )
         _insert_attachment(
-            conn, message_id="m", thread_id="t", attachment_id="a", filename="report.pdf"
+            conn, message_id="t", thread_id="t", attachment_id="a", filename="report.pdf"
         )
         conn.close()
         server = _server(db)
@@ -786,7 +788,7 @@ def test_listing_tools_cut_long_participant_values(tmp_path):
 def _expected_source(message_id: str, folder: str = "INBOX") -> dict:
     return {
         "source_type": "maildir_message",
-        "locator": f"/maildir/{folder}/cur/{message_id}",
+        "locator": f"{folder}/cur/{message_id}",
         "sha256": source_sha256(message_id),
         "size_bytes": 100,
         "indexed_at": "2024-01-01T00:00:00Z",
@@ -813,7 +815,7 @@ class TestSourceProvenance:
         result = _wire(_server(messages_db), "get_message", {"message_id": "m3"})
         assert isinstance(result, CallToolResult)
         text = result.content[0].text
-        assert "/maildir/Archive/cur/m3" in text
+        assert "Archive/cur/m3" in text
         assert source_sha256("m3") in text
 
     @pytest.mark.parametrize("scope", [{"thread_id": "t1"}, {}])
@@ -848,7 +850,7 @@ class TestSourceProvenance:
             source = _call(_server(db), "get_message", message_id="m1")["message"]["source_file"]
             assert source["sha256"] is None
             assert source["size_bytes"] is None
-            assert source["locator"] == "/maildir/INBOX/cur/m1"
+            assert source["locator"] == "INBOX/cur/m1"
 
     def test_evidence_without_a_message_record_has_null_source(self, tmp_path):
         with _open_fixture_db(tmp_path) as (conn, db):
@@ -1092,15 +1094,25 @@ class TestPendingDeletion:
             assert message["pending_deletion"] is expected
 
     def test_query_messages_lists_it_with_unchanged_totals_and_paging(self, server):
+        # Its only copy is T-flagged outside Trash, so it stays in the
+        # default scope (owner decision on #1568), flagged.
         out = _call(server, "query_messages")
+        assert [(m["message_id"], m["pending_deletion"]) for m in out["messages"]] == [
+            ("restored", False),
+            ("doomed", True),
+            ("live", False),
+        ]
+        out = _call(server, "query_messages", folder="INBOX")
         assert out["total_matches"] == 3
         assert [(m["message_id"], m["pending_deletion"]) for m in out["messages"]] == [
             ("restored", False),
             ("doomed", True),
             ("live", False),
         ]
-        first = _call(server, "query_messages", limit=1)
-        second = _call(server, "query_messages", limit=1, cursor=first["next_cursor"])
+        first = _call(server, "query_messages", folder="INBOX", limit=1)
+        second = _call(
+            server, "query_messages", folder="INBOX", limit=1, cursor=first["next_cursor"]
+        )
         assert (first["total_matches"], second["total_matches"]) == (3, 3)
         assert [m["message_id"] for m in first["messages"] + second["messages"]] == [
             "restored",
@@ -1117,5 +1129,5 @@ class TestPendingDeletion:
         assert "mirror retention removes it after the grace period" in text
         text = _wire(server, "get_message", {"message_id": "live"}).content[0].text
         assert "Pending deletion" not in text
-        text = _wire(server, "query_messages", {}).content[0].text
+        text = _wire(server, "query_messages", {"folder": "INBOX"}).content[0].text
         assert text.count("| pending deletion") == 1

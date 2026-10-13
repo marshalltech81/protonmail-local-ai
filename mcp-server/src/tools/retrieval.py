@@ -36,6 +36,7 @@ from ..lib.sqlite import (
     InvalidFilterError,
     MessageBody,
     MessageRecord,
+    OccurrenceRecord,
     Participant,
     ReapedSource,
     address_match_mode,
@@ -230,7 +231,24 @@ def _header_lines(m: MessageRecord) -> list[str]:
     headers.append(("Sent", sent_text(m.sent_at, m.sent_at_status)))
     if m.occurred_at:
         headers.append(("Delivered", m.occurred_at))
-    headers.append(("Folder", clip(m.folder, HEADER_CHAR_LIMIT)))
+    copies = _copies(m)
+    folder = clip(m.folder, HEADER_CHAR_LIMIT)
+    headers.append(
+        ("Folder", f"{folder} (representative of {copies} copies)" if copies > 1 else folder)
+    )
+    if copies > 1:
+        headers.append(
+            (
+                "Copies",
+                "; ".join(
+                    f"{clip(o.folder, HEADER_CHAR_LIMIT)} ({', '.join(_copy_words(o))})"
+                    for o in m.occurrences
+                )
+                + (
+                    f"; … {copies - len(m.occurrences)} more" if copies > len(m.occurrences) else ""
+                ),
+            )
+        )
     if m.in_reply_to:
         headers.append(("In-Reply-To", clip(m.in_reply_to, HEADER_CHAR_LIMIT)))
     if m.references:
@@ -240,6 +258,20 @@ def _header_lines(m: MessageRecord) -> list[str]:
     headers.append(("Attachments", "yes" if m.has_attachments else "no"))
     headers.append(("Status", ", ".join(_state_words(m))))
     return [f"{label}: {value}" for label, value in headers]
+
+
+def _copies(m: MessageRecord) -> int:
+    """How many current Maildir copies ``m`` has (#1568)."""
+    return len(m.occurrences) if m.occurrence_count is None else m.occurrence_count
+
+
+def _copy_words(o: OccurrenceRecord) -> list[str]:
+    """One copy's Maildir state in words, ``deleted`` for a ``T`` flag."""
+    words = ["read" if o.seen else "unread"]
+    words += [w for w, on in (("flagged", o.flagged), ("replied", o.replied)) if on]
+    if o.trashed:
+        words.append("deleted")
+    return words
 
 
 def _state_words(m: MessageRecord) -> list[str]:
@@ -333,7 +365,8 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
     if m.occurred_at and shown("occurred_at"):
         head.append(f"delivered {m.occurred_at}")
     if shown("folder"):
-        head.append(m.folder)
+        copies = _copies(m)
+        head.append(f"{m.folder} (+{copies - 1} copies)" if copies > 1 else m.folder)
     for name, word, on in (
         ("seen", "unread", not m.seen),
         ("flagged", "flagged", m.flagged),
@@ -1130,9 +1163,9 @@ def register_retrieval_tools(server, db):
         Args:
             folder: Folder name (default: INBOX)
             filter_type: "all" (default), "unread" (threads with an
-                         unread message in the folder) or "flagged"
-                         (threads with a flagged / starred message in
-                         the folder). Other values return a validation
+                         unread copy of a message in the folder) or
+                         "flagged" (threads with a flagged / starred
+                         copy in the folder). Other values return a validation
                          error.
             limit: Number of threads to return (default 20, clamped
                    to [1, 100])
@@ -1348,9 +1381,11 @@ def register_retrieval_tools(server, db):
                   A message whose indexed body is incomplete (a parse
                   limit, indexing not finished, or not checked yet)
                   and lacks a word is indeterminate.
-            folder: Exact folder name (see list_folders). Without it,
-                    messages filed in Trash are left out; pass "Trash"
-                    to list them.
+            folder: Exact folder name (see list_folders): a message
+                    with a copy there, decided on the same copy as
+                    seen / flagged / replied. Without it, messages
+                    filed only in Trash are left out; pass "Trash" to
+                    list them.
             date_from: ISO 8601 lower bound, inclusive, on the
                        message's time: its delivery date (occurred_at),
                        else its send date (sent_at). A message with
@@ -1375,9 +1410,12 @@ def register_retrieval_tools(server, db):
                              whose From address list is incomplete or
                              not yet checked with no classified address
                              stored, is counted as indeterminate.
-            seen: True for messages read in Proton, False for unread.
-            flagged: True for flagged (starred) messages, False for the rest.
-            replied: True for messages answered in Proton, False for the rest.
+            seen: True for messages read in Proton, False for unread
+                  (per copy: a message matches through one copy).
+            flagged: True for flagged (starred) messages, False for the
+                     rest (per copy).
+            replied: True for messages answered in Proton, False for the
+                     rest (per copy).
             size_min: Inclusive lower bound in bytes (an integer from 0
                       to 2^63-1) on the message's local file size (not
                       the server's RFC822.SIZE); a message without a

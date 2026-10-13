@@ -29,6 +29,7 @@ from src.lib.predicates import (
     search_emails_leaves,
 )
 from src.lib.security import _LOGGABLE_TOOL_PARAMS, log_tool_call
+from src.lib.sources import default_scope_sql, role_sql
 from src.lib.sqlite import Database, InvalidFilterError, MessageRecord, _record_clock
 
 from tests.conftest import _insert_message, claimant_of, set_authority
@@ -359,6 +360,7 @@ _SAMPLES: dict[str, object] = {
     "role, address": ("visible_participant", "jane@example.test"),
     "role, text": ("from", "jane"),
     "role, domain": ("visible_recipient", "example.test"),
+    "none": None,
 }
 
 # Registered leaves no flat-parameter adapter builds, each with its
@@ -493,6 +495,8 @@ class TestLeafRegistry:
                 "CASE WHEN ",
                 "(CASE WHEN m.",
                 "(COALESCE(m.",
+                # Folder, flag and default-scope terms are over one copy (#1568).
+                "EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id",
             )
         )
         assert sql.count("?") == len(params)
@@ -541,8 +545,13 @@ class TestCompilerAndDigest:
         sql, params = compile_leaves(
             [Leaf("folder", ("INBOX",)), Leaf("seen", False), Leaf("effective_from", "2024-01-01")]
         )
-        assert sql == f"m.folder IN (?) AND m.seen = ? AND ({EFFECTIVE_EVIDENCE_SQL}) >= ?"
-        assert params == ["INBOX", 0, "2024-01-01"]
+        # The occurrence terms conjoin in one EXISTS, last (#1568).
+        assert sql == (
+            f"({EFFECTIVE_EVIDENCE_SQL}) >= ? AND EXISTS (SELECT 1 FROM message_occurrences o "
+            "WHERE o.claimant_id = m.claimant_id AND o.state = 'active' "
+            "AND o.folder IN (?) AND o.seen = ?)"
+        )
+        assert params == ["2024-01-01", "INBOX", 0]
 
     def test_query_messages_leaves_compile_to_the_expected_where_clause(self):
         sql, params = compile_leaves(
@@ -578,19 +587,21 @@ class TestCompilerAndDigest:
                 "WHEN m.subject_complete = 1 THEN 0 ELSE NULL END",
                 f"CASE WHEN ({body_word} AND {body_word}) THEN 1 "
                 "WHEN m.body_complete = 1 THEN 0 ELSE NULL END",
-                "m.folder NOT IN (?)",
                 # #1080: a date the message carries, else unknown.
                 f"({EFFECTIVE_EVIDENCE_SQL}) >= ?",
                 "CASE WHEN m.has_attachments = 1 OR m.attachments_manifest_complete = 1 "
                 "THEN m.has_attachments = ? ELSE NULL END",
-                "m.flagged = ?",
-                "CASE WHEN m.folder IN (?) THEN 0 "
-                "WHEN m.sender_ambiguous IS NOT 0 THEN NULL "
+                "CASE WHEN m.sender_ambiguous IS NOT 0 THEN NULL "
                 "WHEN m.claimant_id IN (SELECT p.claimant_id "
                 "FROM entities e "
                 "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
                 "WHERE e.kind = 'person' AND e.authority_class = ?) THEN 1 "
                 "WHEN m.from_addresses_complete = 1 THEN 0 ELSE NULL END",
+                # The default scope, the flag and the Spam exclusion on one
+                # copy (#1568), Trash and Spam by the account's provider.
+                "EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id "
+                f"AND o.state = 'active' AND {default_scope_sql()} AND o.flagged = ? "
+                f"AND NOT {role_sql('spam')})",
             ]
         )
         assert params == [
@@ -599,16 +610,14 @@ class TestCompilerAndDigest:
             "plan",
             '"budget"',
             '"plan"',
-            "Trash",
             "2024-01-01T00:00:00+00:00",
             1,
-            1,
-            "Spam",
             "counsel",
+            1,
         ]
 
     def test_digest_binds_the_leaf_list_in_order(self):
-        a = [Leaf("sender", "jane@example.test"), Leaf("not_in_folders", ("Trash",))]
+        a = [Leaf("sender", "jane@example.test"), Leaf("default_scope", None)]
         assert leaf_digest(a) == leaf_digest(list(a))
         assert len(leaf_digest(a)) == 16
         assert leaf_digest(a) != leaf_digest(list(reversed(a)))
@@ -617,7 +626,7 @@ class TestCompilerAndDigest:
 
     def test_adapters_ignore_blank_filters_and_keep_the_default_scope(self):
         assert query_messages_leaves(**dict.fromkeys(_QUERY_PARAMS)) == [
-            Leaf("not_in_folders", ("Trash",))
+            Leaf("default_scope", None)
         ]
         blank = {
             name: "  "
@@ -635,11 +644,11 @@ class TestCompilerAndDigest:
             )
         }
         assert query_messages_leaves(**{**dict.fromkeys(_QUERY_PARAMS), **blank}) == [
-            Leaf("not_in_folders", ("Trash",))
+            Leaf("default_scope", None)
         ]
         assert message_scope_leaves(
             from_addr=None, participant=None, folders=None, date_from=None, date_to=None
-        ) == [Leaf("not_in_folders", ("Trash",))]
+        ) == [Leaf("default_scope", None)]
         assert (
             search_emails_leaves(
                 folders=None,
@@ -997,9 +1006,11 @@ class TestClockSizeAndRepliedLeaves:
         )
         assert sql == (
             f"NULLIF(m.occurred_at IS NOT NULL, 0) AND ({SENT_CLOCK_SQL}) >= ? "
-            "AND m.occurred_at <= ? AND m.replied = ? AND m.size_bytes >= ? AND m.size_bytes <= ?"
+            "AND m.occurred_at <= ? AND m.size_bytes >= ? AND m.size_bytes <= ? "
+            "AND EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id "
+            "AND o.state = 'active' AND o.replied = ?)"
         )
-        assert params == ["2024-01-01T00:00:00+00:00", "2024-12-31T23:59:59.999999+00:00", 1, 1, 2]
+        assert params == ["2024-01-01T00:00:00+00:00", "2024-12-31T23:59:59.999999+00:00", 1, 2, 1]
         unknown_when_null = {
             "size_min",
             "size_max",
@@ -1044,28 +1055,28 @@ class TestClockSizeAndRepliedLeaves:
         assert query_messages_leaves(
             **{**base, "date_from": "2024-01-01", "date_basis": "sent"}
         ) == [
-            Leaf("not_in_folders", ("Trash",)),
+            Leaf("default_scope", None),
             Leaf("dated", "sent"),
             Leaf("sent_from", "2024-01-01T00:00:00+00:00"),
         ]
         assert query_messages_leaves(
             **{**base, "date_to": "2024-01-01", "date_basis": "occurred"}
         ) == [
-            Leaf("not_in_folders", ("Trash",)),
+            Leaf("default_scope", None),
             Leaf("dated", "occurred"),
             Leaf("occurred_to", "2024-01-01T23:59:59.999999+00:00"),
         ]
         assert query_messages_leaves(
             **{**base, "replied": False, "size_min": 10, "size_max": 20}
         ) == [
-            Leaf("not_in_folders", ("Trash",)),
+            Leaf("default_scope", None),
             Leaf("replied", False),
             Leaf("size_min", 10),
             Leaf("size_max", 20),
         ]
 
     def test_digest_binds_the_basis(self):
-        leaves = [Leaf("not_in_folders", ("Trash",))]
+        leaves = [Leaf("default_scope", None)]
         assert leaf_digest(leaves) == leaf_digest(leaves, "effective")
         assert len({leaf_digest(leaves, basis) for basis in DATE_BASES}) == len(DATE_BASES)
 

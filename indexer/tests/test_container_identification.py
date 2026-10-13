@@ -68,6 +68,7 @@ from tests.conftest import (
     make_package,
     make_thread,
     make_zip,
+    message_path_sql,
     ooxml_content_types,
     ooxml_rels,
 )
@@ -1070,8 +1071,8 @@ class TestStartupSweep:
     @staticmethod
     def _words(db, filepath) -> str:
         rows = db._conn.execute(
-            "SELECT c.text FROM message_chunks c JOIN message_thread_map m "
-            "ON m.claimant_id = c.claimant_id WHERE m.filepath = ? "
+            "SELECT c.text FROM message_chunks c JOIN messages m "
+            f"ON m.claimant_id = c.claimant_id WHERE {message_path_sql(db)} = ? "
             "AND c.attachment_id IS NOT NULL",
             (filepath,),
         ).fetchall()

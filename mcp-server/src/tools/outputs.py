@@ -36,6 +36,7 @@ from ..lib.sqlite import (
     MAX_LISTED_MESSAGE_HEADERS,
     REAPED_RECORD_RETENTION_DAYS,
     MessageRecord,
+    OccurrenceRecord,
     SourceFile,
     ThreadResult,
 )
@@ -94,8 +95,9 @@ class Source(_Output):
         description="What locator points at; an RFC 5322 message file in the Maildir."
     )
     locator: str = Field(
-        description="Path of the raw message file in the Maildir volume, as the "
-        "indexer sees it (/maildir/...). Kept current when mbsync renames the file."
+        description="Path of the raw message file relative to its account's Maildir root "
+        "(the indexer mounts it at /maildir): the representative copy's. Kept current when "
+        "mbsync renames the file."
     )
     sha256: str | None = Field(
         description="SHA-256 of the file's bytes when it was indexed; the file's "
@@ -119,6 +121,32 @@ def source(f: SourceFile | None) -> Source | None:
 
 
 _SOURCE_FILE_DESCRIPTION = "The raw message file this came from; null when none is recorded."
+
+
+class Occurrence(_Output):
+    """One current Maildir copy of a message (#1568)."""
+
+    account_scope: str = Field(description="The account's scope UUID (ACCOUNT_SCOPE).")
+    provider: str = Field(description="The account's provider (SOURCE_MODE).")
+    folder: str = Field(description="Folder, relative to the account.")
+    locator: str = Field(description="File path relative to the account's Maildir root.")
+    seen: bool
+    flagged: bool
+    replied: bool
+    trashed: bool = Field(description="Maildir T flag: deleted in Proton; not a live copy.")
+
+
+def occurrence(o: OccurrenceRecord) -> Occurrence:
+    return Occurrence(
+        account_scope=o.account_scope,
+        provider=o.provider,
+        folder=o.folder,
+        locator=o.locator,
+        seen=o.seen,
+        flagged=o.flagged,
+        replied=o.replied,
+        trashed=o.trashed,
+    )
 
 
 class Participant(_Output):
@@ -228,11 +256,19 @@ class MessageHeaders(_Output):
             "indeterminate under them."
         )
     )
-    folder: str
+    folder: str = Field(
+        description="Folder of the representative copy (an active one, not T-flagged, "
+        "outside Trash first); every copy is in occurrences."
+    )
     has_attachments: bool
-    seen: bool = Field(description="Read in Proton (the file's Maildir S flag).")
-    flagged: bool = Field(description="Starred in Proton (Maildir F flag).")
-    replied: bool = Field(description="Answered in Proton (Maildir R flag).")
+    seen: bool = Field(description="Representative copy read in Proton (Maildir S flag).")
+    flagged: bool = Field(description="Representative copy starred in Proton (Maildir F flag).")
+    replied: bool = Field(description="Representative copy answered in Proton (Maildir R flag).")
+    occurrences: list[Occurrence] = Field(
+        description="The message's current Maildir copies, representative first; may be "
+        "shortened, see occurrence_count."
+    )
+    occurrence_count: int
     in_reply_to: str | None
     references: list[str] = Field(description="References; may be shortened, see references_count.")
     references_count: int
@@ -286,6 +322,8 @@ def message_headers(m: MessageRecord) -> MessageHeaders:
         seen=m.seen,
         flagged=m.flagged,
         replied=m.replied,
+        occurrences=[occurrence(o) for o in m.occurrences],
+        occurrence_count=(len(m.occurrences) if m.occurrence_count is None else m.occurrence_count),
         in_reply_to=None if m.in_reply_to is None else clip(m.in_reply_to, chars),
         references=[clip(r, chars) for r in m.references[:refs]],
         references_count=len(m.references) if m.references_count is None else m.references_count,

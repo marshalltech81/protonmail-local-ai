@@ -105,7 +105,13 @@ def test_family_messages_are_indexed_as_described(baseline_db: Database) -> None
     """Each truth message is indexed in its own thread, in Trash when the
     truth says so, once per delivery (a claimant per file)."""
     with closing(baseline_db._connect()) as conn:
-        rows = conn.execute("SELECT message_id, thread_id, folder FROM messages").fetchall()
+        # The folder of each message's active copy (#1568: folders live on
+        # the occurrences); every baseline message has exactly one.
+        rows = conn.execute(
+            "SELECT m.message_id, m.thread_id, o.folder FROM messages m "
+            "JOIN message_occurrences o ON o.claimant_id = m.claimant_id "
+            "AND o.state = 'active'"
+        ).fetchall()
     claimants: Counter[str] = Counter()
     for message_id, thread_id, folder in rows:
         ref = _message_ref(message_id)

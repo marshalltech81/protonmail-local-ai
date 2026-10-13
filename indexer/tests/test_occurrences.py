@@ -4,8 +4,9 @@ Ingest binds every parsed file to an occurrence keyed by (account,
 account-relative folder, Maildir uniq, claimant ID), with its path
 relative to the account's Maildir root; an observed rename keeps it
 (flags, ``new``/``cur``) or replaces it (folder or uniq); the v14
-migration seeds one per message and queues a reparse. PR 1 is dormant:
-nothing reads the table yet, and the old columns are unchanged."""
+migration seeds one per message and queues a reparse. Since v15 the
+reconciler, reaper and MCP server read occurrences, and the per-copy
+``messages`` columns are gone (#1567, #1568)."""
 
 import logging
 import shutil
@@ -466,11 +467,6 @@ def _v13_index(tmp_path: Path, root: Path) -> tuple[Path, dict]:
     trashed = b.with_name("s2:2,FT")
     b.rename(trashed)
     db.update_filepath(str(b), str(trashed), move_occurrence=True)
-    # v13 kept the locator and flags on ``messages`` (#1567 drops them).
-    db._conn.execute("UPDATE messages SET filepath = ? WHERE filepath = ?", (str(trashed), str(b)))
-    db._conn.execute(
-        "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?", (str(trashed), str(b))
-    )
     b = trashed
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     queue.enqueue(str(dead), REASON_INITIAL_SCAN)
@@ -484,16 +480,20 @@ def _v13_index(tmp_path: Path, root: Path) -> tuple[Path, dict]:
             "SELECT t.thread_id, t.message_ids, v.embedding FROM threads t "
             "JOIN threads_vec v ON v.thread_id = t.thread_id ORDER BY t.thread_id"
         ).fetchall(),
-        "messages": db._conn.execute(
-            "SELECT claimant_id, message_id, thread_id, filepath, folder, seen, flagged "
-            "FROM messages ORDER BY claimant_id"
-        ).fetchall(),
         "paths": {"a": a, "b": b, "dead": dead},
     }
     state["chunks"] = [tuple(r) for r in state["chunks"]]
     state["threads"] = [tuple(r) for r in state["threads"]]
-    state["messages"] = [tuple(r) for r in state["messages"]]
+    # v13's columns, filled from the occurrences as v13's ingest kept them.
     _v13_from_fresh(db)
+    state["messages"] = [
+        tuple(r)
+        for r in db._conn.execute(
+            "SELECT claimant_id, message_id, thread_id, filepath, folder, seen, flagged "
+            "FROM messages ORDER BY claimant_id"
+        )
+    ]
+    db._conn.commit()
     db.close()
     return tmp_path / "mail.db", state
 

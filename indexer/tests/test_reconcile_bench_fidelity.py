@@ -192,7 +192,7 @@ def test_benchmark_rows_are_the_rows_the_indexer_writes(bench, tmp_path, monkeyp
         "words": words,
         "per_message": per_message,
     }
-    maildir = _index_with_the_indexer(bench, tmp_path, monkeypatch, n, **shape)
+    _index_with_the_indexer(bench, tmp_path, monkeypatch, n, **shape)
     built = tmp_path / "bench.db"
     bench.build(built, n, per_message, identity, records, references, 0, chunks, words)
 
@@ -201,10 +201,8 @@ def test_benchmark_rows_are_the_rows_the_indexer_writes(bench, tmp_path, monkeyp
         closing(sqlite3.connect(built)) as ours,
     ):
         # Messages in the order the indexer inserted them (oldest first),
-        # every column but the index-time clock; paths relative to the root.
+        # every column but the index-time clock (paths are the occurrences').
         expected = _without(_rows(prod, "messages", "rowid"), _CLOCK)
-        for row in expected:
-            row["filepath"] = row["filepath"].replace(str(maildir), "/maildir", 1)
         problems = _differences(
             "messages", _without(_rows(ours, "messages", "rowid"), _CLOCK), expected
         )

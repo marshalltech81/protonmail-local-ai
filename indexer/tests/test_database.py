@@ -564,16 +564,50 @@ def _only_the_v12_reparse(db: Database) -> bool:
 
 
 def _revert_v15(db: Database) -> None:
-    """Undo what v15 changes (#1567): tombstones keyed by path again and
-    no content-hash index. The occurrences' provenance CHECK is not part
-    of the compared shape."""
-    db._conn.execute("DROP INDEX idx_messages_content_hash")
-    db._conn.execute("DROP TABLE pending_deletions")
-    db._conn.execute(
+    """Undo what v15 changes (#1567, #1568): tombstones keyed by path
+    again, no content-hash index, and the scalar per-copy columns back on
+    ``messages`` and ``message_thread_map``, filled from each message's
+    representative occurrence (an active one, live first) the way v14's
+    ingest wrote them. The occurrences' provenance CHECK is not part of
+    the compared shape."""
+    conn = db._conn
+    conn.execute("DROP INDEX idx_messages_content_hash")
+    conn.execute("DROP TABLE pending_deletions")
+    conn.execute(
         "CREATE TABLE pending_deletions (filepath TEXT PRIMARY KEY, claimant_id TEXT NOT NULL, "
         "thread_id TEXT NOT NULL, marked_at TEXT NOT NULL)"
     )
-    db._conn.execute("CREATE INDEX idx_pending_deletions_thread ON pending_deletions(thread_id)")
+    conn.execute("CREATE INDEX idx_pending_deletions_thread ON pending_deletions(thread_id)")
+    for column, decl in (
+        ("filepath", "TEXT NOT NULL DEFAULT ''"),
+        ("folder", "TEXT NOT NULL DEFAULT ''"),
+        ("seen", "INTEGER NOT NULL DEFAULT 0"),
+        ("flagged", "INTEGER NOT NULL DEFAULT 0"),
+        ("replied", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        conn.execute(f"ALTER TABLE messages ADD COLUMN {column} {decl}")
+    conn.execute("ALTER TABLE message_thread_map ADD COLUMN filepath TEXT NOT NULL DEFAULT ''")
+    root = str(db.account.maildir_root).rstrip("/") + "/"
+    pick = (
+        "(SELECT o.{} FROM message_occurrences o WHERE o.claimant_id = {}.claimant_id "
+        "ORDER BY o.state = 'active' DESC, o.trashed, o.id LIMIT 1)"
+    )
+    conn.execute(
+        f"UPDATE messages SET filepath = ? || {pick.format('relative_path', 'messages')}, "
+        f"folder = {pick.format('folder', 'messages')}, seen = {pick.format('seen', 'messages')}, "
+        f"flagged = {pick.format('flagged', 'messages')}, "
+        f"replied = {pick.format('replied', 'messages')} "
+        "WHERE EXISTS (SELECT 1 FROM message_occurrences o "
+        "WHERE o.claimant_id = messages.claimant_id)",
+        (root,),
+    )
+    conn.execute(
+        "UPDATE message_thread_map SET filepath = (SELECT filepath FROM messages m "
+        "WHERE m.claimant_id = message_thread_map.claimant_id)"
+    )
+    conn.execute("CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at)")
+    conn.execute("CREATE INDEX idx_messages_filepath ON messages(filepath)")
+    conn.execute("CREATE INDEX idx_message_thread_map_filepath ON message_thread_map(filepath)")
 
 
 def _drop_v14_tables(db: Database) -> None:
@@ -1197,9 +1231,9 @@ class TestMigrationV8:
     tables, and queues the reparse."""
 
     _ROW = (
-        "SELECT claimant_id, message_id, thread_id, filepath, folder, subject, sent_at, "
+        "SELECT claimant_id, message_id, thread_id, subject, sent_at, "
         "occurred_at, effective_at, in_reply_to, references_json, has_attachments, size_bytes, "
-        "content_hash, indexed_at, seen, flagged, replied, sender_ambiguous, "
+        "content_hash, indexed_at, sender_ambiguous, "
         "participant_names_complete, caps_json FROM messages ORDER BY claimant_id"
     )
     _PARTICIPANTS = "SELECT * FROM message_participants ORDER BY 1, 2, 3"
@@ -4951,7 +4985,9 @@ class TestOccurredAt:
         }
         assert indexes["idx_messages_effective"] == ["effective_at"]
         assert indexes["idx_messages_thread_effective"] == ["thread_id", "effective_at"]
-        assert indexes["idx_messages_folder_effective"] == ["folder", "effective_at"]
+        # The folder index went with the column (#1568): folders are the
+        # occurrences'.
+        assert "idx_messages_folder_effective" not in indexes
         assert indexes["idx_messages_message_effective"] == [
             "message_id",
             "effective_at",
@@ -4991,8 +5027,6 @@ class TestMessagesTable:
             "claimant_id",
             "message_id",
             "thread_id",
-            "filepath",
-            "folder",
             "subject",
             "sent_at",
             "sent_at_status",
@@ -5004,9 +5038,6 @@ class TestMessagesTable:
             "content_hash",
             "indexed_at",
             "first_indexed_at",
-            "seen",
-            "flagged",
-            "replied",
             "sender_ambiguous",
             "participant_names_complete",
             *_V5_COLUMNS,
@@ -5041,8 +5072,9 @@ class TestMessagesTable:
         ).fetchone()
         assert row["claimant_id"] == "m1@example.com#aaaaaaaaaaaaaaaa"
         assert row["thread_id"] == "t1"
-        assert row["filepath"] == "/maildir/INBOX/cur/m1"
-        assert row["folder"] == "INBOX"
+        # Its locator and folder are its occurrence's (#1568).
+        occurrence = db.find_active_occurrence("/maildir/INBOX/cur/m1")
+        assert occurrence["claimant_id"] == row["claimant_id"]
         assert row["subject"] == "Re: Budget"
         assert row["sent_at"] == "2024-01-01T12:00:00+00:00"
         assert row["in_reply_to"] == "m0@example.com"
@@ -5067,9 +5099,14 @@ class TestMessagesTable:
         )
         db.upsert_thread(make_thread(messages=[moved], thread_id="t1"), _one_hot(0))
 
-        rows = db._conn.execute("SELECT folder, filepath FROM messages").fetchall()
-        assert [(r["folder"], r["filepath"]) for r in rows] == [
-            ("Archive", "/maildir/Archive/cur/m1")
+        assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+        rows = db._conn.execute(
+            "SELECT folder, relative_path FROM message_occurrences WHERE state = 'active' "
+            "ORDER BY id"
+        ).fetchall()
+        assert [(r["folder"], r["relative_path"]) for r in rows] == [
+            ("maildir/INBOX", "maildir/INBOX/cur/m1"),
+            ("maildir/Archive", "maildir/Archive/cur/m1"),
         ]
         assert self._participants(db, "m1@example.com") == {
             ("from", "alice@example.com", None),
@@ -5414,7 +5451,6 @@ def test_claimant_listings_walk_a_message_id_index_in_order(db, sql, params):
 
 
 MESSAGE_MAP_INDEXES = {
-    "idx_message_thread_map_filepath",
     "idx_message_thread_map_thread",
 }
 
@@ -5429,9 +5465,10 @@ def _message_map_indexes(conn) -> set[str]:
 
 
 class TestMessageMapLookupIndexes:
-    """#302: flag renames and thread rebuilds look ``message_thread_map``
-    up by filepath or thread_id; without indexes each lookup scans the
-    table, so N renames over N messages is quadratic."""
+    """#302: thread rebuilds look ``message_thread_map`` up by thread_id;
+    without an index each lookup scans the table, so N rebuilds over N
+    messages is quadratic. Renames look occurrences up by path (#1568,
+    ``test_rename_and_scan_lookups_use_an_index``)."""
 
     def test_fresh_install_creates_the_indexes(self, db):
         assert _message_map_indexes(db._conn) >= MESSAGE_MAP_INDEXES
@@ -5440,17 +5477,7 @@ class TestMessageMapLookupIndexes:
         ("sql", "params", "index"),
         [
             (
-                "SELECT claimant_id, thread_id, filepath FROM message_thread_map WHERE filepath = ?",
-                ("/md/cur/7:2,S",),
-                "idx_message_thread_map_filepath",
-            ),
-            (
-                "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
-                ("/md/cur/7:2,RS", "/md/cur/7:2,S"),
-                "idx_message_thread_map_filepath",
-            ),
-            (
-                "SELECT claimant_id, filepath FROM message_thread_map WHERE thread_id = ?",
+                "SELECT claimant_id FROM message_thread_map WHERE thread_id = ?",
                 ("t1",),
                 "idx_message_thread_map_thread",
             ),
@@ -5460,7 +5487,7 @@ class TestMessageMapLookupIndexes:
                 "idx_message_thread_map_thread",
             ),
             (
-                "SELECT filepath FROM message_thread_map WHERE thread_id IN (?, ?)",
+                "SELECT claimant_id FROM message_thread_map WHERE thread_id IN (?, ?)",
                 ("t1", "t2"),
                 "idx_message_thread_map_thread",
             ),
@@ -5471,8 +5498,8 @@ class TestMessageMapLookupIndexes:
         # empty-table artefact.
         db._conn.execute("PRAGMA foreign_keys = OFF")
         db._conn.executemany(
-            "INSERT INTO message_thread_map VALUES (?, ?, ?, ?)",
-            ((f"<m{i}@x>#0", f"<m{i}@x>", f"t{i // 4}", f"/md/cur/{i}:2,S") for i in range(2000)),
+            "INSERT INTO message_thread_map VALUES (?, ?, ?)",
+            ((f"<m{i}@x>#0", f"<m{i}@x>", f"t{i // 4}") for i in range(2000)),
         )
         db._conn.commit()
         db._conn.execute("ANALYZE")

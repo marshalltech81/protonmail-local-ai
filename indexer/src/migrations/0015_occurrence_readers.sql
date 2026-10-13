@@ -87,3 +87,17 @@ CREATE INDEX idx_pending_deletions_claimant ON pending_deletions(claimant_id, ma
 -- The reconciliation scan binds a found copy to the message holding its
 -- bytes by content hash.
 CREATE INDEX idx_messages_content_hash ON messages(content_hash);
+
+-- Every reader now takes folder, locator and flags from the occurrences
+-- (#1567, #1568), so the scalar per-copy columns go: the message's one
+-- path, folder and S/F/R flags, and the thread map's path. Their indexes
+-- go first, as SQLite requires. Each DROP COLUMN rewrites its table once.
+DROP INDEX idx_messages_folder_effective;
+DROP INDEX idx_messages_filepath;
+ALTER TABLE messages DROP COLUMN filepath;
+ALTER TABLE messages DROP COLUMN folder;
+ALTER TABLE messages DROP COLUMN seen;
+ALTER TABLE messages DROP COLUMN flagged;
+ALTER TABLE messages DROP COLUMN replied;
+DROP INDEX idx_message_thread_map_filepath;
+ALTER TABLE message_thread_map DROP COLUMN filepath;

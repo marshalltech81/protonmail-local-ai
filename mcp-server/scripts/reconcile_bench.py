@@ -86,8 +86,6 @@ CREATE TABLE messages (
     claimant_id     TEXT PRIMARY KEY,
     message_id      TEXT NOT NULL,
     thread_id       TEXT NOT NULL,
-    filepath        TEXT NOT NULL,
-    folder          TEXT NOT NULL,
     subject         TEXT NOT NULL,
     sent_at         TEXT,
     sent_at_status  TEXT CHECK (sent_at_status IN ('parsed', 'missing', 'invalid')),
@@ -101,9 +99,6 @@ CREATE TABLE messages (
     content_hash    TEXT,
     indexed_at      TEXT NOT NULL,
     first_indexed_at TEXT NOT NULL,
-    seen            INTEGER NOT NULL DEFAULT 0,
-    flagged         INTEGER NOT NULL DEFAULT 0,
-    replied         INTEGER NOT NULL DEFAULT 0,
     sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
     participant_names_complete INTEGER CHECK (participant_names_complete IN (0, 1)),
     subject_complete INTEGER CHECK (subject_complete IN (0, 1)),
@@ -119,9 +114,7 @@ CREATE TABLE messages (
 CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
 CREATE INDEX idx_messages_message_effective ON messages(message_id, effective_at, claimant_id);
 CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
-CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
 CREATE INDEX idx_messages_effective ON messages(effective_at);
-CREATE INDEX idx_messages_filepath ON messages(filepath);
 CREATE INDEX idx_messages_content_hash ON messages(content_hash);
 CREATE TABLE message_participants (
     claimant_id TEXT NOT NULL,
@@ -717,13 +710,13 @@ def _record(
 
 
 _INSERT_MESSAGE = (
-    "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
+    "INSERT INTO messages (claimant_id, message_id, thread_id, "
     "subject, sent_at, sent_at_status, occurred_at, in_reply_to, references_json, "
     "has_attachments, size_bytes, content_hash, indexed_at, first_indexed_at, "
-    "seen, flagged, replied, sender_ambiguous, participant_names_complete, "
+    "sender_ambiguous, participant_names_complete, "
     "subject_complete, from_addresses_complete, to_addresses_complete, "
     "cc_addresses_complete, attachments_manifest_complete, body_complete, caps_json, headers_complete) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, "
+    "VALUES (?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, 0, "
     "1, 1, 1, 1, 1, 1, ?, ?, ?)"
 )
 
@@ -734,13 +727,12 @@ _INSERT_MESSAGE = (
 # ``body_complete`` until phase 2c sets it again.
 _UPSERT_MESSAGE = _INSERT_MESSAGE + (
     " ON CONFLICT(claimant_id) DO UPDATE SET thread_id = excluded.thread_id, "
-    "filepath = excluded.filepath, folder = excluded.folder, subject = excluded.subject, "
+    "subject = excluded.subject, "
     "sent_at = excluded.sent_at, sent_at_status = excluded.sent_at_status, "
     "occurred_at = excluded.occurred_at, in_reply_to = excluded.in_reply_to, "
     "references_json = excluded.references_json, has_attachments = excluded.has_attachments, "
     "size_bytes = excluded.size_bytes, content_hash = excluded.content_hash, "
-    "indexed_at = excluded.indexed_at, seen = excluded.seen, flagged = excluded.flagged, "
-    "replied = excluded.replied, sender_ambiguous = excluded.sender_ambiguous, "
+    "indexed_at = excluded.indexed_at, sender_ambiguous = excluded.sender_ambiguous, "
     "participant_names_complete = excluded.participant_names_complete, "
     "subject_complete = excluded.subject_complete, "
     "from_addresses_complete = excluded.from_addresses_complete, "
@@ -758,8 +750,6 @@ def _message_values(rec: _Record, now: str, body_complete: int | None) -> tuple:
         rec.cid,
         rec.mid,
         rec.tid,
-        rec.path,
-        rec.folder,
         rec.shape["subject"],
         rec.at,
         None if rec.folder == "Sent" else rec.at,
@@ -770,7 +760,6 @@ def _message_values(rec: _Record, now: str, body_complete: int | None) -> tuple:
         hashlib.sha256(rec.raw).hexdigest(),
         now,
         now,
-        rec.i % 2,
         body_complete,
         "{}" if rec.headers_complete else json.dumps({"headers_budget": 1}),
         int(rec.headers_complete),
@@ -1676,11 +1665,9 @@ CREATE TABLE IF NOT EXISTS message_thread_map (
     claimant_id TEXT PRIMARY KEY,
     message_id  TEXT NOT NULL,
     thread_id   TEXT NOT NULL,
-    filepath    TEXT NOT NULL,
     FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
 );
 CREATE INDEX IF NOT EXISTS idx_message_thread_map_message ON message_thread_map(message_id);
-CREATE INDEX IF NOT EXISTS idx_message_thread_map_filepath ON message_thread_map(filepath);
 CREATE INDEX IF NOT EXISTS idx_message_thread_map_thread ON message_thread_map(thread_id);
 CREATE TABLE IF NOT EXISTS indexed_files (
     filepath     TEXT PRIMARY KEY,
@@ -2111,10 +2098,10 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
             (rec.tid, SUM_ENCODING_VERSION, b""),
         )
     conn.execute(
-        "INSERT INTO message_thread_map (claimant_id, message_id, thread_id, filepath) "
-        "VALUES (?, ?, ?, ?) ON CONFLICT(claimant_id) DO UPDATE SET "
-        "thread_id = excluded.thread_id, filepath = excluded.filepath",
-        (rec.cid, rec.mid, rec.tid, rec.path),
+        "INSERT INTO message_thread_map (claimant_id, message_id, thread_id) "
+        "VALUES (?, ?, ?) ON CONFLICT(claimant_id) DO UPDATE SET "
+        "thread_id = excluded.thread_id",
+        (rec.cid, rec.mid, rec.tid),
     )
     conn.execute(
         "INSERT OR REPLACE INTO indexed_files (filepath, indexed_at, size, mtime_ns, "

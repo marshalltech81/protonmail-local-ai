@@ -100,9 +100,7 @@ def _message(db: Database, name: str) -> str:
 def _occurrences(db: Database, filepath: str, rows: list[tuple]) -> None:
     """``rows``: (attachment_id, filename, MIME type, size, module,
     status, error) per occurrence of the message at ``filepath``."""
-    claimant = db._conn.execute(
-        "SELECT claimant_id FROM message_thread_map WHERE filepath = ?", (filepath,)
-    ).fetchone()["claimant_id"]
+    claimant = db.find_active_occurrence(filepath)["claimant_id"]
     db._conn.executemany(
         "INSERT INTO attachments (attachment_occurrence_id, claimant_id, attachment_id, "
         "thread_id, filename, content_type, size_bytes, seen_at, extractor_module) "

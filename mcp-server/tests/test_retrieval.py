@@ -1098,13 +1098,13 @@ class TestGetMessageIndexWalk:
                 conn, message_id=self.MESSAGE_ID, thread_id="t1", sent_at="2024-01-01T09:00:00"
             )
             conn.executemany(
-                "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
+                "INSERT INTO messages (claimant_id, message_id, thread_id, "
                 "subject, sent_at, sent_at_status, references_json, has_attachments, indexed_at, "
                 "first_indexed_at) "
-                "VALUES (?, ?, 't1', ?, 'INBOX', 's', ?, 'parsed', '[]', 0, '2024-01-01', "
+                "VALUES (?, ?, 't1', 's', ?, 'parsed', '[]', 0, '2024-01-01', "
                 "'2024-01-01')",
                 (
-                    (f"{self.MESSAGE_ID}#{i:08x}", self.MESSAGE_ID, f"/f{i}", f"2023-{i % 9 + 1}")
+                    (f"{self.MESSAGE_ID}#{i:08x}", self.MESSAGE_ID, f"2023-{i % 9 + 1}")
                     for i in range(count)
                 ),
             )

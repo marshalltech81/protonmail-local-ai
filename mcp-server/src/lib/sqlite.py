@@ -30,15 +30,14 @@ from . import timings
 from .predicates import (
     ADDRESS_LEAF_ROWS,
     ADDRESS_ROLES,
-    AUTHORITY_EXCLUDED_FOLDERS,
     DATE_BASES,
-    DEFAULT_EXCLUDED_FOLDERS,
     EFFECTIVE_EVIDENCE_SQL,
     LEAVES,
     QUERY_DIGEST_FORMAT,
     ROLE_SETS,
     SENT_CLOCK_SQL,
     DateBasis,
+    DefaultFolderScope,
     Evaluability,
     InvalidFilterError,
     Leaf,
@@ -51,6 +50,7 @@ from .predicates import (
     address_match_mode,
     canonical_addr,
     compile_leaves,
+    compile_occurrence_terms,
     compile_where,
     leaf_digest,
     message_scope_leaves,
@@ -62,6 +62,15 @@ from .predicates import (
 )
 from .rate_limited_log import RateLimitedLog
 from .reranker import RerankerBackend
+from .sources import (
+    REPRESENTATIVE_ID_BITS,
+    REPRESENTATIVE_KEY,
+    REPRESENTATIVE_ORDER,
+    active_sql,
+    default_scope_sql,
+    live_sql,
+    role_sql,
+)
 
 log = logging.getLogger("mcp.sqlite")
 
@@ -278,9 +287,10 @@ def _fts_query_units(query: str) -> list[str]:
 
 @dataclass
 class SourceFile:
-    """The raw Maildir file a message was indexed from, as the indexer
-    recorded it in ``messages``: path, SHA-256 and size of the file's
-    bytes (``None`` when not captured), and when the record was written."""
+    """The raw Maildir file a message was indexed from: the path of its
+    representative occurrence relative to the account's Maildir root
+    (#1568), and the SHA-256 and size of the file's bytes (``None`` when
+    not captured) and when the record was written, from ``messages``."""
 
     locator: str
     sha256: str | None
@@ -288,13 +298,27 @@ class SourceFile:
     indexed_at: str
 
 
+def _representative(column: str) -> str:
+    """SQL for ``column`` of the representative occurrence of ``messages
+    m``: the first of its occurrences in ``REPRESENTATIVE_ORDER`` (an
+    active one, not ``T``-flagged, outside Trash first, #1568). NULL when
+    ``m`` is missing."""
+    return (
+        f"(SELECT r.{column} FROM message_occurrences r WHERE r.id = ("  # nosec B608
+        f"SELECT MIN({REPRESENTATIVE_KEY}) FROM message_occurrences o "
+        f"WHERE o.claimant_id = m.claimant_id) % {REPRESENTATIVE_ID_BITS})"
+    )
+
+
 # Selected by every query that reports a message's source file; ``m`` is
-# the ``messages`` row (LEFT JOINed where the row may be missing).
+# the ``messages`` row (LEFT JOINed where the row may be missing). The
+# locator is the representative occurrence's path, relative to its
+# account's Maildir root (#1568).
 # Chunk and attachment rows carry only the claimant ID (#217); their bare
 # Message-ID comes from that same ``messages`` row, falling back to the
 # claimant ID itself (which begins with the Message-ID) when it is missing.
 _SOURCE_COLUMNS = (
-    "m.filepath AS source_locator, m.content_hash AS source_sha256, "
+    f"{_representative('relative_path')} AS source_locator, m.content_hash AS source_sha256, "
     "m.size_bytes AS source_size_bytes, m.indexed_at AS source_indexed_at"
 )
 
@@ -671,6 +695,27 @@ MAX_LISTED_MESSAGE_HEADERS = 10
 
 
 @dataclass
+class OccurrenceRecord:
+    """One active Maildir copy of a message (#1566, #1568): its account
+    (scope UUID and provider), folder (relative to the account), path
+    relative to the account's Maildir root and Maildir flags."""
+
+    account_scope: str
+    provider: str
+    folder: str
+    locator: str
+    seen: bool
+    flagged: bool
+    replied: bool
+    trashed: bool
+
+
+# Occurrences listed per message; ``MessageRecord.occurrence_count``
+# keeps the total.
+MAX_LISTED_OCCURRENCES = 10
+
+
+@dataclass
 class MessageRecord:
     """One message's own headers, from ``messages`` +
     ``message_participants``.
@@ -704,11 +749,15 @@ class MessageRecord:
     source_file: SourceFile | None = None
     # Delivery time from the top ``Received:`` header; None when unknown.
     occurred_at: str | None = None
-    # Maildir S / F / R flags of the indexed file, as mbsync mirrors
-    # Proton's read, starred and replied state.
+    # Maildir S / F / R flags of the representative occurrence (like
+    # ``folder``; ``_representative``, #1568), as mbsync mirrors
+    # Proton's read, starred and replied state. ``occurrences`` lists the
+    # active copies, each with its own.
     seen: bool = False
     flagged: bool = False
     replied: bool = False
+    occurrences: list[OccurrenceRecord] = field(default_factory=list)
+    occurrence_count: int | None = None
     # The reconciler tombstoned the indexed file (``T``-flagged or
     # missing): it awaits the reaper under mirror retention.
     pending_deletion: bool = False
@@ -732,8 +781,8 @@ class MessageRecord:
 # occurrence is stale (the next sweep clears it), so it does not count.
 # Two indexed lookups by claimant ID.
 _PENDING_DELETION_COLUMN = (
-    "(NOT EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id "
-    "AND o.state = 'active' AND o.trashed = 0) "
+    "(NOT EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id "  # nosec B608 - module constants only
+    f"AND {live_sql()}) "
     "AND EXISTS (SELECT 1 FROM pending_deletions p WHERE p.claimant_id = m.claimant_id)) "
     "AS pending_deletion"
 )
@@ -749,13 +798,14 @@ _REFERENCE_PATHS = ", ".join(f"'$[{i}]'" for i in range(MAX_LISTED_MESSAGE_HEADE
 _MESSAGE_COLUMNS = (
     "m.message_id, m.claimant_id, m.thread_id, m.subject, "
     f"{_SENT_AT_COLUMN}, m.sent_at_status, "
-    "m.occurred_at, m.effective_at, m.folder, "
+    f"m.occurred_at, m.effective_at, {_representative('folder')} AS folder, "
     "m.has_attachments, m.in_reply_to, "
     "json_array_length(m.references_json) AS references_count, "
     f"CASE WHEN json_array_length(m.references_json) > {MAX_LISTED_MESSAGE_HEADERS} "
     f"THEN json_extract(m.references_json, {_REFERENCE_PATHS}) "
     "ELSE m.references_json END AS references_json, "
-    "m.seen, m.flagged, m.replied, "
+    f"{_representative('seen')} AS seen, {_representative('flagged')} AS flagged, "
+    f"{_representative('replied')} AS replied, "
     "m.sender_ambiguous, " + _PENDING_DELETION_COLUMN + ", " + _SOURCE_COLUMNS
 )
 
@@ -782,6 +832,45 @@ def _row_to_message_record(r) -> MessageRecord:
         pending_deletion=bool(r["pending_deletion"]),
         sender_ambiguous=_optional_flag(r["sender_ambiguous"]),
     )
+
+
+def _attach_occurrences(conn: sqlite3.Connection, records: list[MessageRecord]) -> None:
+    """Read each record's active occurrences in ``REPRESENTATIVE_ORDER``
+    (the first is the representative its ``folder`` and flags show),
+    with their account, at most ``MAX_LISTED_OCCURRENCES`` per message
+    and the exact total (#1568)."""
+    by_id = {rec.claimant_id: rec for rec in records}
+    if not by_id:
+        return
+    for record in records:
+        record.occurrence_count = 0
+    rows = conn.execute(
+        "WITH ranked AS (SELECT o.id, o.claimant_id, "  # nosec B608
+        f"ROW_NUMBER() OVER (PARTITION BY o.claimant_id ORDER BY {REPRESENTATIVE_ORDER}) "
+        "AS position, COUNT(*) OVER (PARTITION BY o.claimant_id) AS total "
+        f"FROM message_occurrences o WHERE {active_sql()} "
+        "AND o.claimant_id IN (SELECT value FROM json_each(?))) "
+        "SELECT r.claimant_id, r.total, a.scope_uuid, a.provider, o.folder, o.relative_path, "
+        "o.seen, o.flagged, o.replied, o.trashed FROM ranked r "
+        "JOIN message_occurrences o ON o.id = r.id JOIN accounts a ON a.id = o.account_id "
+        "WHERE r.position <= ? ORDER BY r.claimant_id, r.position",
+        (json.dumps(list(by_id)), MAX_LISTED_OCCURRENCES),
+    ).fetchall()
+    for r in rows:
+        record = by_id[r["claimant_id"]]
+        record.occurrence_count = r["total"]
+        record.occurrences.append(
+            OccurrenceRecord(
+                account_scope=r["scope_uuid"],
+                provider=r["provider"],
+                folder=r["folder"],
+                locator=r["relative_path"],
+                seen=bool(r["seen"]),
+                flagged=bool(r["flagged"]),
+                replied=bool(r["replied"]),
+                trashed=bool(r["trashed"]),
+            )
+        )
 
 
 def _optional_flag(value: int | None) -> bool | None:
@@ -839,6 +928,7 @@ def _message_records(
         (*params, limit, offset),
     ).fetchall()
     records = [_row_to_message_record(r) for r in rows]
+    _attach_occurrences(conn, records)
     if participants:
         _attach_participants(conn, records)
     return records
@@ -1299,8 +1389,8 @@ class GroupPage:
     # filters do not reject whose sender is safe (``sender_ambiguous``
     # 0) but whose From list is not known complete
     # (``from_addresses_complete`` not 1), each once, across the whole
-    # result; ``authority_class`` leaves out
-    # ``AUTHORITY_EXCLUDED_FOLDERS``. It includes a message with no
+    # result; ``authority_class`` leaves out a message with no matched
+    # copy outside Spam. It includes a message with no
     # stored From row, which is also in the null group.
     incomplete_from_messages: int | None = None
 
@@ -1515,12 +1605,13 @@ _SAFE_FROM_ROWS = (
 # several (two From addresses), and one with ``value`` NULL for a
 # message with none. Each value is the one the matching
 # ``query_messages`` filter decides on: ``address_is`` / ``domain_is``
-# on the From role, ``folder``, a date range on the effective time
-# (stored UTC ISO 8601, so the year and month are its prefix) and
-# ``authority_class`` (its person entity's class, never in
-# ``AUTHORITY_EXCLUDED_FOLDERS``). ``name`` is the sender's display
-# name on the group's latest match that has one. The SQL is constant
-# except the excluded folders' placeholders, bound in order.
+# on the From role, ``folder`` (each folder holding a copy the
+# query's occurrence terms matched, #1568), a date range on the
+# effective time (stored UTC ISO 8601, so the year and month are its
+# prefix) and ``authority_class`` (its person entity's class, only with
+# a matched copy outside Spam, ``e.ns``). ``name`` is the sender's
+# display name on the group's latest match that has one. The SQL is
+# constant except the ``folder`` rows' occurrence terms, bound in order.
 _GROUP_ROWS: dict[str, str] = {
     # The participant row keeps the first name the message wrote the
     # address with, NULL when that one had none; every name is in
@@ -1539,7 +1630,13 @@ _GROUP_ROWS: dict[str, str] = {
         "length(rtrim(p.address, replace(p.address, '@', ''))) + 1) AS value, "
         f"NULL AS name FROM e {_SAFE_FROM_ROWS}"
     ),
-    "folder": "SELECT e.*, e.folder AS value, NULL AS name FROM e",
+    # Each folder holding a copy the query's folder, flag and default
+    # scope terms matched (``compile_occurrence_terms``, bound by
+    # ``aggregate_messages``), once per message and folder (#1568).
+    "folder": (
+        "SELECT DISTINCT e.*, o.folder AS value, NULL AS name FROM e "
+        "JOIN message_occurrences o ON o.claimant_id = e.cid AND {occurrence}"
+    ),
     "year": "SELECT e.*, substr(e.at, 1, 4) AS value, NULL AS name FROM e",
     "month": "SELECT e.*, substr(e.at, 1, 7) AS value, NULL AS name FROM e",
     "authority_class": (
@@ -1547,8 +1644,7 @@ _GROUP_ROWS: dict[str, str] = {
         "SELECT p.claimant_id AS cid, n.authority_class AS class FROM message_participants p "
         "JOIN entities n ON n.entity_id = 'person:' || p.address "
         "AND n.kind = 'person' AND n.canonical_key = p.address WHERE p.role = 'from'"
-        ") c ON c.cid = e.cid AND e.sa = 0 "
-        f"AND e.folder NOT IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))})"
+        ") c ON c.cid = e.cid AND e.sa = 0 AND e.ns = 1"
     ),
 }
 
@@ -1797,7 +1893,8 @@ _OCCURRENCE_COLUMNS = (
     f"substr(CAST(a.filename AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) AS filename_head, "
     f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
     "AS content_type_head, "
-    f"a.size_bytes, m.folder, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
+    f"a.size_bytes, {_representative('folder')} AS folder, {_SENT_AT_COLUMN}, "
+    "m.sent_at_status, m.occurred_at, "
     "m.effective_at, "
     f"{_SOURCE_COLUMNS}, {OCCURRENCE_STATUS_SQL} AS extraction_status, "
     f"{_unless_deferred('extractor')} AS extractor, "
@@ -2072,8 +2169,8 @@ def _contact_entities(conn: sqlite3.Connection, addresses: list[str]) -> dict[st
 # in the listed folder. Fixed SQL only; the caller's value picks a key.
 LIST_THREAD_FILTERS = {
     "all": "",
-    "unread": " AND seen = 0",
-    "flagged": " AND flagged = 1",
+    "unread": " AND o.seen = 0",
+    "flagged": " AND o.flagged = 1",
 }
 FILTER_TYPE_ERROR = "filter_type must be one of: " + ", ".join(LIST_THREAD_FILTERS)
 
@@ -2081,20 +2178,26 @@ FILTER_TYPE_ERROR = "filter_type must be one of: " + ", ".join(LIST_THREAD_FILTE
 def _append_folder_membership_sql(
     where_clauses: list[str], params: list, thread_id_column: str, folders: list[str]
 ) -> None:
-    """Keep rows whose thread has a message filed in one of ``folders``.
+    """Keep rows whose thread has a message with an active occurrence in
+    one of ``folders``, or, for a ``DefaultFolderScope``, one in the
+    default scope (``sources.default_scope_sql``, #441, #1568).
 
-    Membership is per message (``messages.folder``), the rule
+    Membership is per message copy (``message_occurrences``), the rule
     ``list_threads`` and ``list_folders`` use, not ``threads.folder``,
     which only records where the thread's first message was filed
     (#308, #415). ``thread_id_column`` is a fixed literal from the
     caller; folder names are ``?``-bound.
     """
-    placeholders = ",".join("?" * len(folders))
+    if isinstance(folders, DefaultFolderScope):
+        condition = default_scope_sql()
+    else:
+        condition = f"o.folder IN ({','.join('?' * len(folders))})"
+        params.extend(folders)
     where_clauses.append(
-        f"{thread_id_column} IN (SELECT thread_id FROM messages "  # nosec B608
-        f"WHERE folder IN ({placeholders}))"
+        f"{thread_id_column} IN (SELECT mm.thread_id FROM message_occurrences o "  # nosec B608
+        "JOIN messages mm ON mm.claimant_id = o.claimant_id "
+        f"WHERE {active_sql()} AND {condition})"
     )
-    params.extend(folders)
 
 
 def read_stored_schema_version(path: str) -> str:
@@ -2274,22 +2377,36 @@ class Database:
 
         A caller's non-empty ``folders`` is kept as given, so naming a
         ``DEFAULT_EXCLUDED_FOLDERS`` folder includes it. Otherwise, when
-        the mailbox holds mail in an excluded folder, the scope is every
-        other folder holding mail (``[]`` when there is none), so the
-        exclusion runs through the ``folders`` path: pushed into the
-        keyword SQL, applied post-fusion, and counted as a filter that
-        widens the vector windows (#286). A mailbox with no excluded
-        mail gets ``None``, the unfiltered search exactly as before.
-        ``conn`` runs the folder lookup inside a caller's snapshot.
+        some copy is outside the default scope (retired, in Trash, or
+        ``T``-flagged beside a live copy, ``sources.default_scope_sql``),
+        the scope is a ``DefaultFolderScope`` of the folders holding a
+        copy in it (``[]`` when there is none), whose membership is the default scope's, so the exclusion
+        runs through the ``folders`` path: pushed into the keyword SQL,
+        applied post-fusion, and counted as a filter that widens the
+        vector windows (#286). A mailbox whose every copy is in the
+        default scope gets ``None``, the unfiltered search exactly as
+        before. ``conn`` runs the lookup inside a caller's snapshot.
         """
         if folders:
             return folders
-        sql = "SELECT DISTINCT folder FROM messages"
-        rows = conn.execute(sql).fetchall() if conn is not None else self._fetchall(sql)
-        present = [r["folder"] for r in rows]
-        if not any(f in DEFAULT_EXCLUDED_FOLDERS for f in present):
+        outside = (
+            "SELECT 1 FROM message_occurrences o "  # nosec B608
+            f"WHERE NOT ({default_scope_sql()}) LIMIT 1"
+        )
+        inside = (
+            "SELECT DISTINCT o.folder AS folder FROM message_occurrences o "  # nosec B608
+            f"WHERE {default_scope_sql()} ORDER BY o.folder"
+        )
+        if conn is not None:
+            any_outside = conn.execute(outside).fetchall()
+            rows = conn.execute(inside).fetchall() if any_outside else []
+        else:
+            any_outside = self._fetchall(outside)
+            rows = self._fetchall(inside) if any_outside else []
+        if not any_outside:
             return None
-        return [f for f in present if f not in DEFAULT_EXCLUDED_FOLDERS]
+        present = [r["folder"] for r in rows]
+        return DefaultFolderScope(present) if present else []
 
     # -------------------------------------------------------------------------
     # Hybrid search — BM25 + vector, merged via Reciprocal Rank Fusion
@@ -2956,14 +3073,14 @@ class Database:
         same way the thread-search lanes normalize them so a bare
         ``"2024-12-31"`` includes the full day it names.
         """
-        # Attachments on messages filed in an excluded folder are left
-        # out (#441); the tool has no folder filter to name them.
-        excluded = ",".join("?" * len(DEFAULT_EXCLUDED_FOLDERS))
+        # Attachments on messages outside the default scope
+        # (``sources.default_scope_sql``, #441, #1568) are left out; the tool has no
+        # folder filter to name them.
         clauses: list[str] = [
-            "a.claimant_id NOT IN (SELECT claimant_id FROM messages "  # nosec B608
-            f"WHERE folder IN ({excluded}))"
+            "EXISTS (SELECT 1 FROM message_occurrences o "  # nosec B608
+            f"WHERE o.claimant_id = a.claimant_id AND {default_scope_sql()})"
         ]
-        params: list = [*DEFAULT_EXCLUDED_FOLDERS]
+        params: list = []
         if content_type:
             clauses.append("a.content_type = ?")
             params.append(content_type)
@@ -4245,9 +4362,10 @@ class Database:
           domain or name fragment by substring).
         - ``date_from`` / ``date_to``: its effective time (``occurred_at``,
           else ``sent_at``) within the bounds.
-        - ``folders``: the folder it is filed in now, so a moved message
-          is labelled by where it was moved to. Without ``folders``, the
-          default scope: any folder but ``DEFAULT_EXCLUDED_FOLDERS``.
+        - ``folders``: an active copy in one of them now, so a moved
+          message is labelled by where it was moved to. Without
+          ``folders``, the default scope (``sources.default_scope_sql``,
+          #1568).
 
         A message a leaf cannot decide (a sender filter on one whose
         ``sender_ambiguous`` is not 0, #1153) is labelled context, never
@@ -4471,25 +4589,29 @@ class Database:
         limit: int = 20,
         offset: int = 0,
     ) -> list[ThreadResult]:
-        """Threads with at least one message in ``folder``, newest first.
+        """Threads with at least one message with an active copy in
+        ``folder``, newest first.
 
-        Membership comes from each message's own folder (``messages``),
-        not ``threads.folder``: that is the folder of the message that
-        started the thread, so a folder holding only replies to threads
-        started elsewhere would never list (#308). The returned
-        ``folder`` stays the thread's representative folder, set when
-        the thread was first indexed.
+        Membership comes from each message's copies
+        (``message_occurrences``, #1568), not ``threads.folder``: that is
+        the folder of the message that started the thread, so a folder
+        holding only replies to threads started elsewhere would never
+        list (#308). The returned ``folder`` stays the thread's
+        representative folder, set when the thread was first indexed.
 
         ``filter_type`` (``LIST_THREAD_FILTERS``) narrows that to threads
-        with an unread (``unread``) or flagged (``flagged``) message in
-        ``folder``.
+        with an unread (``unread``) or flagged (``flagged``) copy in
+        ``folder``: the flag of that copy, not of another in another
+        folder.
         """
         condition = LIST_THREAD_FILTERS.get(filter_type)
         if condition is None:
             raise ValueError(FILTER_TYPE_ERROR)
         rows = self._fetchall(
             "SELECT * FROM threads WHERE thread_id IN "  # nosec B608
-            f"(SELECT thread_id FROM messages WHERE folder = ?{condition}) "
+            "(SELECT m.thread_id FROM message_occurrences o "
+            "JOIN messages m ON m.claimant_id = o.claimant_id "
+            f"WHERE {active_sql()} AND o.folder = ?{condition}) "
             "ORDER BY date_last DESC LIMIT ? OFFSET ?",
             (folder, limit, offset),
         )
@@ -4664,17 +4786,19 @@ class Database:
         return stats
 
     def list_folders(self) -> list[dict]:
-        """Folders holding at least one indexed message, with the number
-        of distinct threads that have a message in each — the same set
-        ``list_threads(folder=...)`` pages through. A thread with
-        messages in several folders counts once in each of them.
+        """Folders holding an active copy of at least one indexed
+        message, with the number of distinct threads that have a message
+        with a copy in each — the same set ``list_threads(folder=...)``
+        pages through (#1568). A thread with messages in several folders
+        counts once in each of them. Folder names are account-relative;
+        with one account they are the mailbox's (grouping by account is
+        #1491's).
         """
-        rows = self._fetchall("""
-            SELECT folder, COUNT(DISTINCT thread_id) AS thread_count
-            FROM messages
-            GROUP BY folder
-            ORDER BY thread_count DESC, folder
-        """)
+        rows = self._fetchall(
+            "SELECT o.folder AS folder, COUNT(DISTINCT m.thread_id) AS thread_count "  # nosec B608 - module constants only
+            "FROM message_occurrences o JOIN messages m ON m.claimant_id = o.claimant_id "
+            f"WHERE {active_sql()} GROUP BY o.folder ORDER BY thread_count DESC, o.folder"
+        )
         return [{"name": r["folder"], "thread_count": r["thread_count"]} for r in rows]
 
     def find_contact(
@@ -4817,8 +4941,9 @@ class Database:
           only when the stored subject, body, attachment list or role's
           addresses are complete (``messages.*_complete`` 1), and the
           message is otherwise counted as indeterminate (#1086).
-        - ``folder``: exact folder name. Without it, messages filed in a
-          ``DEFAULT_EXCLUDED_FOLDERS`` folder are left out.
+        - ``folder``: exact folder name of an active copy. Without it,
+          the default scope: a message is left out unless it has a live
+          copy (not ``T``-flagged) outside Trash (#1568).
         - ``date_from`` / ``date_to``: inclusive bounds on the clock
           ``date_basis`` names; date-only values cover the whole UTC day.
         - ``date_basis`` (#1085): not served by the ``query_messages``
@@ -4832,15 +4957,18 @@ class Database:
           counted in ``MessagePage.indeterminate``.
           ``internal`` is a legal value that is unavailable until #1092.
         - ``has_attachments``: the message's own attachment flag.
-        - ``seen`` / ``flagged`` / ``replied``: the message's read,
-          flagged and answered state (its Maildir ``S`` / ``F`` / ``R``
-          flags).
+        - ``seen`` / ``flagged`` / ``replied``: a copy's read, flagged
+          and answered state (its Maildir ``S`` / ``F`` / ``R`` flags).
+          Every folder and flag filter, and the default scope, is
+          decided on one copy (#1568): ``folder`` with ``flagged`` needs
+          a flagged copy in that folder. The result is one row per
+          message however many copies match.
         - ``size_min`` / ``size_max``: inclusive bounds in bytes on the
           local Maildir file's size; a message whose size is not stored
           is left out and counted as indeterminate, as above.
         - ``authority_class``: the class the indexer gave the message's
-          From sender (``AUTHORITY_CLASSES``); a message in
-          ``AUTHORITY_EXCLUDED_FOLDERS`` never matches, and any other
+          From sender (``AUTHORITY_CLASSES``); a message with no
+          matching copy outside Spam never matches, and any other
           whose ``sender_ambiguous`` is not 0 is counted as
           indeterminate (#1161).
         - ``where`` (#1088): the normalized explicit expression
@@ -4931,6 +5059,7 @@ class Database:
             ).fetchall()
             has_more = len(rows) > limit
             records = [_row_to_message_record(r) for r in rows[:limit]]
+            _attach_occurrences(conn, records)
             _attach_participants(conn, records)
             conn.rollback()
 
@@ -5105,9 +5234,10 @@ class Database:
         value on the dimension is in the group whose value is ``None``:
         for the sender dimensions one whose ``sender_ambiguous`` is not
         0 or with no stored From address; for ``authority_class`` also
-        one in ``AUTHORITY_EXCLUDED_FOLDERS`` or with no classified
-        From address. A message with several From addresses counts in
-        each of their groups, so those groups can sum to more than
+        one with no matched copy outside Spam or with no classified From
+        address. A message with several From addresses counts in each of
+        their groups, and one with matched copies in several folders in
+        each folder's group (#1568), so those groups can sum to more than
         ``total_matches``.
 
         Bounded work: one statement in one read snapshot. It evaluates
@@ -5144,21 +5274,23 @@ class Database:
         expr, expr_params = _message_expression(leaves, where)
         digest = _aggregate_digest(group_by, leaves, where)
         offset = _decode_aggregate_cursor(cursor, digest) if cursor else 0
-        rows_params = list(AUTHORITY_EXCLUDED_FOLDERS) if group_by == "authority_class" else []
+        occurrence_sql, occurrence_params = compile_occurrence_terms(leaves)
+        rows_sql = _GROUP_ROWS[group_by]
+        rows_params: list = []
+        if group_by == "folder":
+            rows_sql = rows_sql.replace("{occurrence}", occurrence_sql)
+            rows_params = list(occurrence_params)
         # Review round 3 (owner, 2026-10-08): for a sender dimension,
         # the messages not rejected whose sender is safe but whose From
         # list is not known complete (0 a known loss, NULL not reparsed),
         # once each, before a message is spread over its groups: further
         # sender groups or memberships may be missing for them. Spam has
         # no class either way, so authority_class leaves it out.
-        incomplete_sql, incomplete_params = "NULL", []
+        incomplete_sql = "NULL"
         if group_by in _SENDER_DIMENSIONS:
             incomplete_sql = "TOTAL(sa = 0 AND fc IS NOT 1"
             if group_by == "authority_class":
-                incomplete_sql += (
-                    f" AND folder NOT IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))})"
-                )
-                incomplete_params = list(AUTHORITY_EXCLUDED_FOLDERS)
+                incomplete_sql += " AND ns = 1"
             incomplete_sql += ")"
         # ``e`` is materialized so the expression is evaluated once per
         # message it does not reject for ``ok``, not once per aggregate
@@ -5167,10 +5299,14 @@ class Database:
         # group still carries the totals.
         sql = (
             "WITH e AS MATERIALIZED (SELECT m.claimant_id AS cid, m.thread_id AS tid, "  # nosec B608
-            f"{EFFECTIVE_EVIDENCE_SQL} AS at, m.has_attachments AS att, m.folder AS folder, "
+            f"{EFFECTIVE_EVIDENCE_SQL} AS at, m.has_attachments AS att, "
             "m.sender_ambiguous AS sa, m.from_addresses_complete AS fc, "
-            f"({expr}) AS ok FROM messages m WHERE ({expr}) IS NOT 0), "
-            f"k AS ({_GROUP_ROWS[group_by]}), "
+            # Whether a matched copy is outside Spam: the class of a
+            # message only copied to Spam is not counted (#463, #1568).
+            f"({expr}) AS ok, EXISTS (SELECT 1 FROM message_occurrences o "
+            f"WHERE o.claimant_id = m.claimant_id AND {occurrence_sql} "
+            f"AND NOT {role_sql('spam')}) AS ns FROM messages m WHERE ({expr}) IS NOT 0), "
+            f"k AS ({rows_sql}), "
             "g AS MATERIALIZED (SELECT value, TOTAL(ok IS 1) AS n, "
             "COUNT(DISTINCT CASE WHEN ok IS 1 THEN tid END) AS threads, "
             "MIN(CASE WHEN ok IS 1 THEN at END) AS first_at, "
@@ -5184,7 +5320,14 @@ class Database:
             "FROM t LEFT JOIN (SELECT * FROM g ORDER BY n DESC, value IS NULL, value "
             "LIMIT ? OFFSET ?) pg ON 1 ORDER BY pg.n DESC, pg.value IS NULL, pg.value"
         )
-        params = [*expr_params, *expr_params, *rows_params, *incomplete_params, limit + 1, offset]
+        params = [
+            *expr_params,
+            *occurrence_params,
+            *expr_params,
+            *rows_params,
+            limit + 1,
+            offset,
+        ]
         with closing(self._connect()) as conn:
             rows = conn.execute(sql, params).fetchall()
         matches, undecided, total_groups = (int(n) for n in rows[0][:3])

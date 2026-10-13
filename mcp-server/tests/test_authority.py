@@ -267,7 +267,10 @@ def spam_db(tmp_path) -> Database:
             message_ids=message_ids,
             embedding=[1.0, 0.0, 0.0, 0.0],
         )
-    conn.execute("UPDATE messages SET folder = 'Spam' WHERE message_id IN ('mixed-1', 'sr-1')")
+    conn.execute(
+        "UPDATE message_occurrences SET folder = 'Spam' WHERE claimant_id IN "
+        "(SELECT claimant_id FROM messages WHERE message_id IN ('mixed-1', 'sr-1'))"
+    )
     # sr-2 is the reader's reply: the reader sent it, counsel received it.
     conn.execute(
         "UPDATE message_participants SET role = CASE address WHEN ? THEN 'to' ELSE 'from' END "
@@ -335,7 +338,10 @@ class TestSpamIsNeverAuthority:
         # as eligible, so it still widens until it reaches the target.
         db = _scoped_recall_db(tmp_path)
         with closing(sqlite3.connect(db.path)) as conn:
-            conn.execute("UPDATE messages SET folder = 'Spam' WHERE thread_id LIKE 't-noise-%'")
+            conn.execute(
+                "UPDATE message_occurrences SET folder = 'Spam' WHERE claimant_id IN "
+                "(SELECT claimant_id FROM messages WHERE thread_id LIKE 't-noise-%')"
+            )
             conn.commit()
         set_authority(db.path, "digest@noise.example", "counsel", "domain:noise.example")
         results = _search(db, mode, authority_class="counsel")

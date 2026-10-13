@@ -245,6 +245,19 @@ def count_pending_deletions(db: Database) -> int:
     return int(db._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])
 
 
+def message_path_sql(db: Database, alias: str = "m") -> str:
+    """SQL for the file of the message row ``alias``: its representative
+    occurrence's path under ``db``'s account root (an active one, live
+    first), as ``messages.filepath`` held before #1568 dropped it."""
+    root = str(db.account.maildir_root).rstrip("/") + "/"
+    assert "'" not in root
+    return (
+        f"('{root}' || (SELECT o.relative_path FROM message_occurrences o "
+        f"WHERE o.claimant_id = {alias}.claimant_id "
+        "ORDER BY o.state = 'active' DESC, o.trashed, o.id LIMIT 1))"
+    )
+
+
 def lose_message(db: Database, claimant_id: str, marked_at: str | None = None) -> None:
     """Make a message lose its last live occurrence, as mbsync ``T``-flagging
     every copy would (#1567): its active occurrences are marked trashed and

@@ -41,6 +41,7 @@ from tests.conftest import (
     make_mock_embedder,
     make_ole2,
     make_thread,
+    message_path_sql,
 )
 
 # Captured before any test monkeypatches the name, so the sorted
@@ -2298,7 +2299,8 @@ class TestReprocessKeepsFirstDate:
         self._index(db, threader, rewritten)
 
         rows = db._conn.execute(
-            "SELECT filepath, sent_at FROM messages WHERE message_id = ?",
+            f"SELECT {message_path_sql(db)} AS filepath, sent_at FROM messages m "
+            "WHERE message_id = ?",
             ("changed@example.com",),
         ).fetchall()
         assert {(r["filepath"], r["sent_at"]) for r in rows} == {
@@ -8635,12 +8637,12 @@ class TestMessageRecordsEndToEnd:
         main.initial_index(db, embedder, threader, _make_queue(db))
 
         row = db._conn.execute(
-            "SELECT filepath, folder, content_hash, size_bytes FROM messages "
+            "SELECT claimant_id, content_hash, size_bytes FROM messages "
             "WHERE message_id = 'e2e@example.com'"
         ).fetchone()
         raw = live.read_bytes()
-        assert row["filepath"] == str(live)
-        assert row["folder"] == "INBOX"
+        occurrence = db.find_active_occurrence(str(live))
+        assert occurrence["claimant_id"] == row["claimant_id"]
         assert row["content_hash"] == hashlib.sha256(raw).hexdigest()
         assert row["size_bytes"] == len(raw)
         participants = {
@@ -9356,8 +9358,11 @@ class TestMessageIdClaimants:
             return sorted(tuple(r) for r in db._conn.execute(sql))
 
         return {
-            "messages": rows("SELECT claimant_id, message_id, filepath FROM messages"),
-            "map": rows("SELECT claimant_id, message_id, filepath FROM message_thread_map"),
+            "messages": rows("SELECT claimant_id, message_id FROM messages"),
+            "map": rows("SELECT claimant_id, message_id FROM message_thread_map"),
+            "occurrences": rows(
+                "SELECT claimant_id, relative_path FROM message_occurrences WHERE state = 'active'"
+            ),
             "chunks": rows("SELECT claimant_id, chunk_id, attachment_id FROM message_chunks"),
             "attachments": rows("SELECT attachment_occurrence_id, claimant_id FROM attachments"),
             "participants": rows("SELECT claimant_id, role, address FROM message_participants"),
@@ -9382,7 +9387,9 @@ class TestMessageIdClaimants:
         assert a != b
         assert a.startswith(self.MID + "#") and b.startswith(self.MID + "#")
         rows = db._conn.execute(
-            "SELECT claimant_id, filepath FROM messages WHERE message_id = ?", (self.MID,)
+            f"SELECT claimant_id, {message_path_sql(db)} AS filepath FROM messages m "
+            "WHERE message_id = ?",
+            (self.MID,),
         ).fetchall()
         assert {(r["claimant_id"], r["filepath"]) for r in rows} == {
             (a, str(first)),

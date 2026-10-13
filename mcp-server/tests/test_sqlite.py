@@ -5483,7 +5483,10 @@ def _trash_db(tmp_path, *, only_trash: bool = False) -> Database:
             filename=f"invoice-{tid}.pdf",
         )
     # The mixed thread's reply was filed in INBOX.
-    conn.execute("UPDATE messages SET folder = 'INBOX' WHERE message_id = 'm-mixed-reply'")
+    conn.execute(
+        "UPDATE message_occurrences SET folder = 'INBOX' WHERE claimant_id IN "
+        "(SELECT claimant_id FROM messages WHERE message_id = 'm-mixed-reply')"
+    )
     conn.commit()
     conn.close()
     return Database(str(db_path))

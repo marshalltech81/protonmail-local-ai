@@ -1114,19 +1114,17 @@ class Database:
                 claimant_id TEXT PRIMARY KEY,
                 message_id  TEXT NOT NULL,
                 thread_id   TEXT NOT NULL,
-                filepath    TEXT NOT NULL,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
             );
             CREATE INDEX idx_message_thread_map_message ON message_thread_map(message_id);
-            -- Flag renames match rows by filepath; thread rebuilds and
-            -- removals match them by thread_id.
-            CREATE INDEX idx_message_thread_map_filepath ON message_thread_map(filepath);
+            -- Thread rebuilds and removals match rows by thread_id.
             CREATE INDEX idx_message_thread_map_thread ON message_thread_map(thread_id);
 
             -- One row per indexed message: the authoritative per-message
-            -- record (own headers, send and delivery time, folder, source
-            -- locator and content hash) behind exact enumeration and
-            -- provenance. Cascades from ``message_thread_map`` so every
+            -- record (own headers, send and delivery time and content
+            -- hash) behind exact enumeration and provenance; its folders,
+            -- locators and Maildir flags are its copies' (``message_occurrences``,
+            -- #1568). Cascades from ``message_thread_map`` so every
             -- existing message / thread removal path cleans it up.
             -- ``sent_at`` is the parsed ``Date:`` header, NULL when it is
             -- absent or unparseable, with ``sent_at_status`` saying which
@@ -1144,8 +1142,6 @@ class Database:
                 claimant_id     TEXT PRIMARY KEY,
                 message_id      TEXT NOT NULL,
                 thread_id       TEXT NOT NULL,
-                filepath        TEXT NOT NULL,
-                folder          TEXT NOT NULL,
                 subject         TEXT NOT NULL,
                 sent_at         TEXT,
                 sent_at_status  TEXT CHECK (sent_at_status IN ('parsed', 'missing', 'invalid')),
@@ -1159,11 +1155,6 @@ class Database:
                 content_hash    TEXT,
                 indexed_at      TEXT NOT NULL,
                 first_indexed_at TEXT NOT NULL,
-                -- Maildir S / F / R flags of ``filepath`` (maildir.message_state),
-                -- written with it on every insert and rename.
-                seen            INTEGER NOT NULL DEFAULT 0,
-                flagged         INTEGER NOT NULL DEFAULT 0,
-                replied         INTEGER NOT NULL DEFAULT 0,
                 -- #1144: 0 = one From header; 1 = sender attribution unsafe
                 -- (a repeated From, or the header scan stopped before a
                 -- second could be ruled out); NULL = not yet assessed (a
@@ -1218,10 +1209,7 @@ class Database:
             CREATE INDEX idx_messages_message_effective
                 ON messages(message_id, effective_at, claimant_id);
             CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
-            CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
             CREATE INDEX idx_messages_effective ON messages(effective_at);
-            -- Flag renames and cross-folder moves update by filepath.
-            CREATE INDEX idx_messages_filepath ON messages(filepath);
             -- The reconciliation scan finds the message holding a found
             -- copy's bytes by content hash (#1567).
             CREATE INDEX idx_messages_content_hash ON messages(content_hash);
@@ -1756,14 +1744,11 @@ class Database:
             for msg in thread.messages:
                 cur.execute(
                     """
-                    INSERT INTO message_thread_map
-                        (claimant_id, message_id, thread_id, filepath)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(claimant_id) DO UPDATE SET
-                        thread_id = excluded.thread_id,
-                        filepath  = excluded.filepath
+                    INSERT INTO message_thread_map (claimant_id, message_id, thread_id)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(claimant_id) DO UPDATE SET thread_id = excluded.thread_id
                     """,
-                    (msg.claimant_id, msg.message_id, thread.thread_id, msg.filepath),
+                    (msg.claimant_id, msg.message_id, thread.thread_id),
                 )
 
                 cur.execute(
@@ -4439,7 +4424,6 @@ class Database:
         UPDATE`` (never ``REPLACE``) keeps the row in place, so the
         participant cascade only fires when the message itself is removed.
         """
-        state = message_state(msg.filepath)
         # ``from_addrs`` holds every author; ``from_addr`` alone for callers
         # that build a Message by hand.
         authors = msg.from_addrs or [msg.from_addr]
@@ -4457,18 +4441,16 @@ class Database:
         cur.execute(
             """
             INSERT INTO messages
-                (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
+                (claimant_id, message_id, thread_id, subject, sent_at,
                  sent_at_status, occurred_at, in_reply_to, references_json, has_attachments,
-                 size_bytes, content_hash, indexed_at, first_indexed_at, seen, flagged,
-                 replied, sender_ambiguous, participant_names_complete, subject_complete,
+                 size_bytes, content_hash, indexed_at, first_indexed_at,
+                 sender_ambiguous, participant_names_complete, subject_complete,
                  from_addresses_complete, to_addresses_complete, cc_addresses_complete,
                  attachments_manifest_complete, body_complete, caps_json, headers_complete)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, NULL, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, NULL, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
-                filepath        = excluded.filepath,
-                folder          = excluded.folder,
                 subject         = excluded.subject,
                 sent_at         = excluded.sent_at,
                 sent_at_status  = excluded.sent_at_status,
@@ -4487,9 +4469,6 @@ class Database:
                 size_bytes      = excluded.size_bytes,
                 content_hash    = excluded.content_hash,
                 indexed_at      = excluded.indexed_at,
-                seen            = excluded.seen,
-                flagged         = excluded.flagged,
-                replied         = excluded.replied,
                 sender_ambiguous = excluded.sender_ambiguous,
                 participant_names_complete = excluded.participant_names_complete,
                 subject_complete = excluded.subject_complete,
@@ -4506,8 +4485,6 @@ class Database:
                 msg.claimant_id,
                 msg.message_id,
                 thread_id,
-                msg.filepath,
-                msg.folder,
                 msg.subject,
                 msg.date.isoformat() if msg.date is not None else None,
                 msg.date_status,
@@ -4519,9 +4496,6 @@ class Database:
                 msg.content_hash,
                 datetime.now(UTC).isoformat(),
                 msg.first_indexed_at.isoformat(),
-                int(state.seen),
-                int(state.flagged),
-                int(state.replied),
                 int(msg.sender_ambiguous),
                 int(complete),
                 int(msg.subject_complete),

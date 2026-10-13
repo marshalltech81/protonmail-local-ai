@@ -39,6 +39,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .sources import active_sql, default_scope_sql, role_sql
+
 
 class InvalidFilterError(ValueError):
     """A filter or query argument the caller supplied was rejected (a
@@ -84,11 +86,12 @@ def normalize_authority_class(value: str | None) -> str | None:
     return value
 
 
-# Folders whose messages never count toward an ``authority_class``
+# Folders whose copies never count toward an ``authority_class``
 # filter (#463). Authority comes from the claimed From address, which is
 # sender-controlled, and Proton files most spoofed or DMARC-failing mail
-# in Spam. Matched exactly against ``messages.folder``, like the folder
-# filters.
+# in Spam. The SQL dispatches the Spam role by the occurrence's account
+# provider (``sources.role_sql``, #1568); this is Proton's name, for
+# prose.
 AUTHORITY_EXCLUDED_FOLDERS = ("Spam",)
 
 # Claimants (per-message keys) whose From sender's person entity carries
@@ -130,12 +133,25 @@ def canonical_addr(value: str) -> str:
 # Folders whose mail stays synced and indexed but is left out of
 # mailbox-wide retrieval unless the caller names them (#441). Under
 # mirror retention a deleted message lives on as its Trash copy until
-# it is purged from Trash. Matched exactly, as ``folders`` filters are.
-# Thread searches leave out a thread only when every message of it is
-# in one of these folders (the per-message membership the ``folders``
-# filter uses); message and attachment lookups leave out the messages
-# filed there. Lookups of one named thread or message are unaffected.
+# it is purged from Trash. The default scope is a message with an active
+# occurrence outside Trash, counting only its live (not ``T``-flagged)
+# occurrences when it has any (owner decision on #1568, option B), the
+# Trash role dispatched by the occurrence's account provider
+# (``sources.default_scope_sql``); this is Proton's name, for prose. Thread searches leave out a thread
+# only when no message of it is in that scope; message and attachment
+# lookups leave out the messages outside it. Lookups of one named thread
+# or message are unaffected.
 DEFAULT_EXCLUDED_FOLDERS = ("Trash",)
+
+
+class DefaultFolderScope(list[str]):
+    """The ``folders`` a mailbox-wide thread search applies when the
+    caller named none and some mail is outside the default scope
+    (``Database._default_folder_scope``): the folders holding a copy in
+    the default scope. Its membership is the default scope's
+    (``sources.default_scope_sql``), not "a message in one of these
+    folders", so a ``T``-flagged copy there counts only for a message
+    with no live copy (#1568)."""
 
 
 def _parse_date_range(
@@ -484,6 +500,13 @@ class LeafKind:
     safe inside an ``AND`` chain. ``thread_test``, when set, is how
     ``search_emails`` decides the leaf on a thread row instead: it
     takes the value and returns a test over one ``ThreadResult``.
+
+    ``occurrence``, when set, is the leaf's term over one active mailbox
+    occurrence ``o`` (folder, flags, the default scope, Spam; #1568):
+    ``compile_leaves`` conjoins every such term of a query in one
+    ``occurrence_exists``, so they match the same copy. ``message`` is
+    then the leaf's part over ``m`` besides it, if any; ``compile`` is
+    the leaf on its own.
     """
 
     name: str
@@ -491,6 +514,8 @@ class LeafKind:
     compile: Callable[[Any, list], str]
     evaluability: Evaluability
     thread_test: Callable[[Any], Callable[[Any], bool]] | None = None
+    occurrence: Callable[[Any, list], str] | None = None
+    message: Callable[[Any, list], str] | None = None
 
 
 # ``messages.sent_at_status`` (#1080): why ``sent_at`` is what it is.
@@ -782,14 +807,54 @@ def _compile_header_contains(value: tuple[str, str], params: list) -> str:
     )
 
 
-def _compile_folder(folders: tuple[str, ...], params: list) -> str:
-    params.extend(folders)
-    return f"m.folder IN ({','.join('?' * len(folders))})"
+def occurrence_exists(terms: Sequence[str]) -> str:
+    """SQL over ``messages m`` that holds when one active occurrence
+    ``o`` of the message meets every term (#1568): folder, flag, Trash
+    and Spam terms in one query are conjoined on a single copy."""
+    return (
+        "EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id "  # nosec B608 - fixed SQL and compiled terms; values are bound
+        f"AND {active_sql()} AND " + " AND ".join(terms) + ")"
+    )
 
 
-def _compile_not_in_folders(folders: tuple[str, ...], params: list) -> str:
+def _occurrence_folder(folders: tuple[str, ...], params: list) -> str:
     params.extend(folders)
-    return f"m.folder NOT IN ({','.join('?' * len(folders))})"
+    return f"o.folder IN ({','.join('?' * len(folders))})"
+
+
+def _occurrence_default_scope(_value: None, params: list) -> str:
+    # Outside Trash; a T-flagged copy counts only for a message with no
+    # live copy (#441, owner decision on #1568).
+    return default_scope_sql()
+
+
+def _occurrence_flag(column: str) -> Callable[[bool, list], str]:
+    """The occurrence term for a 0/1 column of ``message_occurrences``
+    matched either way."""
+
+    def compile(state: bool, params: list) -> str:
+        params.append(1 if state else 0)
+        return f"o.{column} = ?"
+
+    return compile
+
+
+def _occurrence_not_spam(_value: str, params: list) -> str:
+    return f"NOT {role_sql('spam')}"
+
+
+def _standalone(
+    occurrence: Callable[[Any, list], str], message: Callable[[Any, list], str] | None = None
+) -> Callable[[Any, list], str]:
+    """The SQL of one occurrence leaf on its own: its message part, if
+    any, and its occurrence term in one ``occurrence_exists``."""
+
+    def compile(value: Any, params: list) -> str:
+        parts = [message(value, params)] if message is not None else []
+        parts.append(occurrence_exists([occurrence(value, params)]))
+        return " AND ".join(parts)
+
+    return compile
 
 
 def _operand(value_sql: str) -> str:
@@ -831,19 +896,11 @@ def _compile_has_attachments(state: bool, params: list) -> str:
     )
 
 
-def _compile_flag(column: str) -> Callable[[bool, list], str]:
-    """The compiler for a 0/1 column of ``messages`` matched either way."""
-
-    def compile(state: bool, params: list) -> str:
-        params.append(1 if state else 0)
-        return f"m.{column} = ?"
-
-    return compile
-
-
 def _compile_authority_class(value: str, params: list) -> str:
-    # A message in ``AUTHORITY_EXCLUDED_FOLDERS`` is a decided "no"
-    # whatever its sender flag (#463). Otherwise the From sender decides
+    # The message part. A message with no matching copy outside Spam is a
+    # decided "no" whatever its sender flag (#463): the occurrence term
+    # (``_occurrence_not_spam``, in the query's one ``occurrence_exists``)
+    # makes the conjunction 0. Otherwise the From sender decides
     # the leaf only when its attribution is known safe
     # (``sender_ambiguous = 0``, #1144): for 1 (a repeated From, or a
     # header scan cut short) or NULL (not assessed yet) the author cannot
@@ -855,11 +912,9 @@ def _compile_authority_class(value: str, params: list) -> str:
     # is a miss only when its From list is complete
     # (``from_addresses_complete`` 1), and otherwise unknown (#1086,
     # owner 2026-10-08).
-    params.extend([*AUTHORITY_EXCLUDED_FOLDERS, value])
+    params.append(value)
     return (
-        # The f-string adds ``?`` placeholders only; the values are bound.
-        f"CASE WHEN m.folder IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))}) THEN 0 "
-        "WHEN m.sender_ambiguous IS NOT 0 THEN NULL "
+        "CASE WHEN m.sender_ambiguous IS NOT 0 THEN NULL "
         f"WHEN m.claimant_id IN ({_SENDER_CLASS_MESSAGES}) THEN 1 "
         "WHEN m.from_addresses_complete = 1 THEN 0 ELSE NULL END"
     )
@@ -950,8 +1005,20 @@ LEAVES: dict[str, LeafKind] = {
         # ``text`` is the flat filter's name for ``body_words`` (#1088).
         LeafKind("text", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind("body_words", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
-        LeafKind("folder", "folders", _compile_folder, Evaluability.DECIDED),
-        LeafKind("not_in_folders", "folders", _compile_not_in_folders, Evaluability.DECIDED),
+        LeafKind(
+            "folder",
+            "folders",
+            _standalone(_occurrence_folder),
+            Evaluability.DECIDED,
+            occurrence=_occurrence_folder,
+        ),
+        LeafKind(
+            "default_scope",
+            "none",
+            _standalone(_occurrence_default_scope),
+            Evaluability.DECIDED,
+            occurrence=_occurrence_default_scope,
+        ),
         # A message with neither a delivery nor a send date is unknown
         # under an effective-time bound, never placed by the time it was
         # first indexed (#1080).
@@ -1006,9 +1073,16 @@ LEAVES: dict[str, LeafKind] = {
             Evaluability.UNKNOWN_WHEN_NULL,
             _has_attachments_test,
         ),
-        LeafKind("seen", "bool", _compile_flag("seen"), Evaluability.DECIDED),
-        LeafKind("flagged", "bool", _compile_flag("flagged"), Evaluability.DECIDED),
-        LeafKind("replied", "bool", _compile_flag("replied"), Evaluability.DECIDED),
+        *(
+            LeafKind(
+                flag,
+                "bool",
+                _standalone(_occurrence_flag(flag)),
+                Evaluability.DECIDED,
+                occurrence=_occurrence_flag(flag),
+            )
+            for flag in ("seen", "flagged", "replied")
+        ),
         # The local Maildir file's size, NULL when not recorded.
         LeafKind(
             "size_min",
@@ -1025,8 +1099,10 @@ LEAVES: dict[str, LeafKind] = {
         LeafKind(
             "authority_class",
             "class",
-            _compile_authority_class,
+            _standalone(_occurrence_not_spam, _compile_authority_class),
             Evaluability.UNKNOWN_WHEN_NULL,
+            occurrence=_occurrence_not_spam,
+            message=_compile_authority_class,
         ),
     )
 }
@@ -1034,10 +1110,40 @@ LEAVES: dict[str, LeafKind] = {
 
 def compile_leaves(leaves: Sequence[Leaf]) -> tuple[str, list]:
     """The SQL predicate over ``messages m`` that holds when every leaf
-    does, with its bound values; ``"1"`` for no leaves."""
+    does, with its bound values; ``"1"`` for no leaves. The occurrence
+    terms of every leaf (``LeafKind.occurrence``) are conjoined in one
+    ``occurrence_exists``, last, so folder, flag, Trash and Spam terms
+    match one copy of the message (#1568)."""
     params: list = []
-    sql = " AND ".join(LEAVES[leaf.name].compile(leaf.value, params) for leaf in leaves)
-    return sql or "1", params
+    parts: list[str] = []
+    occurrence_params: list = []
+    occurrence_terms: list[str] = []
+    for leaf in leaves:
+        kind = LEAVES[leaf.name]
+        if kind.occurrence is None:
+            parts.append(kind.compile(leaf.value, params))
+            continue
+        if kind.message is not None:
+            parts.append(kind.message(leaf.value, params))
+        occurrence_terms.append(kind.occurrence(leaf.value, occurrence_params))
+    if occurrence_terms:
+        parts.append(occurrence_exists(occurrence_terms))
+        params += occurrence_params
+    return " AND ".join(parts) or "1", params
+
+
+def compile_occurrence_terms(leaves: Sequence[Leaf]) -> tuple[str, list]:
+    """The conjunction of the leaves' occurrence terms over one active
+    occurrence ``o`` (``sources.active_sql`` alone for none), with its
+    bound values: which copies of a matching message the query matched,
+    for ``aggregate_messages``' ``folder`` groups (#1568)."""
+    params: list = []
+    terms = [active_sql()]
+    for leaf in leaves:
+        occurrence = LEAVES[leaf.name].occurrence
+        if occurrence is not None:
+            terms.append(occurrence(leaf.value, params))
+    return " AND ".join(terms), params
 
 
 # The format of ``leaf_digest``'s input. A change to what the digest
@@ -1046,7 +1152,9 @@ def compile_leaves(leaves: Sequence[Leaf]) -> tuple[str, list]:
 # existed (#1088) are foreign too. 2: the ``where`` clauses in canonical
 # form, with ``any`` and ``negate`` evaluated (#1087). 3: a date bound
 # and the ``sent`` order read only dates the message carries (#1080).
-QUERY_DIGEST_FORMAT = 3
+# 4: folder, flag and Trash terms match one occurrence, and the default
+# scope is ``sources.default_scope_sql`` (#1568).
+QUERY_DIGEST_FORMAT = 4
 
 
 def leaf_digest(
@@ -1348,11 +1456,11 @@ def _given(value: str | None) -> str | None:
 
 
 def _folder_leaf(folders: tuple[str, ...]) -> Leaf:
-    """Membership of the named folders; without any, the default scope
-    that leaves ``DEFAULT_EXCLUDED_FOLDERS`` out (#441)."""
+    """An active copy in one of the named folders; without any, the
+    default scope (``sources.default_scope_sql``, #441, #1568)."""
     if folders:
         return Leaf("folder", folders)
-    return Leaf("not_in_folders", DEFAULT_EXCLUDED_FOLDERS)
+    return Leaf("default_scope", None)
 
 
 def _bound_leaves(
@@ -1488,7 +1596,9 @@ def search_emails_leaves(
     leaves += _bound_leaves(date_from_iso, date_to_iso)
     if has_attachments is not None:
         leaves.append(Leaf("has_attachments", has_attachments))
-    if folders:
+    if isinstance(folders, DefaultFolderScope):
+        leaves.append(Leaf("default_scope", None))
+    elif folders:
         leaves.append(Leaf("folder", tuple(folders)))
     if authority_class:
         leaves.append(Leaf("authority_class", authority_class))

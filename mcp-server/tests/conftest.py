@@ -64,8 +64,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE message_thread_map (
             claimant_id TEXT PRIMARY KEY,
             message_id  TEXT NOT NULL,
-            thread_id   TEXT NOT NULL,
-            filepath    TEXT NOT NULL
+            thread_id   TEXT NOT NULL
         );
 
         -- Per-message records behind query_messages and find_contact.
@@ -73,8 +72,6 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             claimant_id     TEXT PRIMARY KEY,
             message_id      TEXT NOT NULL,
             thread_id       TEXT NOT NULL,
-            filepath        TEXT NOT NULL,
-            folder          TEXT NOT NULL,
             subject         TEXT NOT NULL,
             sent_at         TEXT,
             sent_at_status  TEXT CHECK (sent_at_status IN ('parsed', 'missing', 'invalid')),
@@ -88,9 +85,6 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             content_hash    TEXT,
             indexed_at      TEXT NOT NULL,
             first_indexed_at TEXT NOT NULL,
-            seen            INTEGER NOT NULL DEFAULT 0,
-            flagged         INTEGER NOT NULL DEFAULT 0,
-            replied         INTEGER NOT NULL DEFAULT 0,
             sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
             participant_names_complete INTEGER
                 CHECK (participant_names_complete IN (0, 1)),
@@ -110,9 +104,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_messages_message_effective
             ON messages(message_id, effective_at, claimant_id);
         CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
-        CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
         CREATE INDEX idx_messages_effective ON messages(effective_at);
-        CREATE INDEX idx_messages_filepath ON messages(filepath);
         CREATE INDEX idx_messages_content_hash ON messages(content_hash);
 
         CREATE TABLE message_headers (
@@ -332,7 +324,6 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_threads_subject_folder
             ON threads(subject, folder, date_last, thread_id);
         CREATE INDEX idx_message_thread_map_message ON message_thread_map(message_id);
-        CREATE INDEX idx_message_thread_map_filepath ON message_thread_map(filepath);
         CREATE INDEX idx_message_thread_map_thread ON message_thread_map(thread_id);
         CREATE INDEX idx_attachments_attachment_id ON attachments(attachment_id);
         CREATE INDEX idx_attachments_thread ON attachments(thread_id);
@@ -651,19 +642,17 @@ def _insert_message_record(
     cur.execute(
         f"""
         INSERT INTO messages
-            (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
+            (claimant_id, message_id, thread_id, subject, sent_at,
              sent_at_status, occurred_at, in_reply_to, references_json, has_attachments,
-             size_bytes, content_hash, indexed_at, first_indexed_at, seen, flagged, replied,
+             size_bytes, content_hash, indexed_at, first_indexed_at,
              sender_ambiguous, participant_names_complete, {", ".join(flags)}, caps_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 {", ".join("?" * len(flags))}, '{{}}')
         """,  # nosec B608
         (
             claimant_of(message_id, variant),
             message_id,
             thread_id,
-            f"/maildir/{folder}/cur/{message_id}{variant}",
-            folder,
             subject,
             sent_at,
             sent_at_status,
@@ -675,9 +664,6 @@ def _insert_message_record(
             source_sha256(message_id, variant),
             "2024-01-01T00:00:00+00:00",
             first_indexed_at,
-            int(seen),
-            int(flagged),
-            int(replied),
             sender_ambiguous,
             participant_names_complete,
             *flags.values(),
@@ -857,8 +843,8 @@ def _insert_message(
         (json.dumps([*json.loads(row.fetchone()[0]), claimant]), thread_id),
     )
     cur.execute(
-        "INSERT INTO message_thread_map VALUES (?, ?, ?, ?)",
-        (claimant, message_id, thread_id, f"/maildir/{folder}/cur/{message_id}{variant}"),
+        "INSERT INTO message_thread_map VALUES (?, ?, ?)",
+        (claimant, message_id, thread_id),
     )
     participants = (
         [("from", v) for v in from_ or []]
@@ -969,8 +955,8 @@ def _insert_thread(
     roles = [("from" if _split_address(p)[1] in sender_keys else "to", p) for p in participants]
     for i, mid in enumerate(message_ids or [thread_id]):
         cur.execute(
-            "INSERT INTO message_thread_map VALUES (?, ?, ?, ?)",
-            (claimant_of(mid), mid, thread_id, f"/maildir/{folder}/cur/{mid}"),
+            "INSERT INTO message_thread_map VALUES (?, ?, ?)",
+            (claimant_of(mid), mid, thread_id),
         )
         _insert_message_record(
             cur,

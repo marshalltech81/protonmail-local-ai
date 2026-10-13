@@ -27,7 +27,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/note@trip.example",
+                "locator": "INBOX/cur/note@trip.example",
                 "sha256": "sha256(note@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -64,7 +64,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -93,7 +93,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/help@trip.example",
+                "locator": "INBOX/cur/help@trip.example",
                 "sha256": "sha256(help@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -122,7 +122,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -151,7 +151,7 @@
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -180,7 +180,7 @@
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -227,7 +227,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/note@trip.example",
+                "locator": "INBOX/cur/note@trip.example",
                 "sha256": "sha256(note@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -264,7 +264,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -293,7 +293,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/help@trip.example",
+                "locator": "INBOX/cur/help@trip.example",
                 "sha256": "sha256(help@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -322,7 +322,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -351,7 +351,7 @@
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -380,7 +380,7 @@
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -427,7 +427,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -456,7 +456,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/help@trip.example",
+                "locator": "INBOX/cur/help@trip.example",
                 "sha256": "sha256(help@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -485,7 +485,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -514,7 +514,7 @@
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -543,7 +543,7 @@
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -590,7 +590,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/note@trip.example",
+                "locator": "INBOX/cur/note@trip.example",
                 "sha256": "sha256(note@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -630,7 +630,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -659,7 +659,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/help@trip.example",
+                "locator": "INBOX/cur/help@trip.example",
                 "sha256": "sha256(help@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -688,7 +688,7 @@
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -717,7 +717,7 @@
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
@@ -746,7 +746,7 @@
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
-                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "locator": "INBOX/cur/lead@trip.example",
                 "sha256": "sha256(lead@trip.example)",
                 "size_bytes": 100,
                 "source_type": "maildir_message"
