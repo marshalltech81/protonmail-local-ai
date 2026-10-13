@@ -1255,6 +1255,7 @@ def register_retrieval_tools(server, db):
         fields: list[str] | None = None,
     ) -> CallToolResult:
         """
+        See get_mailbox_status.query_capabilities for predicate evidence coverage.
         Enumerate EVERY message matching exact criteria, with a total
         count. Not ranked, not fuzzy: every message the filters
         definitely match, newest first, one message per row.

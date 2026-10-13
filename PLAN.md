@@ -363,16 +363,17 @@ schema change needs a numbered migration.
    there is no nesting to bound (#1087), and grouped aggregation as its
    own tool over the same engine (`aggregate_messages`, first slice of
    #823), subject_contains, header_exists / header_contains (#1089),
-   and attachment_text_words (#1091). The header capability reports
-   unassessed and incomplete messages (#1093 header slice). **Open, in order:**
+   and attachment_text_words (#1091). `get_mailbox_status` reports
+   every registered leaf's query capability from schema fields and stored
+   evidence, with available, unassessed and missing message counts (#1093).
+   **Open, in order:**
    the rest of #823 (selectable clocks,
    further dimensions and identity counts); the
    index optimization for selected clocks (#1123; #1150 serves
    `date_basis` for both listings, retaining keyset paging with scan-and-sort
    under the current schema and counting missing clocks as indeterminate); leaves
-   that wait on the evidence model (#1090 Bcc, #1092 internal date);
-   a capability report in
-   `get_mailbox_status` (#1093). Omitted by decision: IMAP UID,
+   that wait on the evidence model (#1090 Bcc, #1092 internal date).
+   Omitted by decision: IMAP UID,
    KEYWORD, DRAFT and DELETED.
 
 ### Phase 5 — Knowledge reasoning

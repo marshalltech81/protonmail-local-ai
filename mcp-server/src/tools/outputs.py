@@ -1109,13 +1109,23 @@ class QueueCounts(_Output):
 
 
 class HeaderPredicateCapability(_Output):
-    status: Literal["supported", "supported after backfill"]
-    unassessed_messages: int = Field(
+    status: Literal["supported", "supported after backfill", "unavailable"]
+    unassessed_messages: int | None = Field(
         description="Indexed messages awaiting header evidence assessment, including Trash."
     )
-    incomplete_messages: int = Field(
+    incomplete_messages: int | None = Field(
         description="Indexed messages whose header budget or parse lost fields, including Trash."
     )
+
+
+class QueryCapability(_Output):
+    status: Literal[
+        "supported", "supported after backfill", "supported when present", "unavailable"
+    ]
+    available_messages: int | None
+    unassessed_messages: int | None
+    missing_messages: int | None
+    condition: str | None
 
 
 class MailboxStatusOutput(_Output):
@@ -1148,6 +1158,14 @@ class MailboxStatusOutput(_Output):
         "that file."
     )
     header_predicates: HeaderPredicateCapability
+    index_schema_version: int | None = Field(
+        description="Stored index schema version, or null when unstamped."
+    )
+    query_capabilities: dict[str, QueryCapability] = Field(
+        description="Per registered leaf, conservative evidence coverage across its accepted "
+        "operands, including Trash; not a particular query's indeterminate count. "
+        "Counts are null when schema evidence is unavailable."
+    )
     extra_claimant_files: int = Field(
         description="Indexed files beyond the first claimant of each conflicting Message-ID."
     )
