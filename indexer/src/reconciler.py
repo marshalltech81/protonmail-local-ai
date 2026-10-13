@@ -96,6 +96,8 @@ class ReconcilerConfig:
     grace_days: int
     sweep_interval_secs: int
     max_batch_pct: float
+    # True only in the one-run ``make force-deletion`` command
+    # (``force_deletion.py``, #1609); no setting turns the brake off.
     force: bool
 
 
@@ -219,9 +221,9 @@ class Reconciler:
 
         Groups them by thread so each thread is rebuilt at most once per
         pass. Skips the batch entirely when the mass-delete brake trips,
-        unless ``INDEXER_DELETION_FORCE=true`` is set; with more than one
-        active account, holds back the messages of an account whose own
-        brake trips.
+        unless ``config.force`` is set (only by ``make force-deletion``);
+        with more than one active account, holds back the messages of an
+        account whose own brake trips.
         """
         cutoff = (datetime.now(UTC) - timedelta(days=self.config.grace_days)).isoformat()
         candidates = self.db.reapable_messages(cutoff)
@@ -247,8 +249,8 @@ class Reconciler:
                 log.error(
                     "reaper aborted: %d messages past grace window exceed "
                     "mass-delete threshold (max allowed %d = max(%d, %.1f%% "
-                    "of %d total messages); set INDEXER_DELETION_FORCE=true "
-                    "to override)",
+                    "of %d total messages); run make force-deletion for one "
+                    "pass past it)",
                     len(candidates),
                     max_allowed,
                     _REAP_ABSOLUTE_FLOOR,
@@ -334,7 +336,7 @@ class Reconciler:
                 log.error(
                     "reaper held back account %d: %d messages past grace window exceed "
                     "its mass-delete threshold (max allowed %d = max(%d, %.1f%% of %d "
-                    "messages); set INDEXER_DELETION_FORCE=true to override)",
+                    "messages); run make force-deletion for one pass past it)",
                     account_id,
                     len(claimant_ids),
                     max_allowed,
@@ -643,9 +645,12 @@ def load_config_from_env(env: Mapping[str, str]) -> ReconcilerConfig:
     so a typo fails startup instead of silently picking a mode.
 
     The other knobs follow the same rule (#481): unset or empty yields
-    the default, and an unrecognised boolean, a non-integer, an integer
-    below its minimum, or a batch fraction that is not a finite number
-    in [0, 1] raises ``ValueError`` naming the variable.
+    the default, and a non-integer, an integer below its minimum, or a
+    batch fraction that is not a finite number in [0, 1] raises
+    ``ValueError`` naming the variable.
+
+    ``force`` is always ``False`` here: forcing the brake is the one-run
+    ``make force-deletion`` command (#1609), never a setting.
     """
 
     _truthy = {"1", "true", "yes", "on"}
@@ -663,16 +668,6 @@ def load_config_from_env(env: Mapping[str, str]) -> ReconcilerConfig:
             f"{name}={raw!r} is not recognized; use true (mirror: reap mail "
             "deleted upstream) or false (archive: keep it locally)"
         )
-
-    def _bool(name: str, default: bool) -> bool:
-        raw = (env.get(name) or "").strip().lower()
-        if not raw:
-            return default
-        if raw in _truthy:
-            return True
-        if raw in _falsy:
-            return False
-        raise ValueError(f"{name}={raw!r} is not recognized; use true or false")
 
     def _int(name: str, default: int, minimum: int = 0) -> int:
         raw = (env.get(name) or "").strip()
@@ -708,5 +703,5 @@ def load_config_from_env(env: Mapping[str, str]) -> ReconcilerConfig:
         grace_days=_int("INDEXER_DELETION_GRACE_DAYS", 7, minimum=0),
         sweep_interval_secs=_int("INDEXER_DELETION_SWEEP_INTERVAL_SECS", 3600, minimum=60),
         max_batch_pct=_pct("INDEXER_DELETION_MAX_BATCH_PCT", 0.05),
-        force=_bool("INDEXER_DELETION_FORCE", False),
+        force=False,
     )

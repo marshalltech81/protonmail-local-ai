@@ -112,7 +112,7 @@ readonly FP_OLD FP_NEW
 pin_setup() {
     STATE_DIR="$WORK/state-$1"
     PIN_FILE="$STATE_DIR/bridge-cert.fingerprint"
-    BRIDGE_CERT_PIN_ROTATE="false"
+    PIN_ROTATION_RUN="false"
     load write_pin verify_cert_pin
 }
 
@@ -157,14 +157,14 @@ rotation_replaces_the_pin() {
     pin_setup rotate
     mkdir -p "$STATE_DIR"
     printf '%s\n' "$FP_OLD" >"$PIN_FILE"
-    BRIDGE_CERT_PIN_ROTATE="true"
+    PIN_ROTATION_RUN="true"
     verify_cert_pin "$FP_NEW"
     [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]] || return 1
 }
 
-# The flag lives in the container's environment and survives restarts
-# (#267), so the documented recovery recreates mbsync with it false. From
-# then on the rotated pin is enforced: a second change is refused.
+# Rotation is allowed only in a `make rotate-bridge-pin` run (#1609); the
+# next start has no argument, so the rotated pin is enforced from then
+# on: a second change is refused.
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 rotation_then_disabled_flag_enforces_the_new_pin() {
     local fp_third
@@ -172,9 +172,9 @@ rotation_then_disabled_flag_enforces_the_new_pin() {
     pin_setup rotate-then-enforce
     mkdir -p "$STATE_DIR"
     printf '%s\n' "$FP_OLD" >"$PIN_FILE"
-    BRIDGE_CERT_PIN_ROTATE="true"
+    PIN_ROTATION_RUN="true"
     verify_cert_pin "$FP_NEW"
-    BRIDGE_CERT_PIN_ROTATE="false"
+    PIN_ROTATION_RUN="false"
     verify_cert_pin "$FP_NEW"
     if verify_cert_pin "$fp_third"; then
         echo "a second change was accepted without a new authorization"
@@ -188,7 +188,7 @@ failed_rotation_fails_closed_and_keeps_the_old_pin() {
     pin_setup rotate-fail
     mkdir -p "$STATE_DIR"
     printf '%s\n' "$FP_OLD" >"$PIN_FILE"
-    BRIDGE_CERT_PIN_ROTATE="true"
+    PIN_ROTATION_RUN="true"
     # The replacement cannot be moved into place.
     mv() { return 1; }
     if verify_cert_pin "$FP_NEW"; then
@@ -250,20 +250,20 @@ rotation_replaces_an_invalid_pin() {
     pin_setup invalid-rotate
     mkdir -p "$STATE_DIR"
     : >"$PIN_FILE"
-    BRIDGE_CERT_PIN_ROTATE="true"
+    PIN_ROTATION_RUN="true"
     verify_cert_pin "$FP_NEW"
     [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]] || return 1
 }
 
 # Rotation must be able to repair a pin it cannot read (#342):
-# the documented recovery is one run with BRIDGE_CERT_PIN_ROTATE=true.
+# the documented recovery is one `make rotate-bridge-pin` run.
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 rotation_replaces_a_dangling_pin_link() {
     pin_setup dangling-rotate
     mkdir -p "$STATE_DIR"
     ln -s "$STATE_DIR/missing" "$PIN_FILE"
-    BRIDGE_CERT_PIN_ROTATE="true"
+    PIN_ROTATION_RUN="true"
     verify_cert_pin "$FP_NEW"
     [[ ! -L "$PIN_FILE" && "$(cat "$PIN_FILE")" == "$FP_NEW" && ! -e "$STATE_DIR/missing" ]] || return 1
 }
@@ -278,7 +278,7 @@ rotation_replaces_an_unreadable_pin_file() {
     if [[ -r "$PIN_FILE" ]]; then
         return 0
     fi
-    BRIDGE_CERT_PIN_ROTATE="true"
+    PIN_ROTATION_RUN="true"
     verify_cert_pin "$FP_NEW"
     [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]] || return 1
 }
@@ -287,7 +287,7 @@ rotation_replaces_an_unreadable_pin_file() {
 rotation_refuses_a_directory_in_the_pins_place() {
     pin_setup directory-rotate
     mkdir -p "$PIN_FILE"
-    BRIDGE_CERT_PIN_ROTATE="true"
+    PIN_ROTATION_RUN="true"
     # mv would move the new pin into the directory and report success.
     refuses_the_new_fingerprint
     [[ -d "$PIN_FILE" && -z "$(find "$PIN_FILE" -mindepth 1)" ]] || return 1
@@ -303,7 +303,7 @@ fifo_pin_is_refused_without_reading() {
     pin_setup fifo
     mkdir -p "$STATE_DIR"
     mkfifo "$PIN_FILE"
-    BRIDGE_CERT_PIN_ROTATE="true"
+    PIN_ROTATION_RUN="true"
     # If the FIFO is opened, this writer unblocks the read after 2 s, so a
     # regression fails on the message check instead of hanging the suite.
     { sleep 2 >"$PIN_FILE"; } &
@@ -1432,7 +1432,7 @@ catalogue_shapes_are_redacted_by_class() {
     PROTON_CHANNEL_NAME="$channel" PROTON_REMOTE_STORE_NAME="$far" PROTON_LOCAL_STORE_NAME="$near"
     proton_settings_problem "$PROTON_DEFAULT_SOURCE_MODE" "$PROTON_DEFAULT_BRIDGE_HOST" \
         "$PROTON_DEFAULT_BRIDGE_IMAP_PORT" "$PROTON_DEFAULT_BRIDGE_CERT_HOST" \
-        "$PROTON_DEFAULT_BRIDGE_CERT_PIN_ROTATE" "$PROTON_DEFAULT_FOLDER_EXCLUSIONS" \
+        "$PROTON_DEFAULT_FOLDER_EXCLUSIONS" \
         "$PROTON_IMAP_ACCOUNT_NAME" "$far" "$near" "$channel" || return 1
     path="${MAILDIR_PATH}/.mbsyncstateFolders!MarkerZq9: a 'b' (c)/cur/1:2,S"
     while IFS= read -r entry; do
@@ -1828,7 +1828,7 @@ invalid_deadlines_are_refused_at_startup() {
     BRIDGE_IMAP_PORT=1143
     BRIDGE_CERT_HOST="127.0.0.1"
     BRIDGE_CERT_FINGERPRINT="$FP_OLD"
-    BRIDGE_CERT_PIN_ROTATE="false"
+    PIN_ROTATION_RUN="false"
     load expected_fingerprint validate_proton_settings validate_bridge_endpoint \
         account_scope_is_canonical require_prerequisites
     SYNC_DEADLINE_SECONDS=86400
@@ -1972,7 +1972,7 @@ unreadable_folders_are_refused_without_naming_them() {
 
 the_layout_check_runs_before_any_sync() {
     local check_line sync_line
-    check_line="$(grep -n '^check_maildir_layout || exit 1$' "$ENTRYPOINT" | cut -d: -f1)"
+    check_line="$(grep -n '^    check_maildir_layout || exit 1$' "$ENTRYPOINT" | cut -d: -f1)"
     sync_line="$(grep -n '^wait_for_bridge_imap$' "$ENTRYPOINT" | cut -d: -f1)"
     [[ -n "$check_line" && -n "$sync_line" ]] || return 1
     ((check_line < sync_line)) || return 1
@@ -2316,7 +2316,7 @@ extract_setup() {
     STATE_DIR="$WORK/state-extract-$1"
     PIN_FILE="$STATE_DIR/bridge-cert.fingerprint"
     CERT_EXTRACT_TIMEOUT_SECONDS=10
-    BRIDGE_CERT_PIN_ROTATE="false"
+    PIN_ROTATION_RUN="false"
     BRIDGE_HOST="host.docker.internal"
     BRIDGE_IMAP_PORT=1144
     BRIDGE_CERT_HOST="127.0.0.1"
@@ -2342,6 +2342,7 @@ make_synthetic_cert() {
 }
 make_synthetic_cert cert-a
 make_synthetic_cert cert-b
+make_synthetic_cert cert-c
 
 extraction_reaches_the_host_and_pins_its_cert() {
     extract_setup pin
@@ -2469,7 +2470,7 @@ rotation_still_needs_the_expected_fingerprint() {
     extract_bridge_cert
     pinned="$(cat "$PIN_FILE")"
     rm -f "$CERT_FILE"
-    BRIDGE_CERT_PIN_ROTATE="true"
+    PIN_ROTATION_RUN="true"
     printf '%s\n' "$WORK/cert-b.pem" >"$SERVED"
     if extract_bridge_cert 2>/dev/null; then
         echo "rotation accepted a certificate other than the expected one"
@@ -3084,7 +3085,10 @@ order_setup() {
 }
 
 # Runs the copy with Compose's settings plus the NAME=VALUE arguments, in
-# an environment holding only those; sets ORDER_RC to its exit status.
+# an environment holding only those, passing it the arguments in
+# ORDER_ARGS (none unless a case sets them, as Compose starts the
+# service); sets ORDER_RC to its exit status.
+ORDER_ARGS=()
 order_run() {
     ORDER_RC=0
     env -i PATH="$ORDER_DIR/bin:$PATH" ORDER_DIR="$ORDER_DIR" \
@@ -3093,8 +3097,9 @@ order_run() {
         SOURCE_MODE= PROTON_FOLDER_EXCLUSIONS= \
         BRIDGE_HOST=host.docker.internal BRIDGE_IMAP_PORT=1143 BRIDGE_CERT_HOST=127.0.0.1 \
         BRIDGE_USER=synthetic@example.com SYNC_INTERVAL=3600 SYNC_DEADLINE_SECONDS=86400 \
-        BRIDGE_CERT_PIN_ROTATE=false ACCOUNT_SCOPE="$ACCOUNT_SCOPE" "$@" \
-        timeout 60 "$BASH" "$ORDER_ENTRYPOINT" >>"$ORDER_LOG" 2>&1 || ORDER_RC=$?
+        ACCOUNT_SCOPE="$ACCOUNT_SCOPE" "$@" \
+        timeout 60 "$BASH" "$ORDER_ENTRYPOINT" ${ORDER_ARGS[@]+"${ORDER_ARGS[@]}"} \
+        >>"$ORDER_LOG" 2>&1 || ORDER_RC=$?
 }
 
 # The log reduced to one word per milestone, in order. Any other ERROR or
@@ -3105,7 +3110,7 @@ order_of() {
         case "$line" in
             ">>> Startup identity:"*) words+=" identity" ;;
             *"BRIDGE_CERT_FINGERPRINT is not set"*) words+=" no-expected-fingerprint" ;;
-            ">>> WARNING: BRIDGE_CERT_PIN_ROTATE=true"*"will be accepted"*) words+=" rotation-on" ;;
+            ">>> WARNING: rotate-bridge-pin run"*"replaces the pin"*) words+=" rotation-on" ;;
             "EVENT render") words+=" render" ;;
             ">>> Waiting for ProtonBridge IMAP"*) words+=" wait" ;;
             "EVENT probe") words+=" probe" ;;
@@ -3114,8 +3119,10 @@ order_of() {
             ">>> First boot"*"pinned Bridge cert fingerprint"*) words+=" pin-first-boot" ;;
             *"fingerprint matches the pinned value"*) words+=" pin-match" ;;
             *"fingerprint does not match pinned value"*) words+=" pin-mismatch" ;;
-            *"BRIDGE_CERT_PIN_ROTATE=true"*"rotating pin"*) words+=" pin-rotated" ;;
+            *"fingerprint changed"*"rotating pin"*) words+=" pin-rotated" ;;
             ">>> Bridge cert extracted successfully."*) words+=" cert-accepted" ;;
+            ">>> rotate-bridge-pin: done"*) words+=" rotation-done" ;;
+            *"mbsync takes no argument"*) words+=" bad-argument" ;;
             ">>> Running initial sync"*) words+=" initial-sync" ;;
             "EVENT mbsync") words+=" mbsync" ;;
             ">>> Sync ok"*) words+=" sync-ok" ;;
@@ -3202,17 +3209,21 @@ expected_fingerprint_mismatch_stops_before_the_pin() {
     refused_before_mbsync "$pinned"
 }
 
-# Rotation does not lift the expected fingerprint, and it is still checked
-# first.
+# A rotation run (make rotate-bridge-pin, #1609) does not lift the
+# expected fingerprint, and it is still checked first: a certificate other
+# than the configured one is refused before the pin is consulted and
+# before anything could send the password.
 rotation_stops_at_an_expected_fingerprint_mismatch() {
     local pinned
     order_setup rotation-mismatch
     pinned="$(cert_fingerprint "$WORK/cert-a.pem")"
     printf '%s\n' "$pinned" >"$ORDER_DIR/state/bridge-cert.fingerprint"
     printf '%s\n' "$WORK/cert-b.pem" >"$ORDER_DIR/served"
-    order_run BRIDGE_CERT_FINGERPRINT="$pinned" BRIDGE_CERT_PIN_ROTATE=true
-    order_is "identity rotation-on render wait probe cert-fetch expected-mismatch" 1
+    ORDER_ARGS=(rotate-bridge-pin)
+    order_run BRIDGE_CERT_FINGERPRINT="$pinned"
+    order_is "identity rotation-on wait probe cert-fetch expected-mismatch" 1
     refused_before_mbsync "$pinned"
+    [[ ! -e "$ORDER_DIR/runtime/mbsyncrc" ]] || return 1
 }
 
 # The expected certificate against another pin, without rotation: refused
@@ -3228,19 +3239,99 @@ pin_mismatch_stops_before_mbsync() {
     refused_before_mbsync "$pinned"
 }
 
-# An approved rotation: the boot warning comes first, and the new pin is
-# stored before mbsync runs.
-approved_rotation_stores_the_pin_before_mbsync() {
-    local rotated
+# A rotation run: the warning comes first, the certificate that matches
+# BRIDGE_CERT_FINGERPRINT replaces the pin, and the run exits without
+# rendering a config or running mbsync, so the password is never read.
+# The next start, which has no argument, compares with the new pin: the
+# same certificate syncs, and a further change is refused.
+rotation_run_replaces_the_pin_once() {
+    local rotated third
     order_setup rotation
     rotated="$(cert_fingerprint "$WORK/cert-b.pem")"
     cert_fingerprint "$WORK/cert-a.pem" >"$ORDER_DIR/state/bridge-cert.fingerprint"
     printf '%s\n' "$WORK/cert-b.pem" >"$ORDER_DIR/served"
-    order_run BRIDGE_CERT_FINGERPRINT="$rotated" BRIDGE_CERT_PIN_ROTATE=true
-    order_is "identity rotation-on render wait probe cert-fetch pin-rotated cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143
+    ORDER_ARGS=(rotate-bridge-pin)
+    order_run BRIDGE_CERT_FINGERPRINT="$rotated"
+    order_is "identity rotation-on wait probe cert-fetch pin-rotated cert-accepted rotation-done" 0
+    [[ "$(cat "$ORDER_DIR/state/bridge-cert.fingerprint")" == "$rotated" ]] || return 1
+    [[ -z "$(find "$ORDER_DIR/seen" -type f)" ]] || return 1
+    [[ ! -e "$ORDER_DIR/runtime/mbsyncrc" ]] || return 1
+
+    ORDER_ARGS=()
+    : >"$ORDER_LOG"
+    order_run BRIDGE_CERT_FINGERPRINT="$rotated"
+    order_is "identity render wait probe cert-fetch pin-match cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143
     [[ "$(cat "$ORDER_DIR/seen/pin")" == "$rotated" ]] || return 1
     cmp -s "$ORDER_DIR/seen/cert" "$WORK/cert-b.pem" || return 1
     cmp -s "$ORDER_DIR/seen/mbsyncrc" "$GOLDEN" || return 1
+
+    third="$(cert_fingerprint "$WORK/cert-c.pem")"
+    rm -f "$ORDER_DIR"/seen/* "$ORDER_DIR/runtime/bridge-cert.pem"
+    printf '%s\n' "$WORK/cert-c.pem" >"$ORDER_DIR/served"
+    : >"$ORDER_LOG"
+    order_run BRIDGE_CERT_FINGERPRINT="$third"
+    order_is "identity render wait probe cert-fetch pin-mismatch" 1
+    refused_before_mbsync "$rotated"
+}
+
+# A rotation run against the pinned certificate changes nothing and still
+# exits without syncing.
+rotation_run_with_an_unchanged_certificate_keeps_the_pin() {
+    local pinned
+    order_setup rotation-unchanged
+    pinned="$(cert_fingerprint "$WORK/cert-a.pem")"
+    printf '%s\n' "$pinned" >"$ORDER_DIR/state/bridge-cert.fingerprint"
+    printf '%s\n' "$WORK/cert-a.pem" >"$ORDER_DIR/served"
+    ORDER_ARGS=(rotate-bridge-pin)
+    order_run BRIDGE_CERT_FINGERPRINT="$pinned"
+    order_is "identity rotation-on wait probe cert-fetch pin-match cert-accepted rotation-done" 0
+    [[ "$(cat "$ORDER_DIR/state/bridge-cert.fingerprint")" == "$pinned" ]] || return 1
+    [[ -z "$(find "$ORDER_DIR/seen" -type f)" ]] || return 1
+}
+
+# The removed setting (#1609) no longer rotates: with it in the
+# environment, a changed certificate that matches the expected fingerprint
+# is still refused by the pin.
+removed_rotation_setting_does_not_rotate() {
+    local pinned
+    order_setup removed-setting
+    pinned="$(cert_fingerprint "$WORK/cert-a.pem")"
+    printf '%s\n' "$pinned" >"$ORDER_DIR/state/bridge-cert.fingerprint"
+    printf '%s\n' "$WORK/cert-b.pem" >"$ORDER_DIR/served"
+    order_run BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-b.pem")" \
+        BRIDGE_CERT_PIN_ROTATE=true
+    order_is "identity render wait probe cert-fetch pin-mismatch" 1
+    refused_before_mbsync "$pinned"
+}
+
+# Any argument other than exactly rotate-bridge-pin, alone, is refused
+# before anything else runs, with fixed text that does not repeat it.
+unknown_arguments_are_refused_before_anything_runs() {
+    local pinned args n=0
+    load cert_fingerprint
+    pinned="$(cert_fingerprint "$WORK/cert-a.pem")"
+    for args in "rotate" "Rotate-Bridge-Pin" "rotate-bridge-pin zq9marker" "zq9marker" \
+        "--rotate-bridge-pin" ""; do
+        n=$((n + 1))
+        order_setup "bad-argument-$n"
+        printf '%s\n' "$pinned" >"$ORDER_DIR/state/bridge-cert.fingerprint"
+        printf '%s\n' "$WORK/cert-b.pem" >"$ORDER_DIR/served"
+        if [[ -z "$args" ]]; then
+            ORDER_ARGS=("")
+        else
+            read -r -a ORDER_ARGS <<<"$args"
+        fi
+        order_run BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-b.pem")"
+        order_is "bad-argument" 1 || {
+            printf 'arguments: %q\n' "$args"
+            return 1
+        }
+        if grep -q zq9marker "$ORDER_LOG"; then
+            echo "the argument reached the log"
+            return 1
+        fi
+        refused_before_mbsync "$pinned"
+    done
 }
 
 check "startup order: a first start renders, waits, pins, then runs mbsync" \
@@ -3249,12 +3340,18 @@ check "startup order: a missing expected fingerprint stops before the render" \
     missing_expected_fingerprint_stops_before_render
 check "startup order: the expected fingerprint is checked before the pin" \
     expected_fingerprint_mismatch_stops_before_the_pin
-check "startup order: rotation still stops at the expected fingerprint" \
+check "startup order: a rotation run still stops at the expected fingerprint" \
     rotation_stops_at_an_expected_fingerprint_mismatch
 check "startup order: a pin mismatch stops before mbsync" \
     pin_mismatch_stops_before_mbsync
-check "startup order: an approved rotation stores the pin before mbsync" \
-    approved_rotation_stores_the_pin_before_mbsync
+check "startup order: a rotation run replaces the pin once and syncs nothing" \
+    rotation_run_replaces_the_pin_once
+check "startup order: a rotation run with an unchanged certificate keeps the pin" \
+    rotation_run_with_an_unchanged_certificate_keeps_the_pin
+check "startup order: the removed BRIDGE_CERT_PIN_ROTATE setting does not rotate" \
+    removed_rotation_setting_does_not_rotate
+check "startup order: an unknown argument is refused before anything runs" \
+    unknown_arguments_are_refused_before_anything_runs
 
 # --- the Proton settings at both sites (PLAN.md decision 46, #1497) ---------
 #
@@ -3265,9 +3362,8 @@ check "startup order: an approved rotation stores the pin before mbsync" \
 # exported as a shell would). Both sites must accept or refuse the row
 # alike. A refusal comes before anything is rendered or connected, with
 # the same fixed text at both sites. An accepted value is the one the
-# rendered config holds; SOURCE_MODE and BRIDGE_CERT_PIN_ROTATE leave the
-# config as the golden file has it, and rotation is announced only when
-# true. Each row, tab-separated: accept, refuse (the refusal of the first
+# rendered config holds; SOURCE_MODE leaves the config as the golden file
+# has it. Each row, tab-separated: accept, refuse (the refusal of the first
 # setting named), refuse-stores (the two store names are the same) or
 # refuse-protected (PROTON_FOLDER_EXCLUSIONS leaves out All Mail,
 # Labels/* or Starred), then one or two NAME=VALUE assignments. A row
@@ -3409,22 +3505,6 @@ SETTING_CASES=(
     $'refuse\tBRIDGE_IMAP_PORT=zq9marker' # pragma: allowlist secret
     $'refuse\tBRIDGE_IMAP_PORT=1143;zq9marker'
     $'refuse\tBRIDGE_IMAP_PORT=0\tPROTON_FOLDER_EXCLUSIONS=zq9marker' # pragma: allowlist secret
-    $'accept\tBRIDGE_CERT_PIN_ROTATE=false'
-    $'accept\tBRIDGE_CERT_PIN_ROTATE='
-    $'accept\tBRIDGE_CERT_PIN_ROTATE=true'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=TRUE'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=True'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=False'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=yes'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=no'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=1'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=0'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=on'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE= true'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=true '
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=true\n'
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE= '
-    $'refuse\tBRIDGE_CERT_PIN_ROTATE=zq9marker' # pragma: allowlist secret
     $'accept\tPROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred'
     $'accept\tPROTON_FOLDER_EXCLUSIONS='
     $'accept\tPROTON_FOLDER_EXCLUSIONS=Starred|Labels/*|All Mail'
@@ -3502,7 +3582,6 @@ expected_config_line() {
 fixed_refusal() {
     local mode="$PROTON_DEFAULT_SOURCE_MODE" host="$PROTON_DEFAULT_BRIDGE_HOST"
     local port="$PROTON_DEFAULT_BRIDGE_IMAP_PORT" cert="$PROTON_DEFAULT_BRIDGE_CERT_HOST"
-    local rotate="$PROTON_DEFAULT_BRIDGE_CERT_PIN_ROTATE"
     local exclusions="$PROTON_DEFAULT_FOLDER_EXCLUSIONS"
     local account="$PROTON_DEFAULT_IMAP_ACCOUNT_NAME" far="$PROTON_DEFAULT_REMOTE_STORE_NAME"
     local near="$PROTON_DEFAULT_LOCAL_STORE_NAME" channel="$PROTON_DEFAULT_CHANNEL_NAME"
@@ -3511,7 +3590,6 @@ fixed_refusal() {
         BRIDGE_HOST) host="refused" ;;
         BRIDGE_IMAP_PORT) port="0" ;;
         BRIDGE_CERT_HOST) cert="refused" ;;
-        BRIDGE_CERT_PIN_ROTATE) rotate="refused" ;;
         PROTON_FOLDER_EXCLUSIONS) exclusions="|" ;;
         protected) exclusions="Starred" ;;
         PROTON_IMAP_ACCOUNT_NAME) account="-" ;;
@@ -3520,7 +3598,7 @@ fixed_refusal() {
         PROTON_CHANNEL_NAME) channel="-" ;;
         stores) far="$near" ;;
     esac
-    proton_settings_problem "$mode" "$host" "$port" "$cert" "$rotate" "$exclusions" \
+    proton_settings_problem "$mode" "$host" "$port" "$cert" "$exclusions" \
         "$account" "$far" "$near" "$channel" || true
 }
 
@@ -3550,7 +3628,7 @@ validate_env_with() {
 
 # One row at both sites.
 setting_row_agrees() {
-    local row="$1" verdict assignments=() rest refusal entry_error rotation
+    local row="$1" verdict assignments=() rest refusal entry_error
     verdict="${row%%$'\t'*}"
     rest="${row#*$'\t'}"
     while [[ "$rest" == *$'\t'* ]]; do
@@ -3569,16 +3647,12 @@ setting_row_agrees() {
             printf 'validate-env refused: %q\n%s\n' "$row" "$VALIDATE_OUT"
             return 1
         }
-        rotation=""
-        if [[ " ${assignments[*]} " == *" BRIDGE_CERT_PIN_ROTATE=true "* ]]; then
-            rotation=" rotation-on"
-        fi
-        order_is "identity${rotation} render wait probe cert-fetch pin-first-boot cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143 || {
+        order_is "identity render wait probe cert-fetch pin-first-boot cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143 || {
             printf 'the entrypoint did not accept: %q\n' "$row"
             return 1
         }
         case "${assignments[0]%%=*}" in
-            SOURCE_MODE | BRIDGE_CERT_PIN_ROTATE)
+            SOURCE_MODE)
                 cmp -s "$ORDER_DIR/seen/mbsyncrc" "$GOLDEN" || {
                     printf 'the rendered config is not the golden file: %q\n' "$row"
                     return 1
@@ -3627,7 +3701,7 @@ every_setting_row_agrees_at_both_sites() {
     for ((i = 0; i < ${#SETTING_CASES[@]}; i++)); do
         setting_row_agrees "${SETTING_CASES[i]}" "$i" || return 1
     done
-    ((${#SETTING_CASES[@]} == 193)) || return 1
+    ((${#SETTING_CASES[@]} == 177)) || return 1
 }
 
 check "the Proton settings: each value is accepted or refused alike at both sites" \
@@ -3653,7 +3727,7 @@ identity_setup() {
     SYNC_DEADLINE_SECONDS=86400
     BRIDGE_USER="synthetic-identity-marker@example.com"
     BRIDGE_CERT_FINGERPRINT="$FP_OLD"
-    BRIDGE_CERT_PIN_ROTATE="false"
+    PIN_ROTATION_RUN="false"
     BRIDGE_PASS_FILE="$WORK/identity-pass"
     printf 'synthetic-identity-marker-pass\n' >"$BRIDGE_PASS_FILE"
     GIT_COMMIT="abc1234-dirty"
@@ -3720,10 +3794,10 @@ secrets_do_not_change_the_hash_or_reach_the_line() {
 }
 
 # #893: the expected fingerprint (not secret, it
-# is in .env) and the pin-rotation flag change what mbsync trusts, so
-# they are inputs, the fingerprint in the form the check compares.
+# is in .env) changes what mbsync trusts, so it is an input, in the
+# form the check compares.
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
-fingerprint_and_pin_rotation_change_the_hash() {
+fingerprint_changes_the_hash_and_a_rotation_run_does_not() {
     local before same fingerprint rotate
     identity_setup
     before="$(identity_fields)"
@@ -3735,9 +3809,11 @@ fingerprint_and_pin_rotation_change_the_hash() {
     fingerprint="$(identity_fields)"
     [[ "${fingerprint##* }" != "${before##* }" ]] || return 1
     BRIDGE_CERT_FINGERPRINT="$FP_OLD"
-    BRIDGE_CERT_PIN_ROTATE="true"
+    # A rotate-bridge-pin run is an argument, not a setting (#1609): it
+    # leaves the hash alone and announces itself with its own warning.
+    PIN_ROTATION_RUN="true"
     rotate="$(identity_fields)"
-    [[ "${rotate##* }" != "${before##* }" ]] || return 1
+    [[ "${rotate##* }" == "${before##* }" ]] || return 1
     if grep -q "$FP_OLD" <<<"$(log_startup_identity)"; then
         printf 'the fingerprint reached the line\n'
         return 1
@@ -3854,8 +3930,8 @@ check "secrets do not change the hash or reach the identity line" \
 check "isync's account, store and channel names change the hash" isync_names_change_the_hash
 check "the source selector and the folder exclusions change the hash" \
     source_mode_and_exclusions_change_the_hash
-check "the fingerprint and pin rotation change the hash" \
-    fingerprint_and_pin_rotation_change_the_hash
+check "the fingerprint changes the hash and a rotation run does not" \
+    fingerprint_changes_the_hash_and_a_rotation_run_does_not
 # #893: every variable the entrypoint reads from its
 # environment (each ${NAME:- expansion) is hashed by log_startup_identity
 # (a NAME=%s in its format) or excluded here with a reason. Prints each
@@ -3951,8 +4027,9 @@ PROVIDER_ENTRY_POINTS=(bridge_imap_connect bridge_imap_host expected_fingerprint
     provider_exclusion_patterns
     validate_bridge_endpoint validate_proton_settings warn_if_pin_rotation_enabled)
 PROVIDER_INTERNAL=(cert_fingerprint verify_cert_pin verify_expected_fingerprint write_pin)
-PROVIDER_CONSTANTS=(BRIDGE_CERT_FINGERPRINT BRIDGE_CERT_HOST BRIDGE_CERT_PIN_ROTATE BRIDGE_HOST
+PROVIDER_CONSTANTS=(BRIDGE_CERT_FINGERPRINT BRIDGE_CERT_HOST BRIDGE_HOST
     BRIDGE_IMAP_PORT BRIDGE_PASS_FILE CERT_EXTRACT_TIMEOUT_SECONDS CERT_FILE PIN_FILE
+    PIN_ROTATION_RUN
     PROTON_CHANNEL_NAME PROTON_FOLDER_EXCLUSIONS PROTON_IMAP_ACCOUNT_NAME PROTON_LOCAL_STORE_NAME
     PROTON_REMOTE_STORE_NAME PROTON_SETTINGS_FILE SOURCE_MODE STATE_DIR)
 # Code (not comments) that only the provider section may hold.
@@ -4032,7 +4109,7 @@ check "policy outside the provider section is reported" \
 # settings the healthcheck also reads change its verdict too. A shell read
 # that is deleted, while Compose still passes the setting, fails here
 # (the mutation cases below show it for each reader file).
-SHELL_ONLY_BEHAVIOUR_KEYS=(BRIDGE_USER BRIDGE_CERT_FINGERPRINT BRIDGE_IMAP_PORT BRIDGE_CERT_PIN_ROTATE PROTON_FOLDER_EXCLUSIONS BRIDGE_HOST BRIDGE_CERT_HOST PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME SYNC_INTERVAL SYNC_DEADLINE_SECONDS)
+SHELL_ONLY_BEHAVIOUR_KEYS=(BRIDGE_USER BRIDGE_CERT_FINGERPRINT BRIDGE_IMAP_PORT PROTON_FOLDER_EXCLUSIONS BRIDGE_HOST BRIDGE_CERT_HOST PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME SYNC_INTERVAL SYNC_DEADLINE_SECONDS)
 readonly SHELL_ONLY_BEHAVIOUR_KEYS
 
 # The order of a start that syncs, then stops at the sleep between syncs.
@@ -4068,14 +4145,6 @@ setting_changes_behaviour() {
         BRIDGE_IMAP_PORT)
             order_run BRIDGE_CERT_FINGERPRINT="$fp_a" BRIDGE_IMAP_PORT=2993
             order_is "$SYNCED_START" 143 && rendered_has 'Tunnel "exec socat - TCP:host.docker.internal:2993"'
-            ;;
-        BRIDGE_CERT_PIN_ROTATE)
-            # A pinned certificate a, the expected and served certificate
-            # b: refused as a pin mismatch unless rotation is on.
-            printf '%s\n' "$fp_a" >"$ORDER_DIR/state/bridge-cert.fingerprint"
-            printf '%s\n' "$WORK/cert-b.pem" >"$ORDER_DIR/served"
-            order_run BRIDGE_CERT_FINGERPRINT="$fp_b" BRIDGE_CERT_PIN_ROTATE=true
-            order_is "identity rotation-on render wait probe cert-fetch pin-rotated cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143
             ;;
         PROTON_FOLDER_EXCLUSIONS)
             order_run BRIDGE_CERT_FINGERPRINT="$fp_a" \
@@ -4196,7 +4265,7 @@ every_shell_only_setting_changes_behaviour() {
             return 1
         }
     done
-    ((${#SHELL_ONLY_BEHAVIOUR_KEYS[@]} == 13)) || return 1
+    ((${#SHELL_ONLY_BEHAVIOUR_KEYS[@]} == 12)) || return 1
 }
 
 # A read deleted from each reader file, the setting still passed: its

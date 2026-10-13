@@ -4,8 +4,9 @@ set -Eeuo pipefail
 # Sourced, not run. Proton provider settings (PLAN.md decision 46, #1497): the defaults and
 # validators of the source selector (SOURCE_MODE), the Bridge app's
 # container-side host name, IMAP port and the name its certificate is
-# checked against, the pin-rotation switch, Proton's folder exclusions,
-# and isync's account, store and channel names. One implementation,
+# checked against, Proton's folder exclusions, and isync's account,
+# store and channel names. Pin rotation is a one-run command, not a
+# setting (#1609; mbsync/entrypoint.sh PIN_ROTATION_RUN). One implementation,
 # sourced by scripts/validate-env.sh on the host
 # (Bash 3.2 on macOS) and by mbsync/entrypoint.sh in the image, whose
 # require_prerequisites runs it before rendering or any network use, so
@@ -21,8 +22,6 @@ readonly PROTON_DEFAULT_SOURCE_MODE="proton-bridge"
 readonly PROTON_DEFAULT_BRIDGE_HOST="host.docker.internal"
 # shellcheck disable=SC2034 # read by the scripts that source this file
 readonly PROTON_DEFAULT_BRIDGE_IMAP_PORT="1143"
-# shellcheck disable=SC2034 # read by the scripts that source this file
-readonly PROTON_DEFAULT_BRIDGE_CERT_PIN_ROTATE="false"
 # shellcheck disable=SC2034 # read by the scripts that source this file
 readonly PROTON_DEFAULT_BRIDGE_CERT_HOST="127.0.0.1"
 # The names mbsync/mbsyncrc.template held before they were settings, so
@@ -180,14 +179,14 @@ proton_name_allowed() {
 # SOURCE_MODE and BRIDGE_HOST normalized), as fixed text, and fails;
 # prints nothing and succeeds when every value is accepted. SOURCE_MODE
 # is checked first. Arguments: SOURCE_MODE, BRIDGE_HOST,
-# BRIDGE_IMAP_PORT, BRIDGE_CERT_HOST, BRIDGE_CERT_PIN_ROTATE,
-# PROTON_FOLDER_EXCLUSIONS, PROTON_IMAP_ACCOUNT_NAME,
-# PROTON_REMOTE_STORE_NAME, PROTON_LOCAL_STORE_NAME, PROTON_CHANNEL_NAME.
+# BRIDGE_IMAP_PORT, BRIDGE_CERT_HOST, PROTON_FOLDER_EXCLUSIONS,
+# PROTON_IMAP_ACCOUNT_NAME, PROTON_REMOTE_STORE_NAME,
+# PROTON_LOCAL_STORE_NAME, PROTON_CHANNEL_NAME.
 proton_settings_problem() {
     local i
     local names=(PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME
         PROTON_CHANNEL_NAME)
-    local values=("$7" "$8" "$9" "${10}")
+    local values=("$6" "$7" "$8" "$9")
 
     if [[ "$1" != "$PROTON_DEFAULT_SOURCE_MODE" ]]; then
         printf 'SOURCE_MODE must be %s (the default when unset or empty), the only source mbsync supports.\n' \
@@ -208,15 +207,11 @@ proton_settings_problem() {
         printf 'BRIDGE_CERT_HOST must be 127.0.0.1 (the default), localhost, another 127.x.y.z address without leading zeros, or ::1: the name of a certificate for this Mac'"'"'s loopback. Any other name waits on the decision in #1499.\n'
         return 1
     fi
-    if [[ "$5" != "true" && "$5" != "false" ]]; then
-        printf 'BRIDGE_CERT_PIN_ROTATE must be true or false, written in lower case (the default is false).\n'
-        return 1
-    fi
-    if ! proton_folder_exclusions_allowed "$6"; then
+    if ! proton_folder_exclusions_allowed "$5"; then
         printf 'PROTON_FOLDER_EXCLUSIONS must be folder patterns separated by |, none empty and none with a space at either end, written with A-Z, a-z, 0-9, spaces, . / _ * %% & + , ( ) @ - and non-ASCII characters only.\n'
         return 1
     fi
-    if ! proton_folder_exclusions_protected "$6"; then
+    if ! proton_folder_exclusions_protected "$5"; then
         printf 'PROTON_FOLDER_EXCLUSIONS must keep All Mail, Labels/* and Starred among its patterns: mbsync never syncs these folders, which hold further copies of messages (labels come from message metadata, #1313).\n'
         return 1
     fi
@@ -227,7 +222,7 @@ proton_settings_problem() {
             return 1
         fi
     done
-    if [[ "$8" == "$9" ]]; then
+    if [[ "$7" == "$8" ]]; then
         printf 'PROTON_REMOTE_STORE_NAME and PROTON_LOCAL_STORE_NAME must differ.\n'
         return 1
     fi

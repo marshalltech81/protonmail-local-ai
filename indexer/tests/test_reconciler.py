@@ -1834,7 +1834,6 @@ class TestLoadConfig:
                 "INDEXER_DELETION_GRACE_DAYS": "",
                 "INDEXER_DELETION_SWEEP_INTERVAL_SECS": " ",
                 "INDEXER_DELETION_MAX_BATCH_PCT": "",
-                "INDEXER_DELETION_FORCE": "",
             }
         )
         assert cfg.grace_days == 7
@@ -1848,28 +1847,22 @@ class TestLoadConfig:
                 "INDEXER_DELETION_GRACE_DAYS": "0",
                 "INDEXER_DELETION_SWEEP_INTERVAL_SECS": "60",
                 "INDEXER_DELETION_MAX_BATCH_PCT": "1",
-                "INDEXER_DELETION_FORCE": "YES",
             }
         )
         assert cfg.grace_days == 0
         assert cfg.sweep_interval_secs == 60
         assert cfg.max_batch_pct == 1.0
-        assert cfg.force is True
-        cfg = load_config_from_env(
-            {
-                "INDEXER_DELETION_MAX_BATCH_PCT": "0",
-                "INDEXER_DELETION_FORCE": "off",
-            }
-        )
+        cfg = load_config_from_env({"INDEXER_DELETION_MAX_BATCH_PCT": "0"})
         assert cfg.max_batch_pct == 0.0
-        assert cfg.force is False
 
-    @pytest.mark.parametrize("name", ["INDEXER_DELETION_FORCE"])
-    @pytest.mark.parametrize("raw", ["tru", "-5", "nan", "inf"])
-    def test_unrecognized_boolean_fails(self, name, raw):
-        """A typo must not read as false without a word (#481)."""
-        with pytest.raises(ValueError, match=f"{name}.*not recognized"):
-            load_config_from_env({name: raw})
+    @pytest.mark.parametrize("raw", ["true", "YES", "1", "tru"])
+    def test_the_removed_force_setting_never_disables_the_brake(self, raw):
+        """Forcing is the one-run ``make force-deletion`` command (#1609):
+        no environment value turns the brake off for the service, and the
+        removed setting is not read (``scripts/validate-env.sh`` refuses
+        it before startup)."""
+        cfg = load_config_from_env({"INDEXER_DELETION_FORCE": raw})
+        assert cfg.force is False
 
     @pytest.mark.parametrize(
         ("name", "raw", "message"),

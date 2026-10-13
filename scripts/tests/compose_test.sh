@@ -198,6 +198,11 @@ def bounded_logging:
             | select([$bs | list("secrets")[] | select(.source == $src)] == [])
             | "gains secret \($src)"),
         (if $bs.init == true and $s.init != true then "init is not true" else empty end),
+        # The one-run maintenance commands (#1609) are arguments of a
+        # one-shot `docker compose run` container; a command or entrypoint
+        # set on a service would repeat one on every start.
+        (if $s.command != $bs.command or $s.entrypoint != $bs.entrypoint
+            then "changes its command or entrypoint" else empty end),
         ($bs | list("cap_drop")[] | select(. as $c | $s | list("cap_drop") | index($c) == null)
             | "cap_drop lost \(.)"),
         ($bs | list("security_opt")[]
@@ -295,6 +300,27 @@ services:
           devices:
             - capabilities: [gpu]
 EOF
+}
+
+# A one-run maintenance command (#1609) set as a service's command or
+# entrypoint would run on every start of that service.
+merged_hardening_rejects_a_command_or_entrypoint() {
+    expect_overlay_rejected command \
+        "mbsync: changes its command or entrypoint" \
+        "indexer: changes its command or entrypoint" <<'EOF'
+services:
+  mbsync:
+    command: [rotate-bridge-pin]
+  indexer:
+    entrypoint: [python, -m, src.force_deletion]
+EOF
+}
+
+# Forced deletion is a one-run command, not a setting (#1609).
+indexer_has_no_deletion_force_setting() {
+    render "$BASE"
+    expect '.services.indexer.environment | has("INDEXER_DELETION_FORCE") | not' || return 1
+    expect '[.services[] | .command, .entrypoint] | all(. == null)' || return 1
 }
 
 merged_hardening_rejects_reset_security_opt() {
@@ -639,7 +665,8 @@ mbsync_points_at_the_host_app() {
         fi
     done
     expect '.services.mbsync.environment.BRIDGE_IMAP_PORT == "1143"' || return 1
-    expect '.services.mbsync.environment.BRIDGE_CERT_PIN_ROTATE == "false"' || return 1
+    # Pin rotation is a one-run command, not a setting (#1609).
+    expect '.services.mbsync.environment | has("BRIDGE_CERT_PIN_ROTATE") | not' || return 1
     # Empty unless set: the entrypoint then refuses to trust the app's
     # certificate on first use.
     expect '.services.mbsync.environment.BRIDGE_CERT_FINGERPRINT == ""' || return 1
@@ -844,6 +871,10 @@ check "merged hardening rejects renamed, shared or rebacked volumes" \
     merged_hardening_rejects_renamed_or_rebacked_volumes
 check "merged hardening rejects new users, secrets, hooks and devices" \
     merged_hardening_rejects_new_grants
+check "merged hardening rejects a command or entrypoint on a base service" \
+    merged_hardening_rejects_a_command_or_entrypoint
+check "the indexer has no deletion force setting and no service sets a command" \
+    indexer_has_no_deletion_force_setting
 check "merged hardening rejects a service a top-level include brings in" \
     merged_hardening_rejects_an_included_service
 check "omitted rerank and inference settings render without a warning" \

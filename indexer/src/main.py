@@ -49,7 +49,7 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 from watchdog.utils import UnsupportedLibcError
 
-from .account import account_config_from_env, maildir_root_from_env
+from .account import AccountConfig, account_config_from_env, maildir_root_from_env
 from .attachment_indexing import (
     AttachmentWritePlan,
     ExtractionBudget,
@@ -212,7 +212,6 @@ _IDENTITY_SETTINGS = (
     "INDEXER_DELETION_GRACE_DAYS",
     "INDEXER_DELETION_SWEEP_INTERVAL_SECS",
     "INDEXER_DELETION_MAX_BATCH_PCT",
-    "INDEXER_DELETION_FORCE",
 )
 
 # Every other variable ``src/`` reads, with why it is not hashed.
@@ -3775,23 +3774,27 @@ def _run_watch_refresh(
     return True
 
 
-def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> None:
+def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> bool:
     """One reconciliation interval: sweep and reap when deletion
     reconciliation is on, then expire old reaped-message records (in
-    archive mode too, so records from before a switch expire)."""
+    archive mode too, so records from before a switch expire). Returns
+    False when the sweep or reap failed (``make force-deletion`` exits
+    non-zero on it)."""
+    ok = True
     if reconciler is not None:
         started = _monotonic()
         try:
             swept = reconciler.sweep()
             reaped = reconciler.reap()
         except Exception as e:
+            ok = False
             _streaks[PERIODIC_RECONCILIATION].failed()
             log.error("periodic reconciliation failed: %s", type(e).__name__)
         else:
             _streaks[PERIODIC_RECONCILIATION].succeeded()
             # One line per pass, no-op passes included (#874). The brake
             # is "tripped" when it held back this pass's reaps, "forced"
-            # when INDEXER_DELETION_FORCE disables it.
+            # in the one pass of ``make force-deletion`` (#1609).
             if reaped.get("aborted"):
                 brake = "tripped"
             elif reconciler.config.force:
@@ -3815,6 +3818,7 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> None
                 brake,
             )
     _prune_reaped_records(db)
+    return ok
 
 
 def _run_periodic_rescan(
@@ -3883,6 +3887,32 @@ def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     )
 
 
+def _open_database(account: AccountConfig) -> Database:
+    """Open the index with the operator's authority and identity files
+    applied, as every indexer process that writes it must (``main`` and
+    ``force_deletion``)."""
+    # Before opening the database, so a malformed file fails fast.
+    authority_rules = _load_authority_rules(AUTHORITY_RULES_PATH)
+    operator_identity = _load_operator_identity(OPERATOR_IDENTITY_PATH)
+    db = Database(SQLITE_PATH, account=account)
+    db.set_operator_identity(operator_identity)
+    reclassified = db.set_authority_rules(authority_rules)
+    if reclassified:
+        log.info("Authority rules: reclassified %d existing entities", reclassified)
+    return db
+
+
+def _build_embedder(embed_base_url: str) -> OpenAIEmbedder:
+    """The embedder the ``EMBED_*`` settings describe."""
+    return OpenAIEmbedder(
+        base_url=embed_base_url,
+        model=EMBED_MODEL,
+        api_key=EMBED_API_KEY,
+        batch_size=EMBED_BATCH_SIZE,
+        concurrency=EMBED_CONCURRENCY,
+    )
+
+
 def main():
     embed_base_url = _validate_embed_config()
     # Before the database opens: a missing or malformed ACCOUNT_SCOPE or
@@ -3892,27 +3922,14 @@ def main():
     log.info("  Maildir: %s", MAILDIR_PATH)
     log.info("  SQLite:  %s", SQLITE_PATH)
 
-    # Before opening the database, so a malformed file fails fast.
-    authority_rules = _load_authority_rules(AUTHORITY_RULES_PATH)
-    operator_identity = _load_operator_identity(OPERATOR_IDENTITY_PATH)
-    db = Database(SQLITE_PATH, account=account)
-    db.set_operator_identity(operator_identity)
-    reclassified = db.set_authority_rules(authority_rules)
-    if reclassified:
-        log.info("Authority rules: reclassified %d existing entities", reclassified)
+    db = _open_database(account)
     # Needs only the database: run before the embedder wait and the
     # initial index, which can take hours or never finish (#576).
     _prune_reaped_records(db)
     # Every table starts pending, so this pass scrubs them all once: it
     # covers a reap whose scrub the last run did not reach (#670).
     _run_wal_maintenance(db)
-    embedder = OpenAIEmbedder(
-        base_url=embed_base_url,
-        model=EMBED_MODEL,
-        api_key=EMBED_API_KEY,
-        batch_size=EMBED_BATCH_SIZE,
-        concurrency=EMBED_CONCURRENCY,
-    )
+    embedder = _build_embedder(embed_base_url)
     # Log the wire endpoint after construction: ``EMBED_BASE_URL=default``
     # is logged as the official URL it resolves to, not the raw value.
     # ``OpenAIEmbedder.base_url`` reads the URL back from the SDK,
