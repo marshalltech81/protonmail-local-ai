@@ -47,7 +47,8 @@ set -Eeuo pipefail
 # mode 700); <work-dir> lives outside the repository (it
 # holds upstream trees, downloads and builds). Needs docker (Linux
 # arm64 or amd64 engine), git, curl, jq, gpgv, xz, python3 and shasum or
-# sha256sum on the host. Not part of CI or `make test`.
+# sha256sum on the host
+# (clean needs only docker). Not part of CI or `make test`.
 # =============================================================================
 
 readonly GLUON_COMMIT=7e800978ab4a9942829eb6116e33ea0278c03e91
@@ -161,6 +162,8 @@ acquire_src() {
         git -C "$dir" fetch -q --depth 1 "https://github.com/ProtonMail/$name.git" "$commit"
         git -C "$dir" -c advice.detachedHead=false checkout -q FETCH_HEAD
         [[ "$(git -C "$dir" rev-parse HEAD)" == "$commit" ]] || die "$name: fetched commit differs"
+        # Before anything on the host reads or writes inside the tree.
+        only_regular_files
         [[ "$(sed -n 's/^toolchain //p' "$dir/go.mod")" == "$GO_VERSION" ]] || die "$name: go.mod toolchain is not $GO_VERSION"
         prov "source $name commit=$commit tree=$(git -C "$dir" rev-parse 'HEAD^{tree}') go.sum-sha256=$(sha256 "$dir/go.sum")"
     done
@@ -713,9 +716,17 @@ main() {
     local verb="${1:-}"
     [[ -n "$verb" && -n "${2:-}" ]] || die "usage: run.sh all|acquire|assemble|execute|clean <work-dir> [out-dir]"
     WORK="$(resolve_work "$2")"
+    readonly WORK
+    # clean needs only docker, so it still works when an acquire-only
+    # tool is missing or the engine's architecture is unsupported.
+    if [[ "$verb" == clean ]]; then
+        command -v docker >/dev/null 2>&1 || die "missing tool: docker"
+        cmd_clean
+        return
+    fi
     need_tools
     ARCH="$(engine_arch)"
-    readonly WORK ARCH
+    readonly ARCH
     case "$verb" in
         acquire)
             trap phase_cleanup EXIT
@@ -732,7 +743,6 @@ main() {
             trap phase_cleanup EXIT
             cmd_execute "$(resolve_out "$3")" "${4:-}"
             ;;
-        clean) cmd_clean ;;
         all)
             [[ -n "${3:-}" ]] || die "all needs an out dir"
             local out
