@@ -18,7 +18,11 @@ set -Eeuo pipefail
 #             checked against the SHA-256 pinned here for that snapshot
 #             and verified with gpgv against the base's own archive
 #             keyring, Packages and each .deb against the signed SHA-256).
-#             Every download is size- and time-bounded. Writes
+#             Every download is size- and time-bounded; each repo's git
+#             fetch additionally writes into a GIT_IMAGE_SIZE-capped
+#             sparse APFS image mounted at its source tree, so it fails
+#             closed with ENOSPC rather than filling the host disk
+#             (owner decision 2026-10-13, round 23 finding 4). Writes
 #             provenance.txt. No container runs in this step: the keyring,
 #             apt sources and dpkg status are copied out of a created,
 #             never-started container.
@@ -29,13 +33,22 @@ set -Eeuo pipefail
 #             commit a local image.
 #   execute   With --network none, as the non-root user, all capabilities
 #             dropped, no-new-privileges, memory, pids, CPU and file-size
-#             limits, no container log, a wall-clock deadline and a cap on
-#             bytes written that the host enforces, no ports, mounts or
+#             limits, no container log, a wall-clock deadline, a
+#             read-only root filesystem with a size-capped tmpfs for
+#             every writable path (owner decision 2026-10-13, round 21
+#             and 27 finding: amends the earlier no-user-mounts rule so
+#             fallocate cannot reserve disk the host-side write-byte
+#             sampling misses) and a cap on bytes written that the host
+#             also enforces, no ports or user-added bind mounts or
 #             volumes:
 #             build and run the harness tests (Go test files under gluon/
 #             and bridge/ here) with GOTOOLCHAIN=local,
 #             GOPROXY=off and -mod=readonly. Copies out only the allowlisted
-#             JSON results; upstream logs stay in the container.
+#             JSON results, checked against a committed manifest (an
+#             in-process observation of what ran, not an attestation
+#             against code that could tamper with its own process; round
+#             23 finding 3, owner decision 2026-10-13); upstream logs
+#             stay in the container.
 #   clean     Removes the containers, the image and the work directory,
 #             and asserts they are gone. `all` runs it on any failure too.
 #
@@ -54,9 +67,11 @@ set -Eeuo pipefail
 # harness passes. Both are created with mode 700, under a parent only this
 # account can write. <work-dir> lives outside the repository (it holds
 # upstream trees, downloads and builds). Needs docker (Linux
-# arm64 or amd64 engine), git, curl, jq, gpgv, xz, python3 and shasum or
-# sha256sum on the host
-# (clean needs only docker). Not part of CI or `make test`.
+# arm64 or amd64 engine), git, curl, jq, gpgv, xz, python3, hdiutil and
+# diskutil (macOS, to bound git fetch's disk use with a sparse APFS
+# image) and shasum or sha256sum on the host (clean needs docker,
+# hdiutil and diskutil, to detach a mounted git image). Not part of CI
+# or `make test`.
 # =============================================================================
 
 readonly GLUON_COMMIT=7e800978ab4a9942829eb6116e33ea0278c03e91
@@ -75,27 +90,67 @@ readonly IMAGE_REPO=i1583-upstream
 readonly EXEC_DEADLINE_SECS=7200
 # Resource caps for the execution container, measured on full runs
 # (2026-10-13: at most 3.2 cores, 1.5 GB in its writable layer and 1.23 GB
-# written to disk). No engine-side quota for that layer exists without a
-# mount (OrbStack's overlay2 on btrfs refuses --storage-opt size), so the
-# watchdog measures from the host every WATCH_INTERVAL_SECS and kills the
-# container when either the layer's size or its cgroup's bytes written to
-# disk (which count files unlinked while open) passes the cap. What it can
-# hold is then bounded by the cap, plus unflushed data (charged to its
-# 8 GiB memory limit), plus one interval's writes.
+# written to disk). The container's root filesystem is read-only
+# (--read-only); its only writable paths are the four tmpfs mounts
+# below, each capped by EXEC_TMPFS_*_BYTES. That cap is enforced by the
+# kernel at every write or allocation, fallocate included, so it cannot
+# be defeated the way an overlay2 writable layer could: a keep-size
+# fallocate on tmpfs is rejected with ENOSPC the instant it would pass
+# the mount's size= option (owner decision 2026-10-13, round 21 and 27
+# finding; measured before and after in the round's own throwaway-
+# container test). The host-side watchdog's layer-size and
+# bytes-written sampling (below) stays in place as a second, independent
+# control; with nothing writing to the overlay layer or a block device
+# any more, it now typically reads at or near zero, which is expected
+# and not a sign the tmpfs cap is doing nothing.
 readonly EXEC_MAX_CPUS=4
 # Largest file any process in the execution container may write or
 # allocate (RLIMIT_FSIZE, which also limits fallocate that grows a file).
 readonly EXEC_MAX_FILE_BYTES=2147483648
 readonly EXEC_MAX_WRITE_BYTES=8589934592
+# tmpfs sizes for the execution container's writable paths, charged
+# against its 8 GiB memory limit (tmpfs pages are anonymous memory).
+# /home/h/out holds only each suite's small JSON result; /home/h/logs
+# the go test -v output (read back capped at 8 MiB); /home/h/gocache
+# the Go build cache, the largest of the four; /tmp the per-suite
+# GOCACHE/TMPDIR scratch dirs run_inside.sh creates and removes. Sized
+# generously above the measured peaks above, well under the memory
+# limit so real process RSS still has headroom.
+readonly EXEC_TMPFS_OUT_BYTES=67108864
+readonly EXEC_TMPFS_LOGS_BYTES=536870912
+readonly EXEC_TMPFS_GOCACHE_BYTES=2147483648
+readonly EXEC_TMPFS_TMP_BYTES=1073741824
+# Mount option strings used both for `docker run --tmpfs` and for the
+# post-start assertion that the container got exactly these, so the two
+# can never drift apart. /tmp must stay executable: go test builds the
+# test binary under TMPDIR and execs it directly from there.
+readonly EXEC_TMPFS_OUT_OPTS="rw,noexec,nosuid,nodev,size=$EXEC_TMPFS_OUT_BYTES,uid=1583,gid=1583,mode=0700"
+readonly EXEC_TMPFS_LOGS_OPTS="rw,noexec,nosuid,nodev,size=$EXEC_TMPFS_LOGS_BYTES,uid=1583,gid=1583,mode=0700"
+readonly EXEC_TMPFS_GOCACHE_OPTS="rw,noexec,nosuid,nodev,size=$EXEC_TMPFS_GOCACHE_BYTES,uid=1583,gid=1583,mode=0700"
+# Docker adds noexec to every --tmpfs mount unless the options say
+# otherwise; exec is explicit here because go test builds the test
+# binary under TMPDIR and execs it directly from there (measured
+# 2026-10-13: without it, that exec is refused).
+readonly EXEC_TMPFS_TMP_OPTS="rw,exec,nosuid,nodev,size=$EXEC_TMPFS_TMP_BYTES,mode=1777"
 readonly WATCH_INTERVAL_SECS=5
 # Each Docker call the watchdog makes is cut off after this long, and a
 # measurement that times out counts as unreadable.
 readonly PROBE_TIMEOUT_SECS=30
 # Each network step of acquire (each download through fetch, git fetch,
 # the host-side go mod download, docker pull) is cut off after this long,
-# with everything it started. The byte and storage bounds of the steps
-# fetch does not cover are #1583's open question.
+# with everything it started. git fetch's disk use is additionally
+# bounded by GIT_IMAGE_SIZE (below); the host-side go mod download and
+# docker pull have no byte bound yet (#1583 round 24, open).
 readonly ACQUIRE_TIMEOUT_SECS=1800
+# Size of the sparse APFS image each repo's git fetch writes into
+# (owner decision 2026-10-13, round 23 finding 4): a fetch that would
+# grow past it fails closed with ENOSPC, on top of ACQUIRE_TIMEOUT_SECS,
+# instead of writing an unbounded amount to the host filesystem. Real
+# shallow clones of both repos measured under 10 MB combined
+# (2026-10-13); this leaves large headroom for upstream growth while
+# staying a small, finite cap. hdiutil's -size takes a unit suffix
+# (here, gigabytes), not a byte count.
+readonly GIT_IMAGE_SIZE=2g
 # Fixed text after the digest on provenance.txt's inputs line, which must
 # match exactly.
 readonly INPUTS_NOTE='(provenance lines above, staged trees with harness files, repo/Packages, Go archive, run.sh, its scripts and manifest.json, mbsync/Dockerfile)'
@@ -158,9 +213,48 @@ fetch() {
 
 need_tools() {
     local t
-    for t in docker git curl jq gpgv xz python3; do
+    for t in docker git curl jq gpgv xz python3 hdiutil diskutil; do
         command -v "$t" >/dev/null 2>&1 || die "missing tool: $t"
     done
+}
+
+# Path of the per-repo sparse image file (hdiutil appends the extension
+# itself; this is where it lands).
+git_image_file() {
+    printf '%s/git-images/%s.sparseimage' "$WORK" "$1"
+}
+
+# Creates a GIT_IMAGE_SIZE-capped APFS image and mounts it at
+# $WORK/src/<name>, which must be a fresh, empty directory (acquire_src
+# creates it immediately before calling this, once per repo). Every
+# byte git writes for that repo is then bounded by the filesystem
+# itself, not only by the time bound bounded already gives git fetch.
+# The image stays attached after this process exits (acquire, assemble
+# and execute are separate invocations that all read $WORK/src/<name>);
+# only detach_git_image, called from clean, unmounts it.
+attach_git_image() {
+    local name="$1" img base
+    local dir="$WORK/src/$name"
+    img="$(git_image_file "$name")"
+    base="${img%.sparseimage}"
+    mkdir -p "$WORK/git-images" "$dir"
+    hdiutil create -size "$GIT_IMAGE_SIZE" -fs APFS -volname "i1583-git-$name" -type SPARSE -quiet "$base" ||
+        die "$name: cannot create the bounded git image"
+    hdiutil attach "$img" -mountpoint "$dir" -nobrowse -quiet ||
+        die "$name: cannot attach the bounded git image"
+}
+
+# Detaches the image at $WORK/src/<name> if one is mounted there
+# (a no-op otherwise, so clean works whether or not acquire reached
+# this repo), and fails if anything is still mounted there afterward:
+# clean must not rm -rf a live mountpoint.
+detach_git_image() {
+    local name="$1"
+    local dir="$WORK/src/$name"
+    diskutil info "$dir" >/dev/null 2>&1 || return 0
+    hdiutil detach "$dir" -quiet 2>/dev/null || hdiutil detach "$dir" -force -quiet 2>/dev/null || true
+    diskutil info "$dir" >/dev/null 2>&1 && die "$name: the bounded git image did not detach"
+    return 0
 }
 
 engine_arch() {
@@ -197,10 +291,10 @@ acquire_src() {
         name="${spec%%:*}"
         commit="${spec#*:}"
         dir="$WORK/src/$name"
-        mkdir -p "$dir"
+        attach_git_image "$name"
         git -C "$dir" init -q
         bounded "$ACQUIRE_TIMEOUT_SECS" git -C "$dir" fetch -q --depth 1 "https://github.com/ProtonMail/$name.git" "$commit" ||
-            die "$name: git fetch failed or passed $ACQUIRE_TIMEOUT_SECS s"
+            die "$name: git fetch failed, passed $ACQUIRE_TIMEOUT_SECS s, or passed the $GIT_IMAGE_SIZE image cap"
         git -C "$dir" -c advice.detachedHead=false checkout -q FETCH_HEAD
         [[ "$(git -C "$dir" rev-parse HEAD)" == "$commit" ]] || die "$name: fetched commit differs"
         # Before anything on the host reads or writes inside the tree.
@@ -560,9 +654,24 @@ cmd_execute() {
         --cpus "$cpus" \
         --ulimit "fsize=$EXEC_MAX_FILE_BYTES" \
         --log-driver none \
+        --read-only \
+        --tmpfs "/home/h/out:$EXEC_TMPFS_OUT_OPTS" \
+        --tmpfs "/home/h/logs:$EXEC_TMPFS_LOGS_OPTS" \
+        --tmpfs "/home/h/gocache:$EXEC_TMPFS_GOCACHE_OPTS" \
+        --tmpfs "/tmp:$EXEC_TMPFS_TMP_OPTS" \
         "$image" >/dev/null
-    [[ "$(docker inspect --format '{{json .Mounts}} {{json .NetworkSettings.Ports}} {{.HostConfig.NetworkMode}}' "$RUNC")" == '[] {} none' ]] ||
-        die "execution container has mounts, ports or a network"
+    [[ "$(docker inspect --format '{{json .Mounts}} {{json .NetworkSettings.Ports}} {{.HostConfig.NetworkMode}} {{.HostConfig.ReadonlyRootfs}}' "$RUNC")" == '[] {} none true' ]] ||
+        die "execution container has mounts, ports or a network, or its root filesystem is not read-only"
+    # The container's only writable paths: exactly these four tmpfs
+    # mounts, each with the size cap that stops a fallocate-style
+    # reservation (round 21 and 27). jq, not a string match, because
+    # Go's JSON encoder is free to order the map's keys however it
+    # likes (it happens to sort them, but nothing here depends on that).
+    docker inspect --format '{{json .HostConfig.Tmpfs}}' "$RUNC" |
+        jq -e --arg out "$EXEC_TMPFS_OUT_OPTS" --arg logs "$EXEC_TMPFS_LOGS_OPTS" \
+            --arg gocache "$EXEC_TMPFS_GOCACHE_OPTS" --arg tmp "$EXEC_TMPFS_TMP_OPTS" \
+            '. == {"/home/h/out": $out, "/home/h/logs": $logs, "/home/h/gocache": $gocache, "/tmp": $tmp}' \
+            >/dev/null || die "execution container's tmpfs mounts differ from the expected set"
     # No container log: its code runs as PID 1's user and could write to
     # /proc/1/fd/1, which neither of the watchdog's measures counts.
     [[ "$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.PidsLimit}} {{.HostConfig.LogConfig.Type}}{{range .HostConfig.Ulimits}} {{.Name}}={{.Soft}}/{{.Hard}}{{end}}' "$RUNC")" == "${cpus}000000000 8589934592 8589934592 2048 none fsize=$EXEC_MAX_FILE_BYTES/$EXEC_MAX_FILE_BYTES" ]] ||
@@ -773,6 +882,13 @@ run_step() {
 # allowlisted shape
 # (the one the harness's i1583Rec enforces). An empty or partial result,
 # or a test that never ran, fails. Uses the suite's STEP_LINES.
+# This is an in-process observation, not an attestation: it cross-checks
+# what the test process reported against a fixed, committed shape, but
+# code running inside that same process could in principle forge or
+# empty its own results, and no check running in that process can rule
+# that out by construction. Accepted as a residual, undischarged risk
+# rather than further in-process mitigation (owner decision 2026-10-13,
+# round 23 finding 3).
 accept_result() {
     local suite="$1" out="$2" manifest="$HERE/manifest.json" tmp="$2/$1.json.tmp"
     if ! { [[ "$(printf '%s\n' "$STEP_LINES" | sed -n 's/^--- PASS: //p' | LC_ALL=C sort)" == "$(jq -r --arg s "$suite" '.[$s].tests[]' "$manifest" | LC_ALL=C sort)" ]] &&
@@ -845,6 +961,8 @@ cmd_clean() {
         [[ -z "$left" ]] || die "containers remain"
         left="$(docker image ls -q "$IMAGE_REPO:$tag")" || die "cannot list images"
         [[ -z "$left" ]] || die "image remains"
+        detach_git_image gluon
+        detach_git_image proton-bridge
         chmod -R u+w "$WORK"
         rm -rf "$WORK"
     fi
@@ -909,10 +1027,14 @@ main() {
     # process group (Ctrl-C does not reach it).
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    # clean needs only docker, so it still works when an acquire-only
-    # tool is missing or the engine's architecture is unsupported.
+    # clean needs docker and the image tools (to detach a mounted git
+    # image), but none of the other acquire-only tools, and works when
+    # the engine's architecture is unsupported.
     if [[ "$verb" == clean ]]; then
-        command -v docker >/dev/null 2>&1 || die "missing tool: docker"
+        local t
+        for t in docker hdiutil diskutil; do
+            command -v "$t" >/dev/null 2>&1 || die "missing tool: $t"
+        done
         cmd_clean
         return
     fi

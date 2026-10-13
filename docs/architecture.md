@@ -1346,6 +1346,12 @@ fake server, delivering to isync over TLS. Inputs are synthetic and
 results are counts, byte comparisons, timings and fixed tokens. Limits:
 the fake connector is not Bridge's connector, the fake server is not
 Proton, and the results hold for these commits, not a released binary.
+A result's match against the harness's committed `manifest.json` is an
+in-process observation, not an attestation: code running inside the
+harness's own locked-down process could in principle forge or empty
+its own results, and no check running in that process can rule that
+out by construction (owner decision 2026-10-13, accepted as a residual
+risk rather than further in-process mitigation).
 
 | # | Item (#1583) | Result | Rows |
 |---|---|---|---|
