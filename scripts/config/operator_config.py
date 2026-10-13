@@ -38,6 +38,7 @@ import stat
 import subprocess  # nosec B404 - runs bash on the repository's own settings file, fixed argv
 import sys
 import tomllib
+import unicodedata
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,9 @@ MAX_CONFIG_BYTES = 4 * 1024 * 1024
 # Accounts are validated one by one, each with a bash run of the Proton
 # settings check, so their number is bounded too.
 MAX_ACCOUNTS = 32
+# The largest value scripts/validate-env.sh's shell arithmetic reads (it
+# wraps past it), and short enough for str() under Python's digit limit.
+MAX_NUMBER = 2**63 - 1
 # The indexer's own limits (indexer/src/entities.py), checked here on the
 # files this module renders, so a configuration the indexer would refuse
 # is refused before it is written. The indexer still checks them.
@@ -115,12 +119,20 @@ class Integer(Leaf):
             raise ConfigError(f"{path} must be an integer from {self.minimum}{upper}.")
         if value < self.minimum or (self.maximum is not None and value > self.maximum):
             raise ConfigError(f"{path} must be an integer from {self.minimum}{upper}.")
+        if value > MAX_NUMBER:
+            raise ConfigError(f"{path} must be at most {MAX_NUMBER}.")
         return value
 
     def describe(self) -> str:
         if self.maximum is not None:
             return f"integer {self.minimum} to {self.maximum}"
         return f"integer >= {self.minimum}"
+
+
+def _unsigned_zero(value: int | float) -> int | float:
+    """-0.0 as 0.0: it passes a lower bound of 0, but its projection
+    "-0.0" is not a form scripts/validate-env.sh accepts."""
+    return 0.0 if isinstance(value, float) and value == 0 else value
 
 
 @dataclasses.dataclass(frozen=True)
@@ -137,7 +149,9 @@ class Number(Leaf):
             or value < self.minimum
         ):
             raise ConfigError(f"{path} must be a finite number of at least {self.minimum}.")
-        return value
+        if value > MAX_NUMBER:
+            raise ConfigError(f"{path} must be at most {MAX_NUMBER}.")
+        return _unsigned_zero(value)
 
     def describe(self) -> str:
         return f"number >= {self.minimum}"
@@ -153,7 +167,7 @@ class Fraction(Leaf):
             or not 0 <= value <= 1
         ):
             raise ConfigError(f"{path} must be a number from 0 to 1.")
-        return value
+        return _unsigned_zero(value)
 
     def describe(self) -> str:
         return "number 0 to 1"
@@ -542,6 +556,9 @@ def parse(raw: bytes, name: str = "config.toml") -> dict[str, Any]:
         raise ConfigError(f"{name} is not valid TOML{where}.") from None
     except RecursionError:
         raise ConfigError(f"{name} nests arrays or tables too deeply.") from None
+    except ValueError:
+        # Not a TOMLDecodeError: int() past Python's 4300-digit limit.
+        raise ConfigError(f"{name} holds a number too long to read.") from None
 
 
 def validate(data: dict[str, Any], base: Path) -> dict[str, Any]:
@@ -608,14 +625,38 @@ def _check_model_layers(config_global: dict[str, Any]) -> None:
         _check_base_url(layer, table)
 
 
-def _same_file(path: Path) -> str:
-    """A path as compared with others: links followed, so two spellings
-    of one file are the same."""
-    return os.path.realpath(path)
+@dataclasses.dataclass(frozen=True)
+class _FileKey:
+    """A secret path as compared with others: the device and inode of an
+    existing file (links, hard links and a case-insensitive filesystem's
+    other spellings open the same file), and the resolved path, case
+    folded, for a file not created yet."""
+
+    spelling: str
+    identity: tuple[int, int] | None
+
+    @classmethod
+    def of(cls, path: Path) -> _FileKey:
+        real = os.path.realpath(path)
+        try:
+            info = os.stat(real)
+            identity: tuple[int, int] | None = (info.st_dev, info.st_ino)
+        except OSError:
+            identity = None
+        return cls(unicodedata.normalize("NFC", real).casefold(), identity)
+
+    def same(self, other: _FileKey) -> bool:
+        return self.spelling == other.spelling or (
+            self.identity is not None and self.identity == other.identity
+        )
+
+
+def _any_same(key: _FileKey, others: list[_FileKey]) -> bool:
+    return any(key.same(other) for other in others)
 
 
 def _check_not_reserved(path: Path, key: str) -> None:
-    if _same_file(path) in {_same_file(REPO_ROOT / name) for name in RESERVED_SECRET_FILES}:
+    if _any_same(_FileKey.of(path), [_FileKey.of(REPO_ROOT / n) for n in RESERVED_SECRET_FILES]):
         raise ConfigError(
             f"{key} is a reserved credential file ({', '.join(RESERVED_SECRET_FILES)}): "
             "each secret goes only where it belongs."
@@ -726,11 +767,11 @@ def _account_defaults(account: dict[str, Any], path: str) -> None:
 def _check_accounts(accounts: list[dict[str, Any]], config_global: dict[str, Any]) -> None:
     seen_uuids: set[str] = set()
     legacy = []
-    key_files = {
-        _same_file(config_global[layer]["api_key_file"])
+    key_files = [
+        _FileKey.of(config_global[layer]["api_key_file"])
         for layer in ("embedding", "inference", "reranking")
-    }
-    password_files: set[str] = set()
+    ]
+    password_files: list[_FileKey] = []
     for i, account in enumerate(accounts):
         path = f"accounts[{i}]"
         uuid = account["scope_uuid"]
@@ -755,13 +796,13 @@ def _check_accounts(accounts: list[dict[str, Any]], config_global: dict[str, Any
                 "details, not the example's placeholder."
             )
         _check_not_reserved(account["password_file"], f"{path}.password_file")
-        password = _same_file(account["password_file"])
-        if password in password_files or password in key_files:
+        password = _FileKey.of(account["password_file"])
+        if _any_same(password, password_files + key_files):
             raise ConfigError(
                 f"{path}.password_file is another account's password file or a model API key file: "
                 "each account has its own secret."
             )
-        password_files.add(password)
+        password_files.append(password)
         if account["provider"] == IMAP:
             if account["enabled"]:
                 raise ConfigError(

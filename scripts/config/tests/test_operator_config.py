@@ -234,6 +234,24 @@ REFUSALS: list[tuple[str, list[tuple[str, Any]], str]] = [
         "global.inference.timeout_seconds must be a finite number of at least 1.",
     ),
     (
+        # Review round 2: a hexadecimal integer is not bound by the digit
+        # limit, and str() of it would raise; validate-env.sh's arithmetic
+        # wraps past 2**63 - 1.
+        "an integer past 64 bits",
+        [("global.inference.max_tokens", int("f" * 5000, 16))],
+        "global.inference.max_tokens must be at most 9223372036854775807.",
+    ),
+    (
+        "an integer one past 64 bits",
+        [("global.indexer.parse_max_bytes", 2**63)],
+        "global.indexer.parse_max_bytes must be at most 9223372036854775807.",
+    ),
+    (
+        "a number past 64 bits",
+        [("global.embedding.warmup_timeout_seconds", 1e19)],
+        "global.embedding.warmup_timeout_seconds must be at most 9223372036854775807.",
+    ),
+    (
         "a fraction over 1",
         [("global.indexer.deletion.max_batch_fraction", 1.5)],
         "global.indexer.deletion.max_batch_fraction must be a number from 0 to 1.",
@@ -593,6 +611,56 @@ class Refusals(unittest.TestCase):
                     "accounts[1].password_file is another account's password file or a model API key file: each account has its own secret.",
                 )
 
+    def test_secret_paths_are_compared_by_file_identity(self) -> None:
+        # Review round 2: a case-insensitive spelling (APFS's default) or a
+        # hard link opens the reserved file without matching its path.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / ".secrets").mkdir()
+        (tmp / ".secrets" / "mcp_auth_token.txt").write_text("t")
+        os.link(tmp / ".secrets" / "mcp_auth_token.txt", tmp / "linked.txt")
+        reserved = (
+            "global.embedding.api_key_file is a reserved credential file "
+            "(.secrets/mcp_auth_token.txt, .secrets/mcp_client_headers.txt): "
+            "each secret goes only where it belongs."
+        )
+        with unittest.mock.patch.object(oc, "REPO_ROOT", tmp):
+            for alias in (".SECRETS/MCP_AUTH_TOKEN.TXT", "linked.txt"):
+                with self.subTest(alias):
+                    data = fixture()
+                    data["global"]["embedding"]["api_key_file"] = str(tmp / alias)
+                    self.assert_refused(data, reserved)
+
+    def test_a_password_file_aliasing_another_secret_is_refused(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / "pass.txt").write_text("p")
+        os.link(tmp / "pass.txt", tmp / "linked.txt")
+        shared = (
+            "accounts[1].password_file is another account's password file or a model "
+            "API key file: each account has its own secret."
+        )
+        # Existing files by identity; a missing one by its spelling, case folded,
+        # since it may be created on a case-insensitive filesystem.
+        for first, second in (
+            ("pass.txt", "linked.txt"),
+            ("pass.txt", "PASS.TXT"),
+            ("missing.txt", "MISSING.txt"),
+        ):
+            with self.subTest(second):
+                data = fixture()
+                data["accounts"][0]["password_file"] = str(tmp / first)
+                data["accounts"].append(second_account(password_file=str(tmp / second)))
+                self.assert_refused(data, shared)
+        data = fixture()
+        data["global"].setdefault("reranking", {})["api_key_file"] = str(tmp / "pass.txt")
+        data["accounts"][0]["password_file"] = str(tmp / "LINKED.txt")
+        self.assert_refused(
+            data,
+            "accounts[0].password_file is another account's password file or a model "
+            "API key file: each account has its own secret.",
+        )
+
     def test_an_enabled_imap_account_is_refused_and_a_disabled_one_accepted(self) -> None:
         imap = second_account(
             provider="imap",
@@ -732,6 +800,12 @@ class Reading(unittest.TestCase):
         path = self.write(b'name = "\xff' + MARKER.encode() + b'"\n')
         self.assertEqual(self.refused(path), "config.toml is not UTF-8 text.")
 
+    def test_an_integer_over_the_conversion_limit_is_refused(self) -> None:
+        # Review round 2: tomllib raises a plain ValueError past Python's
+        # 4300-digit int conversion limit, quoting nothing but not a TOMLDecodeError.
+        path = self.write(b"schema_version = " + b"1" * 5000 + b"\n")
+        self.assertEqual(self.refused(path), "config.toml holds a number too long to read.")
+
     def test_deep_nesting_is_refused_without_a_crash(self) -> None:
         depth = 100_000
         path = self.write(b"a = " + b"[" * depth + b"]" * depth + b"\n")
@@ -864,6 +938,34 @@ class Mapping(unittest.TestCase):
             if s.kind == "maintenance":
                 self.assertIn("#1609", s.note)
         self.assertIn("MCP_TRANSPORT", {name for name, _ in oc.RUNTIME_OWNED})
+
+    def test_negative_zero_projects_as_zero(self) -> None:
+        # Review round 2: -0.0 passes a lower bound of 0, but "-0.0" is
+        # not a form scripts/validate-env.sh accepts. Every numeric
+        # setting, derived from the schema: refused or projected unsigned.
+        numeric = [
+            s
+            for s in oc.MAPPING
+            if s.toml is not None and isinstance(oc._leaf(s.toml), oc.Number | oc.Fraction)
+        ]
+        self.assertIn("INDEXER_DELETION_MAX_BATCH_PCT", {s.env for s in numeric})
+        accepted = []
+        for setting in numeric:
+            with self.subTest(setting.env):
+                data = fixture()
+                _set(data, _toml_path(setting), -0.0)
+                try:
+                    config = checked(data)
+                except oc.ConfigError:
+                    continue
+                self.assertEqual(oc.project_env(config)[setting.env], "0.0")
+                accepted.append(setting.env)
+        self.assertEqual(accepted, ["INDEXER_DELETION_MAX_BATCH_PCT"])
+        for leaf in (oc.Number(minimum=0), oc.Fraction()):
+            with self.subTest(type(leaf).__name__):
+                value = leaf.check(-0.0, "x", CONFIG_DIR)
+                self.assertEqual(oc._format(value), "0.0")
+                self.assertEqual(oc._format(leaf.check(0, "x", CONFIG_DIR)), "0")
 
     def test_samples_cover_every_projected_setting(self) -> None:
         projected = {s.env for s in oc.MAPPING if s.toml is not None}

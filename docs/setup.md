@@ -993,7 +993,9 @@ become one-run commands (#1609).
 
 Every `.env.example` setting, every TOML key and what stays fixed (a
 test in `scripts/config/tests` keeps these tables equal to the
-translator's):
+translator's). An integer or number is at most 9223372036854775807, the
+largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
+`-0.0` is read as 0:
 
 <!-- operator-config-mapping:begin -->
 | `.env.example` setting | TOML key | Default | Validation | Consumer | After a change |
