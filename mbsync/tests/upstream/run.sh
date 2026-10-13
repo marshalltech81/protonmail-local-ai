@@ -28,9 +28,10 @@ set -Eeuo pipefail
 #             build cache, logs and results; root owns every input) and
 #             commit a local image.
 #   execute   With --network none, as the non-root user, all capabilities
-#             dropped, no-new-privileges, memory, pids and CPU limits, no
-#             container log, a wall-clock deadline and a cap on bytes
-#             written that the host enforces, no ports, mounts or volumes:
+#             dropped, no-new-privileges, memory, pids, CPU and file-size
+#             limits, no container log, a wall-clock deadline and a cap on
+#             bytes written that the host enforces, no ports, mounts or
+#             volumes:
 #             build and run the harness tests (Go test files under gluon/
 #             and bridge/ here) with GOTOOLCHAIN=local,
 #             GOPROXY=off and -mod=readonly. Copies out only the allowlisted
@@ -82,14 +83,20 @@ readonly EXEC_DEADLINE_SECS=7200
 # hold is then bounded by the cap, plus unflushed data (charged to its
 # 8 GiB memory limit), plus one interval's writes.
 readonly EXEC_MAX_CPUS=4
+# Largest file any process in the execution container may write or
+# allocate (RLIMIT_FSIZE, which also limits fallocate that grows a file).
+readonly EXEC_MAX_FILE_BYTES=2147483648
 readonly EXEC_MAX_WRITE_BYTES=8589934592
 readonly WATCH_INTERVAL_SECS=5
 # Each Docker call the watchdog makes is cut off after this long, and a
 # measurement that times out counts as unreadable.
 readonly PROBE_TIMEOUT_SECS=30
+# Each git fetch is cut off after this long (its byte bound is #1583's
+# open question).
+readonly GIT_TIMEOUT_SECS=1800
 # Fixed text after the digest on provenance.txt's inputs line, which must
 # match exactly.
-readonly INPUTS_NOTE='(provenance lines above, staged trees with harness files, repo/Packages, Go archive, run.sh and its scripts, mbsync/Dockerfile)'
+readonly INPUTS_NOTE='(provenance lines above, staged trees with harness files, repo/Packages, Go archive, run.sh, its scripts and manifest.json, mbsync/Dockerfile)'
 # Container names carry the work dir's tag (set_names), so runs in other
 # work dirs never share or remove each other's containers.
 ACQ=""
@@ -100,6 +107,8 @@ PROBE=""
 # The out dir while execute is still filling it; the cleanup paths remove
 # it, so a failed run leaves no partial results behind.
 OUT_PENDING=""
+# The status lines of the last run_inside.sh step (run_step).
+STEP_LINES=""
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HERE
@@ -183,7 +192,8 @@ acquire_src() {
         dir="$WORK/src/$name"
         mkdir -p "$dir"
         git -C "$dir" init -q
-        git -C "$dir" fetch -q --depth 1 "https://github.com/ProtonMail/$name.git" "$commit"
+        bounded "$GIT_TIMEOUT_SECS" git -C "$dir" fetch -q --depth 1 "https://github.com/ProtonMail/$name.git" "$commit" ||
+            die "$name: git fetch failed or passed $GIT_TIMEOUT_SECS s"
         git -C "$dir" -c advice.detachedHead=false checkout -q FETCH_HEAD
         [[ "$(git -C "$dir" rev-parse HEAD)" == "$commit" ]] || die "$name: fetched commit differs"
         # Before anything on the host reads or writes inside the tree.
@@ -382,8 +392,9 @@ set_names() {
 # from the module downloads (which go mod verify checks against go.sum
 # inside the container) and the .debs (which apt checks against
 # repo/Packages): the staged source trees with the harness files,
-# repo/Packages, the Go archive, the scripts here (run.sh included),
-# mbsync/Dockerfile, which pins the base, and every line acquire wrote to
+# repo/Packages, the Go archive, the scripts and manifest.json here
+# (run.sh included), mbsync/Dockerfile, which pins the base, and every
+# line acquire wrote to
 # provenance.txt before this digest. acquire records it as the last line;
 # assemble and execute refuse inputs or a provenance record that changed
 # since.
@@ -396,7 +407,7 @@ inputs_digest() {
             LC_ALL=C sort -z | xargs -0 "${SHA256_CMD[@]}"
         "${SHA256_CMD[@]}" repo/Packages "go-dl/$GO_VERSION.linux-$ARCH.tar.gz"
         cd "$HERE"
-        "${SHA256_CMD[@]}" run_inside.sh assemble.sh run.sh resolve_debs.py
+        "${SHA256_CMD[@]}" run_inside.sh assemble.sh run.sh resolve_debs.py manifest.json
         cd "$REPO"
         "${SHA256_CMD[@]}" mbsync/Dockerfile
     ) | "${SHA256_CMD[@]}" | cut -d' ' -f1
@@ -528,44 +539,28 @@ cmd_execute() {
         --memory 8g --memory-swap 8g \
         --pids-limit 2048 \
         --cpus "$cpus" \
+        --ulimit "fsize=$EXEC_MAX_FILE_BYTES" \
         --log-driver none \
         "$image" >/dev/null
     [[ "$(docker inspect --format '{{json .Mounts}} {{json .NetworkSettings.Ports}} {{.HostConfig.NetworkMode}}' "$RUNC")" == '[] {} none' ]] ||
         die "execution container has mounts, ports or a network"
     # No container log: its code runs as PID 1's user and could write to
     # /proc/1/fd/1, which neither of the watchdog's measures counts.
-    [[ "$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}} {{.HostConfig.LogConfig.Type}}' "$RUNC")" == "${cpus}000000000 8589934592 2048 none" ]] ||
-        die "execution container lacks its CPU, memory or pids limit, or has a log"
-    local status_text name
+    [[ "$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}} {{.HostConfig.LogConfig.Type}}{{range .HostConfig.Ulimits}} {{.Name}}={{.Soft}}/{{.Hard}}{{end}}' "$RUNC")" == "${cpus}000000000 8589934592 2048 none fsize=$EXEC_MAX_FILE_BYTES/$EXEC_MAX_FILE_BYTES" ]] ||
+        die "execution container lacks its CPU, memory, pids or file-size limit, or has a log"
+    local suite
     start_watchdog
-    # Capped: the status lines are few and short.
-    # Both streams: the tests run as the same user as run_inside.sh and can
-    # write to its stderr too.
-    status_text="$(docker exec "$RUNC" /home/h/run_inside.sh "$debug" 2>&1 | head -c 65536)" || rc=$?
-    require_running
-    # Everything from the container is untrusted: only fixed-shape status
-    # lines are shown and kept (with debug, also the harness's own
-    # diagnostic lines, printable characters only), and only the three
-    # expected result files are copied out (fetch_result), as regular files
-    # of bounded size whose JSON has the allowlisted shape (the same one
-    # the harness's i1583Rec enforces).
-    printf '%s\n' "$status_text" |
-        grep -E '^(gluon|proton-bridge) go_mod_verify=(ok|failed)$|^[a-z-]+ exit=[0-9]+$|^--- (PASS|FAIL|SKIP): TestIssue1583[A-Za-z0-9]+$|^inside: [a-z ]+$' \
-            >"$out/run-status.txt" || true
-    cat "$out/run-status.txt"
-    if [[ "$debug" == debug ]]; then
-        printf '%s\n' "$status_text" | grep -E 'zz_issue1583_([a-z]+_)?test\.go:[0-9]+' | LC_ALL=C tr -cd '[:print:]\n' || true
-    fi
-    for name in gluon.json bridge-builder.json bridge.json; do
-        fetch_result "$name" "$out/$name.tmp"
-        jq -e 'type == "object" and all(.[];
-                type == "object" and all(to_entries[];
-                    (.key | test("^[a-z0-9_]{1,64}$")) and
-                    (.value | type == "boolean" or type == "number"
-                        or (type == "string" and test("^[A-Za-z_]{0,16}$")))))' \
-            "$out/$name.tmp" >/dev/null || die "$name: not in the allowlisted result shape"
-        jq -e 'keys | all(test("^[a-z0-9_]{1,64}$"))' "$out/$name.tmp" >/dev/null || die "$name: scenario name not allowlisted"
-        mv "$out/$name.tmp" "$out/$name"
+    : >"$out/run-status.txt"
+    # One run_inside.sh step at a time: each suite's result is copied out
+    # and checked before the next suite starts, so no suite can plant or
+    # rewrite another's result.
+    run_step verify "$out" "$debug" || rc=1
+    for suite in gluon bridge-builder bridge; do
+        if run_step "$suite" "$out" "$debug"; then
+            accept_result "$suite" "$out" || rc=1
+        else
+            rc=1
+        fi
     done
     stop_watchdog
     docker rm -f "$RUNC" >/dev/null
@@ -588,7 +583,7 @@ start_watchdog() {
     (
         local s="" start=$SECONDS size written why=""
         # The sleep or probe may already have ended.
-        trap '[[ -z "$s" ]] || kill "$s" 2>/dev/null || true; [[ -z "$PROBE" ]] || kill -s KILL "$PROBE" 2>/dev/null || true; exit 0' TERM
+        trap '[[ -z "$s" ]] || kill "$s" 2>/dev/null || true; [[ -z "$PROBE" ]] || kill -s KILL -- "-$PROBE" 2>/dev/null || true; exit 0' TERM
         while [[ -z "$why" ]]; do
             sleep "$WATCH_INTERVAL_SECS" &
             s=$!
@@ -611,16 +606,21 @@ start_watchdog() {
     WATCHDOG=$!
 }
 
-# Runs a command for at most <secs> seconds, then kills it and fails (the
-# host may have no timeout(1)). Its pid is in PROBE while it runs.
+# Runs a command for at most <secs> seconds, then kills it with every
+# process it started and fails (the host may have no timeout(1)). The
+# command runs in its own process group (job control), whose id is in
+# PROBE while it runs: git fetch, for one, starts helpers that would
+# outlive a kill of its own pid.
 bounded() {
     local secs="$1" rc=0 i=0
     shift
+    set -m
     "$@" &
     PROBE=$!
+    set +m
     while kill -0 "$PROBE" 2>/dev/null; do
         if ((i >= secs * 10)); then
-            kill -s KILL "$PROBE" 2>/dev/null || true
+            kill -s KILL -- "-$PROBE" 2>/dev/null || true
             break
         fi
         i=$((i + 1))
@@ -665,6 +665,55 @@ stop_watchdog() {
     WATCHDOG=""
     ((st == 0)) || die "the watchdog fired or failed (status $st); the run is not valid"
     require_running
+}
+
+# Runs one run_inside.sh step (verify or a suite). Both streams are read,
+# capped: the tests run as the same user as run_inside.sh and can write to
+# either. Everything from the container is untrusted, so only fixed-shape
+# status lines are shown and appended to run-status.txt (with debug, also
+# the harness's own diagnostic lines, printable characters only). The
+# step's status lines are left in STEP_LINES; returns the step's status.
+run_step() {
+    local step="$1" out="$2" debug="$3" text src=0
+    text="$(docker exec "$RUNC" /home/h/run_inside.sh "$step" "$debug" 2>&1 | head -c 65536)" || src=$?
+    require_running
+    STEP_LINES="$(printf '%s\n' "$text" |
+        grep -E '^(gluon|proton-bridge) go_mod_verify=(ok|failed)$|^[a-z-]+ exit=[0-9]+$|^--- (PASS|FAIL|SKIP): TestIssue1583[A-Za-z0-9]+$|^inside: [a-z ]+$' || true)"
+    [[ -z "$STEP_LINES" ]] || printf '%s\n' "$STEP_LINES" | tee -a "$out/run-status.txt"
+    if [[ "$debug" == debug ]]; then
+        printf '%s\n' "$text" | grep -E 'zz_issue1583_([a-z]+_)?test\.go:[0-9]+' | LC_ALL=C tr -cd '[:print:]\n' || true
+    fi
+    return "$src"
+}
+
+# Copies a suite's result out and keeps it only if the suite reported
+# exactly the tests manifest.json lists, all passing, and the result holds
+# exactly the scenarios, keys and value types listed there, in the
+# allowlisted shape
+# (the one the harness's i1583Rec enforces). An empty or partial result,
+# or a test that never ran, fails. Uses the suite's STEP_LINES.
+accept_result() {
+    local suite="$1" out="$2" manifest="$HERE/manifest.json" tmp="$2/$1.json.tmp"
+    if ! { [[ "$(printf '%s\n' "$STEP_LINES" | sed -n 's/^--- PASS: //p' | LC_ALL=C sort)" == "$(jq -r --arg s "$suite" '.[$s].tests[]' "$manifest" | LC_ALL=C sort)" ]] &&
+        printf '%s\n' "$STEP_LINES" | grep -qx "$suite exit=0" &&
+        ! printf '%s\n' "$STEP_LINES" | grep -qE '^--- (FAIL|SKIP): '; }; then
+        printf 'run.sh: %s: the tests that passed differ from manifest.json\n' "$suite" >&2
+        return 1
+    fi
+    fetch_result "$suite/$suite.json" "$tmp"
+    jq -e 'type == "object" and all(.[];
+            type == "object" and all(to_entries[];
+                (.key | test("^[a-z0-9_]{1,64}$")) and
+                (.value | type == "boolean" or type == "number"
+                    or (type == "string" and test("^[A-Za-z_]{0,16}$")))))' \
+        "$tmp" >/dev/null || die "$suite.json: not in the allowlisted result shape"
+    # Every scenario, key and JSON type exactly as listed; a repeated key
+    # (which the parser would collapse) fails too.
+    jq -e --slurpfile m "$manifest" --arg s "$suite" '$m[0][$s].scenarios == map_values(map_values(type))' \
+        "$tmp" >/dev/null || die "$suite.json: scenarios, keys or types differ from manifest.json"
+    [[ "$(jq -n --stream '[inputs | select(length == 2)] | length' "$tmp")" == "$(jq '[tostream | select(length == 2)] | length' "$tmp")" ]] ||
+        die "$suite.json: repeats a key"
+    mv "$tmp" "$out/$suite.json"
 }
 
 # Reads one result file out of the execution container into <dest>. The

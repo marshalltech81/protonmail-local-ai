@@ -295,6 +295,17 @@ func (s *i1583Store) dropAll(tb testing.TB) int {
 	return len(idsList)
 }
 
+// storedOnly returns the store's only literal, read past the counters.
+func (s *i1583Store) storedOnly(tb testing.TB) []byte {
+	idsList, err := s.Store.List()
+	require.NoError(tb, err)
+	require.Len(tb, idsList, 1)
+	b, err := s.Store.Get(idsList[0])
+	require.NoError(tb, err)
+
+	return b
+}
+
 func (s *i1583Store) resetCounters() {
 	s.gets.Store(0)
 	s.misses.Store(0)
@@ -950,19 +961,32 @@ func TestIssue1583Item5Rebuild(t *testing.T) {
 		i1583Rec(t, sc, "equivalent_uncached_bytes_equal", bytes.Equal(m4.body, before.body))
 		i1583Rec(t, sc, "equivalent_uncached_gluon_id_unchanged", i1583GluonID(t, m4.body) == i1583GluonID(t, before.body))
 
-		// e. Byte-identical update with the literal cached.
+		// e. The connector repeats the bytes it sent last, literal cached.
+		// They carry no X-Pm-Gluon-Id, which Gluon adds before comparing,
+		// so they are not the stored bytes.
 		before = observe()
 		s.messageUpdatedWithID("user", mid, mbox, i1583Multipart("boundary-four", "synthetic text"), time.Now())
 		m5 := observe()
-		i1583Rec(t, sc, "identical_cached_uid_unchanged", m5.uid == before.uid)
-		i1583Rec(t, sc, "identical_cached_bytes_equal", bytes.Equal(m5.body, before.body))
+		i1583Rec(t, sc, "repeat_cached_uid_unchanged", m5.uid == before.uid)
+		i1583Rec(t, sc, "repeat_cached_bytes_equal", bytes.Equal(m5.body, before.body))
 
-		// f. Content update (control).
+		// f. Byte-identical update, literal cached: exactly the stored
+		// literal, Gluon's X-Pm-Gluon-Id included.
+		stored := st.storedOnly(t)
+		before = observe()
+		s.messageUpdatedWithID("user", mid, mbox, stored, time.Now())
+		m6 := observe()
+		i1583Rec(t, sc, "identical_cached_input_equals_served", bytes.Equal(stored, before.body))
+		i1583Rec(t, sc, "identical_cached_uid_unchanged", m6.uid == before.uid)
+		i1583Rec(t, sc, "identical_cached_bytes_equal", bytes.Equal(m6.body, before.body))
+		i1583Rec(t, sc, "identical_cached_gluon_id_unchanged", i1583GluonID(t, m6.body) == i1583GluonID(t, before.body))
+
+		// g. Content update (control).
 		before = observe()
 		s.messageUpdatedWithID("user", mid, mbox, i1583Multipart("boundary-four", "changed synthetic text"), time.Now())
-		m6 := observe()
-		i1583Rec(t, sc, "changed_uid_unchanged", m6.uid == before.uid)
-		i1583Rec(t, sc, "changed_gluon_id_unchanged", i1583GluonID(t, m6.body) == i1583GluonID(t, before.body))
+		m7 := observe()
+		i1583Rec(t, sc, "changed_uid_unchanged", m7.uid == before.uid)
+		i1583Rec(t, sc, "changed_gluon_id_unchanged", i1583GluonID(t, m7.body) == i1583GluonID(t, before.body))
 	})
 }
 

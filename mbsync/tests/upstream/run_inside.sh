@@ -5,15 +5,19 @@ set -Eeuo pipefail
 # and runs the issue #1583 harness tests with the module cache only
 # (GOPROXY=off, -mod=readonly, GOTOOLCHAIN=local). Test output, including
 # any upstream log text, stays in /home/h/logs inside the container; only
-# fixed tokens are printed and only /home/h/out (allowlisted JSON) is
-# copied out by run.sh.
+# fixed tokens are printed. run.sh calls it once per step, so it can copy
+# each suite's result out before the next suite starts:
+#   run_inside.sh verify
+#   run_inside.sh gluon|bridge-builder|bridge [debug]
+# A suite writes only to its own /home/h/out/<suite>, made new here while
+# no test process runs, so nothing an earlier suite left behind is there.
 
 export HOME=/home/h
 export PATH=/usr/local/go/bin:/usr/bin:/bin
 export GOTOOLCHAIN=local GOPROXY=off GOFLAGS=-mod=readonly GOSUMDB=off GOTELEMETRY=off
 export GOMODCACHE=/home/h/gomodcache GOCACHE=/home/h/gocache CGO_ENABLED=1
-export ISSUE1583_OUT=/home/h/out ISSUE1583_LOGS=/home/h/logs
-readonly DEBUG="${1:-}"
+export ISSUE1583_LOGS=/home/h/logs
+readonly STEP="${1:-}" DEBUG="${2:-}"
 
 if [[ "$(go env GOVERSION)" != "go1.26.7" ]]; then
     printf 'inside: unexpected Go version\n' >&2
@@ -50,6 +54,9 @@ stop_leftovers() {
 run() {
     local name="$1" mod="$2" pkg="$3" timeout="$4" rc=0 log="/home/h/logs/$1.log" w r output cache tmp
     stop_leftovers
+    rm -rf "/home/h/out/$name"
+    mkdir -m 700 "/home/h/out/$name"
+    export ISSUE1583_OUT="/home/h/out/$name"
     cache="$(mktemp -d /home/h/gocache/suite.XXXXXXXX)"
     tmp="$(mktemp -d /tmp/suite.XXXXXXXX)"
     rm -f "$log"
@@ -74,9 +81,17 @@ run() {
     fi
 }
 
-verify gluon
-verify proton-bridge
-run gluon gluon ./tests 30m
-run bridge-builder proton-bridge ./internal/services/imapservice 20m
-run bridge proton-bridge ./internal/bridge 30m
+case "$STEP" in
+    verify)
+        verify gluon
+        verify proton-bridge
+        ;;
+    gluon) run gluon gluon ./tests 30m ;;
+    bridge-builder) run bridge-builder proton-bridge ./internal/services/imapservice 20m ;;
+    bridge) run bridge proton-bridge ./internal/bridge 30m ;;
+    *)
+        printf 'inside: unknown step\n' >&2
+        exit 1
+        ;;
+esac
 exit "$status"
