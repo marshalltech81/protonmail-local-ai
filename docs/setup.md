@@ -1000,9 +1000,9 @@ a secret file it names or a protected file. For the accounts:
 - An `imap` account (`[accounts.imap]` with its folder roles) is part of
   the schema, but enabling one is refused until #1606.
 
-Certificate pin rotation (`BRIDGE_CERT_PIN_ROTATE`) and forced deletion
-(`INDEXER_DELETION_FORCE`) are not configuration in the TOML file: they
-become one-run commands (#1609).
+Certificate pin rotation and forced deletion are not configuration:
+they are the one-run commands `make rotate-bridge-pin` and
+`make force-deletion` (#1609).
 
 Every `.env.example` setting, every TOML key and what stays fixed (a
 test in `scripts/config/tests` keeps these tables equal to the
@@ -1025,7 +1025,6 @@ largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
 | `PROTON_LOCAL_STORE_NAME` | `accounts[].sync.local_store_name` | protonmail-local | text; proton-settings.sh names | mbsync (mbsyncrc) | recreate mbsync |
 | `PROTON_CHANNEL_NAME` | `accounts[].sync.channel_name` | protonmail | text; proton-settings.sh names | mbsync (mbsyncrc, output filter) | recreate mbsync |
 | `PROTON_FOLDER_EXCLUSIONS` | `accounts[].sync.mailboxes.exclude` | All Mail, Labels/\*, Starred (proton-bridge) | list of text, at most 256; joined with \|; must keep All Mail, Labels/\*, Starred | mbsync (mbsyncrc Patterns) | recreate mbsync; mail already synced stays |
-| `BRIDGE_CERT_PIN_ROTATE` | maintenance command (#1609) | - | - | mbsync (pin check) | one-run command |
 | `SYNC_INTERVAL` | `accounts[].sync.interval_seconds` | 60 | integer >= 1 | mbsync (entrypoint, healthcheck) | recreate mbsync |
 | `SYNC_DEADLINE_SECONDS` | `accounts[].sync.deadline_seconds` | 86400 | integer 1 to 999999999 | mbsync (entrypoint, healthcheck) | recreate mbsync |
 | `EMBED_BASE_URL` | `global.embedding.base_url` | required | text; URL or default | indexer, mcp-server | recreate indexer and mcp-server; on an existing index it must match the recorded embedder |
@@ -1055,7 +1054,6 @@ largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
 | `INDEXER_DELETION_GRACE_DAYS` | `global.indexer.deletion.grace_days` | 7 | integer >= 0 | indexer (reconciler) | recreate indexer |
 | `INDEXER_DELETION_SWEEP_INTERVAL_SECS` | `global.indexer.deletion.sweep_interval_seconds` | 3600 | integer >= 60 | indexer (reconciler) | recreate indexer |
 | `INDEXER_DELETION_MAX_BATCH_PCT` | `global.indexer.deletion.max_batch_fraction` | 0.05 | number 0 to 1 | indexer (reconciler) | recreate indexer |
-| `INDEXER_DELETION_FORCE` | maintenance command (#1609) | - | - | indexer (reconciler) | one-run command |
 | `INDEXER_MAX_ATTEMPTS` | `global.indexer.retry.max_attempts` | 5 | integer >= 1 | indexer (queue) | recreate indexer |
 | `INDEXER_RETRY_BASE_SECONDS` | `global.indexer.retry.base_seconds` | 30 | integer >= 1 | indexer (queue) | recreate indexer |
 | `INDEXER_MESSAGE_TIMEOUT_SECONDS` | `global.indexer.message_timeout_seconds` | 3600 | integer >= 0; 0 disables | indexer | recreate indexer |

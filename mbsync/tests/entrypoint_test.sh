@@ -3529,7 +3529,7 @@ check "policy outside the provider section is reported" \
 # settings the healthcheck also reads change its verdict too. A shell read
 # that is deleted, while Compose still passes the setting, fails here
 # (the mutation cases below show it for each reader file).
-SHELL_ONLY_BEHAVIOUR_KEYS=(BRIDGE_USER BRIDGE_CERT_FINGERPRINT BRIDGE_IMAP_PORT BRIDGE_CERT_PIN_ROTATE PROTON_FOLDER_EXCLUSIONS BRIDGE_HOST BRIDGE_CERT_HOST PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME SYNC_INTERVAL SYNC_DEADLINE_SECONDS)
+SHELL_ONLY_BEHAVIOUR_KEYS=(BRIDGE_USER BRIDGE_CERT_FINGERPRINT BRIDGE_IMAP_PORT PROTON_FOLDER_EXCLUSIONS BRIDGE_HOST BRIDGE_CERT_HOST PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME SYNC_INTERVAL SYNC_DEADLINE_SECONDS)
 readonly SHELL_ONLY_BEHAVIOUR_KEYS
 
 # The order of a start that syncs, then stops at the sleep between syncs.
@@ -3565,14 +3565,6 @@ setting_changes_behaviour() {
         BRIDGE_IMAP_PORT)
             order_run BRIDGE_CERT_FINGERPRINT="$fp_a" BRIDGE_IMAP_PORT=2993
             order_is "$SYNCED_START" 143 && rendered_has 'Tunnel "exec socat - TCP:host.docker.internal:2993"'
-            ;;
-        BRIDGE_CERT_PIN_ROTATE)
-            # A pinned certificate a, the expected and served certificate
-            # b: refused as a pin mismatch unless rotation is on.
-            printf '%s\n' "$fp_a" >"$ORDER_DIR/state/bridge-cert.fingerprint"
-            printf '%s\n' "$WORK/cert-b.pem" >"$ORDER_DIR/served"
-            order_run BRIDGE_CERT_FINGERPRINT="$fp_b" BRIDGE_CERT_PIN_ROTATE=true
-            order_is "identity rotation-on render wait probe cert-fetch pin-rotated cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143
             ;;
         PROTON_FOLDER_EXCLUSIONS)
             order_run BRIDGE_CERT_FINGERPRINT="$fp_a" \
@@ -3692,7 +3684,7 @@ every_shell_only_setting_changes_behaviour() {
             return 1
         }
     done
-    ((${#SHELL_ONLY_BEHAVIOUR_KEYS[@]} == 13)) || return 1
+    ((${#SHELL_ONLY_BEHAVIOUR_KEYS[@]} == 12)) || return 1
 }
 
 # A read deleted from each reader file, the setting still passed: its
