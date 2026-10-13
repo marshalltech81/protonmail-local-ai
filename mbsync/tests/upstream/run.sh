@@ -63,12 +63,15 @@ readonly IMAGE_REPO=i1583-upstream
 # (the three go test runs take at most 80 minutes by their own -timeout,
 # which the code under test can defeat). Enforced from the host.
 readonly EXEC_DEADLINE_SECS=7200
-# Resource caps for the execution container, measured on a full run
-# (2026-10-13: at most 3.2 cores and 1.5 GB written to its writable layer).
-# No engine-side quota for that layer exists without a mount (OrbStack's
-# overlay2 on btrfs refuses --storage-opt size), so the watchdog measures
-# it from the host every WATCH_INTERVAL_SECS and kills the container
-# beyond the cap.
+# Resource caps for the execution container, measured on full runs
+# (2026-10-13: at most 3.2 cores, 1.5 GB in its writable layer and 1.23 GB
+# written to disk). No engine-side quota for that layer exists without a
+# mount (OrbStack's overlay2 on btrfs refuses --storage-opt size), so the
+# watchdog measures from the host every WATCH_INTERVAL_SECS and kills the
+# container when either the layer's size or its cgroup's bytes written to
+# disk (which count files unlinked while open) passes the cap. What it can
+# hold is then bounded by the cap, plus unflushed data (charged to its
+# 8 GiB memory limit), plus one interval's writes.
 readonly EXEC_MAX_CPUS=4
 readonly EXEC_MAX_WRITE_BYTES=8589934592
 readonly WATCH_INTERVAL_SECS=5
@@ -508,21 +511,23 @@ cmd_execute() {
 # have passed, so a hang inside it (go test's own -timeout runs in the
 # code under test) ends every docker exec into it. Every
 # WATCH_INTERVAL_SECS it also measures the container's writable layer and
-# kills it beyond EXEC_MAX_WRITE_BYTES, or when the size cannot be read.
+# its bytes written to disk, and kills it when either passes
+# EXEC_MAX_WRITE_BYTES or cannot be read.
 start_watchdog() {
     (
         trap 'kill "$s" 2>/dev/null; exit 0' TERM
-        local start=$SECONDS size why=""
+        local start=$SECONDS size written why=""
         while [[ -z "$why" ]]; do
             sleep "$WATCH_INTERVAL_SECS" &
             s=$!
             wait "$s"
             size="$(docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
+            written="$(container_written_bytes)" || written=""
             if ((SECONDS - start >= EXEC_DEADLINE_SECS)); then
                 why="passed its $EXEC_DEADLINE_SECS s deadline"
-            elif [[ ! "$size" =~ ^[0-9]+$ ]]; then
-                why="has a writable layer whose size cannot be read"
-            elif ((size > EXEC_MAX_WRITE_BYTES)); then
+            elif [[ ! "$size" =~ ^[0-9]+$ || ! "$written" =~ ^[0-9]+$ ]]; then
+                why="has a layer size or bytes-written count that cannot be read"
+            elif ((size > EXEC_MAX_WRITE_BYTES || written > EXEC_MAX_WRITE_BYTES)); then
                 why="wrote more than $EXEC_MAX_WRITE_BYTES bytes"
             fi
         done
@@ -530,6 +535,23 @@ start_watchdog() {
         docker kill "$RUNC" >/dev/null
     ) &
     WATCHDOG=$!
+}
+
+# Bytes the execution container's cgroup wrote to block devices, from
+# docker stats' BlockIO ("<read> / <written>" in decimal units such as
+# 315MB or 1.23GB). Unlike the layer size, it counts data written to a
+# file that was unlinked while open.
+container_written_bytes() {
+    local io
+    io="$(docker stats --no-stream --format '{{.BlockIO}}' "$RUNC")" || return 1
+    awk -v w="${io##*/ }" 'BEGIN {
+        if (!match(w, /^[0-9]+(\.[0-9]+)?/)) exit 1
+        n = substr(w, 1, RLENGTH)
+        u = substr(w, RLENGTH + 1)
+        split("B kB MB GB TB PB", units, " ")
+        for (i = 1; i <= 6; i++) if (u == units[i]) { printf "%.0f\n", n * 1000 ^ (i - 1); exit 0 }
+        exit 1
+    }'
 }
 
 # Fails when the execution container has stopped (the watchdog fired).
@@ -672,8 +694,10 @@ main() {
             [[ -n "${3:-}" ]] || die "all needs an out dir"
             local out
             out="$(resolve_out "$3")"
-            # Clean up after any failure from here on, keeping its status.
-            trap 'rc=$?; trap - EXIT; [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true; cmd_clean || true; exit "$rc"' EXIT
+            # Clean up at exit. An earlier failure keeps its status; a
+            # failed cleanup after a success exits 1. cmd_clean runs in a
+            # subshell so its die cannot replace the earlier status.
+            trap 'rc=$?; trap - EXIT; [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true; (cmd_clean) || { [[ "$rc" -ne 0 ]] || rc=1; }; exit "$rc"' EXIT
             cmd_acquire
             cmd_assemble
             cmd_execute "$out"
