@@ -366,6 +366,96 @@ REFUSALS: list[tuple[str, list[tuple[str, Any]], str]] = [
     ),
 ]
 
+# Review round 1: what scripts/validate-env.sh or a service would refuse in
+# the projection is refused here too, with fixed text.
+REFUSALS += [
+    (
+        "blank text",
+        [("accounts.0.connection.username", "   ")],
+        "accounts[0].connection.username must not be blank.",
+    ),
+    (
+        "a blank model",
+        [("global.embedding.model", " ")],
+        "global.embedding.model must not be blank.",
+    ),
+    (
+        "a blank base_url",
+        [("global.embedding.base_url", "  ")],
+        "global.embedding.base_url must not be blank.",
+    ),
+    (
+        "a blank list entry",
+        [("accounts.0.identity.addresses", [" "])],
+        "accounts[0].identity.addresses[0] must not be blank.",
+    ),
+    (
+        "a base_url that is not a URL",
+        [("global.embedding.base_url", f"{MARKER}.example")],
+        "global.embedding.base_url must be default or start with http:// or https://.",
+    ),
+    (
+        "a base_url with credentials",
+        [("global.embedding.base_url", f"https://u:{MARKER}@x.example/v1")],
+        "global.embedding.base_url must not embed credentials (user:pass@host): put the key in the layer's api_key_file.",
+    ),
+    (
+        "an anthropic base_url ending in /v1",
+        [
+            ("global.inference.mode", "anthropic"),
+            ("global.inference.model", "m"),
+            ("global.inference.base_url", "https://gw.example/v1/"),
+        ],
+        "global.inference.base_url must not end with /v1 when global.inference.mode is anthropic: the SDK appends /v1/messages itself.",
+    ),
+    (
+        "chunk target over max",
+        [("global.indexer.chunking.target_tokens", 1600)],
+        "global.indexer.chunking.target_tokens must be at most global.indexer.chunking.max_tokens.",
+    ),
+    (
+        "overlap not under target",
+        [("global.indexer.chunking.overlap_tokens", 1000)],
+        "global.indexer.chunking.overlap_tokens must be less than global.indexer.chunking.target_tokens.",
+    ),
+    (
+        "a context too small for its reply",
+        [
+            ("global.inference.mode", "openai"),
+            ("global.inference.base_url", "default"),
+            ("global.inference.model", "m"),
+            ("global.inference.max_tokens", 4096),
+            ("global.inference.context_tokens", 5000),
+        ],
+        "global.inference.context_tokens (32768 when unset) must exceed global.inference.max_tokens (1024 when unset) by at least 1088.",
+    ),
+    (
+        "an anthropic default context under a large reply",
+        [
+            ("global.inference.mode", "anthropic"),
+            ("global.inference.base_url", "default"),
+            ("global.inference.model", "m"),
+            ("global.inference.max_tokens", 47000),
+        ],
+        "global.inference.context_tokens (48000 when unset) must exceed global.inference.max_tokens (16000 when unset) by at least 1088.",
+    ),
+    (
+        "the placeholder username",
+        [("accounts.0.connection.username", "your@proton.me")],
+        "accounts[0].connection.username must be the username from the Bridge app's IMAP details, not the example's placeholder.",
+    ),
+    (
+        "a model key that is the MCP token",
+        [("global.inference.api_key_file", "../.secrets/mcp_auth_token.txt")],
+        "global.inference.api_key_file is a reserved credential file (.secrets/mcp_auth_token.txt, .secrets/mcp_client_headers.txt): each secret goes only where it belongs.",
+    ),
+    (
+        "a password file that is the MCP token",
+        [("accounts.0.password_file", "../.secrets/mcp_auth_token.txt")],
+        "accounts[0].password_file is a reserved credential file (.secrets/mcp_auth_token.txt, .secrets/mcp_client_headers.txt): each secret goes only where it belongs.",
+    ),
+]
+
 # Refused by mbsync/proton-settings.sh, whose fixed text the refusal carries.
 PROTON_REFUSALS: list[tuple[str, str, Any, str]] = [
     (
@@ -433,6 +523,44 @@ class Refusals(unittest.TestCase):
                 data = fixture()
                 _set(data, path, value)
                 self.assert_refused(data, f"accounts[0]: {expected}", prefix=True)
+
+    def test_the_round_one_rules_accept_their_boundaries(self) -> None:
+        # The accepted side of each rule above, as validate-env.sh draws it.
+        data = fixture()
+        inference = {"mode": "openai", "base_url": "DEFAULT", "model": "m"}
+        data["global"]["inference"] = {
+            **inference,
+            "max_tokens": 4096,
+            "context_tokens": 4096 + 1088,
+        }
+        data["global"]["indexer"] = {
+            "chunking": {"target_tokens": 1500, "max_tokens": 1500, "overlap_tokens": 1499}
+        }
+        data["global"]["reranking"] = {
+            "mode": "cohere",
+            "base_url": "https://gw.example/v1",
+            "model": "m",
+        }
+        checked(data)
+        # A disabled layer's budget and URL are not checked, as in validate-env.sh.
+        data["global"]["inference"] = {
+            "mode": "none",
+            "base_url": "x",
+            "max_tokens": 9000,
+            "context_tokens": 1,
+        }
+        checked(data)
+
+    def test_a_link_to_a_reserved_file_is_refused(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / "key.txt").symlink_to(REPO / ".secrets" / "mcp_auth_token.txt")
+        data = fixture()
+        data["global"]["embedding"]["api_key_file"] = str(tmp / "key.txt")
+        self.assert_refused(
+            data,
+            "global.embedding.api_key_file is a reserved credential file (.secrets/mcp_auth_token.txt, .secrets/mcp_client_headers.txt): each secret goes only where it belongs.",
+        )
 
     def test_duplicate_uuids_are_refused(self) -> None:
         data = fixture()
@@ -681,7 +809,7 @@ SAMPLES: dict[str, list[tuple[Any, str]]] = {
     "INDEXER_MAX_ATTEMPTS": [(1, "1"), (6, "6")],
     "INDEXER_RETRY_BASE_SECONDS": [(1, "1"), (31, "31")],
     "INDEXER_MESSAGE_TIMEOUT_SECONDS": [(0, "0"), (3601, "3601")],
-    "INDEXER_CHUNK_TARGET_TOKENS": [(1, "1"), (1001, "1001")],
+    "INDEXER_CHUNK_TARGET_TOKENS": [(151, "151"), (1001, "1001")],
     "INDEXER_CHUNK_MAX_TOKENS": [(1501, "1501"), (1502, "1502")],
     "INDEXER_CHUNK_OVERLAP_TOKENS": [(0, "0"), (151, "151")],
     "INDEXER_PARSE_MAX_BYTES": [(0, "0"), (50000001, "50000001")],

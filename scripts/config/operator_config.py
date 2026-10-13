@@ -64,6 +64,12 @@ IDENTITY_MAX_BYTES = 64 * 1024
 IDENTITY_MAX_ADDRESSES = 1_000
 
 LEGACY_ROOT = "/maildir"
+# Credentials with a fixed place, which no configured secret path may name:
+# the MCP bearer token (and the header file an older setup left), read by
+# the client helpers and mounted in mcp-server only.
+RESERVED_SECRET_FILES = (".secrets/mcp_auth_token.txt", ".secrets/mcp_client_headers.txt")
+# .env.example's placeholder, which scripts/validate-env.sh refuses too.
+PLACEHOLDER_USERNAME = "your@proton.me"
 PROTON = "proton-bridge"
 IMAP = "imap"
 # mbsync/proton-settings.sh PROTON_PROTECTED_FOLDER_EXCLUSIONS, which
@@ -194,6 +200,9 @@ class Text(Leaf):
             raise ConfigError(f"{path} must be text of 1 to {self.max_chars} characters.")
         if _CONTROL_RE.search(value):
             raise ConfigError(f"{path} must not hold control characters or line breaks.")
+        # The services read values trimmed: a blank one is a missing one.
+        if not value.strip():
+            raise ConfigError(f"{path} must not be blank.")
         if self.projected and "'" in value:
             raise ConfigError(f"{path} must not hold a single quote (').")
         if self.no_pipe and "|" in value:
@@ -554,6 +563,10 @@ def validate(data: dict[str, Any], base: Path) -> dict[str, Any]:
         raise ConfigError("global is required.")
     config_global = _check_table(data["global"], GLOBAL, "global", base)
     _check_model_layers(config_global)
+    for layer in ("embedding", "inference", "reranking"):
+        _check_not_reserved(config_global[layer]["api_key_file"], f"global.{layer}.api_key_file")
+    _check_inference_budget(config_global["inference"])
+    _check_chunking(config_global["indexer"]["chunking"])
     _check_authority(config_global["classification"]["authority"])
 
     if "accounts" not in data:
@@ -576,8 +589,8 @@ def validate(data: dict[str, Any], base: Path) -> dict[str, Any]:
 def _check_model_layers(config_global: dict[str, Any]) -> None:
     """An enabled layer names its endpoint and model (the required-vars
     contract, AGENTS.md): embedding always, inference and reranking unless
-    their mode is none. base_url is a URL or ``default``; scripts/
-    validate-env.sh and the services check its form."""
+    their mode is none. base_url is a URL or ``default``, in the form
+    scripts/validate-env.sh requires (_check_base_url)."""
     for layer in ("embedding", "inference", "reranking"):
         table = config_global[layer]
         if table["mode"] == "none":
@@ -592,6 +605,73 @@ def _check_model_layers(config_global: dict[str, Any]) -> None:
                         else "."
                     )
                 )
+        _check_base_url(layer, table)
+
+
+def _same_file(path: Path) -> str:
+    """A path as compared with others: links followed, so two spellings
+    of one file are the same."""
+    return os.path.realpath(path)
+
+
+def _check_not_reserved(path: Path, key: str) -> None:
+    if _same_file(path) in {_same_file(REPO_ROOT / name) for name in RESERVED_SECRET_FILES}:
+        raise ConfigError(
+            f"{key} is a reserved credential file ({', '.join(RESERVED_SECRET_FILES)}): "
+            "each secret goes only where it belongs."
+        )
+
+
+def _check_base_url(layer: str, table: dict[str, Any]) -> None:
+    """The form scripts/validate-env.sh requires of an enabled layer's
+    base_url: ``default`` (any case), or an http(s) URL without userinfo,
+    and for anthropic not ending in /v1."""
+    path = f"global.{layer}.base_url"
+    value = table["base_url"].strip()
+    if value.lower() == "default":
+        return
+    if not re.match(r"https?://", value):
+        raise ConfigError(f"{path} must be default or start with http:// or https://.")
+    if re.match(r"https?://[^/]*@", value):
+        raise ConfigError(
+            f"{path} must not embed credentials (user:pass@host): put the key in the layer's api_key_file."
+        )
+    if table["mode"] == "anthropic" and value.rstrip("/").endswith("/v1"):
+        raise ConfigError(
+            f"{path} must not end with /v1 when global.{layer}.mode is anthropic: "
+            "the SDK appends /v1/messages itself."
+        )
+
+
+# mcp-server's per-mode defaults (#764) and the reserve PromptBudget keeps
+# (mcp-server/src/lib/inference.py), as scripts/validate-env.sh checks them.
+_DEFAULT_TOKENS = {"anthropic": (16000, 48000), "openai": (1024, 32768)}
+_PROMPT_RESERVE = 1088
+
+
+def _check_inference_budget(inference: dict[str, Any]) -> None:
+    if inference["mode"] == "none":
+        return
+    default_max, default_context = _DEFAULT_TOKENS[inference["mode"]]
+    max_tokens = inference["max_tokens"] if inference["max_tokens"] is not None else default_max
+    context = (
+        inference["context_tokens"] if inference["context_tokens"] is not None else default_context
+    )
+    if context < max_tokens + _PROMPT_RESERVE:
+        raise ConfigError(
+            f"global.inference.context_tokens ({default_context} when unset) must exceed "
+            f"global.inference.max_tokens ({default_max} when unset) "
+            f"by at least {_PROMPT_RESERVE}."
+        )
+
+
+def _check_chunking(chunking: dict[str, Any]) -> None:
+    """chunker.chunk_message's rules, which the indexer checks at startup."""
+    path = "global.indexer.chunking"
+    if chunking["target_tokens"] > chunking["max_tokens"]:
+        raise ConfigError(f"{path}.target_tokens must be at most {path}.max_tokens.")
+    if chunking["overlap_tokens"] >= chunking["target_tokens"]:
+        raise ConfigError(f"{path}.overlap_tokens must be less than {path}.target_tokens.")
 
 
 def _check_authority(authority: dict[str, Any] | None) -> None:
@@ -647,9 +727,10 @@ def _check_accounts(accounts: list[dict[str, Any]], config_global: dict[str, Any
     seen_uuids: set[str] = set()
     legacy = []
     key_files = {
-        config_global[layer]["api_key_file"] for layer in ("embedding", "inference", "reranking")
+        _same_file(config_global[layer]["api_key_file"])
+        for layer in ("embedding", "inference", "reranking")
     }
-    password_files: set[Path] = set()
+    password_files: set[str] = set()
     for i, account in enumerate(accounts):
         path = f"accounts[{i}]"
         uuid = account["scope_uuid"]
@@ -668,7 +749,13 @@ def _check_accounts(accounts: list[dict[str, Any]], config_global: dict[str, Any
             )
         if len(legacy) > 1:
             raise ConfigError(f"{path}.maildir_root: only one account may use {LEGACY_ROOT}.")
-        password = account["password_file"]
+        if account["connection"]["username"].strip() == PLACEHOLDER_USERNAME:
+            raise ConfigError(
+                f"{path}.connection.username must be the username from the Bridge app's IMAP "
+                "details, not the example's placeholder."
+            )
+        _check_not_reserved(account["password_file"], f"{path}.password_file")
+        password = _same_file(account["password_file"])
         if password in password_files or password in key_files:
             raise ConfigError(
                 f"{path}.password_file is another account's password file or a model API key file: "
