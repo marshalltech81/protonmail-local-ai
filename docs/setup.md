@@ -968,8 +968,12 @@ layer's `base_url` that is not `default` or an http(s) URL without
 credentials, an anthropic `base_url` ending in `/v1`, chunk budgets or
 an inference context that do not fit together, the example's placeholder
 username), and any layer's `base_url`, enabled or not, that carries
-credentials or is not a URL `mcp-server` can split. No secret path may
-name `.secrets/mcp_auth_token.txt`. With `--out` set, it refuses an
+credentials or is not a URL `mcp-server` can split, and an identity
+address or authority pattern the indexer's loaders would refuse (not a
+bare address or domain, or repeated). No secret path may name
+`.secrets/mcp_auth_token.txt`; this and the file rules below hold for
+this checkout's files and for those beside a configuration kept
+elsewhere (its own `../.secrets/` and `config/`). With `--out` set, it refuses an
 output directory where an output would replace the configuration file,
 a secret file it names or a protected file. For the accounts:
 
@@ -1079,7 +1083,7 @@ largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
 | `accounts[].maildir_root` | required | /maildir (one account at most) or /accounts/<scope_uuid> | /maildir: today's projection (compose.env); /accounts/<scope_uuid>: its collector only, the indexer mount is #1605 | - |
 | `accounts[].password_file` | required | path, relative to config/; no other account's or model key's, nor a model key's conventional file | the collector's password secret (bridge_pass) | recreate the collector |
 | `accounts[].sync.mailboxes.include` | unset | list of text; empty for proton-bridge | proton-bridge: must be empty; imap: #1606 | - |
-| `accounts[].identity.addresses` | table absent: unconfigured | list of 1 to 1000 addresses; the indexer checks each | config/identity.toml for the indexer (the account at /maildir) | restart indexer |
+| `accounts[].identity.addresses` | table absent: unconfigured | list of 1 to 1000 bare addresses (name@domain); unique | config/identity.toml for the indexer (the account at /maildir) | restart indexer |
 | `accounts[].proton_bridge.declared_address_scope` | unverified | one of combined, split, unverified | none until #1593 | - |
 | `accounts[].imap.folder_roles.trash` | unset | text | none until #1606 | - |
 | `accounts[].imap.folder_roles.sent` | unset | text | none until #1606 | - |
@@ -1088,18 +1092,18 @@ largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
 | `global.embedding.api_key_file` | ../.secrets/embed_api_key.txt | path, relative to config/; not .secrets/bridge_pass.txt | the embed_api_key secret (indexer, mcp-server) | recreate indexer and mcp-server |
 | `global.inference.api_key_file` | ../.secrets/inference_api_key.txt | path, relative to config/; not .secrets/bridge_pass.txt | the inference_api_key secret (mcp-server) | recreate mcp-server |
 | `global.reranking.api_key_file` | ../.secrets/rerank_api_key.txt | path, relative to config/; not .secrets/bridge_pass.txt | the rerank_api_key secret (mcp-server) | recreate mcp-server |
-| `global.classification.authority.counsel.domains` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.counsel.addresses` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.management.domains` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.management.addresses` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.vendor.domains` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.vendor.addresses` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.government.domains` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.government.addresses` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.personal.domains` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.personal.addresses` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.other.domains` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
-| `global.classification.authority.other.addresses` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.counsel.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.counsel.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.management.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.management.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.vendor.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.vendor.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.government.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.government.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.personal.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.personal.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.other.domains` | unset | list of bare domains, at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
+| `global.classification.authority.other.addresses` | unset | list of bare addresses (name@domain), at most 10000; unique across classes | config/authority.toml for the indexer | restart indexer |
 
 | Runtime-owned, not configurable | Why |
 | --- | --- |

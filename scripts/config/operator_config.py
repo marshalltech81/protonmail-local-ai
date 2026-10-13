@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import decimal
+import email.utils
 import json
 import math
 import os
@@ -602,11 +603,16 @@ def validate(data: dict[str, Any], base: Path) -> dict[str, Any]:
         raise ConfigError("global is required.")
     config_global = _check_table(data["global"], GLOBAL, "global", base)
     _check_model_layers(config_global)
+    roots = _roots(base)
     for layer in ("embedding", "inference", "reranking"):
         key_file = config_global[layer]["api_key_file"]
-        _check_not_reserved(key_file, f"global.{layer}.api_key_file")
+        _check_not_reserved(key_file, f"global.{layer}.api_key_file", roots)
         _check_not_conventional(
-            key_file, f"global.{layer}.api_key_file", PASSWORD_SECRET_FILES, "the Bridge password's"
+            key_file,
+            f"global.{layer}.api_key_file",
+            PASSWORD_SECRET_FILES,
+            "the Bridge password's",
+            roots,
         )
     _check_inference_budget(config_global["inference"])
     _check_chunking(config_global["indexer"]["chunking"])
@@ -624,8 +630,9 @@ def validate(data: dict[str, Any], base: Path) -> dict[str, Any]:
         path = f"accounts[{i}]"
         result = _check_table(account, ACCOUNT, path, base)
         _account_defaults(result, path)
+        _check_identity(result["identity"], path)
         checked.append(result)
-    _check_accounts(checked, config_global)
+    _check_accounts(checked, config_global, roots)
     return {"schema_version": version, "global": config_global, "accounts": checked}
 
 
@@ -683,15 +690,25 @@ def _any_same(key: _FileKey, others: list[_FileKey]) -> bool:
     return any(key.same(other) for other in others)
 
 
-def _check_not_reserved(path: Path, key: str) -> None:
-    if _any_same(_FileKey.of(path), [_FileKey.of(REPO_ROOT / n) for n in RESERVED_SECRET_FILES]):
+def _roots(base: Path) -> tuple[Path, ...]:
+    """Where the fixed and conventional files are: this checkout, and the
+    directory above the configuration's (its own .secrets/ and config/)."""
+    return (REPO_ROOT, base.parent)
+
+
+def _named(names: tuple[str, ...], roots: tuple[Path, ...]) -> list[_FileKey]:
+    return [_FileKey.of(root / name) for root in roots for name in names]
+
+
+def _check_not_reserved(path: Path, key: str, roots: tuple[Path, ...]) -> None:
+    if _any_same(_FileKey.of(path), _named(RESERVED_SECRET_FILES, roots)):
         raise ConfigError(
             f"{key} is a reserved credential file ({', '.join(RESERVED_SECRET_FILES)}): "
             "each secret goes only where it belongs."
         )
     suffixes = {Path(p).suffix.lower() for p in (path, os.path.realpath(path))}
     if suffixes & set(PRIVATE_KEY_SUFFIXES) or _any_same(
-        _FileKey.of(path), [_FileKey.of(REPO_ROOT / n) for n in RESERVED_DATA_FILES]
+        _FileKey.of(path), _named(RESERVED_DATA_FILES, roots)
     ):
         raise ConfigError(
             f"{key} is a configuration, data or private-key file "
@@ -701,8 +718,10 @@ def _check_not_reserved(path: Path, key: str) -> None:
         )
 
 
-def _check_not_conventional(path: Path, key: str, names: tuple[str, ...], role: str) -> None:
-    if _any_same(_FileKey.of(path), [_FileKey.of(REPO_ROOT / n) for n in names]):
+def _check_not_conventional(
+    path: Path, key: str, names: tuple[str, ...], role: str, roots: tuple[Path, ...]
+) -> None:
+    if _any_same(_FileKey.of(path), _named(names, roots)):
         raise ConfigError(
             f"{key} is {role} file ({', '.join(names)}): each secret goes only where it belongs."
         )
@@ -774,6 +793,54 @@ def _check_chunking(chunking: dict[str, Any]) -> None:
         raise ConfigError(f"{path}.overlap_tokens must be less than {path}.target_tokens.")
 
 
+# indexer/src/entities.py's address and domain rules (load_authority_rules,
+# load_operator_identity, canonical_addr in indexer/src/parser.py),
+# mirrored on the values this module renders; the indexer still checks.
+# indexer/tests/test_operator_config_parity.py compares them on a catalogue.
+_MAX_DOMAIN_CHARS = 253
+_MAX_DOMAIN_LABELS = 16
+_LDH_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_BARE_DOMAIN_TEXT = (
+    "must be a bare domain: dot-separated labels of letters, digits and hyphens, "
+    f"at most {_MAX_DOMAIN_LABELS} labels and {_MAX_DOMAIN_CHARS} characters."
+)
+
+
+def _is_bare_domain(value: str) -> bool:
+    if not value or len(value) > _MAX_DOMAIN_CHARS:
+        return False
+    labels = value.split(".")
+    return len(labels) <= _MAX_DOMAIN_LABELS and all(
+        _LDH_LABEL_RE.fullmatch(label) for label in labels
+    )
+
+
+def _is_bare_address(value: str) -> bool:
+    """canonical_addr(value) == value and the domain is bare."""
+    try:
+        parsed = email.utils.parseaddr(value)[1].strip().lower()
+    except Exception:  # canonical_addr reads any failure as no address
+        return False
+    _, at, domain = value.rpartition("@")
+    return "@" in parsed and parsed == value and bool(at) and _is_bare_domain(domain)
+
+
+def _check_identity(identity: dict[str, Any] | None, path: str) -> None:
+    if identity is None:
+        return
+    seen: set[str] = set()
+    for i, entry in enumerate(identity["addresses"]):
+        address = entry.strip().lower()
+        where = f"{path}.identity.addresses[{i}]"
+        if not _is_bare_address(address) or address.startswith("@"):
+            raise ConfigError(f"{where} must be a bare address (name@domain).")
+        if address in seen:
+            raise ConfigError(
+                f"{where} repeats an earlier address (compared trimmed and in lower case)."
+            )
+        seen.add(address)
+
+
 def _check_authority(authority: dict[str, Any] | None) -> None:
     if authority is None:
         return
@@ -787,6 +854,25 @@ def _check_authority(authority: dict[str, Any] | None) -> None:
         raise ConfigError(
             f"global.classification.authority may hold at most {AUTHORITY_RULES_MAX_PATTERNS} patterns."
         )
+    # In the rendered file's order; addresses and domains are unique each.
+    seen: dict[str, set[str]] = {"domains": set(), "addresses": set()}
+    for cls in AUTHORITY_CLASSES:
+        table = authority[cls]
+        if table is None:
+            continue
+        for key in ("domains", "addresses"):
+            for i, entry in enumerate(table[key] or []):
+                pattern = entry.strip().lower()
+                where = f"global.classification.authority.{cls}.{key}[{i}]"
+                if key == "domains" and not _is_bare_domain(pattern):
+                    raise ConfigError(f"{where} {_BARE_DOMAIN_TEXT}")
+                if key == "addresses" and not _is_bare_address(pattern):
+                    raise ConfigError(f"{where} must be a bare address (name@domain).")
+                if pattern in seen[key]:
+                    raise ConfigError(
+                        f"{where} repeats an earlier pattern (compared trimmed and in lower case)."
+                    )
+                seen[key].add(pattern)
 
 
 def _account_defaults(account: dict[str, Any], path: str) -> None:
@@ -823,7 +909,9 @@ def _account_defaults(account: dict[str, Any], path: str) -> None:
         mailboxes["exclude"] = mailboxes["exclude"] or []
 
 
-def _check_accounts(accounts: list[dict[str, Any]], config_global: dict[str, Any]) -> None:
+def _check_accounts(
+    accounts: list[dict[str, Any]], config_global: dict[str, Any], roots: tuple[Path, ...]
+) -> None:
     seen_uuids: set[str] = set()
     legacy = []
     key_files = [
@@ -854,7 +942,7 @@ def _check_accounts(accounts: list[dict[str, Any]], config_global: dict[str, Any
                 f"{path}.connection.username must be the username from the Bridge app's IMAP "
                 "details, not the example's placeholder."
             )
-        _check_not_reserved(account["password_file"], f"{path}.password_file")
+        _check_not_reserved(account["password_file"], f"{path}.password_file", roots)
         password = _FileKey.of(account["password_file"])
         if _any_same(password, password_files + key_files):
             raise ConfigError(
@@ -866,6 +954,7 @@ def _check_accounts(accounts: list[dict[str, Any]], config_global: dict[str, Any
             f"{path}.password_file",
             MODEL_KEY_SECRET_FILES,
             "a model API key's",
+            roots,
         )
         password_files.append(password)
         if account["provider"] == IMAP:
@@ -883,15 +972,19 @@ def proton_settings_problem(args: list[str]) -> str | None:
     run (PLAN.md decision 46). Its text is fixed and never repeats a
     value. None when every value is accepted."""
     try:
-        result = subprocess.run(  # nosec B603 B607 - fixed program and script, values as arguments
+        # The values go on stdin, NUL-separated (Text refuses control
+        # characters): other local accounts can read process arguments,
+        # and folder names are mailbox metadata.
+        result = subprocess.run(  # nosec B603 B607 - fixed program and script, values on stdin
             [
                 "bash",
                 "-c",
-                'source "$1"; shift; proton_settings_problem "$@"',
+                'source "$1"; values=(); while IFS= read -r -d "" v; do values+=("$v"); done; '
+                'proton_settings_problem "${values[@]}"',
                 "bash",
                 str(PROTON_SETTINGS),
-                *args,
             ],
+            input="".join(f"{arg}\0" for arg in args),
             capture_output=True,
             text=True,
             timeout=30,
@@ -1127,6 +1220,13 @@ _DOC_DEFAULTS = {
     "global.inference.context_tokens": "unset: the mode's default",
 }
 _DOC_VALIDATION = {
+    **{
+        f"global.classification.authority.{cls}.{key}": (
+            f"list of bare {kind}, at most {AUTHORITY_RULES_MAX_PATTERNS}; unique across classes"
+        )
+        for cls in AUTHORITY_CLASSES
+        for key, kind in (("domains", "domains"), ("addresses", "addresses (name@domain)"))
+    },
     "accounts[].maildir_root": f"{LEGACY_ROOT} (one account at most) or /accounts/<scope_uuid>",
     "accounts[].password_file": (
         "path, relative to config/; no other account's or model key's, "
@@ -1138,7 +1238,7 @@ _DOC_VALIDATION = {
     "accounts[].scope_uuid": "UUID, canonical lower case; unique",
     "accounts[].provider": "one of proton-bridge, imap (imap cannot be enabled until #1606)",
     "accounts[].sync.mailboxes.include": "list of text; empty for proton-bridge",
-    "accounts[].identity.addresses": "list of 1 to 1000 addresses; the indexer checks each",
+    "accounts[].identity.addresses": "list of 1 to 1000 bare addresses (name@domain); unique",
 }
 
 
@@ -1513,7 +1613,7 @@ def check_targets(
     protected += [_FileKey.of(account["password_file"]) for account in config["accounts"]]
     names: tuple[str, ...] = RESERVED_SECRET_FILES + PASSWORD_SECRET_FILES + MODEL_KEY_SECRET_FILES
     names += tuple(n for n in RESERVED_DATA_FILES if not n.startswith(".generated/"))
-    protected += [_FileKey.of(REPO_ROOT / name) for name in names]
+    protected += _named(names, _roots(Path(os.path.abspath(config_path)).parent))
     for name in outputs:
         if _any_same(_FileKey.of(out_dir / name), protected):
             raise ConfigError(

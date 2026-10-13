@@ -438,6 +438,53 @@ REFUSALS += [
         "global.embedding.base_url is not a valid URL.",
     ),
     (
+        # Review round 7: indexer/src/entities.py's loaders refuse these in
+        # the rendered files, so the translator does too.
+        "an authority domain with a wildcard",
+        [("global.classification.authority.vendor.domains", ["ok.example", f"*.{MARKER}.example"])],
+        "global.classification.authority.vendor.domains[1] must be a bare domain: dot-separated labels of letters, digits and hyphens, at most 16 labels and 253 characters.",
+    ),
+    (
+        "an authority domain with an empty label",
+        [("global.classification.authority.vendor.domains", [f"{MARKER}..example"])],
+        "global.classification.authority.vendor.domains[0] must be a bare domain: dot-separated labels of letters, digits and hyphens, at most 16 labels and 253 characters.",
+    ),
+    (
+        "an authority address with a display name",
+        [("global.classification.authority.personal.addresses", [f"A <{MARKER}@mail.example>"])],
+        "global.classification.authority.personal.addresses[0] must be a bare address (name@domain).",
+    ),
+    (
+        "an authority address without a bare domain",
+        [("global.classification.authority.personal.addresses", [f"{MARKER}@mail_example"])],
+        "global.classification.authority.personal.addresses[0] must be a bare address (name@domain).",
+    ),
+    (
+        "an authority domain in two classes",
+        [("global.classification.authority.vendor.domains", [" LawFirm.example"])],
+        "global.classification.authority.vendor.domains[0] repeats an earlier pattern (compared trimmed and in lower case).",
+    ),
+    (
+        "an authority address in two classes",
+        [("global.classification.authority.other.addresses", ["A.Friend@mail.example"])],
+        "global.classification.authority.other.addresses[0] repeats an earlier pattern (compared trimmed and in lower case).",
+    ),
+    (
+        "an identity address that is not bare",
+        [("accounts.0.identity.addresses", ["me@mail.example", f"<{MARKER}@mail.example>"])],
+        "accounts[0].identity.addresses[1] must be a bare address (name@domain).",
+    ),
+    (
+        "an identity address with no local part",
+        [("accounts.0.identity.addresses", [f"@{MARKER}.example"])],
+        "accounts[0].identity.addresses[0] must be a bare address (name@domain).",
+    ),
+    (
+        "an identity address listed twice",
+        [("accounts.0.identity.addresses", ["me@mail.example", "ME@mail.example "])],
+        "accounts[0].identity.addresses[1] repeats an earlier address (compared trimmed and in lower case).",
+    ),
+    (
         "a base_url with credentials",
         [("global.embedding.base_url", f"https://u:{MARKER}@x.example/v1")],
         "global.embedding.base_url must not embed credentials (user:pass@host): put the key in the layer's api_key_file.",
@@ -755,6 +802,82 @@ class Refusals(unittest.TestCase):
                         f"({', '.join(oc.RESERVED_DATA_FILES)}, or *.pem, *.key, *.p12, *.pfx): "
                         "each secret goes only where it belongs.",
                     )
+
+    def test_role_checks_also_read_the_configuration_root(self) -> None:
+        # Review round 7: with the configuration outside this checkout,
+        # its own ../.secrets and config/ files are the conventional ones.
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        base = root / "config"
+        cases = [
+            (
+                "global.embedding.api_key_file",
+                "../.secrets/bridge_pass.txt",
+                "global.embedding.api_key_file is the Bridge password's file "
+                "(.secrets/bridge_pass.txt): each secret goes only where it belongs.",
+            ),
+            (
+                "global.embedding.api_key_file",
+                "../.secrets/mcp_auth_token.txt",
+                "global.embedding.api_key_file is a reserved credential file "
+                "(.secrets/mcp_auth_token.txt, .secrets/mcp_client_headers.txt): "
+                "each secret goes only where it belongs.",
+            ),
+            (
+                "global.embedding.api_key_file",
+                "identity.toml",
+                "global.embedding.api_key_file is a configuration, data or private-key file "
+                f"({', '.join(oc.RESERVED_DATA_FILES)}, or *.pem, *.key, *.p12, *.pfx): "
+                "each secret goes only where it belongs.",
+            ),
+            (
+                "accounts.0.password_file",
+                "../.secrets/rerank_api_key.txt",
+                "accounts[0].password_file is a model API key's file "
+                "(.secrets/embed_api_key.txt, .secrets/inference_api_key.txt, "
+                ".secrets/rerank_api_key.txt): each secret goes only where it belongs.",
+            ),
+        ]
+        for key, value, expected in cases:
+            with self.subTest(value):
+                data = fixture()
+                data["accounts"][0]["password_file"] = "../.secrets/pass_elsewhere.txt"
+                data["global"].setdefault("reranking", {})["api_key_file"] = "../keys/r.txt"
+                _set(data, key, value)
+                with self.assertRaises(oc.ConfigError) as caught:
+                    oc.validate(data, base)
+                self.assertEqual(str(caught.exception), expected)
+
+    def test_proton_values_reach_bash_on_stdin_not_its_arguments(self) -> None:
+        # Review round 7: other local accounts can read process arguments,
+        # and folder names are mailbox metadata.
+        calls: list[tuple[list[str], Any]] = []
+        real = subprocess.run
+
+        def recording(argv: list[str], **kwargs: Any) -> Any:
+            calls.append((argv, kwargs.get("input")))
+            return real(argv, **kwargs)
+
+        values = [
+            "proton-bridge",
+            "host.docker.internal",
+            "1143",
+            "127.0.0.1",
+            "false",
+            f"All Mail|Labels/*|Starred|{MARKER} folder",
+            "protonmail",
+            "protonmail-remote",
+            "protonmail-local",
+            "protonmail",
+        ]
+        with unittest.mock.patch("subprocess.run", recording):
+            self.assertIsNone(oc.proton_settings_problem(values))
+            problem = oc.proton_settings_problem([*values[:5], f"{MARKER} folder", *values[6:]])
+        self.assertIsNotNone(problem)
+        self.assertEqual(len(calls), 2)
+        for argv, given in calls:
+            self.assertFalse(any(MARKER in arg for arg in argv))
+            self.assertIn(MARKER, given)
 
     def test_an_enabled_imap_account_is_refused_and_a_disabled_one_accepted(self) -> None:
         imap = second_account(
