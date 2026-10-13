@@ -1096,8 +1096,12 @@ superseded entries keep their number and one line.
     host rejects unknown keys, wrong types and ranges and mixed account
     forms with fixed text; `scripts/validate-env.sh` independently
     checks every account projection with value-free diagnostics, and
-    each service still validates what it is given. Every application
-    setting is mapped before the translator ships. Maintenance overrides
+    each service still validates what it is given. Configuration files
+    are mode 600, generated directories 700, and all are gitignored.
+    Generated Compose is scanned by Semgrep and `compose_test.sh`,
+    whose hardening checks allow each declared collector only its own
+    secret, volume and network. Every application setting is mapped
+    before the translator ships. Maintenance overrides
     (certificate pin rotation, forced deletion) become one-run
     commands, not configuration (#1609). One enabled account is allowed
     until #1605.
@@ -1154,7 +1158,8 @@ superseded entries keep their number and one line.
     (unchanged `go.sum`, `go mod verify`), the Debian base digest
     (checked against the publisher's) and exact-version packages are
     fetched and verified first, with each artifact's provenance
-    recorded; assembly then runs with `--network none`. Execution uses
+    recorded; assembly then runs with `--network none`, and no image
+    code runs with network access. Execution uses
     one disposable non-root container built from the Debian base, with
     all capabilities dropped, `no-new-privileges`, memory and pids
     limits, no ports, sockets, volumes, mounts, secrets, Maildir or
