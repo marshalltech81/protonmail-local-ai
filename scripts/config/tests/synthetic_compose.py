@@ -69,11 +69,32 @@ def declared(config: dict[str, Any]) -> list[dict[str, Any]]:
             # BRIDGE_USER, or empty one, such as BRIDGE_CERT_FINGERPRINT,
             # without tripping anything. Comparing every declared value
             # also subsumes the trust-value check added for round 5,
-            # finding 3 (BRIDGE_CERT_FINGERPRINT): it is already part of
-            # collector_env()'s output, the same function render_compose()
-            # calls, so the declaration and the render agree by
-            # construction.
-            "environment": oc.collector_env(account),
+            # finding 3 (BRIDGE_CERT_FINGERPRINT).
+            #
+            # Every other key here comes from collector_env(), the same
+            # function render_compose() calls to build the real render,
+            # so a bug in that function would corrupt both sides alike
+            # and never produce a mismatch here. That is fine for a
+            # routing value such as BRIDGE_USER, but BRIDGE_CERT_FINGERPRINT
+            # is the one mbsync trusts to accept Bridge's certificate
+            # (AGENTS.md "Bridge-Specific Guardrails"): a collector_env()
+            # regression that cross-wires it with another account's
+            # fingerprint would let that account's mounted Bridge
+            # password reach an attacker's certificate, and this
+            # construction would not catch it, agreeing with the
+            # corrupted render by sharing its source (review round 8,
+            # finding 6, security). password_file above is already
+            # independent of collector_env() the same way; fingerprint
+            # is derived the same way here, straight from the account,
+            # not through collector_env(). (Pin rotation was the other
+            # trust value this check covered until #1616: it is now a
+            # one-run command, not configuration, and collector_env()
+            # sets no environment key for it at all, so there is nothing
+            # left to derive independently for it.)
+            "environment": {
+                **oc.collector_env(account),
+                "BRIDGE_CERT_FINGERPRINT": account["proton_bridge"]["certificate_fingerprint"],
+            },
         }
         for account in config["accounts"]
         if account["enabled"]

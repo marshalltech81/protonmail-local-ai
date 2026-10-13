@@ -112,6 +112,13 @@ def set($k): has($k) and .[$k] != null and .[$k] != false and .[$k] != [] and .[
 # command: [] renders as [] even for a service only one layer defines.
 def overridden($k): has($k) and .[$k] != null;
 def list($k): .[$k] // [];
+# A service own effective replica count, one when neither field is set.
+# Docker refuses to scale a service with a fixed container_name (every
+# service here sets one) beyond one container, so a plain up fails
+# instead of starting it; the activation checks below rejected only a
+# zero count, which an overlay or renderer regression raising either
+# field above one still passed (review round 8, finding 1).
+def replicas($s): $s.scale // $s.deploy.replicas // 1;
 def bounded_logging:
     . != null and (.driver == "none" or .driver == "local"
         or (.driver == "json-file"
@@ -157,9 +164,12 @@ def bounded_logging:
 | ($base[0].services | keys[] | select(. as $k | $m.services | has($k) | not)
     | "\(.): missing from the merged config"),
   # Every base service also starts with no profile active ($active), as
-  # the Makefile runs Compose, and is not scaled to zero.
+  # the Makefile runs Compose, and at exactly one replica (review round
+  # 8, finding 1): a fixed container_name (every service sets one)
+  # makes Docker refuse a second container of it, so a plain up fails
+  # for that service instead of starting it, the same as zero.
   ($base[0].services | keys[] | . as $k | $active[0].services[$k] as $a
-    | select($a == null or $a.scale == 0 or $a.deploy.replicas == 0)
+    | select($a == null or replicas($a) != 1)
     | "\($k): not started by a plain up"),
   ($base[0].networks | to_entries[]
     | select(($m.networks[.key].name) != .value.name or $m.networks[.key].external == true)
@@ -202,10 +212,22 @@ def bounded_logging:
     | if $s == null then "\($c.service): declared collector missing from the merged config"
       else
         ($active[0].services[$c.service] as $a
-            | select($a == null or $a.scale == 0 or $a.deploy.replicas == 0)
+            | select($a == null or replicas($a) != 1)
             | "\($c.service): declared collector not started by a plain up"),
-        ($s | list("secrets")[] | select(.source != $c.secret)
-            | "\($c.service): uses secret \(.source), not its own"),
+        # A second secrets entry can repeat the collector own correct
+        # source at a different, absolute target (Compose allows
+        # mounting one secret at several targets): the "lacks its own
+        # secret" presence check below still finds its one
+        # bridge_pass-targeted entry and passes, while the extra mount
+        # can overwrite /entrypoint.sh or another in-container file with
+        # the mounted password bytes (review round 8, finding 2,
+        # security). Every entry naming the collector own secret must
+        # target bridge_pass; one naming another secret is unchanged.
+        ($s | list("secrets")[]
+            | if .source != $c.secret then "\($c.service): uses secret \(.source), not its own"
+              elif ((.target // .source) | ltrimstr("/run/secrets/")) != "bridge_pass"
+                then "\($c.service): mounts its own secret \(.source) at \(.target // .source), not bridge_pass"
+              else empty end),
         ($s | list("volumes")[] | select(.type != "volume" or $c.volumes[.target] != .source)
             | "\($c.service): mounts \(.source // .type) at \(.target), not its own Maildir or state volume"),
         ($s.networks // {} | keys[] | select(. != $c.network)
@@ -275,6 +297,17 @@ def bounded_logging:
               # that exactly.
               (if ($s.depends_on // {}) != ($bbase.depends_on // {})
                 then "\($c.service): depends_on differs from mbsync" else empty end),
+              # logging was never compared here, and the generic
+              # bounded_logging predicate below explicitly accepts
+              # driver: none, so a collector or overlay could disable
+              # logging outright and still pass every check: Bridge
+              # connection failures, TLS refusals, retries and recovery
+              # for that account would then never reach the log (review
+              # round 8, finding 3). Held to mbsync own logging
+              # exactly, not merely "bounded", since the base own
+              # setting is the operator chosen retention.
+              (if $s.logging != $bbase.logging
+                then "\($c.service): logging differs from mbsync" else empty end),
               ($bbase | list("cap_drop")[]
                 | select(. as $cd | $s | list("cap_drop") | index($cd) == null)
                 | "\($c.service): cap_drop lost \(.)"),
@@ -289,6 +322,19 @@ def bounded_logging:
               ($bbase | list("tmpfs")[]
                 | select(. as $t | $s | list("tmpfs") | index($t) == null)
                 | "\($c.service): tmpfs lost \(.)"),
+              # The retention check above only rejects a missing entry;
+              # a collector or overlay could append another tmpfs path
+              # (Compose appends the list rather than replacing it) and
+              # still keep /tmp, mounting a filesystem over whatever the
+              # image has there -- hiding
+              # /usr/local/lib/proton-settings.sh is one example, and
+              # the image own read-only guarantee narrows by exactly
+              # that path either way (review round 8, finding 4). The
+              # collector own tmpfs list must match mbsync own exactly,
+              # not merely a superset of it.
+              ($s | list("tmpfs")[]
+                | select(. as $t | $bbase | list("tmpfs") | index($t) == null)
+                | "\($c.service): tmpfs gained \(.)"),
               (if ($s.pids_limit | type) == "number" and $s.pids_limit > $bbase.pids_limit
                 then "\($c.service): pids_limit is above the base" else empty end),
               (if $bbase.mem_limit != null
@@ -362,6 +408,23 @@ def bounded_logging:
         | select([$s | list("volumes")[] | select(.type == "volume" and .source == $v.value
             and .target == $v.key and .read_only == true)] | length > 0)
         | "\($c.service): volume \($v.value) at \($v.key) is read-only"),
+      # nocopy skips copying the image own existing directory into a
+      # new, empty volume (Docker own docs); mbsync own image relies on
+      # that copy to seed /maildir and /state owned 1001:1001 (the fixed
+      # mbsync UID, AGENTS.md), so a newly created volume mounted with
+      # it stays root-owned and the explicitly non-root collector can
+      # write neither (review round 8, finding 5). subpath is the same
+      # class under a different option: it mounts a subdirectory of the
+      # volume instead of its root, so the copied seed never lands at
+      # the mount point either. Neither option is ever set by
+      # render_compose(), so any value is an overlay or renderer
+      # regression.
+      ($c.volumes | to_entries[] | . as $v
+        | select([$s | list("volumes")[] | select(.type == "volume" and .source == $v.value
+            and .target == $v.key
+            and (((.volume.nocopy // false) == true) or (.volume.subpath // null) != null))]
+            | length > 0)
+        | "\($c.service): volume \($v.value) at \($v.key) sets nocopy or subpath"),
       (if ($s.networks // {} | has($c.network)) | not
         then "\($c.service): lacks its own network \($c.network)" else empty end)),
   # Its secret is the password file the account declares, and its network
@@ -829,13 +892,31 @@ EOF
     # A service scaled to zero is rendered but starts no container.
     expect_overlay_rejected scaled-to-zero \
         "indexer: not started by a plain up" \
-        "mbsync: not started by a plain up" <<'EOF'
+        "mbsync: not started by a plain up" <<'EOF' || return 1
 services:
   indexer:
     scale: 0
   mbsync:
     deploy:
       replicas: 0
+EOF
+    # Every service here sets a fixed container_name, so Compose itself
+    # already refuses to render a config that also scales one above one
+    # container ("container name must be unique"). container_name is
+    # reset here only so this check, not that unrelated guard, is what
+    # rejects the scale (review round 8, finding 1); nothing in this
+    # script inspects container_name itself.
+    expect_overlay_rejected scaled-above-one \
+        "indexer: not started by a plain up" \
+        "mbsync: not started by a plain up" <<'EOF'
+services:
+  indexer:
+    container_name: !reset null
+    scale: 2
+  mbsync:
+    container_name: !reset null
+    deploy:
+      replicas: 2
 EOF
 }
 
@@ -1001,10 +1082,24 @@ EOF
     # The secret's definition picks the file: another account's file under
     # the collector's own secret name is another account's secret.
     expect_generated_rejected two-proton "" \
-        "secret bridge_pass_$UUID_B: is not the declared password file of mbsync-$UUID_B" <<EOF
+        "secret bridge_pass_$UUID_B: is not the declared password file of mbsync-$UUID_B" <<EOF || return 1
 secrets:
   bridge_pass_$UUID_B: !override
     file: ./.secrets/bridge_pass.txt
+EOF
+    # Compose mounts one secret at several targets; a second entry
+    # naming the collector's own correct secret at another absolute
+    # target can overwrite an in-container file (/entrypoint.sh here)
+    # with the mounted password, while the "lacks its own secret" check
+    # still finds the one bridge_pass-targeted entry and passes (review
+    # round 8, finding 2, security).
+    expect_generated_rejected two-proton "" \
+        "mbsync-$UUID_B: mounts its own secret bridge_pass_$UUID_B at /entrypoint.sh, not bridge_pass" <<EOF
+services:
+  mbsync-$UUID_B:
+    secrets:
+      - source: bridge_pass_$UUID_B
+        target: /entrypoint.sh
 EOF
 }
 
@@ -1127,11 +1222,24 @@ generated_collectors_are_declared_present_and_checked() {
         "mbsync-$UUID_C: declared collector missing from the merged config" </dev/null || return 1
     expect_generated_rejected two-proton "" \
         "mbsync-$UUID_B: declared collector not started by a plain up" \
-        "mbsync-$UUID_B: sets no user" <<EOF
+        "mbsync-$UUID_B: sets no user" <<EOF || return 1
 services:
   mbsync-$UUID_B:
     user: !reset null
     profiles: [manual]
+EOF
+    # Every collector sets a fixed container_name (render_compose()), so
+    # Compose itself already refuses to render a config that also
+    # scales one past one container; container_name is reset here only
+    # so this check, not that unrelated guard, is what rejects the
+    # scale (review round 8, finding 1).
+    expect_generated_rejected two-proton "" \
+        "mbsync-$UUID_B: declared collector not started by a plain up" <<EOF
+services:
+  mbsync-$UUID_B:
+    container_name: !reset null
+    deploy:
+      replicas: 2
 EOF
 }
 
@@ -1206,7 +1314,7 @@ generated_collectors_keep_the_mbsync_baseline_hardening() {
         "mbsync-$UUID_B: cap_drop lost ALL" \
         "mbsync-$UUID_B: security_opt lost no-new-privileges:true" \
         "mbsync-$UUID_B: tmpfs lost /tmp" \
-        "mbsync-$UUID_B: pids_limit is above the base" <<EOF
+        "mbsync-$UUID_B: pids_limit is above the base" <<EOF || return 1
 services:
   mbsync-$UUID_B:
     init: !reset null
@@ -1215,6 +1323,26 @@ services:
     security_opt: !reset []
     tmpfs: !reset []
     pids_limit: 256
+EOF
+    # logging was never compared against mbsync here, and the generic
+    # bounded_logging predicate explicitly accepts driver: none, so a
+    # collector or overlay could disable logging outright and still
+    # pass -- hiding Bridge connection failures, TLS refusals, retries
+    # and recovery for that account (review round 8, finding 3). tmpfs
+    # was only checked for a lost entry, not an added one; a collector
+    # could append another tmpfs path (Compose appends the list rather
+    # than replacing it) and mount a filesystem over an existing image
+    # path, such as /usr/local/lib/proton-settings.sh here (review
+    # round 8, finding 4).
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: logging differs from mbsync" \
+        "mbsync-$UUID_B: tmpfs gained /usr/local/lib" <<EOF
+services:
+  mbsync-$UUID_B:
+    logging:
+      driver: none
+    tmpfs:
+      - /usr/local/lib
 EOF
 }
 
@@ -1246,7 +1374,7 @@ EOF
 generated_collectors_reject_read_only_data_volumes() {
     expect_generated_rejected three-proton "" \
         "mbsync-$UUID_B: volume maildir-$UUID_B at /maildir is read-only" \
-        "mbsync-$UUID_B: volume mbsync-state-$UUID_B at /state is read-only" <<EOF
+        "mbsync-$UUID_B: volume mbsync-state-$UUID_B at /state is read-only" <<EOF || return 1
 services:
   mbsync-$UUID_B:
     volumes: !override
@@ -1258,6 +1386,31 @@ services:
         target: /state
         type: volume
         read_only: true
+EOF
+    # nocopy skips copying the image's existing directory into a newly
+    # created, empty volume (Docker's own docs); mbsync's image relies
+    # on that copy to seed /maildir and /state owned 1001:1001 (the
+    # fixed mbsync UID), so a collector mounted with it stays root-owned
+    # and the non-root collector can write neither. subpath is the same
+    # class: it mounts a subdirectory of the volume instead of its root,
+    # so the copied seed never lands at the mount point either (review
+    # round 8, finding 5).
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: volume maildir-$UUID_B at /maildir sets nocopy or subpath" \
+        "mbsync-$UUID_B: volume mbsync-state-$UUID_B at /state sets nocopy or subpath" <<EOF
+services:
+  mbsync-$UUID_B:
+    volumes: !override
+      - source: maildir-$UUID_B
+        target: /maildir
+        type: volume
+        volume:
+          nocopy: true
+      - source: mbsync-state-$UUID_B
+        target: /state
+        type: volume
+        volume:
+          subpath: sub
 EOF
 }
 
