@@ -1683,16 +1683,19 @@ Queue and maintenance (all INFO unless noted):
   queued nothing. `seen` is message files walked, `queued` the ones
   with no event that the rescan picked up.
 - `maintenance pass=reconcile ms=<ms> tombstoned=<n> cleared=<n>
-  renamed=<n> retired=<n> bound=<n> scan=<complete|partial>
+  renamed=<n> retired=<n> bound=<n> stale=<n> scan=<complete|partial>
   threads_reaped=<n> threads_rebuilt=<n> blocked_threads=<n>
   brake=<ok|tripped|forced>`, after each deletion reconciliation pass
   (mirror mode only). `tombstoned` and `cleared` count messages that
   lost their last live copy or got one back; `renamed`, `retired` and
   `bound` count occurrences the Maildir scan followed, retired or found
-  (`docs/architecture.md`, "Occurrence reconciliation"); `scan=partial`
-  means it retired nothing. `brake=tripped` means the mass-delete brake
-  held this pass's reaps back (see "Deletion reconciliation"); `forced`
-  means the one pass of `make force-deletion` ran with the brake off.
+  (`docs/architecture.md`, "Occurrence reconciliation"); `stale` counts
+  occurrences the content backstop retired because a held path's bytes
+  no longer matched (`docs/architecture.md`, "The content backstop");
+  `scan=partial` means it retired nothing. `brake=tripped` means the
+  mass-delete brake held this pass's reaps back (see "Deletion
+  reconciliation"); `forced` means the one pass of `make force-deletion`
+  ran with the brake off.
 - `maintenance pass=watch_refresh ms=<ms> watches=<n>`, after each
   periodic Maildir watch refresh; `watches` is the number of
   directories readable when the watch was last scheduled.

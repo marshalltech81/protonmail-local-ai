@@ -3423,9 +3423,13 @@ occurrences:
   drain parks, a dead-lettered job, or a copy moved across folders while
   no occurrence held it (#1141). Its bytes come from its `indexed_files`
   record when size and mtime match. Otherwise only a `T`-flagged or
-  dead-lettered file is hashed, and only by the mirror-mode sweep, once
-  per process for each path, size, mtime and inode; any other unindexed file is
-  new mail the Maildir walk queues, and its parse binds it.
+  dead-lettered file is hashed, once per process for each path, size,
+  mtime and inode, by every caller of the scan that passes a hash cache
+  — every one of them does, mirror mode's periodic sweep and archive
+  mode's rename sweep alike (#1612; before it, archive mode's call
+  sites passed none, so this branch and the content backstop below
+  silently never ran there); any other unindexed file is new mail the
+  Maildir walk queues, and its parse binds it.
 - **Vanished files.** An active occurrence with neither is retired only
   when the scan is complete: the walk read every directory under the
   root. An unreadable directory or a missing root makes the scan partial:
@@ -3435,6 +3439,14 @@ occurrences:
   cannot start a message's grace period. Completeness is per account: a
   scan covers one account's root and never touches another account's
   occurrences.
+- **Content backstop.** A held path (its file did not move this pass,
+  so none of the above read its bytes) is hash-verified against its
+  occurrence's claimant, bounded per pass and cached by exact identity
+  (size, mtime, inode) so a later pass does not re-read an already-
+  verified file — see "The content backstop" below for the budget and
+  its cost. A verified mismatch retires only that occurrence (the file
+  is still there, unlike a vanished one) and requests a reparse,
+  counted `stale`.
 
 Each write re-checks, in its own transaction, that the occurrence or
 path is as the scan saw it, and a retire re-checks the disk for the file
@@ -3449,7 +3461,7 @@ renames first keeps the walk from re-indexing them as new mail.
 Retiring removes a locator, never a message: archive mode retires the
 occurrence of a vanished file but never reaps. The INFO lines of both
 sweeps count what they did (`renamed`, `retired`, `bound`, `unreachable`,
-`unverified`, and for the reconciler `tombstoned`, `cleared` and
+`unverified`, `stale`, and for the reconciler `tombstoned`, `cleared` and
 `hashed`). A failure of the rename sweep before a periodic rescan is
 logged at WARNING with its type and does not stop that rescan's walk,
 and its recovery is logged like the other recurring steps'.
@@ -4304,6 +4316,95 @@ identity values. A NULL row never verifies or binds anything, so the
 scan treats such a file as unknown (a vanished occurrence beside it is
 counted, not retired, only when a same-uniq file is there); the columns
 are populated lazily on the next reindex of the file.
+
+### Freshness: `is_indexed` is existence, not proof
+
+`Database.is_indexed` stays a pure path-existence check (`indexed_files`
+has a row for the path), unchanged, so any caller that only needs "has
+this path been through the pipeline at all" keeps an O(1) lookup.
+`Database.is_indexed_and_fresh` adds the cheap half of the identity
+check on top: the path is indexed **and** its current size and mtime
+still match the recorded row. The Maildir walk
+(`main._enqueue_unindexed_messages`) and the watcher's new-mail gate
+(`MaildirHandler.on_moved`'s Case 2) call this instead of the bare
+check, so a record left stale by an out-of-band content change — bytes
+replaced at a path with no observed rename event — falls through to the
+walk's existing dead-letter and already-queued gates exactly as an
+unindexed file would, rather than being skipped forever (#1612). A
+dead-lettered path still stays dead until `make requeue-dead`; staleness
+only stops the *permanent* skip, not the existing retry/dead-letter
+contract.
+
+A watcher-observed rename (`on_moved`'s Case 1) carries an active
+occurrence's claimant forward only after
+`occurrence_scan.verify_rename_bytes` confirms the destination's bytes
+against it: by the source's `indexed_files` identity when there is one
+(a rename keeps size and mtime, so this is the same cheap metadata
+check), or, for a scan-bound occurrence (`bind_found_copy` never writes
+`indexed_files`), by hashing the destination and checking it against
+the claimant ID's embedded hash prefix (the first `CLAIMANT_HASH_CHARS`
+hex digits after the `#`, `parser.claimant_id`). The verified identity
+is re-checked inside the same transaction as the move
+(`Database._move_occurrence`'s `verified_identity` parameter), the same
+TOCTOU pattern `move_verified_occurrence` already uses for the
+reconciliation scan. A mismatch is not carried forward — neither the
+occurrence nor a stale `indexed_files` row under the destination's name
+(`_rename_rows` gates the carry on whether `_move_occurrence` found an
+actual mismatch, not merely on whether it found nothing to say) — and
+`on_moved` falls through to Case 2 as if the destination were new mail.
+
+### The content backstop
+
+Metadata agreeing is a fast admission shortcut, not proof: mbsync sets
+a message's mtime from IMAP's INTERNALDATE, so two different messages
+can legitimately share one, and a crafted or coincidental replacement
+could share size and mtime too. `occurrence_scan.scan_occurrences`
+closes that gap for a **held** path — one whose file did not move this
+pass, which the metadata checks above never read — by hashing it and
+comparing the digest to the occurrence's claimant, bounded per pass:
+
+- **Cache.** Once a path's exact identity (size, mtime, inode) is
+  hash-verified, `hash_cache` remembers it, so a later pass skips it in
+  one dict lookup. A different file landing at the same path gets a new
+  inode in the overwhelming case, so this is not merely a one-time
+  check: a changed identity is always a cache miss.
+- **Budget.** Only cache misses cost a read. Each pass hashes at most
+  `_BACKSTOP_MAX_FILES` (500) previously-unverified held paths, or
+  `_BACKSTOP_MAX_BYTES` (100 MB), whichever is hit first; the rest wait
+  for a later pass, which sees the same cache miss. Sized from a plain
+  wall-clock measurement (2026-10-13, Apple Silicon, warm page cache):
+  SHA-256 over a 20 MB file took ~8.7 ms (~2.2 GB/s); a 200 KB file took
+  ~0.1 ms. A cold read over real disk or a mounted volume is slower than
+  a warm page-cache read, so the budget assumes a much more conservative
+  ~20 MB/s: 100 MB at that rate is ~5 seconds, acceptable for a pass that
+  already walks the whole Maildir tree. The file cap guards the
+  per-file open/stat overhead a byte cap alone would not (many tiny
+  files). At the default hourly sweep interval (`INDEXER_DELETION_SWEEP_
+  INTERVAL_SECS`) this backstop-verifies a multi-gigabyte mailbox within
+  a few days of first running — an eventual backstop for the narrow
+  metadata-collision case, not the primary defense (the watcher's
+  rename verification and the walk's freshness check are).
+- **On a verified mismatch**, only that occurrence is retired
+  (`Database.retire_mismatched_occurrence`) — the file is still there,
+  unlike `retire_vanished_occurrence`'s case — and the path is queued
+  for a reparse through `Database.queue_enqueue_if_absent`
+  (`STALE_ENQUEUE_SQL`, `ON CONFLICT DO NOTHING`). Unlike
+  `queue_enqueue`'s `INSERT OR REPLACE` (a watcher event is fresh
+  intent and should reset prior state), a background detection can
+  recur on a later pass before the worker catches up, so admission must
+  not keep resetting a pending retry's attempts and error, or silently
+  resurrect a dead letter — both stay exactly as they are until the
+  worker or the operator (`make requeue-dead`) acts on them.
+- **On an unreadable or unstable file** (a permission error, the file
+  gone again between the walk and the check), the path is counted
+  `unverified`, never retired: the backstop only acts on a positive
+  mismatch it could prove.
+
+`reconciler.sweep_paths` always threads a `hash_cache` through to
+`scan_occurrences` now, including from its three archive-mode call
+sites in `main.py`; before #1612 those passed none, so the backstop (and
+the hashing of unindexed `T`-flagged or dead-lettered files it shares
+the cache with) silently never ran outside mirror mode.
 
 ## Vulnerability Scans
 
