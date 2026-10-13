@@ -61,6 +61,7 @@ from .predicates import (
     search_emails_leaves,
     where_clauses,
 )
+from .query_capabilities import query_capabilities
 from .rate_limited_log import RateLimitedLog
 from .reranker import RerankerBackend
 
@@ -4618,13 +4619,25 @@ class Database:
             row = conn.execute("SELECT MIN(date_first), MAX(date_last) FROM threads").fetchone()
             stats["oldest_message"] = row[0]
             stats["newest_message"] = row[1]
-            header_counts = conn.execute(
-                "SELECT TOTAL(headers_complete IS NULL), TOTAL(headers_complete = 0) FROM messages"
+            version_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
             ).fetchone()
+            version = (
+                conn.execute("SELECT version FROM schema_version").fetchone()
+                if version_table
+                else None
+            )
+            stats["index_schema_version"] = version[0] if version else None
+            stats["query_capabilities"] = query_capabilities(conn)
+            header = stats["query_capabilities"]["header_exists"]
+            # Preserve the legacy header summary's distinction: assessed
+            # but incomplete evidence still has status "supported".
             stats["header_predicates"] = {
-                "status": "supported after backfill" if header_counts[0] else "supported",
-                "unassessed_messages": int(header_counts[0]),
-                "incomplete_messages": int(header_counts[1]),
+                "status": "supported"
+                if header["status"] == "supported when present"
+                else header["status"],
+                "unassessed_messages": header["unassessed_messages"],
+                "incomplete_messages": header["missing_messages"],
             }
             permission, rename = QUEUE_DEFERRED_PARSE_ERRORS
             buckets = {

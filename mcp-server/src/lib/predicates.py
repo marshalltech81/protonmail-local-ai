@@ -491,6 +491,10 @@ class LeafKind:
     compile: Callable[[Any, list], str]
     evaluability: Evaluability
     thread_test: Callable[[Any], Callable[[Any], bool]] | None = None
+    # SQL over message flags (and grouped attachment flags): fully usable
+    # evidence, then unassessed evidence. A row with neither is missing.
+    # Coverage is conservative across accepted operands, never a match count.
+    coverage: tuple[str, str] | None = None
 
 
 # ``messages.sent_at_status`` (#1080): why ``sent_at`` is what it is.
@@ -898,6 +902,37 @@ def _has_attachments_test(state: bool) -> Callable[[Any], bool]:
     return lambda result: result.has_attachments == state
 
 
+def _coverage_flags(*columns: str) -> tuple[str, str]:
+    """Full evidence and unassessed evidence, independent of a query value."""
+    return (
+        " AND ".join(f"m.{column} = 1" for column in columns),
+        " OR ".join(f"m.{column} IS NULL" for column in columns),
+    )
+
+
+def _address_coverage(roles: tuple[str, ...], *, names: bool) -> tuple[str, str]:
+    complete, unassessed = _coverage_flags(
+        *(f"{role}_addresses_complete" for role in roles),
+        *(("participant_names_complete",) if names else ()),
+    )
+    if "from" in roles:
+        complete += " AND m.sender_ambiguous = 0"
+        unassessed += " OR m.sender_ambiguous IS NULL"
+    return complete, unassessed
+
+
+_SENT_COVERAGE = (f"({SENT_CLOCK_SQL}) IS NOT NULL", "m.sent_at_status IS NULL")
+_EFFECTIVE_COVERAGE = (
+    f"({EFFECTIVE_EVIDENCE_SQL}) IS NOT NULL",
+    "m.occurred_at IS NULL AND m.sent_at_status IS NULL",
+)
+_ATTACHMENT_COVERAGE = (
+    "m.attachments_manifest_complete = 1 AND "
+    "(m.has_attachments = 0 OR (a.n > 0 AND a.incomplete = 0 AND a.unassessed = 0))",
+    "m.attachments_manifest_complete IS NULL OR (m.has_attachments = 1 AND a.unassessed > 0)",
+)
+
+
 LEAVES: dict[str, LeafKind] = {
     kind.name: kind
     for kind in (
@@ -909,9 +944,14 @@ LEAVES: dict[str, LeafKind] = {
             _compile_inferred("sender"),
             Evaluability.UNKNOWN_WHEN_NULL,
             _sender_test,
+            coverage=_address_coverage(("from",), names=True),
         ),
         LeafKind(
-            "recipient", "address", _compile_inferred("recipient"), Evaluability.UNKNOWN_WHEN_NULL
+            "recipient",
+            "address",
+            _compile_inferred("recipient"),
+            Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=_address_coverage(("to", "cc"), names=True),
         ),
         LeafKind(
             "participant",
@@ -919,11 +959,18 @@ LEAVES: dict[str, LeafKind] = {
             _compile_inferred("participant"),
             Evaluability.UNKNOWN_WHEN_NULL,
             _participant_test,
+            coverage=_address_coverage(("from", "to", "cc"), names=True),
         ),
         # The explicit address leaves (#1088): a ``ROLE_SETS`` role and a
         # value.
         *(
-            LeafKind(mode, param, _compile_address(mode), Evaluability.UNKNOWN_WHEN_NULL)
+            LeafKind(
+                mode,
+                param,
+                _compile_address(mode),
+                Evaluability.UNKNOWN_WHEN_NULL,
+                coverage=_address_coverage(("from", "to", "cc"), names=_ADDRESS_MODES[mode][1]),
+            )
             for mode, param in (
                 ("address_is", "role, address"),
                 ("address_contains", "role, text"),
@@ -933,27 +980,63 @@ LEAVES: dict[str, LeafKind] = {
             )
         ),
         LeafKind(
-            "header_exists", "header name", _compile_header_exists, Evaluability.UNKNOWN_WHEN_NULL
+            "header_exists",
+            "header name",
+            _compile_header_exists,
+            Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=_coverage_flags("headers_complete"),
         ),
         LeafKind(
             "header_contains",
             "header name, text",
             _compile_header_contains,
             Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=_coverage_flags("headers_complete"),
         ),
-        LeafKind("subject", "text", _compile_subject, Evaluability.UNKNOWN_WHEN_NULL),
-        LeafKind("subject_contains", "text", _compile_subject, Evaluability.UNKNOWN_WHEN_NULL),
+        LeafKind(
+            "subject",
+            "text",
+            _compile_subject,
+            Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=_coverage_flags("subject_complete"),
+        ),
+        LeafKind(
+            "subject_contains",
+            "text",
+            _compile_subject,
+            Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=_coverage_flags("subject_complete"),
+        ),
         LeafKind(
             "attachment_text_words",
             "words",
             _compile_attachment_text_words,
             Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=_ATTACHMENT_COVERAGE,
         ),
         # ``text`` is the flat filter's name for ``body_words`` (#1088).
-        LeafKind("text", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
-        LeafKind("body_words", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
-        LeafKind("folder", "folders", _compile_folder, Evaluability.DECIDED),
-        LeafKind("not_in_folders", "folders", _compile_not_in_folders, Evaluability.DECIDED),
+        LeafKind(
+            "text",
+            "words",
+            _compile_body_words,
+            Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=_coverage_flags("body_complete"),
+        ),
+        LeafKind(
+            "body_words",
+            "words",
+            _compile_body_words,
+            Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=_coverage_flags("body_complete"),
+        ),
+        LeafKind("folder", "folders", _compile_folder, Evaluability.DECIDED, coverage=("1", "0")),
+        LeafKind(
+            "not_in_folders",
+            "folders",
+            _compile_not_in_folders,
+            Evaluability.DECIDED,
+            coverage=("1", "0"),
+        ),
         # A message with neither a delivery nor a send date is unknown
         # under an effective-time bound, never placed by the time it was
         # first indexed (#1080).
@@ -963,6 +1046,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_bound(EFFECTIVE_EVIDENCE_SQL, ">="),
             Evaluability.UNKNOWN_WHEN_NULL,
             _effective_from_test,
+            coverage=_EFFECTIVE_COVERAGE,
         ),
         LeafKind(
             "effective_to",
@@ -970,6 +1054,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_bound(EFFECTIVE_EVIDENCE_SQL, "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
             _effective_to_test,
+            coverage=_EFFECTIVE_COVERAGE,
         ),
         # The other clocks date_basis selects (#1150).
         # Each is NULL without its date (a send date also until it is
@@ -980,54 +1065,81 @@ LEAVES: dict[str, LeafKind] = {
             "instant",
             _compile_bound(SENT_CLOCK_SQL, ">="),
             Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=_SENT_COVERAGE,
         ),
         LeafKind(
             "sent_to",
             "instant",
             _compile_bound(SENT_CLOCK_SQL, "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=_SENT_COVERAGE,
         ),
         LeafKind(
             "occurred_from",
             "instant",
             _compile_bound("m.occurred_at", ">="),
             Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=("m.occurred_at IS NOT NULL", "0"),
         ),
         LeafKind(
             "occurred_to",
             "instant",
             _compile_bound("m.occurred_at", "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=("m.occurred_at IS NOT NULL", "0"),
         ),
-        LeafKind("dated", "basis", _compile_dated, Evaluability.UNKNOWN_WHEN_NULL),
+        LeafKind(
+            "dated",
+            "basis",
+            _compile_dated,
+            Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=(
+                f"({SENT_CLOCK_SQL}) IS NOT NULL AND m.occurred_at IS NOT NULL",
+                "m.sent_at_status IS NULL",
+            ),
+        ),
         LeafKind(
             "has_attachments",
             "bool",
             _compile_has_attachments,
             Evaluability.UNKNOWN_WHEN_NULL,
             _has_attachments_test,
+            coverage=(
+                "m.has_attachments = 1 OR m.attachments_manifest_complete = 1",
+                "m.has_attachments = 0 AND m.attachments_manifest_complete IS NULL",
+            ),
         ),
-        LeafKind("seen", "bool", _compile_flag("seen"), Evaluability.DECIDED),
-        LeafKind("flagged", "bool", _compile_flag("flagged"), Evaluability.DECIDED),
-        LeafKind("replied", "bool", _compile_flag("replied"), Evaluability.DECIDED),
+        LeafKind("seen", "bool", _compile_flag("seen"), Evaluability.DECIDED, coverage=("1", "0")),
+        LeafKind(
+            "flagged", "bool", _compile_flag("flagged"), Evaluability.DECIDED, coverage=("1", "0")
+        ),
+        LeafKind(
+            "replied", "bool", _compile_flag("replied"), Evaluability.DECIDED, coverage=("1", "0")
+        ),
         # The local Maildir file's size, NULL when not recorded.
         LeafKind(
             "size_min",
             "bytes",
             _compile_bound("m.size_bytes", ">="),
             Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=("m.size_bytes IS NOT NULL", "m.size_bytes IS NULL"),
         ),
         LeafKind(
             "size_max",
             "bytes",
             _compile_bound("m.size_bytes", "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=("m.size_bytes IS NOT NULL", "m.size_bytes IS NULL"),
         ),
         LeafKind(
             "authority_class",
             "class",
             _compile_authority_class,
             Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=(
+                "m.folder = 'Spam' OR (m.sender_ambiguous = 0 AND m.from_addresses_complete = 1)",
+                "m.folder != 'Spam' AND (m.sender_ambiguous IS NULL OR m.from_addresses_complete IS NULL)",
+            ),
         ),
     )
 }

@@ -229,7 +229,9 @@ or `supported after backfill` while any indexed message's header flag is
 NULL, plus `unassessed_messages` and `incomplete_messages` counts over
 all indexed message rows, including Trash. Incomplete messages (a cap or header parse loss) still
 permit positive header matches but cannot certify absence. This is the
-header slice of the capability report tracked by #1093.
+legacy header summary; `query_capabilities` below covers every registered leaf.
+When the schema lacks header evidence, its status is `unavailable` and both
+counts are null.
 
 ## Stage timings in the server log
 
@@ -3342,6 +3344,38 @@ and what it holds. Call this when asked which version or build is running.
 | `total_threads`, `total_messages`, `oldest_message`, `newest_message` | What the index holds |
 | `conflicting_message_ids` | How many Message-IDs more than one indexed file claims (see "Message-ID and claimant ID" above); 0 when none |
 | `extra_claimant_files` | Files beyond the first claimant of each conflicting Message-ID (two Message-IDs with 2 and 3 claimants give 3) |
+
+`query_capabilities` has one entry per registered predicate leaf, derived from
+that leaf's coverage rule and the schema fields and evidence actually stored.
+`index_schema_version` is the stored schema version (null for an unstamped
+index). Each entry reports:
+
+- `supported`: all indexed messages have fully assessed evidence for that leaf;
+  an empty population also has this status.
+- `supported after backfill`: `unassessed_messages` are still awaiting evidence
+  assessment. Reparse can assess them; dead-lettered jobs need operator recovery.
+  An empty `queue.reparse` does not establish completeness.
+- `supported when present`: assessment is finished, but `missing_messages` lack
+  fully usable evidence, for example a missing delivery date, ambiguous sender,
+  parse cap or incomplete attachment extraction.
+- `unavailable`: required schema fields are absent. Counts are null and
+  `condition` names the upgrade and reparse required to enable the leaf.
+
+`available_messages`, `unassessed_messages` and `missing_messages` partition the
+indexed `messages` rows, including Trash. Available means fully usable evidence,
+not a match. Unassessed takes precedence over missing when both affect one row,
+except that already usable evidence remains available. These are conservative
+coverage counts across the leaf's accepted operands: explicit address leaves
+cover all public roles, inferred address leaves also cover name matching, and
+`dated` covers both nullable clocks. A To-only query can therefore decide more
+messages than an address leaf's coverage suggests. Retained positive evidence
+can match even on an incomplete row. Always use the actual query's
+`indeterminate` count to assess that result.
+
+The report reads flags and counts only, never addresses, headers, bodies or
+attachment text. It describes registered leaves; unsupported operands such as
+`date_basis=internal` (#1092) and Bcc-inclusive roles (#1090) remain rejected by
+validation and are not advertised as registered leaves.
 
 Message-ID conflicts are reported as counts only, with a fixed hint
 in the text output (`get_message` on such a Message-ID lists its
