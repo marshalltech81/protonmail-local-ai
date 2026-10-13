@@ -767,6 +767,9 @@ class MessageRecord:
     replied: bool = False
     occurrences: list[OccurrenceRecord] = field(default_factory=list)
     occurrence_count: int | None = None
+    # The representative occurrence's source category (``folder``'s,
+    # ``sources.category_of``, #1569), retired or not; None without one.
+    category: str | None = None
     # The reconciler tombstoned the indexed file (``T``-flagged or
     # missing): it awaits the reaper under mirror retention.
     pending_deletion: bool = False
@@ -808,6 +811,8 @@ _MESSAGE_COLUMNS = (
     "m.message_id, m.claimant_id, m.thread_id, m.subject, "
     f"{_SENT_AT_COLUMN}, m.sent_at_status, "
     f"m.occurred_at, m.effective_at, {_representative('folder')} AS folder, "
+    "(SELECT ac.provider FROM accounts ac "  # nosec B608 - module constants only
+    f"WHERE ac.id = {_representative('account_id')}) AS representative_provider, "
     "m.has_attachments, m.in_reply_to, "
     "json_array_length(m.references_json) AS references_count, "
     f"CASE WHEN json_array_length(m.references_json) > {MAX_LISTED_MESSAGE_HEADERS} "
@@ -830,6 +835,11 @@ def _row_to_message_record(r) -> MessageRecord:
         occurred_at=r["occurred_at"],
         effective_at=r["effective_at"],
         folder=r["folder"],
+        category=(
+            None
+            if r["representative_provider"] is None
+            else category_of(r["representative_provider"], r["folder"])
+        ),
         has_attachments=bool(r["has_attachments"]),
         in_reply_to=r["in_reply_to"],
         references=json.loads(r["references_json"]),

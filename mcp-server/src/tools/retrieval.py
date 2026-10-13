@@ -278,9 +278,10 @@ _CATEGORY_WORDS = {
 
 
 def _category_words(m: MessageRecord) -> list[str]:
-    """The representative copy's source category in words (its first
-    listed occurrence); none for a message with no current copy."""
-    return list(_CATEGORY_WORDS.get(m.occurrences[0].category, [])) if m.occurrences else []
+    """The representative copy's source category in words: the copy
+    ``m.folder`` names, a former one for a message with no current copy
+    (review round 3 on #1612)."""
+    return list(_CATEGORY_WORDS.get(m.category, [])) if m.category is not None else []
 
 
 def _copy_words(o: OccurrenceRecord) -> list[str]:

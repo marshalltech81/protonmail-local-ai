@@ -175,3 +175,20 @@ class TestRecoveredIsNeverAuthority:
         page = spam_db.aggregate_messages(group_by="authority_class", sender="firm.example")
         groups = {g.value: g.messages for g in page.groups}
         assert groups.get("counsel") == 1
+
+
+def test_a_retired_representative_keeps_its_category(folders):
+    """Review round 3 on #1612: a message with no active copy is shown
+    with a former copy's folder, and with that copy's category."""
+    with closing(_conn(Path(folders.path))) as conn:
+        conn.execute(
+            "UPDATE message_occurrences SET state = 'retired', "
+            "retired_at = '2024-03-01T00:00:00+00:00' WHERE claimant_id = ?",
+            (claimant_of(_mid("Recovered Messages")),),
+        )
+        conn.commit()
+    server = FakeMCPServer()
+    register_retrieval_tools(server, folders)
+    out = asyncio.run(server.tools["get_message"](message_id=_mid("Recovered Messages")))
+    assert out.structured_content["message"]["occurrences"] == []
+    assert "Folder: Recovered Messages (recovered, untrusted)" in out.content[0].text
