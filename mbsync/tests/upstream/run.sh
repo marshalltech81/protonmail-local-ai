@@ -385,7 +385,7 @@ cmd_acquire() {
 
 # --------------------------------------------------------------------------
 cmd_assemble() {
-    local stage="$WORK/stage" image
+    local stage="$WORK/stage" image prior
     set_names
     image="$IMAGE_REPO:$(work_tag)"
     check_inputs
@@ -411,8 +411,10 @@ cmd_assemble() {
     docker exec "$ASM" rm -f /tmp/i1583-assemble.sh
     docker stop -t 1 "$ASM" >/dev/null
     # A re-assembly would move the tag and leave the old image dangling,
-    # out of clean's reach: remove it first.
-    if [[ -n "$(docker image ls -q "$image")" ]]; then
+    # out of clean's reach: remove it first. A failed query is a failure,
+    # not an empty answer.
+    prior="$(docker image ls -q "$image")" || die "cannot list images"
+    if [[ -n "$prior" ]]; then
         docker rmi "$image" >/dev/null || die "cannot remove the earlier image for this work dir"
     fi
     docker commit \
