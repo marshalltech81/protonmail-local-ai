@@ -91,9 +91,11 @@ readonly WATCH_INTERVAL_SECS=5
 # Each Docker call the watchdog makes is cut off after this long, and a
 # measurement that times out counts as unreadable.
 readonly PROBE_TIMEOUT_SECS=30
-# Each git fetch is cut off after this long (its byte bound is #1583's
-# open question).
-readonly GIT_TIMEOUT_SECS=1800
+# Each network step of acquire that fetch does not cover (git fetch, the
+# host-side go mod download, docker pull) is cut off after this long,
+# with everything it started. Their byte and storage bounds are #1583's
+# open question.
+readonly ACQUIRE_TIMEOUT_SECS=1800
 # Fixed text after the digest on provenance.txt's inputs line, which must
 # match exactly.
 readonly INPUTS_NOTE='(provenance lines above, staged trees with harness files, repo/Packages, Go archive, run.sh, its scripts and manifest.json, mbsync/Dockerfile)'
@@ -192,8 +194,8 @@ acquire_src() {
         dir="$WORK/src/$name"
         mkdir -p "$dir"
         git -C "$dir" init -q
-        bounded "$GIT_TIMEOUT_SECS" git -C "$dir" fetch -q --depth 1 "https://github.com/ProtonMail/$name.git" "$commit" ||
-            die "$name: git fetch failed or passed $GIT_TIMEOUT_SECS s"
+        bounded "$ACQUIRE_TIMEOUT_SECS" git -C "$dir" fetch -q --depth 1 "https://github.com/ProtonMail/$name.git" "$commit" ||
+            die "$name: git fetch failed or passed $ACQUIRE_TIMEOUT_SECS s"
         git -C "$dir" -c advice.detachedHead=false checkout -q FETCH_HEAD
         [[ "$(git -C "$dir" rev-parse HEAD)" == "$commit" ]] || die "$name: fetched commit differs"
         # Before anything on the host reads or writes inside the tree.
@@ -243,14 +245,15 @@ acquire_mods() {
     local go="$WORK/hostgo/go/bin/go" mod before
     for mod in gluon proton-bridge; do
         before="$(sha256 "$WORK/src/$mod/go.sum")$(sha256 "$WORK/src/$mod/go.mod")"
+        # Exports, not prefix assignments: bounded is a shell function.
         (cd "$WORK/src/$mod" &&
-            env GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
-                GONOSUMDB= GOPRIVATE= GONOPROXY= GOINSECURE= \
-                GOMODCACHE="$WORK/gomodcache" GOCACHE="$WORK/hostgocache" GOPATH="$WORK/hostgopath" \
-                "$go" mod download &&
-            env GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOPROXY=off \
-                GOMODCACHE="$WORK/gomodcache" GOCACHE="$WORK/hostgocache" GOPATH="$WORK/hostgopath" \
-                "$go" mod verify >/dev/null) || die "$mod: module download or verify failed"
+            export GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOSUMDB=sum.golang.org \
+                GONOSUMDB='' GOPRIVATE='' GONOPROXY='' GOINSECURE='' \
+                GOMODCACHE="$WORK/gomodcache" GOCACHE="$WORK/hostgocache" GOPATH="$WORK/hostgopath" &&
+            export GOPROXY=https://proxy.golang.org &&
+            bounded "$ACQUIRE_TIMEOUT_SECS" "$go" mod download &&
+            export GOPROXY=off &&
+            "$go" mod verify >/dev/null) || die "$mod: module download or verify failed"
         [[ "$before" == "$(sha256 "$WORK/src/$mod/go.sum")$(sha256 "$WORK/src/$mod/go.mod")" ]] ||
             die "$mod: go.sum or go.mod changed"
         prov "modules $mod go-mod-download+verify=ok go.sum unchanged (sum.golang.org)"
@@ -281,7 +284,7 @@ verify_base() {
         f && /Image ID:/ && match($0, /sha256:[0-9a-f]+/) { print substr($0, RSTART, RLENGTH); exit }
     ' "$md")"
     [[ "$want_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "no publisher image ID for $platform"
-    docker pull -q "$ref" >/dev/null
+    bounded "$ACQUIRE_TIMEOUT_SECS" docker pull -q "$ref" >/dev/null || die "base image pull failed or passed $ACQUIRE_TIMEOUT_SECS s"
     got_id="$(docker image inspect --format '{{.Id}}' "$ref")"
     [[ "$got_id" == "$want_id" ]] || die "pulled base image ID differs from the publisher's"
     prov "base $ref repo-info-commit=$found platform=$platform image-id=$got_id (matches publisher)"
