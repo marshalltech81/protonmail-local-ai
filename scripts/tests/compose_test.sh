@@ -263,6 +263,17 @@ def bounded_logging:
               # finding 2).
               (if $s.restart != $bbase.restart
                 then "\($c.service): restart differs from mbsync" else empty end),
+              # depends_on was never compared either, so a collector could
+              # gain one on mbsync (or another account) while staying
+              # present and unscaled, which the checks above still accept.
+              # service_completed_successfully waits for the dependency to
+              # exit (Docker own docs), but mbsync sync loop runs
+              # indefinitely once healthy, so the dependent collector would
+              # wait forever and never sync (review round 7). The base
+              # mbsync depends on nothing, so every collector must match
+              # that exactly.
+              (if ($s.depends_on // {}) != ($bbase.depends_on // {})
+                then "\($c.service): depends_on differs from mbsync" else empty end),
               ($bbase | list("cap_drop")[]
                 | select(. as $cd | $s | list("cap_drop") | index($cd) == null)
                 | "\($c.service): cap_drop lost \(.)"),
@@ -1178,6 +1189,26 @@ services:
 EOF
 }
 
+# depends_on was never compared, so a collector could gain a dependency
+# on the always-running mbsync (or another collector) while staying
+# present and unscaled -- passing the checks above -- and never start:
+# Docker's own docs say service_completed_successfully waits for the
+# dependency to exit, but a healthy mbsync runs its sync loop
+# indefinitely, so the dependent account's collector would wait forever
+# (review round 7). The base mbsync depends on nothing
+# (the_base_runs_mbsync_indexer_and_mcp_server), so every collector must
+# match that exactly, not merely stay present and unscaled.
+generated_collectors_reject_a_blocking_dependency() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: depends_on differs from mbsync" <<EOF
+services:
+  mbsync-$UUID_B:
+    depends_on:
+      mbsync:
+        condition: service_completed_successfully
+EOF
+}
+
 # The collector's /maildir and /state mounts must stay writable; the
 # "lacks its own volume" check above compares only type, source and
 # target, so a read-only mount of either would still pass it while
@@ -1668,6 +1699,8 @@ check "generated imap collectors get no Bridge secret or bridge-net" \
     generated_imap_collectors_get_no_bridge_secret_or_network
 check "generated collectors keep the mbsync baseline hardening" \
     generated_collectors_keep_the_mbsync_baseline_hardening
+check "generated collectors reject a blocking dependency" \
+    generated_collectors_reject_a_blocking_dependency
 check "generated collectors reject read-only data volumes" \
     generated_collectors_reject_read_only_data_volumes
 check "generated collectors bind trust values to their declarations" \
