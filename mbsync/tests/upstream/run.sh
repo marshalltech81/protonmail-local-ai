@@ -301,7 +301,9 @@ set_names() {
 inputs_digest() {
     (
         cd "$WORK"
-        find src -type f ! -path '*/.git/*' -print0 | LC_ALL=C sort -z | xargs -0 "${SHA256_CMD[@]}"
+        # Every file rsync_tree copies: all but each tree's top-level .git.
+        find src -type f ! -path 'src/gluon/.git/*' ! -path 'src/proton-bridge/.git/*' -print0 |
+            LC_ALL=C sort -z | xargs -0 "${SHA256_CMD[@]}"
         "${SHA256_CMD[@]}" repo/Packages "go-dl/$GO_VERSION.linux-$ARCH.tar.gz"
         cd "$HERE"
         "${SHA256_CMD[@]}" run_inside.sh assemble.sh run.sh resolve_debs.py
@@ -310,9 +312,20 @@ inputs_digest() {
     ) | "${SHA256_CMD[@]}" | cut -d' ' -f1
 }
 
+# The digest hashes regular files only, so the staged trees may hold
+# nothing else (no symlink, which tar would copy and Go would follow).
+# The pinned trees have none.
+only_regular_files() {
+    local other
+    other="$(cd "$WORK" && find src ! -type f ! -type d ! -path 'src/gluon/.git/*' ! -path 'src/proton-bridge/.git/*' -print -quit)" ||
+        die "cannot list the staged trees"
+    [[ -z "$other" ]] || die "the staged trees contain a symlink or special file"
+}
+
 # assemble and execute both refuse inputs (run.sh included) that changed
 # since acquire recorded them.
 check_inputs() {
+    only_regular_files
     [[ "$(sed -n 's/^inputs sha256=\([0-9a-f]\{64\}\) .*/\1/p' "$WORK/provenance.txt")" == "$(inputs_digest)" ]] ||
         die "inputs changed since acquire; run acquire again into a new work dir"
 }
@@ -331,6 +344,7 @@ cmd_acquire() {
     verify_base
     acquire_debs
     stage_harness
+    only_regular_files
     prov "inputs sha256=$(inputs_digest) (staged trees with harness files, repo/Packages, Go archive, run.sh and its scripts, mbsync/Dockerfile)"
     printf 'acquire: ok (%s)\n' "$WORK/provenance.txt"
 }
@@ -407,8 +421,27 @@ cmd_execute() {
         "$image" >/dev/null
     [[ "$(docker inspect --format '{{json .Mounts}} {{json .NetworkSettings.Ports}} {{.HostConfig.NetworkMode}}' "$RUNC")" == '[] {} none' ]] ||
         die "execution container has mounts, ports or a network"
-    docker exec "$RUNC" /home/h/run_inside.sh "$debug" | tee "$out/run-status.txt" || rc=$?
-    docker cp -q "$RUNC:/home/h/out/." "$out/"
+    local status_text name
+    status_text="$(docker exec "$RUNC" /home/h/run_inside.sh "$debug")" || rc=$?
+    printf '%s\n' "$status_text"
+    # Everything from the container is untrusted: only fixed-shape status
+    # lines are kept, and only the three expected result files are copied
+    # out, as regular files of bounded size whose JSON has the allowlisted
+    # shape (the same one the harness's i1583Rec enforces).
+    printf '%s\n' "$status_text" |
+        grep -E '^(gluon|proton-bridge) go_mod_verify=(ok|failed)$|^[a-z-]+ exit=[0-9]+$|^--- (PASS|FAIL|SKIP): TestIssue1583[A-Za-z0-9]+$' \
+            >"$out/run-status.txt" || true
+    for name in gluon.json bridge-builder.json bridge.json; do
+        docker exec "$RUNC" cat "/home/h/out/$name" | head -c 1048576 >"$out/$name.tmp"
+        jq -e 'type == "object" and all(.[];
+                type == "object" and all(to_entries[];
+                    (.key | test("^[a-z0-9_]{1,64}$")) and
+                    (.value | type == "boolean" or type == "number"
+                        or (type == "string" and test("^[A-Za-z_]{0,16}$")))))' \
+            "$out/$name.tmp" >/dev/null || die "$name: not in the allowlisted result shape"
+        jq -e 'keys | all(test("^[a-z0-9_]{1,64}$"))' "$out/$name.tmp" >/dev/null || die "$name: scenario name not allowlisted"
+        mv "$out/$name.tmp" "$out/$name"
+    done
     docker rm -f "$RUNC" >/dev/null
     cp "$WORK/provenance.txt" "$out/provenance.txt"
     printf 'execute: exit=%s\n' "$rc"
