@@ -111,6 +111,9 @@ PROBE=""
 OUT_PENDING=""
 # The status lines of the last run_inside.sh step (run_step).
 STEP_LINES=""
+# Set once this invocation created the work dir (acquire) or verified its
+# marker (assemble, execute); the cleanup paths touch it only then.
+WORK_CLAIMED=""
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HERE
@@ -449,6 +452,7 @@ cmd_acquire() {
     tag="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" || die "cannot generate the work dir tag"
     [[ "$tag" =~ ^[0-9a-f]{16}$ ]] || die "cannot generate the work dir tag"
     mkdir -m 700 "$WORK" || die "cannot create the work dir"
+    WORK_CLAIMED=1
     # The marker appears whole (rename) or not at all; a work dir without
     # one is removed here, since neither a retry nor clean would take it.
     if ! { printf '%s' "$tag" >"$WORK/$MARKER.tmp" && mv "$WORK/$MARKER.tmp" "$WORK/$MARKER"; }; then
@@ -472,6 +476,7 @@ cmd_acquire() {
 cmd_assemble() {
     local stage="$WORK/stage" image prior
     set_names
+    WORK_CLAIMED=1
     image="$IMAGE_REPO:$(work_tag)"
     check_inputs
     rm -rf "$stage"
@@ -528,6 +533,7 @@ rsync_tree() {
 cmd_execute() {
     local out="$1" debug="${2:-}" rc=0 image
     set_names
+    WORK_CLAIMED=1
     check_inputs
     image="$IMAGE_REPO:$(work_tag)"
     [[ "$(docker image inspect --format '{{index .Config.Labels "i1583.provenance"}}' "$image")" == "$(sha256 "$WORK/provenance.txt")" ]] ||
@@ -605,20 +611,28 @@ start_watchdog() {
 # The watchdog itself, run in the background by start_watchdog. Its
 # locals (s, why) are read by watchdog_term and watchdog_fire.
 watchdog_loop() {
-    local s="" start=$SECONDS size written why=""
+    local s="" start=$SECONDS size written why="" left
     # The probes below run in command substitutions, whose bounded groups
     # end before a TERM handler can run (bash runs it once the probe
     # returns); PROBE here only tracks watchdog_fire's kill.
     PROBE=""
     trap watchdog_term TERM
     while [[ -z "$why" ]]; do
-        sleep "$WATCH_INTERVAL_SECS" &
+        # The deadline is checked before each sleep and probe, and each is
+        # bounded by the time left, so none can carry the run past it.
+        left=$((EXEC_DEADLINE_SECS - (SECONDS - start)))
+        ((left > 0)) || { why="passed its $EXEC_DEADLINE_SECS s deadline"; break; }
+        sleep "$((left < WATCH_INTERVAL_SECS ? left : WATCH_INTERVAL_SECS))" &
         s=$!
         wait "$s"
         # Reaped: its PID may be reused, so the TERM handler must not kill it.
         s=""
-        size="$(bounded "$PROBE_TIMEOUT_SECS" docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
-        written="$(container_written_bytes)" || written=""
+        left=$((EXEC_DEADLINE_SECS - (SECONDS - start)))
+        ((left > 0)) || { why="passed its $EXEC_DEADLINE_SECS s deadline"; break; }
+        size="$(bounded "$((left < PROBE_TIMEOUT_SECS ? left : PROBE_TIMEOUT_SECS))" docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
+        left=$((EXEC_DEADLINE_SECS - (SECONDS - start)))
+        ((left > 0)) || { why="passed its $EXEC_DEADLINE_SECS s deadline"; break; }
+        written="$(container_written_bytes "$((left < PROBE_TIMEOUT_SECS ? left : PROBE_TIMEOUT_SECS))")" || written=""
         if ((SECONDS - start >= EXEC_DEADLINE_SECS)); then
             why="passed its $EXEC_DEADLINE_SECS s deadline"
         elif [[ ! "$size" =~ ^[0-9]+$ || ! "$written" =~ ^[0-9]+$ ]]; then
@@ -660,8 +674,8 @@ bounded() {
 # 315MB or 1.23GB). Unlike the layer size, it counts data written to a
 # file that was unlinked while open.
 container_written_bytes() {
-    local io
-    io="$(bounded "$PROBE_TIMEOUT_SECS" docker stats --no-stream --format '{{.BlockIO}}' "$RUNC")" || return 1
+    local io limit="${1:-$PROBE_TIMEOUT_SECS}"
+    io="$(bounded "$limit" docker stats --no-stream --format '{{.BlockIO}}' "$RUNC")" || return 1
     awk -v w="${io##*/ }" 'BEGIN {
         if (!match(w, /^[0-9]+(\.[0-9]+)?/)) exit 1
         n = substr(w, 1, RLENGTH)
@@ -699,10 +713,14 @@ watchdog_term() {
 # otherwise fall between two samples. Past the deadline, over the cap or
 # unreadable fails the run.
 final_measure() {
-    local start="$1" size written
+    local start="$1" size written left
+    left=$((EXEC_DEADLINE_SECS - (SECONDS - start)))
+    ((left > 0)) || die "the execution passed its $EXEC_DEADLINE_SECS s deadline"
+    size="$(bounded "$((left < PROBE_TIMEOUT_SECS ? left : PROBE_TIMEOUT_SECS))" docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
+    left=$((EXEC_DEADLINE_SECS - (SECONDS - start)))
+    ((left > 0)) || die "the execution passed its $EXEC_DEADLINE_SECS s deadline"
+    written="$(container_written_bytes "$((left < PROBE_TIMEOUT_SECS ? left : PROBE_TIMEOUT_SECS))")" || written=""
     ((SECONDS - start < EXEC_DEADLINE_SECS)) || die "the execution passed its $EXEC_DEADLINE_SECS s deadline"
-    size="$(bounded "$PROBE_TIMEOUT_SECS" docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
-    written="$(container_written_bytes)" || written=""
     [[ "$size" =~ ^[0-9]+$ && "$written" =~ ^[0-9]+$ ]] ||
         die "cannot measure the execution container's layer size or bytes written"
     ((size <= EXEC_MAX_WRITE_BYTES && written <= EXEC_MAX_WRITE_BYTES)) ||
@@ -790,19 +808,20 @@ fetch_result() {
     [[ "$(wc -c <"$dest" | tr -d ' ')" -le 1048576 ]] || die "$name: larger than 1 MiB"
 }
 
-# Kills a running bounded job and removes this work dir's containers, the
-# assembly stage and a partial out dir when a standalone acquire, assemble
-# or execute fails or is interrupted, keeping the failure status.
+# Kills a running bounded job and removes a partial out dir and, when this
+# invocation claimed the work dir (WORK_CLAIMED), its containers and the
+# assembly stage, when a standalone acquire, assemble or execute fails or
+# is interrupted, keeping the failure status.
 phase_cleanup() {
     local rc=$?
     trap - EXIT
     [[ -z "$PROBE" ]] || kill -s KILL -- "-$PROBE" 2>/dev/null || true
     [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true
     [[ -z "$OUT_PENDING" ]] || rm -rf "$OUT_PENDING"
-    if [[ -n "$ASM" ]]; then
+    if [[ -n "$WORK_CLAIMED" ]]; then
         docker rm -f "$ACQ" "$ASM" "$RUNC" >/dev/null 2>&1 || true
+        rm -rf "$WORK/stage"
     fi
-    rm -rf "$WORK/stage"
     exit "$rc"
 }
 
@@ -851,6 +870,9 @@ resolve_work() {
     base="$(basename "$1")"
     [[ "$base" != "." && "$base" != ".." && "$base" != "/" ]] || die "work dir must name a directory"
     path="${parent%/}/$base"
+    # Only the parent's chain is checked above, so a symlink (to anywhere)
+    # is refused rather than followed.
+    [[ ! -L "$path" ]] || die "work and out dirs must not be symlinks"
     if [[ -e "$path" ]]; then
         path="$(cd -P "$path" && pwd)"
     fi
@@ -918,7 +940,7 @@ main() {
             # Clean up at exit. An earlier failure keeps its status; a
             # failed cleanup after a success exits 1. cmd_clean runs in a
             # subshell so its die cannot replace the earlier status.
-            trap 'rc=$?; trap - EXIT; [[ -z "$PROBE" ]] || kill -s KILL -- "-$PROBE" 2>/dev/null || true; [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true; [[ -z "$OUT_PENDING" ]] || rm -rf "$OUT_PENDING"; (cmd_clean) || { [[ "$rc" -ne 0 ]] || rc=1; }; exit "$rc"' EXIT
+            trap 'rc=$?; trap - EXIT; [[ -z "$PROBE" ]] || kill -s KILL -- "-$PROBE" 2>/dev/null || true; [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true; [[ -z "$OUT_PENDING" ]] || rm -rf "$OUT_PENDING"; if [[ -n "$WORK_CLAIMED" ]]; then (cmd_clean) || { [[ "$rc" -ne 0 ]] || rc=1; }; fi; exit "$rc"' EXIT
             cmd_acquire
             cmd_assemble
             cmd_execute "$out"
