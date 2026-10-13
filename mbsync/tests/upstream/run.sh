@@ -58,6 +58,7 @@ readonly MARKER=.i1583-work
 readonly IMAGE_REPO=i1583-upstream
 # Container names carry the work dir's tag (set_names), so runs in other
 # work dirs never share or remove each other's containers.
+ACQ=""
 ASM=""
 RUNC=""
 
@@ -207,13 +208,15 @@ verify_base() {
 # created, never-started container; metadata is authenticated with gpgv,
 # then every .deb is checked against the signed index.
 acquire_debs() {
-    local ref cid snap keyring suite_spec archive suite dir base want got line
+    local ref snap keyring suite_spec archive suite dir base want got line
     ref="$(base_ref)"
-    cid="$(docker create --pull=never --network none "$ref")"
-    docker cp -q "$cid:/usr/share/keyrings/debian-archive-keyring.pgp" "$WORK/base/keyring.pgp"
-    docker cp -q "$cid:/etc/apt/sources.list.d/debian.sources" "$WORK/base/debian.sources"
-    docker cp -q "$cid:/var/lib/dpkg/status" "$WORK/base/dpkg-status"
-    docker rm "$cid" >/dev/null
+    # Named by the work dir's tag, so a failed copy is removed by
+    # phase_cleanup or clean.
+    docker create --pull=never --name "$ACQ" --network none "$ref" >/dev/null
+    docker cp -q "$ACQ:/usr/share/keyrings/debian-archive-keyring.pgp" "$WORK/base/keyring.pgp"
+    docker cp -q "$ACQ:/etc/apt/sources.list.d/debian.sources" "$WORK/base/debian.sources"
+    docker cp -q "$ACQ:/var/lib/dpkg/status" "$WORK/base/dpkg-status"
+    docker rm "$ACQ" >/dev/null
     snap="$(sed -n 's|^# http://snapshot.debian.org/archive/debian/\([0-9T]*Z\)$|\1|p' "$WORK/base/debian.sources" | head -1)"
     [[ "$snap" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "base names no snapshot"
     keyring="$WORK/base/keyring.pgp"
@@ -284,6 +287,7 @@ set_names() {
     tag="$(work_tag)"
     ASM="i1583-assemble-$tag"
     RUNC="i1583-execute-$tag"
+    ACQ="i1583-acquire-$tag"
 }
 
 # One SHA-256 over everything that decides what assemble builds, apart
@@ -309,7 +313,7 @@ cmd_acquire() {
     [[ ! -e "$WORK" || -z "$(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit)" ]] || die "work dir not empty"
     mkdir -p "$WORK"
     od -An -N8 -tx1 /dev/urandom | tr -d ' \n' >"$WORK/$MARKER"
-    work_tag >/dev/null
+    set_names
     : >"$WORK/provenance.txt"
     acquire_src
     acquire_go
@@ -374,7 +378,9 @@ cmd_execute() {
     image="$IMAGE_REPO:$(work_tag)"
     [[ "$(docker image inspect --format '{{index .Config.Labels "i1583.provenance"}}' "$image")" == "$(sha256 "$WORK/provenance.txt")" ]] ||
         die "image $image was not assembled from this work dir's provenance"
-    mkdir -p "$out"
+    # A new directory only this account can write, so nothing planted in
+    # it (a symlink named like an output file) is followed.
+    mkdir -m 700 "$out" || die "out dir must not exist yet"
     docker rm -f "$RUNC" >/dev/null 2>&1 || true
     docker run -d --pull=never --name "$RUNC" \
         --network none \
@@ -395,12 +401,13 @@ cmd_execute() {
 }
 
 # Removes this work dir's containers (and the assembly stage) when a
-# standalone assemble or execute fails, keeping the failure status.
+# standalone acquire, assemble or execute fails, keeping the failure
+# status.
 phase_cleanup() {
     local rc=$?
     trap - EXIT
     if [[ -n "$ASM" ]]; then
-        docker rm -f "$ASM" "$RUNC" >/dev/null 2>&1 || true
+        docker rm -f "$ACQ" "$ASM" "$RUNC" >/dev/null 2>&1 || true
     fi
     rm -rf "$WORK/stage"
     exit "$rc"
@@ -414,7 +421,7 @@ cmd_clean() {
     if [[ -e "$WORK" ]]; then
         set_names
         tag="$(work_tag)"
-        docker rm -f "$ASM" "$RUNC" >/dev/null 2>&1 || true
+        docker rm -f "$ACQ" "$ASM" "$RUNC" >/dev/null 2>&1 || true
         docker rmi "$IMAGE_REPO:$tag" >/dev/null 2>&1 || true
         chmod -R u+w "$WORK"
         rm -rf "$WORK"
@@ -452,6 +459,7 @@ resolve_out() {
     case "$out" in
         "$WORK" | "$WORK"/*) die "out dir must be outside the work dir" ;;
     esac
+    [[ ! -e "$out" && ! -L "$out" ]] || die "out dir must not exist yet"
     printf '%s' "$out"
 }
 
@@ -464,7 +472,11 @@ main() {
     ARCH="$(engine_arch)"
     readonly WORK ARCH
     case "$verb" in
-        acquire) cmd_acquire ;;
+        acquire)
+            trap phase_cleanup EXIT
+            cmd_acquire
+            trap - EXIT
+            ;;
         assemble)
             trap phase_cleanup EXIT
             cmd_assemble
