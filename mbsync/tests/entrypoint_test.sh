@@ -328,6 +328,7 @@ collection_setup() {
     collection_count=0
     collection_attempt_id=""
     collection_attempt_started_at=""
+    collection_result_ready=0
     collection_last_terminal="null"
     collection_last_success="null"
     load collection_now load_collection_records \
@@ -1032,6 +1033,38 @@ term_during_a_sync_publishes_an_interruption() {
     signal_once_started "$!" TERM
     ((STOP_RC == 143)) || return 1
     status_has_shape failed '\{"attempt_id": "[0-9a-f]{12}-1", "completed_at": "[^"]*", "outcome": "failed", "withheld_far_side_folders": null, "failure_class": "interrupted"\}' null
+}
+
+# A stop after run_sync has its result (here while the success stamp is
+# written) publishes that result, not an interruption (review round 3):
+# the success carries the stamp's time, so the indexer can still deliver it.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+stop_after_the_result_publishes_the_result() {
+    local real_stamp
+    stop_setup coll-late-stop
+    SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
+    # A quick successful mbsync on PATH in place of stop_setup's long one.
+    printf '#!/bin/bash\nexit 0\n' >"$WORK/bin-stop-coll-late-stop/mbsync"
+    real_stamp="$(declare -f record_successful_sync)"
+    eval "${real_stamp/record_successful_sync/real_record_successful_sync}"
+    # The stop arrives once the stamp is in place, before the outcome.
+    record_successful_sync() {
+        real_record_successful_sync
+        kill -TERM "$(sh -c 'printf "%s" "$PPID"')"
+    }
+    STOP_RC=0
+    (
+        install_signal_handlers
+        if run_sync; then
+            record_successful_sync
+            record_collection_outcome
+        fi
+    ) >"$WORK/coll-late-stop-log" 2>&1 || STOP_RC=$?
+    cat "$WORK/coll-late-stop-log"
+    ((STOP_RC == 143)) || return 1
+    local stamp_time
+    stamp_time="$(sed -E 's/^\{"completed_at": "([^"]*)".*/\1/' "$SYNC_STAMP_FILE")"
+    status_has_shape succeeded "$(terminal_re 1 succeeded 0 null)" "$(success_re 1 "$stamp_time")"
 }
 
 # A shell killed outright publishes nothing more: the in_progress record
@@ -2613,6 +2646,8 @@ check "collection: an unpublishable status is warned and keeps the result" \
     unpublishable_status_is_warned_and_keeps_the_result
 check "collection: TERM during a sync publishes an interruption" \
     term_during_a_sync_publishes_an_interruption
+check "collection: a stop after the sync's result publishes that result" \
+    stop_after_the_result_publishes_the_result
 check "collection: a kernel kill leaves the in_progress record" \
     kernel_kill_leaves_the_in_progress_record
 check "collection: ACCOUNT_SCOPE is required at startup, with fixed text" \

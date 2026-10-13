@@ -658,11 +658,13 @@ child_pid=""
 
 # The collection status's records (publish_collection_status): this
 # start's boot token and attempt count, the attempt in progress (empty
-# between attempts), and the last terminal and last success records as
+# between attempts), whether run_sync has left that attempt's result
+# (1) or not (0), and the last terminal and last success records as
 # JSON objects, or null.
 collection_boot=""
 collection_count=0
 collection_attempt_id=""
+collection_result_ready=0
 collection_attempt_started_at=""
 collection_last_terminal="null"
 collection_last_success="null"
@@ -688,9 +690,15 @@ stop_on_signal() {
         kill -TERM "$child_pid" 2>/dev/null || true
         wait "$child_pid" || true
     fi
-    # A stop during a sync attempt is its outcome (#1592).
+    # A stop during a sync attempt is its outcome (#1592), unless run_sync
+    # has already left the attempt's result, which is then published (a
+    # success with the stamp's time once the stamp was written).
     if [[ -n "${collection_attempt_id:-}" ]]; then
-        finish_collection_attempt failed null interrupted "$(collection_now)"
+        if [[ "${collection_result_ready:-0}" == 1 ]]; then
+            record_collection_outcome
+        else
+            finish_collection_attempt failed null interrupted "$(collection_now)"
+        fi
     fi
     echo ">>> Received SIG${signal} — stopping." >&2
     exit "$status"
@@ -1013,6 +1021,7 @@ begin_collection_attempt() {
     collection_count=$((collection_count + 1))
     collection_attempt_id="${collection_boot}-${collection_count}"
     collection_attempt_started_at="$(collection_now)"
+    collection_result_ready=0
     publish_collection_status in_progress
 }
 
@@ -1147,6 +1156,7 @@ run_sync() {
     else
         sync_failure_class="$class"
     fi
+    collection_result_ready=1
     return "$rc"
 }
 
