@@ -56,8 +56,10 @@ readonly REPO_INFO_COMMIT=631ff15a31ac5d63781079d695ade706e65708c5
 # Marks a work dir run.sh created; holds that dir's random image tag.
 readonly MARKER=.i1583-work
 readonly IMAGE_REPO=i1583-upstream
-readonly ASM=i1583-assemble
-readonly RUNC=i1583-execute
+# Container names carry the work dir's tag (set_names), so runs in other
+# work dirs never share or remove each other's containers.
+ASM=""
+RUNC=""
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HERE
@@ -207,7 +209,7 @@ verify_base() {
 acquire_debs() {
     local ref cid snap keyring suite_spec archive suite dir base want got line
     ref="$(base_ref)"
-    cid="$(docker create --network none "$ref")"
+    cid="$(docker create --pull=never --network none "$ref")"
     docker cp -q "$cid:/usr/share/keyrings/debian-archive-keyring.pgp" "$WORK/base/keyring.pgp"
     docker cp -q "$cid:/etc/apt/sources.list.d/debian.sources" "$WORK/base/debian.sources"
     docker cp -q "$cid:/var/lib/dpkg/status" "$WORK/base/dpkg-status"
@@ -267,8 +269,8 @@ stage_harness() {
 }
 
 
-# The work dir's random tag: names its image, so an execution can only use
-# the image assembled from this work dir's inputs.
+# The work dir's random tag: names its image and containers, so an
+# execution can only use the image assembled from this work dir's inputs.
 work_tag() {
     local tag
     [[ -f "$WORK/$MARKER" ]] || die "not a run.sh work dir (no $MARKER)"
@@ -277,11 +279,19 @@ work_tag() {
     printf '%s' "$tag"
 }
 
-# One SHA-256 over everything assemble copies into the image apart from
-# the module downloads (which go mod verify checks against go.sum inside
-# the container) and the .debs (which apt checks against repo/Packages):
-# the staged source trees with the harness files, repo/Packages, the Go
-# archive and the two in-container scripts. acquire records it; assemble
+set_names() {
+    local tag
+    tag="$(work_tag)"
+    ASM="i1583-assemble-$tag"
+    RUNC="i1583-execute-$tag"
+}
+
+# One SHA-256 over everything that decides what assemble builds, apart
+# from the module downloads (which go mod verify checks against go.sum
+# inside the container) and the .debs (which apt checks against
+# repo/Packages): the staged source trees with the harness files,
+# repo/Packages, the Go archive, the scripts here (run.sh included) and
+# mbsync/Dockerfile, which pins the base. acquire records it; assemble
 # refuses inputs that changed since.
 inputs_digest() {
     (
@@ -289,7 +299,9 @@ inputs_digest() {
         find src -type f ! -path '*/.git/*' -print0 | LC_ALL=C sort -z | xargs -0 "${SHA256_CMD[@]}"
         "${SHA256_CMD[@]}" repo/Packages "go-dl/$GO_VERSION.linux-$ARCH.tar.gz"
         cd "$HERE"
-        "${SHA256_CMD[@]}" run_inside.sh assemble.sh
+        "${SHA256_CMD[@]}" run_inside.sh assemble.sh run.sh resolve_debs.py
+        cd "$REPO"
+        "${SHA256_CMD[@]}" mbsync/Dockerfile
     ) | "${SHA256_CMD[@]}" | cut -d' ' -f1
 }
 
@@ -305,13 +317,14 @@ cmd_acquire() {
     verify_base
     acquire_debs
     stage_harness
-    prov "inputs sha256=$(inputs_digest) (staged trees with harness files, repo/Packages, Go archive, in-container scripts)"
+    prov "inputs sha256=$(inputs_digest) (staged trees with harness files, repo/Packages, Go archive, run.sh and its scripts, mbsync/Dockerfile)"
     printf 'acquire: ok (%s)\n' "$WORK/provenance.txt"
 }
 
 # --------------------------------------------------------------------------
 cmd_assemble() {
     local stage="$WORK/stage" image
+    set_names
     image="$IMAGE_REPO:$(work_tag)"
     [[ "$(sed -n 's/^inputs sha256=\([0-9a-f]\{64\}\) .*/\1/p' "$WORK/provenance.txt")" == "$(inputs_digest)" ]] ||
         die "inputs changed since acquire; run acquire again into a new work dir"
@@ -326,7 +339,10 @@ cmd_assemble() {
     cp -R "$WORK/gomodcache/cache/download" "$stage/download"
     cp "$HERE/run_inside.sh" "$stage/run_inside.sh"
     docker rm -f "$ASM" >/dev/null 2>&1 || true
-    docker create --name "$ASM" --network none --security-opt no-new-privileges:true "$(base_ref)" sleep infinity >/dev/null
+    # --pull=never: the verified base must already be local; no registry
+    # request happens in this phase.
+    docker create --pull=never --name "$ASM" --network none --security-opt no-new-privileges:true \
+        "$(base_ref)" sleep infinity >/dev/null
     docker cp -q "$stage" "$ASM:/tmp/i1583-in"
     docker cp -q "$HERE/assemble.sh" "$ASM:/tmp/i1583-assemble.sh"
     docker start "$ASM" >/dev/null
@@ -354,12 +370,13 @@ rsync_tree() {
 # active: callers must not run this on the left of || or &&).
 cmd_execute() {
     local out="$1" debug="${2:-}" rc=0 image
+    set_names
     image="$IMAGE_REPO:$(work_tag)"
     [[ "$(docker image inspect --format '{{index .Config.Labels "i1583.provenance"}}' "$image")" == "$(sha256 "$WORK/provenance.txt")" ]] ||
         die "image $image was not assembled from this work dir's provenance"
     mkdir -p "$out"
     docker rm -f "$RUNC" >/dev/null 2>&1 || true
-    docker run -d --name "$RUNC" \
+    docker run -d --pull=never --name "$RUNC" \
         --network none \
         --user 1583:1583 \
         --cap-drop ALL \
@@ -377,20 +394,33 @@ cmd_execute() {
     return "$rc"
 }
 
+# Removes this work dir's containers (and the assembly stage) when a
+# standalone assemble or execute fails, keeping the failure status.
+phase_cleanup() {
+    local rc=$?
+    trap - EXIT
+    if [[ -n "$ASM" ]]; then
+        docker rm -f "$ASM" "$RUNC" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$WORK/stage"
+    exit "$rc"
+}
+
 # --------------------------------------------------------------------------
-# Deletes only a work dir run.sh created (it holds the marker) and the
-# image named by its tag.
+# Deletes only a work dir run.sh created (it holds the marker), with its
+# own containers and image.
 cmd_clean() {
     local tag=""
-    docker rm -f "$ASM" "$RUNC" >/dev/null 2>&1 || true
     if [[ -e "$WORK" ]]; then
+        set_names
         tag="$(work_tag)"
+        docker rm -f "$ASM" "$RUNC" >/dev/null 2>&1 || true
         docker rmi "$IMAGE_REPO:$tag" >/dev/null 2>&1 || true
         chmod -R u+w "$WORK"
         rm -rf "$WORK"
+        [[ -z "$(docker ps -a --filter "name=^i1583-[a-z]+-$tag\$" --format '{{.Names}}')" ]] || die "containers remain"
+        [[ -z "$(docker image ls -q "$IMAGE_REPO:$tag")" ]] || die "image remains"
     fi
-    [[ -z "$(docker ps -a --filter "name=^i1583-" --format '{{.Names}}')" ]] || die "containers remain"
-    [[ -z "$tag" || -z "$(docker image ls -q "$IMAGE_REPO:$tag")" ]] || die "image remains"
     [[ ! -e "$WORK" ]] || die "work dir remains"
     printf 'clean: containers, image and work dir removed\n'
 }
@@ -435,9 +465,14 @@ main() {
     readonly WORK ARCH
     case "$verb" in
         acquire) cmd_acquire ;;
-        assemble) cmd_assemble ;;
+        assemble)
+            trap phase_cleanup EXIT
+            cmd_assemble
+            trap - EXIT
+            ;;
         execute)
             [[ -n "${3:-}" ]] || die "execute needs an out dir"
+            trap phase_cleanup EXIT
             cmd_execute "$(resolve_out "$3")" "${4:-}"
             ;;
         clean) cmd_clean ;;
