@@ -69,12 +69,15 @@ die() {
     exit 1
 }
 
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA256_CMD=(sha256sum)
+else
+    SHA256_CMD=(shasum -a 256)
+fi
+readonly SHA256_CMD
+
 sha256() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | cut -d' ' -f1
-    else
-        shasum -a 256 "$1" | cut -d' ' -f1
-    fi
+    "${SHA256_CMD[@]}" "$1" | cut -d' ' -f1
 }
 
 prov() {
@@ -274,6 +277,22 @@ work_tag() {
     printf '%s' "$tag"
 }
 
+# One SHA-256 over everything assemble copies into the image apart from
+# the module downloads (which go mod verify checks against go.sum inside
+# the container) and the .debs (which apt checks against repo/Packages):
+# the staged source trees with the harness files, repo/Packages, the Go
+# archive and the two in-container scripts. acquire records it; assemble
+# refuses inputs that changed since.
+inputs_digest() {
+    (
+        cd "$WORK"
+        find src -type f ! -path '*/.git/*' -print0 | LC_ALL=C sort -z | xargs -0 "${SHA256_CMD[@]}"
+        "${SHA256_CMD[@]}" repo/Packages "go-dl/$GO_VERSION.linux-$ARCH.tar.gz"
+        cd "$HERE"
+        "${SHA256_CMD[@]}" run_inside.sh assemble.sh
+    ) | "${SHA256_CMD[@]}" | cut -d' ' -f1
+}
+
 cmd_acquire() {
     [[ ! -e "$WORK" || -z "$(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit)" ]] || die "work dir not empty"
     mkdir -p "$WORK"
@@ -286,6 +305,7 @@ cmd_acquire() {
     verify_base
     acquire_debs
     stage_harness
+    prov "inputs sha256=$(inputs_digest) (staged trees with harness files, repo/Packages, Go archive, in-container scripts)"
     printf 'acquire: ok (%s)\n' "$WORK/provenance.txt"
 }
 
@@ -293,6 +313,8 @@ cmd_acquire() {
 cmd_assemble() {
     local stage="$WORK/stage" image
     image="$IMAGE_REPO:$(work_tag)"
+    [[ "$(sed -n 's/^inputs sha256=\([0-9a-f]\{64\}\) .*/\1/p' "$WORK/provenance.txt")" == "$(inputs_digest)" ]] ||
+        die "inputs changed since acquire; run acquire again into a new work dir"
     rm -rf "$stage"
     mkdir -p "$stage"
     cp -R "$WORK/repo" "$stage/repo"
@@ -393,6 +415,16 @@ resolve_work() {
     printf '%s' "$path"
 }
 
+# The out dir, canonical and outside the work dir that clean deletes.
+resolve_out() {
+    local out
+    out="$(resolve_work "$1")"
+    case "$out" in
+        "$WORK" | "$WORK"/*) die "out dir must be outside the work dir" ;;
+    esac
+    printf '%s' "$out"
+}
+
 # --------------------------------------------------------------------------
 main() {
     local verb="${1:-}"
@@ -404,15 +436,20 @@ main() {
     case "$verb" in
         acquire) cmd_acquire ;;
         assemble) cmd_assemble ;;
-        execute) cmd_execute "${3:?out dir}" "${4:-}" ;;
+        execute)
+            [[ -n "${3:-}" ]] || die "execute needs an out dir"
+            cmd_execute "$(resolve_out "$3")" "${4:-}"
+            ;;
         clean) cmd_clean ;;
         all)
             [[ -n "${3:-}" ]] || die "all needs an out dir"
+            local out
+            out="$(resolve_out "$3")"
             # Clean up after any failure from here on, keeping its status.
             trap 'rc=$?; trap - EXIT; cmd_clean || true; exit "$rc"' EXIT
             cmd_acquire
             cmd_assemble
-            cmd_execute "$3"
+            cmd_execute "$out"
             ;;
         *) die "unknown command" ;;
     esac

@@ -1351,7 +1351,7 @@ Proton, and the results hold for these commits, not a released binary.
 |---|---|---|---|
 | H1 | 1, builder | Bridge's builder with the sync's job options, given `X-Pm-Internal-Id` fields in the parsed headers: none, one equal to the Proton ID, one or two other values, or two fields with the other value topmost all give one field equal to the ID; two fields with the ID topmost keep both, so a different value stays below it. | S1 |
 | H2 | 1, fake API | Five imported literals (no identity header, one or two `X-Pm-Internal-Id` fields with other values, an `X-Pm-Gluon-Id` field, both): each of the 5 files isync wrote has one `X-Pm-Internal-Id` equal to its Proton ID and one `X-Pm-Gluon-Id`, the topmost field, and none of the imported values. The fake server keeps only an import's standard fields, so this path cannot reach H1's keep branch or show whether Proton keeps sender-supplied `X-Pm-*` fields (U2). | S1, S4 |
-| H3 | 1, delivery | Each file differs from the literal Bridge served over IMAP: isync wrote LF line endings and added one `X-TUID` field; with both undone the 5 files equal the served literals. A second sync of the same unchanged messages into an empty Maildir gave 0 of 5 byte-identical files, 5 of 5 identical without `X-TUID`. A file's bytes, and so its claimant ID, are not the served bytes and change when a message is synced again. | U3 |
+| H3 | 1, delivery | Each file differs from the literal Bridge served over IMAP: isync wrote LF line endings and added one `X-TUID` field; with both undone the 5 files equal the served literals. A second sync of the same unchanged messages into a new, empty Maildir (new sync state) gave 0 of 5 byte-identical files, 5 of 5 identical without `X-TUID`. A file's bytes, and so its claimant ID, are not the served bytes, and a message isync writes again into an empty Maildir gets different bytes. An incremental sync into the same Maildir was not measured. | U3 |
 | H4 | 2 | Eight APPENDs the connector refused, all answered `NO`: a literal with an `X-Pm-Internal-Id` field, an exact repeat, and copies differing only in `Date`, `Message-Id`, `X-Pm-Internal-Id`, an added `X-Pm-Gluon-Id`, `Subject` or body. `Recovered Messages` stored 3 (the first, the `Subject` and the body variant), each byte-equal to what was submitted, the first with its `X-Pm-Internal-Id` field and no `X-Pm-Gluon-Id`. The target mailbox stayed empty. | S7 |
 | H5 | 3 | A recovery literal removed from the store: `FETCH` answers `NO` with 0 connector fetches, and the message stays listed. `COPY` out of recovery: 1 connector create, recovery keeps its copy (still byte-equal to the submission), the target gets the submitted bytes with one `X-Pm-Gluon-Id` prepended. `MOVE`: the same, and recovery is left empty. | S8 |
 | H6 | 4 | APPEND to an ordinary mailbox of a different literal carrying an existing message's `X-Pm-Gluon-Id`: 0 connector creates, 1 add, and the mailbox serves the existing message's bytes, not the appended ones. To a `\Drafts` mailbox: 1 create and a new Gluon ID. An unknown, well-formed Gluon ID: 1 create, and the served literal has 2 `X-Pm-Gluon-Id` fields. | S9, S4 |
@@ -1386,8 +1386,9 @@ the rows above; they bind #1313's policy, which does not exist yet.
 - Any identity header in a `Recovered Messages` file, which keeps the
   submitted bytes (S7, H4); recovery is an untrusted category (#1317).
 - A file's bytes, or its claimant ID, as the bytes Bridge served or as
-  stable across syncs: isync writes LF line endings and adds an
-  `X-TUID` field whose value differs on each sync (H3).
+  stable when a message is written again (for example into a rebuilt,
+  empty Maildir): isync writes LF line endings and adds an `X-TUID`
+  field whose value differed between two such writes (H3).
 - A header's presence in a file whose provenance is not established,
   and a folder name as provenance.
 - Equal bytes or an equal Message-ID as proof of one logical message
