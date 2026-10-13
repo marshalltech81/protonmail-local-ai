@@ -4,7 +4,8 @@ set -Eeuo pipefail
 # Tests for the one-run maintenance targets `make rotate-bridge-pin` and
 # `make force-deletion` (#1609). A fake `docker` first on PATH logs each
 # call and never contacts a daemon; FAKE_FAIL names the calls that fail
-# (`run`, `up`, `stop`). The validate-env prerequisite is skipped with
+# (`run`, `up`, `stop`) and FAKE_INTERRUPT the call during which Ctrl-C
+# arrives; make runs in its own process group. The validate-env prerequisite is skipped with
 # `make -o validate-env`: scripts/tests/validate_env_test.sh covers it.
 #
 # Run: bash scripts/tests/maintenance_commands_test.sh
@@ -23,6 +24,12 @@ printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
 if [[ " ${FAKE_FAIL:-} " == *" $2 "* ]]; then
     exit 3
 fi
+# FAKE_INTERRUPT=run: the terminal's Ctrl-C, sent to the whole process
+# group (make, the recipe shell and this call).
+if [[ "${FAKE_INTERRUPT:-}" == "$2" ]]; then
+    kill -s INT 0
+    sleep 1
+fi
 EOF
 chmod +x "$WORK/bin/docker"
 
@@ -30,6 +37,7 @@ chmod +x "$WORK/bin/docker"
 run_target() {
     : >"$WORK/docker.log"
     PATH="$WORK/bin:$PATH" FAKE_DOCKER_LOG="$WORK/docker.log" \
+        perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' \
         make --no-print-directory -s -C "$REPO" -o validate-env "$1" >"$WORK/out" 2>&1 \
         && STATUS=0 || STATUS=$?
 }
@@ -93,6 +101,15 @@ failed_start_fails_the_target() {
     [[ "$STATUS" -ne 0 ]] || return 1
 }
 
+# Ctrl-C during the pass still starts the indexer, and the target fails.
+interrupted_pass_still_starts_the_indexer() {
+    FAKE_INTERRUPT=run run_target force-deletion
+    [[ "$STATUS" -ne 0 ]] || return 1
+    calls_are "compose stop indexer" \
+        "compose run --rm --no-deps indexer python -m src.force_deletion" \
+        "compose up -d --no-deps indexer"
+}
+
 # The indexer could not be stopped: no pass runs beside it.
 failed_stop_runs_no_pass() {
     FAKE_FAIL=stop run_target force-deletion
@@ -123,6 +140,7 @@ check "force-deletion stops the indexer, runs one pass and starts it again" \
     forced_deletion_stops_runs_and_starts_the_indexer
 check "a failed pass still starts the indexer and fails" failed_pass_still_starts_the_indexer
 check "an indexer that cannot be started again fails force-deletion" failed_start_fails_the_target
+check "an interrupted pass still starts the indexer and fails" interrupted_pass_still_starts_the_indexer
 check "an indexer that cannot be stopped runs no pass" failed_stop_runs_no_pass
 
 if ((FAILURES > 0)); then

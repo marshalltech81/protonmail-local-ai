@@ -268,10 +268,12 @@ rotate-bridge-pin: validate-env
 # started again (as `make up` starts it) whatever the outcome; the target
 # fails when the pass or that start fails. Nothing is stored: every later
 # pass has the brake on.
+# An interrupt (Ctrl-C) during the pass still starts the indexer again.
 force-deletion: validate-env
 	docker compose stop indexer
-	status=0; docker compose run --rm --no-deps indexer python -m src.force_deletion || status=$$?; \
-		docker compose up -d --no-deps indexer || status=$$?; exit $$status
+	trap 'trap - INT TERM; docker compose up -d --no-deps indexer; exit 130' INT TERM; \
+		status=0; docker compose run --rm --no-deps indexer python -m src.force_deletion || status=$$?; \
+		trap - INT TERM; docker compose up -d --no-deps indexer || status=$$?; exit $$status
 
 # Copy the live index while the stack runs (#1005), for example before
 # deploying a schema change. The copy holds the whole mailbox, so it goes
