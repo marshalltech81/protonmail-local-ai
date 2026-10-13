@@ -8,9 +8,10 @@ set -Eeuo pipefail
 # script follows:
 #
 #   acquire   On the host, with network: fetch the pinned commits, the Go
-#             toolchain go.mod names (checked against go.dev's published
-#             SHA-256), the Go modules against the unchanged go.sum (then
-#             `go mod verify`), the Debian base image by the digest
+#             toolchain go.mod names (checked against the SHA-256 pinned
+#             here and go.dev's published one), the Go modules against
+#             the unchanged go.sum (then `go mod verify`), the Debian base
+#             image by the digest
 #             mbsync/Dockerfile pins (checked against the publisher's
 #             record in docker-library/repo-info), and the exact .debs the
 #             harness needs from the snapshot the base names (InRelease
@@ -148,17 +149,34 @@ acquire_src() {
     done
 }
 
+# SHA-256 of each GO_VERSION archive, as go.dev/dl published them when
+# GO_VERSION was set (reviewed; the arm64 values matched across separate
+# sessions). A download must match both this pin and go.dev's record, so a
+# record and archive forged together in one session are refused before
+# the host runs the toolchain.
+go_archive_sha256() {
+    case "$1" in
+        go1.26.7.darwin-arm64.tar.gz) printf '020a1e8224811be75163e920bc77e0926a1390a6aeea19bdcf23f74b9d749f6d' ;; # pragma: allowlist secret
+        go1.26.7.darwin-amd64.tar.gz) printf '92e8b34bff3c89ab16404c595669ac8cb004cc2f676dcbd1f5b87a6b8def3b47' ;; # pragma: allowlist secret
+        go1.26.7.linux-arm64.tar.gz) printf '5a4ec883379d51ee9ce1040d5e87f8d35e20387574dd8c947feb01eabc3c1b37' ;; # pragma: allowlist secret
+        go1.26.7.linux-amd64.tar.gz) printf 'ffb5f8de10c62550dfddab66b36b57030721e0a44a3218e9e1181d7b59f121ca' ;; # pragma: allowlist secret
+        *) die "no pinned checksum for $1" ;;
+    esac
+}
+
 acquire_go() {
-    local plat file want
+    local plat file want pinned
     mkdir -p "$WORK/go-dl"
     curl -fsSL -o "$WORK/go-dl/go-dl.json" 'https://go.dev/dl/?mode=json&include=all'
     for plat in "$(host_go_platform)" "linux-$ARCH"; do
         file="$GO_VERSION.$plat.tar.gz"
+        pinned="$(go_archive_sha256 "$file")"
         want="$(jq -r --arg f "$file" '.[].files[] | select(.filename == $f and .kind == "archive") | .sha256' "$WORK/go-dl/go-dl.json")"
         [[ "$want" =~ ^[0-9a-f]{64}$ ]] || die "no published checksum for $file"
+        [[ "$want" == "$pinned" ]] || die "$file: go.dev's checksum differs from the one pinned in run.sh"
         curl -fsSL -o "$WORK/go-dl/$file" "https://dl.google.com/go/$file"
-        [[ "$(sha256 "$WORK/go-dl/$file")" == "$want" ]] || die "$file: checksum mismatch"
-        prov "go $file sha256=$want (go.dev/dl published)"
+        [[ "$(sha256 "$WORK/go-dl/$file")" == "$pinned" ]] || die "$file: checksum mismatch"
+        prov "go $file sha256=$pinned (pinned in run.sh, matches go.dev/dl published)"
     done
     mkdir -p "$WORK/hostgo"
     tar -xzf "$WORK/go-dl/$GO_VERSION.$(host_go_platform).tar.gz" -C "$WORK/hostgo"

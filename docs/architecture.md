@@ -1319,9 +1319,9 @@ No row describes an actual Bridge binary or a live account.
 which also records how every input was obtained. Gluon and Bridge are
 built from the commits above with Go 1.26.7, the toolchain both
 `go.mod` files name (linux-arm64 archive SHA-256
-`5a4ec883379d51ee9ce1040d5e87f8d35e20387574dd8c947feb01eabc3c1b37`, as
-go.dev publishes it). Modules are checked against each unchanged
-`go.sum` (SHA-256 Gluon
+`5a4ec883379d51ee9ce1040d5e87f8d35e20387574dd8c947feb01eabc3c1b37`,
+pinned in `run.sh` and matching go.dev's published record). Modules are
+checked against each unchanged `go.sum` (SHA-256 Gluon
 `57ec6e6d7201faca75cf616fdd1d691d45065b6d5730c6400fa6af7a9637e76a`,
 Bridge `e41dcc08911ed850cf72a4f5d2f5a754e1e907ac5046a696d35e5a92a3ae8dfd`)
 and by `go mod verify`. The container starts from the
