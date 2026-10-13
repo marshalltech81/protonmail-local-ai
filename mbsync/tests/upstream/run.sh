@@ -15,8 +15,10 @@ set -Eeuo pipefail
 #             mbsync/Dockerfile pins (checked against the publisher's
 #             record in docker-library/repo-info), and the exact .debs the
 #             harness needs from the snapshot the base names (InRelease
-#             verified with gpgv against the base's own archive keyring,
-#             Packages and each .deb against the signed SHA-256). Writes
+#             checked against the SHA-256 pinned here for that snapshot
+#             and verified with gpgv against the base's own archive
+#             keyring, Packages and each .deb against the signed SHA-256).
+#             Every download is size- and time-bounded. Writes
 #             provenance.txt. No container runs in this step: the keyring,
 #             apt sources and dpkg status are copied out of a created,
 #             never-started container.
@@ -124,6 +126,20 @@ prov() {
     printf '%s\n' "$*" >>"$WORK/provenance.txt"
 }
 
+# Downloads <url> to <dest> through a temp file, refusing more than <max>
+# bytes (curl stops the transfer at the limit; the size is checked again)
+# and taking at most 30 minutes, so no response can fill the disk first.
+fetch() {
+    local max="$1" dest="$2" url="$3"
+    [[ "$max" =~ ^[1-9][0-9]*$ ]] || die "no size limit for $url"
+    if ! curl -fsSL --retry 3 --max-filesize "$max" --max-time 1800 -o "$dest.part" "$url" ||
+        [[ "$(wc -c <"$dest.part" | tr -d ' ')" -gt "$max" ]]; then
+        rm -f "$dest.part"
+        die "download failed or larger than $max bytes: $url"
+    fi
+    mv "$dest.part" "$dest"
+}
+
 need_tools() {
     local t
     for t in docker git curl jq gpgv xz python3; do
@@ -195,14 +211,15 @@ go_archive_sha256() {
 acquire_go() {
     local plat file want pinned
     mkdir -p "$WORK/go-dl"
-    curl -fsSL -o "$WORK/go-dl/go-dl.json" 'https://go.dev/dl/?mode=json&include=all'
+    # Limits: about 7x the 2.2 MB index and 2x the 65 MB archives.
+    fetch 16777216 "$WORK/go-dl/go-dl.json" 'https://go.dev/dl/?mode=json&include=all'
     for plat in "$(host_go_platform)" "linux-$ARCH"; do
         file="$GO_VERSION.$plat.tar.gz"
         pinned="$(go_archive_sha256 "$file")"
         want="$(jq -r --arg f "$file" '.[].files[] | select(.filename == $f and .kind == "archive") | .sha256' "$WORK/go-dl/go-dl.json")"
         [[ "$want" =~ ^[0-9a-f]{64}$ ]] || die "no published checksum for $file"
         [[ "$want" == "$pinned" ]] || die "$file: go.dev's checksum differs from the one pinned in run.sh"
-        curl -fsSL -o "$WORK/go-dl/$file" "https://dl.google.com/go/$file"
+        fetch 134217728 "$WORK/go-dl/$file" "https://dl.google.com/go/$file"
         [[ "$(sha256 "$WORK/go-dl/$file")" == "$pinned" ]] || die "$file: checksum mismatch"
         prov "go $file sha256=$pinned (pinned in run.sh, matches go.dev/dl published)"
     done
@@ -241,7 +258,7 @@ verify_base() {
     tag="${tag#debian:}"
     mkdir -p "$WORK/base"
     md="$WORK/base/repo-info-$tag.md"
-    curl -fsSL -o "$md" "https://raw.githubusercontent.com/docker-library/repo-info/$REPO_INFO_COMMIT/repos/debian/remote/$tag.md"
+    fetch 1048576 "$md" "https://raw.githubusercontent.com/docker-library/repo-info/$REPO_INFO_COMMIT/repos/debian/remote/$tag.md"
     grep -qF "debian@$digest" "$md" ||
         die "the pinned base digest is not in repo-info $REPO_INFO_COMMIT; update REPO_INFO_COMMIT to a publisher commit that records it"
     case "$ARCH" in
@@ -260,11 +277,24 @@ verify_base() {
     prov "base $ref repo-info-commit=$found platform=$platform image-id=$got_id (matches publisher)"
 }
 
+# SHA-256 of each suite's InRelease at the snapshot the pinned base names
+# (reviewed; matched across separate sessions). gpgv accepts any release
+# the archive keys signed, so this binds the metadata to the snapshot; a
+# new base digest names a new snapshot, whose hashes are added here.
+inrelease_sha256() {
+    case "$1" in
+        20261005T000000Z:debian/trixie) printf '0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675' ;; # pragma: allowlist secret
+        20261005T000000Z:debian/trixie-updates) printf 'ef1bab53128b164c03c968625d0f2e8841e3e754ff358ab010ccc2c7dbf6124a' ;; # pragma: allowlist secret
+        20261005T000000Z:debian-security/trixie-security) printf '1a25f10a8e266ba293823ac2c52325b7333e49dddbc2ef74de71f8d7c6d6b7f8' ;; # pragma: allowlist secret
+        *) die "no pinned InRelease for $1; add the new snapshot's hashes to inrelease_sha256" ;;
+    esac
+}
+
 # Debian packages: keyring, sources and dpkg status come out of a
 # created, never-started container; metadata is authenticated with gpgv,
 # then every .deb is checked against the signed index.
 acquire_debs() {
-    local ref snap keyring suite_spec archive suite dir base want got line
+    local ref snap keyring suite_spec archive suite dir base want got line size
     ref="$(base_ref)"
     # Named by the work dir's tag, so a failed copy is removed by
     # phase_cleanup or clean.
@@ -285,11 +315,13 @@ acquire_debs() {
         dir="$WORK/apt/$archive-$suite"
         base="https://snapshot.debian.org/archive/$archive/$snap/dists/$suite"
         mkdir -p "$dir"
-        curl -fsSL --retry 3 -o "$dir/InRelease" "$base/InRelease"
+        fetch 1048576 "$dir/InRelease" "$base/InRelease"
+        [[ "$(sha256 "$dir/InRelease")" == "$(inrelease_sha256 "$snap:$archive/$suite")" ]] ||
+            die "$archive $suite: InRelease differs from the one pinned for snapshot $snap"
         gpgv --keyring "$keyring" --output - "$dir/InRelease" >"$dir/Release" 2>"$dir/gpgv.txt" ||
             die "$archive $suite: InRelease signature not verified"
-        curl -fsSL --retry 3 -o "$dir/Packages.xz" "$base/main/binary-$ARCH/Packages.xz"
-        want="$(awk -v f="main/binary-$ARCH/Packages.xz" '/^SHA256:/ { s = 1; next } /^[^ ]/ { s = 0 } s && $3 == f { print $1 }' "$dir/Release")"
+        read -r want size <<<"$(awk -v f="main/binary-$ARCH/Packages.xz" '/^SHA256:/ { s = 1; next } /^[^ ]/ { s = 0 } s && $3 == f { print $1, $2 }' "$dir/Release")"
+        fetch "$size" "$dir/Packages.xz" "$base/main/binary-$ARCH/Packages.xz"
         got="$(sha256 "$dir/Packages.xz")"
         [[ -n "$want" && "$want" == "$got" ]] || die "$archive $suite: Packages.xz not in the signed index"
         xz -dc "$dir/Packages.xz" >"$dir/Packages"
@@ -305,7 +337,7 @@ acquire_debs() {
         read -r _ archive file want size name version <<<"$line"
         [[ "$file" =~ ^pool/[A-Za-z0-9._+~/-]+\.deb$ ]] || die "$name: unexpected index Filename"
         mkdir -p "$WORK/repo/$(dirname "$file")"
-        curl -fsSL --retry 3 -o "$WORK/repo/$file" "https://snapshot.debian.org/archive/$archive/$snap/$file"
+        fetch "$size" "$WORK/repo/$file" "https://snapshot.debian.org/archive/$archive/$snap/$file"
         [[ "$(sha256 "$WORK/repo/$file")" == "$want" ]] || die "$name: .deb checksum mismatch"
         [[ "$(wc -c <"$WORK/repo/$file" | tr -d ' ')" == "$size" ]] || die "$name: .deb size mismatch"
         prov "deb $name=$version sha256=$want"
