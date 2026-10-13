@@ -539,6 +539,9 @@ cmd_execute() {
     local cpus
     cpus="$(docker info --format '{{.NCPU}}')" || die "cannot read the engine's CPU count"
     [[ "$cpus" =~ ^[1-9][0-9]*$ ]] || die "unexpected engine CPU count"
+    # Equal --memory and --memory-swap keep the container out of swap only
+    # where the engine enforces swap limits.
+    [[ "$(docker info --format '{{.SwapLimit}}')" == true ]] || die "the engine does not enforce swap limits"
     ((cpus <= EXEC_MAX_CPUS)) || cpus="$EXEC_MAX_CPUS"
     docker rm -f "$RUNC" >/dev/null 2>&1 || true
     docker run -d --pull=never --name "$RUNC" \
@@ -556,8 +559,8 @@ cmd_execute() {
         die "execution container has mounts, ports or a network"
     # No container log: its code runs as PID 1's user and could write to
     # /proc/1/fd/1, which neither of the watchdog's measures counts.
-    [[ "$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}} {{.HostConfig.LogConfig.Type}}{{range .HostConfig.Ulimits}} {{.Name}}={{.Soft}}/{{.Hard}}{{end}}' "$RUNC")" == "${cpus}000000000 8589934592 2048 none fsize=$EXEC_MAX_FILE_BYTES/$EXEC_MAX_FILE_BYTES" ]] ||
-        die "execution container lacks its CPU, memory, pids or file-size limit, or has a log"
+    [[ "$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.PidsLimit}} {{.HostConfig.LogConfig.Type}}{{range .HostConfig.Ulimits}} {{.Name}}={{.Soft}}/{{.Hard}}{{end}}' "$RUNC")" == "${cpus}000000000 8589934592 8589934592 2048 none fsize=$EXEC_MAX_FILE_BYTES/$EXEC_MAX_FILE_BYTES" ]] ||
+        die "execution container lacks its CPU, memory, swap, pids or file-size limit, or has a log"
     local suite start=$SECONDS
     start_watchdog
     : >"$out/run-status.txt"
@@ -603,11 +606,17 @@ start_watchdog() {
 # locals (s, why) are read by watchdog_term and watchdog_fire.
 watchdog_loop() {
     local s="" start=$SECONDS size written why=""
+    # The probes below run in command substitutions, whose bounded groups
+    # end before a TERM handler can run (bash runs it once the probe
+    # returns); PROBE here only tracks watchdog_fire's kill.
+    PROBE=""
     trap watchdog_term TERM
     while [[ -z "$why" ]]; do
         sleep "$WATCH_INTERVAL_SECS" &
         s=$!
         wait "$s"
+        # Reaped: its PID may be reused, so the TERM handler must not kill it.
+        s=""
         size="$(bounded "$PROBE_TIMEOUT_SECS" docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
         written="$(container_written_bytes)" || written=""
         if ((SECONDS - start >= EXEC_DEADLINE_SECS)); then
