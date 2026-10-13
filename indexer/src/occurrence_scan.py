@@ -29,7 +29,9 @@ Maildir root and comparing it with the account's active occurrences:
 
 Every write re-checks, in its own transaction, that the occurrence or
 path is as the scan saw it, so a rename the watcher records meanwhile
-wins. The scan covers one account: occurrences of other accounts, and
+wins, and that the file is still the one whose bytes were verified (its
+size, mtime and inode taken before the verification), so a file
+replaced in between is not bound to the message. The scan covers one account: occurrences of other accounts, and
 of this one outside the walked root, are left alone.
 """
 
@@ -103,6 +105,18 @@ def _walk(root: Path, account_root: Path, counts: ScanCounts) -> dict[str, Path]
                 # account's): nothing can be said about it.
                 counts.complete = False
     return files
+
+
+def file_identity(path: Path) -> tuple[int, int, int] | None:
+    """``path``'s size, mtime and inode, or ``None`` when it cannot be
+    read: taken before its bytes are verified and checked again inside
+    the write (``Database.move_verified_occurrence``,
+    ``bind_found_copy``), so a file replaced in between is refused."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_size, st.st_mtime_ns, st.st_ino
 
 
 def _stat_identity(path: Path) -> tuple[int, int] | None:
@@ -183,11 +197,16 @@ def scan_occurrences(
         candidates = [c for c in by_uniq.get((o["folder"], o["uniq"]), []) if c not in held]
         moved = False
         for candidate in sorted(candidates):
-            if o["content_hash"] is None or not _verify(
-                db, old, files[candidate], o["content_hash"], counts
+            identity = file_identity(files[candidate])
+            if (
+                identity is None
+                or o["content_hash"] is None
+                or not _verify(db, old, files[candidate], o["content_hash"], counts)
             ):
                 continue
-            if db.move_verified_occurrence(o["id"], relative, str(files[candidate])):
+            if db.move_verified_occurrence(
+                o["id"], relative, str(files[candidate]), identity=identity
+            ):
                 held.add(candidate)
                 counts.renamed += 1
                 moved = True
@@ -209,13 +228,18 @@ def scan_occurrences(
     for relative, path in sorted(files.items()):
         if relative in held:
             continue
+        identity = file_identity(path)
+        if identity is None:
+            continue
         content_hash = _recorded_hash(db, path, path)
         if content_hash is None and hash_cache is not None:
             content_hash = _hash_unindexed(db, path, hash_cache, counts)
         if content_hash is None:
             continue
         claimant_id = db.claimant_for_content(content_hash)
-        if claimant_id is not None and db.bind_found_copy(claimant_id, str(path)):
+        if claimant_id is not None and db.bind_found_copy(
+            claimant_id, str(path), identity=identity
+        ):
             held.add(relative)
             counts.bound += 1
     return counts

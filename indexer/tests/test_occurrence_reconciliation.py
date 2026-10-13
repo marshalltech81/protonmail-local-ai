@@ -23,7 +23,7 @@ from unittest.mock import patch
 import pytest
 from src import main
 from src.database import EMBEDDING_DIM, SCHEMA_VERSION, Database
-from src.occurrence_scan import scan_occurrences
+from src.occurrence_scan import file_identity, scan_occurrences
 from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 from src.reconciler import Reconciler, ReconcilerConfig, sweep_paths
 from src.threader import Threader
@@ -431,7 +431,14 @@ class TestInterleavings:
         path.rename(dest)
         box.reconciler.handle_moved(str(path), str(dest))
         # The scan read the occurrence before the watcher moved it.
-        assert box.db.move_verified_occurrence(o["id"], o["relative_path"], str(dest)) is False
+        identity = file_identity(dest)
+        assert identity is not None
+        assert (
+            box.db.move_verified_occurrence(
+                o["id"], o["relative_path"], str(dest), identity=identity
+            )
+            is False
+        )
         assert box.db.retire_vanished_occurrence(o["id"], o["relative_path"]) is False
         assert box.active() == [("INBOX/cur/s1:2,RS", 0)]
 
@@ -763,3 +770,96 @@ def test_a_survivor_with_no_file_holds_its_thread_back(tmp_path, caplog):
         assert MARKER not in caplog.text
     finally:
         box.close()
+
+
+class TestReviewRound1:
+    """Review round 1 on #1612."""
+
+    def test_a_reap_keeps_a_reused_path_of_another_message(self, box):
+        """Identity namespace: a retired locator of the reaped message
+        that now holds another message's file keeps that file's
+        ``indexed_files`` and queue rows."""
+        a = box.put("INBOX/cur/p1:2,S", _eml("moved@example.test"))
+        box.index(a)
+        moved = box.root / "Archive/cur/p1:2,S"
+        moved.parent.mkdir(parents=True)
+        a.rename(moved)
+        box.db.update_filepath(str(a), str(moved), move_occurrence=True)
+        b = box.put("INBOX/cur/p1:2,S", _eml("reuser@example.test"))
+        box.index(b)
+        queue = IndexingQueue(box.db, max_attempts=3, base_backoff_seconds=0)
+        queue.enqueue(str(b), REASON_INITIAL_SCAN)
+        moved.unlink()
+        assert box.reconciler.sweep()["tombstoned"] == 1
+        assert box.reconciler.reap()["threads_reaped"] == 1
+        assert box.messages() == 1
+        assert box.db.is_indexed(str(b))
+        assert box.db.queue_get_status(str(b)) == "queued"
+
+    def test_a_found_copy_replaced_after_hashing_is_not_bound(self, box, monkeypatch):
+        """A T-flagged copy hashed by the scan and replaced before the
+        write is refused inside the write transaction."""
+        raw = _eml("raced@example.test")
+        box.index(box.put("INBOX/cur/r1:2,S", raw))
+        copy = box.put("Trash/cur/r2:2,ST", raw)
+        real = scan_occurrences.__globals__["_sha256"]
+
+        def hash_then_replace(path):
+            digest = real(path)
+            if path == copy:
+                swap = copy.with_name("swap")
+                swap.write_bytes(_eml("other@example.test"))
+                os.replace(swap, copy)
+            return digest
+
+        monkeypatch.setitem(scan_occurrences.__globals__, "_sha256", hash_then_replace)
+        counts = scan_occurrences(box.db, box.root, hash_cache={})
+        assert counts.bound == 0
+        assert box.active() == [("INBOX/cur/r1:2,S", 0)]
+
+    def test_a_missed_rename_replaced_after_hashing_is_not_followed(self, box, monkeypatch):
+        old = box.put("INBOX/cur/q1:2,S", _eml("renamed@example.test"))
+        box.index(old)
+        new = box.root / "INBOX/cur/q1:2,FS"
+        old.rename(new)
+        os.utime(new, ns=(1, 1))  # the recorded identity no longer matches: hash it
+        real = scan_occurrences.__globals__["_sha256"]
+
+        def hash_then_replace(path):
+            digest = real(path)
+            swap = path.with_name("swap")
+            swap.write_bytes(_eml("other@example.test"))
+            os.replace(swap, path)
+            return digest
+
+        monkeypatch.setitem(scan_occurrences.__globals__, "_sha256", hash_then_replace)
+        counts = scan_occurrences(box.db, box.root)
+        assert (counts.renamed, counts.unverified) == (0, 1)
+        assert box.active() == [("INBOX/cur/q1:2,S", 0)]
+
+    def test_the_v15_warning_counts_only_messages_with_no_active_copy(self, tmp_path, caplog):
+        """A v14 seed row retired by a later move is history, not a
+        message without a verified file."""
+        root = tmp_path / "maildir"
+        account = replace(TEST_ACCOUNT, maildir_root=root)
+        box = Box(tmp_path)
+        try:
+            raw = _eml("seeded@example.test")
+            path = box.put("INBOX/cur/s1:2,S", raw)
+            box.index(path)
+            db = box.db
+            # The seed row, retired by a move to Archive, beside the new row.
+            db._conn.execute("UPDATE message_occurrences SET provenance = 'migration'")
+            db._conn.commit()
+            moved = box.root / "Archive/cur/s1:2,S"
+            moved.parent.mkdir(parents=True)
+            path.rename(moved)
+            db.update_filepath(str(path), str(moved), move_occurrence=True)
+            _v14_from_fresh(db)
+            db.close()
+            caplog.set_level(logging.INFO)
+            Database(tmp_path / "mail.db", account=account).close()
+        finally:
+            box.db.close()
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert not any("no verified file" in m for m in warnings)

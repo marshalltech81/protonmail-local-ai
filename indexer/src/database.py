@@ -7,6 +7,7 @@ Thread-level indexing: one row per thread, updated as new messages arrive.
 import functools
 import json
 import logging
+import os
 import sqlite3
 import struct
 import threading
@@ -73,6 +74,16 @@ def _caps_json(caps: dict[str, int]) -> str:
     ):
         raise ValueError("parse caps must map PARSE_CAPS names to positive counts")
     return json.dumps({name: caps[name] for name in PARSE_CAPS if name in caps})
+
+
+def _same_file(filepath: str, identity: tuple[int, int, int]) -> bool:
+    """Whether ``filepath`` still has ``identity`` (size, mtime, inode):
+    the file whose bytes a scan verified, not a replacement."""
+    try:
+        st = os.stat(filepath)
+    except OSError:
+        return False
+    return (st.st_size, st.st_mtime_ns, st.st_ino) == identity
 
 
 def _close_connection(conn: sqlite3.Connection) -> None:
@@ -316,7 +327,7 @@ _CAP_REFRESH_SQL = """
     FROM attachment_extractions e
     JOIN attachments a ON a.attachment_id = e.attachment_id
         AND a.extractor_module = e.extractor_module
-    JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id AND o.state = 'active' ORDER BY o.trashed, o.id LIMIT 1)
+    JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
     WHERE e.extraction_status IN ('success', 'empty')
       AND (:ocr_enabled OR (substr(CASE WHEN instr(COALESCE(e.extractor, ''), '@') > 0
                THEN substr(e.extractor, 1, instr(e.extractor, '@') - 1)
@@ -363,7 +374,7 @@ _IDENTIFICATION_REFRESH_QUERY = """
     FROM attachment_extractions e
     JOIN attachments a ON a.attachment_id = e.attachment_id
         AND a.extractor_module = e.extractor_module
-    JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id AND o.state = 'active' ORDER BY o.trashed, o.id LIMIT 1)
+    JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
     WHERE e.extraction_status <> 'too_large'
       AND (:ocr_enabled OR substr(CASE WHEN instr(COALESCE(e.extractor, ''), '@') > 0
                THEN substr(e.extractor, 1, instr(e.extractor, '@') - 1)
@@ -804,10 +815,16 @@ class Database:
     def _log_occurrence_cutover(self) -> None:
         """Report what the v15 migration did (#1567), as counts: the
         messages it gave a retired occurrence because no file was verified
-        to hold their bytes, and the tombstones it carried over."""
+        to hold their bytes, and the tombstones it carried over. A message
+        counts once, and only while it has no active occurrence: a v14
+        seed row retired by a later move sits beside the active row that
+        replaced it and is history, not a missing file (review round 1 on
+        #1612)."""
         retired, pending = self._conn.execute(
-            "SELECT (SELECT COUNT(*) FROM message_occurrences WHERE provenance = 'migration' "
-            "AND state = 'retired'), (SELECT COUNT(*) FROM pending_deletions)"
+            "SELECT (SELECT COUNT(DISTINCT o.claimant_id) FROM message_occurrences o "
+            "WHERE o.provenance = 'migration' AND o.state = 'retired' AND NOT EXISTS ("
+            "SELECT 1 FROM message_occurrences a WHERE a.claimant_id = o.claimant_id "
+            "AND a.state = 'active')), (SELECT COUNT(*) FROM pending_deletions)"
         ).fetchone()
         log.info("Migration v15 carried %d tombstone(s) over to occurrences", pending)
         if retired:
@@ -2385,7 +2402,7 @@ class Database:
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
-            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id AND o.state = 'active' ORDER BY o.trashed, o.id LIMIT 1)
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.extractor IN ({placeholders})
             ORDER BY m.relative_path
             """,  # nosec B608 — placeholders only, values are bound
@@ -2403,8 +2420,10 @@ class Database:
         """The filepaths of the rows ``sql`` returns for which
         ``qualifies`` holds: each row's ``relative_path``, the file its
         message is re-read from (an active occurrence's, a live one first,
-        #1567; a message with none is not returned, having no file to
-        re-read), read ``SWEEP_FETCH_ROWS`` rows at a time
+        #1567; for a message with none, its latest retired occurrence's,
+        its last known path, so the refresh is queued as before
+        occurrences and its job waits for a rename like any missing
+        indexed file, review round 1 on #1612), read ``SWEEP_FETCH_ROWS`` rows at a time
         (#1289). A message can carry thousands of occurrences with
         sender-chosen labels and sizes, so only the qualifying filepaths
         are kept, never the rows. Callers hold the database lock for the
@@ -2450,7 +2469,7 @@ class Database:
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
-            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id AND o.state = 'active' ORDER BY o.trashed, o.id LIMIT 1)
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.text_complete IS NULL
               AND e.extraction_status IN ('success', 'empty')
             """,
@@ -2503,7 +2522,7 @@ class Database:
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
-            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id AND o.state = 'active' ORDER BY o.trashed, o.id LIMIT 1)
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.extraction_status = 'unsupported'
               AND e.extraction_error IN (?, ?)
             """,
@@ -2533,7 +2552,7 @@ class Database:
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
-            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id AND o.state = 'active' ORDER BY o.trashed, o.id LIMIT 1)
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.extraction_status = 'unsupported'
               AND e.extraction_error IN (?, ?)
             """,
@@ -2559,7 +2578,7 @@ class Database:
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
-            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id AND o.state = 'active' ORDER BY o.trashed, o.id LIMIT 1)
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.extraction_status = 'too_large'
               AND a.size_bytes <= ?
             """,
@@ -2631,7 +2650,7 @@ class Database:
             """
             SELECT m.relative_path
             FROM attachments a
-            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id AND o.state = 'active' ORDER BY o.trashed, o.id LIMIT 1)
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE a.extraction_deferred_at IS NOT NULL
             """,
             (),
@@ -3210,18 +3229,19 @@ class Database:
 
         # Step 3: gather the Maildir filepaths for messages on stuck
         # threads: each message's active occurrence, a live one first
-        # (#1567), the path the queue uses, so re-enqueueing routes
+        # (#1567), else its latest retired one (its last known path, as
+        # before occurrences: the job waits for a rename like any missing
+        # indexed file), the path the queue uses, so re-enqueueing routes
         # through the same parse → thread → embed → commit pipeline as a
-        # fresh scan. A message with no active occurrence has no file to
-        # re-read. Batched for the same variable limit as step 2.
+        # fresh scan. Batched for the same variable limit as step 2.
         filepaths: list[str] = []
         for start in range(0, len(stuck_thread_ids), _IN_CLAUSE_BATCH_SIZE):
             id_batch = stuck_thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
             placeholders = ",".join(["?"] * len(id_batch))
             rows = self._conn.execute(
                 "SELECT (SELECT o.relative_path FROM message_occurrences o "  # nosec B608
-                "WHERE o.claimant_id = t.claimant_id AND o.state = 'active' "
-                "ORDER BY o.trashed, o.id LIMIT 1) AS relative_path "
+                "WHERE o.claimant_id = t.claimant_id ORDER BY o.state <> 'active', o.trashed, "
+                "CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1) AS relative_path "
                 f"FROM message_thread_map t WHERE t.thread_id IN ({placeholders})",
                 id_batch,
             ).fetchall()
@@ -3942,14 +3962,21 @@ class Database:
 
     @_synchronized
     def move_verified_occurrence(
-        self, occurrence_id: int, old_relative_path: str, new_path: str
+        self,
+        occurrence_id: int,
+        old_relative_path: str,
+        new_path: str,
+        *,
+        identity: tuple[int, int, int],
     ) -> bool:
         """Carry an active occurrence to ``new_path``, a file the scan
         found under its folder and uniq and whose bytes it verified
         (``occurrence_scan``), with the file's ``indexed_files`` and queue
         rows. Returns False, changing nothing, when the occurrence moved or
-        retired since the scan read it, ``new_path`` is gone, or another
-        active occurrence holds it."""
+        retired since the scan read it, ``new_path`` is no longer the file
+        verified (``identity``, its size, mtime and inode before the
+        verification: gone or replaced), or another active occurrence
+        holds it."""
         with self.transaction():
             cur = self._conn.cursor()
             if (
@@ -3959,7 +3986,7 @@ class Database:
                     (occurrence_id, old_relative_path),
                 ).fetchone()
                 is None
-                or not Path(new_path).exists()
+                or not _same_file(new_path, identity)
                 or self._active_at(cur, new_path) is not None
             ):
                 return False
@@ -3984,14 +4011,17 @@ class Database:
             return cur.rowcount > 0
 
     @_synchronized
-    def bind_found_copy(self, claimant_id: str, filepath: str) -> bool:
+    def bind_found_copy(
+        self, claimant_id: str, filepath: str, *, identity: tuple[int, int, int]
+    ) -> bool:
         """Bind a file the scan found, whose bytes it verified are
         ``claimant_id``'s, as an occurrence with provenance ``scan``.
-        Returns False, changing nothing, when the file is gone or an
+        Returns False, changing nothing, when the file is no longer the
+        one verified (``identity``, as ``move_verified_occurrence``) or an
         active occurrence holds its path already."""
         with self.transaction():
             cur = self._conn.cursor()
-            if not Path(filepath).exists() or self._active_at(cur, filepath) is not None:
+            if not _same_file(filepath, identity) or self._active_at(cur, filepath) is not None:
                 return False
             self._bind_occurrence(cur, claimant_id, filepath, provenance="scan")
         return True
@@ -4158,16 +4188,31 @@ class Database:
                 )
 
     def _occurrence_paths(self, cur: sqlite3.Cursor, claimant_ids: list[str]) -> list[str]:
-        """The paths of every occurrence, active or retired, of
-        ``claimant_ids``."""
-        return [
-            self._absolute(r[0])
-            for r in cur.execute(
-                "SELECT relative_path FROM message_occurrences "
-                "WHERE claimant_id IN (SELECT value FROM json_each(?))",
-                (json.dumps(claimant_ids),),
-            )
-        ]
+        """The paths of the occurrences of ``claimant_ids`` that still name
+        their files: every active one, and a retired one only while
+        ``indexed_files`` records the message's own bytes there. A
+        retired locator can hold another message's file now (the path
+        was freed by a move and reused), whose rows the reap must keep
+        (review round 1 on #1612). One primary-key lookup per retired
+        path."""
+        paths = []
+        for r in cur.execute(
+            "SELECT o.relative_path, o.state, m.content_hash FROM message_occurrences o "
+            "JOIN messages m ON m.claimant_id = o.claimant_id "
+            "WHERE o.claimant_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(claimant_ids),),
+        ).fetchall():
+            path = self._absolute(r["relative_path"])
+            if r["state"] != "active":
+                record = cur.execute(
+                    "SELECT content_hash FROM indexed_files WHERE filepath = ?", (path,)
+                ).fetchone()
+                if record is None or r["content_hash"] is None:
+                    continue
+                if record["content_hash"] != r["content_hash"]:
+                    continue
+            paths.append(path)
+        return paths
 
     @_synchronized
     def keep_persisted_first_indexed_at(self, msg) -> None:

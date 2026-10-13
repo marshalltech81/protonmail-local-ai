@@ -1324,7 +1324,11 @@ Reconciliation*). Every message keeps at least one occurrence: v15 gave
 a message the v14 seed could not bind a retired one at its stored path,
 since no file was verified to hold its bytes. A message is re-read (a
 re-extraction sweep, a reap's survivor) from an active occurrence, a
-live one first.
+live one first; a startup sweep queues a message with none at its latest
+retired occurrence's path, its last known one, where the job waits for
+a rename like any missing indexed file. A reap unmarks a retired
+occurrence's path only while `indexed_files` records the message's own
+bytes there, since a freed path can hold another message's file.
 
 The MCP server reads occurrences for every folder, flag and locator
 (#1568): filters match within one active occurrence; the default scope
@@ -3418,6 +3422,9 @@ occurrences:
 Each write re-checks, in its own transaction, that the occurrence or
 path is as the scan saw it, and a retire re-checks the disk for the file
 or a file with its uniq, so a rename the watcher records meanwhile wins.
+A move or bind also re-checks that the file still has the size, mtime
+and inode it had before its bytes were verified, so a file replaced in
+between is refused.
 The rename sweep (`sweep_paths`), which runs at startup, before each
 periodic rescan's Maildir walk and on folder-watch recovery, in archive
 mode too, runs the same scan without tombstoning anything; recording the
