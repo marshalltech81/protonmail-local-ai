@@ -23,8 +23,9 @@ set -Eeuo pipefail
 #             container from the verified base (root, dpkg -i), create the
 #             non-root user and commit a local image.
 #   execute   With --network none, as the non-root user, all capabilities
-#             dropped, no-new-privileges, memory and pids limits, no ports,
-#             mounts or volumes: build and run the harness tests (Go test
+#             dropped, no-new-privileges, memory and pids limits, a
+#             wall-clock deadline the host enforces, no ports, mounts or
+#             volumes: build and run the harness tests (Go test
 #             files under gluon/ and bridge/ here) with GOTOOLCHAIN=local,
 #             GOPROXY=off and -mod=readonly. Copies out only the allowlisted
 #             JSON results; upstream logs stay in the container.
@@ -57,6 +58,10 @@ readonly REPO_INFO_COMMIT=631ff15a31ac5d63781079d695ade706e65708c5
 # Marks a work dir run.sh created; holds that dir's random image tag.
 readonly MARKER=.i1583-work
 readonly IMAGE_REPO=i1583-upstream
+# Wall-clock deadline for everything that runs in the execution container
+# (the three go test runs take at most 80 minutes by their own -timeout,
+# which the code under test can defeat). Enforced from the host.
+readonly EXEC_DEADLINE_SECS=7200
 # Fixed text after the digest on provenance.txt's inputs line, which must
 # match exactly.
 readonly INPUTS_NOTE='(provenance lines above, staged trees with harness files, repo/Packages, Go archive, run.sh and its scripts, mbsync/Dockerfile)'
@@ -65,6 +70,7 @@ readonly INPUTS_NOTE='(provenance lines above, staged trees with harness files, 
 ACQ=""
 ASM=""
 RUNC=""
+WATCHDOG=""
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HERE
@@ -432,8 +438,10 @@ cmd_execute() {
     [[ "$(docker inspect --format '{{json .Mounts}} {{json .NetworkSettings.Ports}} {{.HostConfig.NetworkMode}}' "$RUNC")" == '[] {} none' ]] ||
         die "execution container has mounts, ports or a network"
     local status_text name
+    start_watchdog
     # Capped: the status lines are few and short.
     status_text="$(docker exec "$RUNC" /home/h/run_inside.sh "$debug" | head -c 65536)" || rc=$?
+    require_running
     printf '%s\n' "$status_text"
     # Everything from the container is untrusted: only fixed-shape status
     # lines are kept, and only the three expected result files are copied
@@ -453,10 +461,42 @@ cmd_execute() {
         jq -e 'keys | all(test("^[a-z0-9_]{1,64}$"))' "$out/$name.tmp" >/dev/null || die "$name: scenario name not allowlisted"
         mv "$out/$name.tmp" "$out/$name"
     done
+    stop_watchdog
     docker rm -f "$RUNC" >/dev/null
     cp "$WORK/provenance.txt" "$out/provenance.txt"
     printf 'execute: exit=%s\n' "$rc"
     return "$rc"
+}
+
+# Kills the execution container from the host once EXEC_DEADLINE_SECS
+# have passed, so a hang inside it (go test's own -timeout runs in the
+# code under test) ends every docker exec into it.
+start_watchdog() {
+    (
+        trap 'kill "$s" 2>/dev/null; exit 0' TERM
+        sleep "$EXEC_DEADLINE_SECS" &
+        s=$!
+        wait "$s"
+        printf 'run.sh: execution passed its %s s deadline; killing the container\n' "$EXEC_DEADLINE_SECS" >&2
+        docker kill "$RUNC" >/dev/null
+    ) &
+    WATCHDOG=$!
+}
+
+# Fails when the execution container has stopped (the watchdog fired).
+require_running() {
+    [[ "$(docker inspect --format '{{.State.Running}}' "$RUNC")" == true ]] ||
+        die "the execution container stopped (deadline of $EXEC_DEADLINE_SECS s passed?)"
+}
+
+# Stops the watchdog (and its sleep; a kill it already started finishes
+# first), then fails if the container is no longer running.
+stop_watchdog() {
+    [[ -n "$WATCHDOG" ]] || return 0
+    kill "$WATCHDOG" 2>/dev/null || true
+    wait "$WATCHDOG" || true
+    WATCHDOG=""
+    require_running
 }
 
 # Reads one result file out of the execution container into <dest>. The
@@ -478,6 +518,7 @@ fetch_result() {
 phase_cleanup() {
     local rc=$?
     trap - EXIT
+    [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true
     if [[ -n "$ASM" ]]; then
         docker rm -f "$ACQ" "$ASM" "$RUNC" >/dev/null 2>&1 || true
     fi
@@ -583,7 +624,7 @@ main() {
             local out
             out="$(resolve_out "$3")"
             # Clean up after any failure from here on, keeping its status.
-            trap 'rc=$?; trap - EXIT; cmd_clean || true; exit "$rc"' EXIT
+            trap 'rc=$?; trap - EXIT; [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true; cmd_clean || true; exit "$rc"' EXIT
             cmd_acquire
             cmd_assemble
             cmd_execute "$out"
