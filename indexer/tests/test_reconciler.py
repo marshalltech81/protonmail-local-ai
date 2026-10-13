@@ -22,12 +22,22 @@ from src.database import (
     EMBEDDING_DIM,
     Database,
 )
+from src.occurrence_scan import file_identity
 from src.reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from src.threader import Threader
 
 from tests.conftest import TEST_ACCOUNT, count_pending_deletions, lose_message
 
 FAKE_EMBEDDING = [0.0] * EMBEDDING_DIM
+
+
+def _handle_moved(reconciler: Reconciler, src: str, dest: str) -> None:
+    """``Reconciler.handle_moved``, with the destination's identity
+    verified as the real watcher caller (``main.py``'s ``on_moved``)
+    does (#1612). Every call in this file is a genuine, unmodified
+    rename, so ``dest``'s current stat is exactly what verification
+    would compute."""
+    reconciler.handle_moved(src, dest, verified_identity=file_identity(Path(dest)))
 
 
 class FakeEmbedder:
@@ -215,7 +225,7 @@ class TestSweep:
         thread_id = _index(path, db, threader)
         trashed = maildir / "1700000000.M1.host:2,ST"
         path.rename(trashed)
-        rec.handle_moved(str(path), str(trashed))
+        _handle_moved(rec, str(path), str(trashed))
         assert db.has_pending_deletion(str(trashed))
 
         real_walk = scan_module._walk
@@ -223,7 +233,7 @@ class TestSweep:
         def walk_then_restore(*args):
             files = real_walk(*args)
             trashed.rename(path)
-            rec.handle_moved(str(trashed), str(path))  # the watcher wins the lock here
+            _handle_moved(rec, str(trashed), str(path))  # the watcher wins the lock here
             return files
 
         monkeypatch.setattr(scan_module, "_walk", walk_then_restore)
@@ -256,7 +266,7 @@ class TestSweep:
         def walk_then_move(*args):
             files = real_walk(*args)
             path.rename(archived)
-            rec.handle_moved(str(path), str(archived))
+            _handle_moved(rec, str(path), str(archived))
             return files
 
         monkeypatch.setattr(scan_module, "_walk", walk_then_move)
@@ -343,6 +353,7 @@ class TestSweepPaths:
             "tombstones_cleared": 0,
             "bound": 0,
             "unverified": 0,
+            "stale": 0,
             "complete": True,
         }
         assert len(listed) == len(set(listed))
@@ -432,7 +443,7 @@ class TestSweepPaths:
             (
                 logging.INFO,
                 "startup rename sweep: renamed=1 retired=0 unreachable=0 tombstones_cleared=1 "
-                "bound=0 unverified=0",
+                "bound=0 unverified=0 stale=0",
             )
         ]
         assert marker not in caplog.text
@@ -469,7 +480,7 @@ class TestHandleMoved:
         trashed = maildir / "1700000000.M1.host:2,ST"
         path.rename(trashed)
 
-        reconciler.handle_moved(str(path), str(trashed))
+        _handle_moved(reconciler, str(path), str(trashed))
         assert db.has_pending_deletion(str(trashed))
 
     def test_clears_tombstone_when_flag_removed(self, db, threader, reconciler, maildir):
@@ -479,12 +490,12 @@ class TestHandleMoved:
 
         trashed = maildir / "1700000000.M1.host:2,ST"
         path.rename(trashed)
-        reconciler.handle_moved(str(path), str(trashed))
+        _handle_moved(reconciler, str(path), str(trashed))
         assert db.has_pending_deletion(str(trashed))
 
         restored = maildir / "1700000000.M1.host:2,S"
         trashed.rename(restored)
-        reconciler.handle_moved(str(trashed), str(restored))
+        _handle_moved(reconciler, str(trashed), str(restored))
         assert db.has_pending_deletion(str(trashed)) is False
         assert db.has_pending_deletion(str(restored)) is False
 
@@ -492,7 +503,7 @@ class TestHandleMoved:
         src = maildir / "unknown:2,S"
         dest = maildir / "unknown:2,ST"
         # Must not raise, must not record anything
-        reconciler.handle_moved(str(src), str(dest))
+        _handle_moved(reconciler, str(src), str(dest))
         assert count_pending_deletions(db) == 0
 
 
@@ -538,10 +549,10 @@ class TestReap:
 
         def move_away_walk_move_back(*args):
             path.rename(elsewhere)
-            rec.handle_moved(str(path), str(elsewhere))
+            _handle_moved(rec, str(path), str(elsewhere))
             files = real_walk(*args)
             elsewhere.rename(path)
-            rec.handle_moved(str(elsewhere), str(path))
+            _handle_moved(rec, str(elsewhere), str(path))
             return files
 
         monkeypatch.setattr(scan_module, "_walk", move_away_walk_move_back)
@@ -689,7 +700,9 @@ class TestReap:
         assert snapshot
         trashed.rename(live)
         # The watcher's write: the occurrence follows, the tombstones go.
-        db.update_filepath(str(trashed), str(live), move_occurrence=True)
+        db.update_filepath(
+            str(trashed), str(live), move_occurrence=True, verified_identity=file_identity(live)
+        )
         monkeypatch.setattr(db, "reapable_messages", lambda _cutoff: snapshot)
 
     def test_full_reap_skips_a_message_restored_after_the_snapshot(
@@ -762,7 +775,7 @@ class TestReap:
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         trashed = maildir / "1700000000.M1.host:2,ST"
         path.rename(trashed)
-        rec.handle_moved(str(path), str(trashed))
+        _handle_moved(rec, str(path), str(trashed))
         trashed.rename(path)
 
         real_update = db.update_filepath
@@ -773,7 +786,7 @@ class TestReap:
             return result
 
         monkeypatch.setattr(db, "update_filepath", update_then_reap)
-        rec.handle_moved(str(trashed), str(path))
+        _handle_moved(rec, str(trashed), str(path))
 
         assert db.get_thread(thread_id) is not None
         assert not db.has_pending_deletion(str(path))
@@ -960,7 +973,7 @@ class TestReap:
         def rename_then_read(tid):
             if trashed.exists():
                 trashed.rename(renamed)
-                reconciler.handle_moved(str(trashed), str(renamed))
+                _handle_moved(reconciler, str(trashed), str(renamed))
             return real_get(tid)
 
         monkeypatch.setattr(db, "get_thread_messages", rename_then_read)
@@ -1963,7 +1976,9 @@ class TestReapedMessageRecords:
         reconciler.sweep()
         snapshot = db.reapable_messages(datetime.now(UTC).isoformat())
         trashed.rename(path)
-        db.update_filepath(str(trashed), str(path), move_occurrence=True)
+        db.update_filepath(
+            str(trashed), str(path), move_occurrence=True, verified_identity=file_identity(path)
+        )
         monkeypatch.setattr(db, "reapable_messages", lambda _cutoff: snapshot)
 
         assert reconciler.reap()["threads_reaped"] == 0

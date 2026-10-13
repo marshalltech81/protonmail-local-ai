@@ -83,6 +83,17 @@ class Box:
     def put(self, relative: str, raw: bytes) -> Path:
         return _put(self.root, relative, raw)
 
+    def handle_moved(self, src: Path | str, dest: Path | str) -> None:
+        """``Reconciler.handle_moved``, with the destination's identity
+        verified as the real watcher caller (``main.py``'s ``on_moved``)
+        does (#1612). Every call in this file is a genuine, unmodified
+        rename, so ``dest``'s current stat is exactly what verification
+        would compute; a test of the mismatch guard itself calls
+        ``self.reconciler.handle_moved`` directly instead."""
+        self.reconciler.handle_moved(
+            str(src), str(dest), verified_identity=file_identity(Path(dest))
+        )
+
     def index(self, *paths: Path) -> None:
         queue = IndexingQueue(self.db, max_attempts=3, base_backoff_seconds=0)
         for path in paths:
@@ -224,10 +235,10 @@ class TestLastLiveLoss:
         box.index(path)
         trashed = box.root / "INBOX/cur/e1:2,ST"
         path.rename(trashed)
-        box.reconciler.handle_moved(str(path), str(trashed))
+        box.handle_moved(str(path), str(trashed))
         assert len(box.tombstones()) == 1
         trashed.rename(path)
-        box.reconciler.handle_moved(str(trashed), str(path))
+        box.handle_moved(str(trashed), str(path))
         assert box.tombstones() == []
         assert box.reconciler.reap()["threads_reaped"] == 0
 
@@ -365,7 +376,7 @@ class TestMissedRenames:
             dest = box.root / "Clients" / "cur" / "n2:2,S"
             dest.parent.mkdir(parents=True)
             copy.rename(dest)
-            box.reconciler.handle_moved(str(copy), str(dest))
+            box.handle_moved(str(copy), str(dest))
             assert ("Clients/cur/n2:2,S", 0) in box.active()
             inbox.unlink()
             box.reconciler.sweep()
@@ -389,7 +400,7 @@ class TestMissedRenames:
         old.write_bytes(_eml("new@example.test", body="a different, longer body"))
         dest = box.root / "INBOX/cur/r1:2,FS"
         old.rename(dest)
-        box.reconciler.handle_moved(str(old), str(dest))
+        box.handle_moved(str(old), str(dest))
         assert box.active() == []
 
     def test_an_unmapped_copy_moved_in_archive_mode_keeps_its_occurrence(self, box):
@@ -418,10 +429,14 @@ class TestFoundCopies:
         box.put("Trash/cur/p2:2,ST", raw)
         stranger = box.put("Trash/cur/p3:2,ST", _eml("unknown@example.test"))
         first = box.reconciler.sweep()
-        assert (first["bound"], first["hashed"]) == (1, 2)
+        # 3 hashes: the two Trash copies (``_hash_unindexed``) plus the
+        # content backstop's one hash of the INBOX copy's held path
+        # (#1612), since nothing has verified its identity yet.
+        assert (first["bound"], first["hashed"]) == (1, 3)
         bound = [o for o in box.occurrences() if o["provenance"] == "scan"]
         assert [(o["relative_path"], o["trashed"]) for o in bound] == [("Trash/cur/p2:2,ST", 1)]
-        # The unmatched file is not read again in this process.
+        # The unmatched file, and the already-verified held path, are not
+        # read again in this process.
         second = box.reconciler.sweep()
         assert (second["bound"], second["hashed"]) == (0, 0)
         assert stranger.exists()
@@ -448,7 +463,7 @@ class TestInterleavings:
         (o,) = box.occurrences()
         dest = box.root / "INBOX/cur/s1:2,RS"
         path.rename(dest)
-        box.reconciler.handle_moved(str(path), str(dest))
+        box.handle_moved(str(path), str(dest))
         # The scan read the occurrence before the watcher moved it.
         identity = file_identity(dest)
         assert identity is not None
@@ -478,7 +493,7 @@ class TestInterleavings:
         box.reconciler.sweep()
         assert box.active() == [("INBOX/cur/u1:2,ST", 1)]
         tombs = box.tombstones()
-        box.reconciler.handle_moved(str(path), str(dest))
+        box.handle_moved(str(path), str(dest))
         assert box.active() == [("INBOX/cur/u1:2,ST", 1)]
         assert box.tombstones() == tombs
 
@@ -493,7 +508,7 @@ class TestInterleavings:
         def restore_then_read(cutoff):
             rows = real(cutoff)
             trashed.rename(path)
-            box.reconciler.handle_moved(str(trashed), str(path))
+            box.handle_moved(str(trashed), str(path))
             return rows
 
         monkeypatch.setattr(box.db, "reapable_messages", restore_then_read)
@@ -758,7 +773,9 @@ def test_an_unreadable_trashed_copy_is_left_unbound(box):
         counts = box.reconciler.sweep()
     finally:
         os.chmod(locked, 0o600)
-    assert (counts["bound"], counts["hashed"]) == (0, 1)
+    # 2: the locked Trash copy's attempted hash plus the content
+    # backstop's one hash of the INBOX copy's held path (#1612).
+    assert (counts["bound"], counts["hashed"]) == (0, 2)
 
 
 def test_a_survivor_with_no_file_holds_its_thread_back(tmp_path, caplog):
@@ -803,7 +820,9 @@ class TestReviewRound1:
         moved = box.root / "Archive/cur/p1:2,S"
         moved.parent.mkdir(parents=True)
         a.rename(moved)
-        box.db.update_filepath(str(a), str(moved), move_occurrence=True)
+        box.db.update_filepath(
+            str(a), str(moved), move_occurrence=True, verified_identity=file_identity(moved)
+        )
         b = box.put("INBOX/cur/p1:2,S", _eml("reuser@example.test"))
         box.index(b)
         queue = IndexingQueue(box.db, max_attempts=3, base_backoff_seconds=0)
@@ -873,7 +892,9 @@ class TestReviewRound1:
             moved = box.root / "Archive/cur/s1:2,S"
             moved.parent.mkdir(parents=True)
             path.rename(moved)
-            db.update_filepath(str(path), str(moved), move_occurrence=True)
+            db.update_filepath(
+                str(path), str(moved), move_occurrence=True, verified_identity=file_identity(moved)
+            )
             _v14_from_fresh(db)
             db.close()
             caplog.set_level(logging.INFO)

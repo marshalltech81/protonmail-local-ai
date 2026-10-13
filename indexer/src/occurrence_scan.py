@@ -26,6 +26,22 @@ Maildir root and comparing it with the account's active occurrences:
   counted as unreachable. Retiring removes a locator, never a message:
   whether the message is reaped is mirror retention's reaper's call
   (``reconciler``), and archive retention never reaps.
+- **Content backstop.** A metadata match (size and mtime unchanged) is a
+  fast admission shortcut, not proof: mbsync sets a message's mtime from
+  IMAP's INTERNALDATE, so two different messages can legitimately share
+  one. For a held path whose file did not move this pass (so nothing
+  above read its bytes), a bounded number of still-unverified ones per
+  pass (``_BACKSTOP_MAX_FILES`` / ``_BACKSTOP_MAX_BYTES``, sized from a
+  measured hash throughput, docs/architecture.md "File Identity") are
+  hashed and checked against the occurrence's claimant. Once a path's
+  exact identity (size, mtime, inode) has been hash-verified, it is
+  cached (``hash_cache``) and skipped on every later pass until that
+  identity changes again — a genuinely different file landing at the
+  same path gets a new inode in the overwhelming case, so this is not
+  merely a one-time check. A verified mismatch retires only that
+  occurrence (its file is still there, so this is distinct from a
+  vanished file) and requests a parse of the new content; an unreadable
+  or unstable file is left unverified, not retired.
 
 Every write re-checks, in its own transaction, that the occurrence or
 path is as the scan saw it, so a rename the watcher records meanwhile
@@ -40,17 +56,55 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .database import Database
 from .maildir import is_trashed
 from .occurrences import OccurrenceLocatorError, locate
+from .parser import CLAIMANT_HASH_CHARS
+from .queue import REASON_STALE_CONTENT
 
 log = logging.getLogger("indexer.occurrence_scan")
 
 # Bytes read per call when hashing a file.
 _HASH_CHUNK_BYTES = 1 << 20
+
+# Per-pass budget for the content backstop's hashing of held paths whose
+# identity has not been verified before (cache misses only — a path
+# already verified at its current size/mtime/inode costs one dict lookup,
+# not a read). Sized from a plain wall-clock measurement on this
+# project's own hardware (2026-10-13, Apple Silicon, warm page cache):
+# SHA-256 over a 20 MB file took ~8.7 ms (~2.2 GB/s); a typical mail
+# body/attachment is far smaller (a 200 KB file took ~0.1 ms). Cold reads
+# over real disk or a mounted volume are slower than a warm page-cache
+# read, so these budgets assume a much more conservative ~20 MB/s: 100 MB
+# at that rate is ~5 seconds, acceptable for a pass that already walks
+# the whole Maildir tree. The file cap guards the per-file open/stat
+# overhead a byte cap alone would not (many tiny files). At the default
+# hourly sweep interval this backstop-verifies a multi-gigabyte mailbox
+# within a few days of first running — an eventual backstop for a narrow
+# metadata-collision case, not the primary defense (the watcher's own
+# rename verification and the Maildir walk's freshness check are).
+_BACKSTOP_MAX_FILES = 500
+_BACKSTOP_MAX_BYTES = 100 * 1024 * 1024
+
+# A claimant ID is "<Message-ID>#<hash prefix>" (parser.claimant_id); the
+# hash prefix is CLAIMANT_HASH_CHARS lowercase hex digits of the file's
+# SHA-256, at the end of the string. A Message-ID is attacker-controlled
+# and may itself contain "#", so only a trailing token of the right shape
+# is trusted as the embedded hash.
+_CLAIMANT_HASH_RE = re.compile(rf"#([0-9a-f]{{{CLAIMANT_HASH_CHARS}}})$")
+
+
+def _claimant_hash_prefix(claimant_id: str) -> str | None:
+    """The hash prefix ``claimant_id`` embeds, or ``None`` when it has
+    none (a ``Message`` built without file identity, only in tests, or a
+    Message-ID that happens to end the same way)."""
+    match = _CLAIMANT_HASH_RE.search(claimant_id)
+    return match.group(1) if match is not None else None
 
 
 @dataclass
@@ -65,6 +119,10 @@ class ScanCounts:
     unverified: int = 0
     hashed: int = 0
     unreadable: int = 0
+    # A held path's content backstop found its bytes no longer match its
+    # occurrence's claimant (#1612): that occurrence was retired and a
+    # reparse of the path requested.
+    stale: int = 0
     complete: bool = True
 
 
@@ -157,6 +215,42 @@ def _verify(
         return False
 
 
+def verify_rename_bytes(
+    db: Database, old_path: str, new_path: str, claimant_id: str
+) -> tuple[int, int, int] | None:
+    """Whether ``new_path`` still holds ``claimant_id``'s bytes after a
+    watcher-observed rename from ``old_path`` (#1612): by ``old_path``'s
+    ``indexed_files`` identity (a rename keeps size and mtime) when there
+    is one, else by hashing ``new_path`` and checking it against the
+    claimant ID's embedded hash prefix — the case for a scan-bound
+    occurrence, since ``bind_found_copy`` never writes ``indexed_files``.
+
+    Returns ``new_path``'s identity (size, mtime, inode) captured at
+    verification time, for the caller to pass into
+    ``Database.update_filepath`` as ``verified_identity`` for the
+    in-transaction recheck (the same pattern ``move_verified_occurrence``
+    already uses), or ``None`` when the bytes cannot be verified — a
+    caller that observed only a pre-check, not this return value, must
+    not trust the rename.
+    """
+    identity = file_identity(Path(new_path))
+    if identity is None:
+        return None
+    prior = db.file_identity(old_path)
+    if prior is not None:
+        if (identity[0], identity[1]) == (prior["size"], prior["mtime_ns"]):
+            return identity
+        return None
+    expected = _claimant_hash_prefix(claimant_id)
+    if expected is None:
+        return None
+    try:
+        digest = _sha256(Path(new_path))
+    except OSError:
+        return None
+    return identity if digest[: len(expected)] == expected else None
+
+
 def scan_occurrences(
     db: Database,
     root: Path,
@@ -166,9 +260,10 @@ def scan_occurrences(
     """Reconcile the account's active occurrences under ``root`` with
     the files there (see the module docstring) and return the counts.
 
-    ``hash_cache`` enables
-    hashing of unindexed ``T``-flagged or dead-lettered files, keyed by
-    path, size, mtime and inode so each file is read once per process.
+    ``hash_cache`` enables hashing of unindexed ``T``-flagged or
+    dead-lettered files, and the content backstop of held paths whose
+    file did not move this pass, keyed by path, size, mtime and inode so
+    each distinct file identity is read once per process.
     """
     counts = ScanCounts()
     account_root = db.account.maildir_root
@@ -187,9 +282,15 @@ def scan_occurrences(
 
     occurrences = db.active_occurrences()
     held = {o["relative_path"] for o in occurrences}
+    # Occurrences whose file is still exactly where it was recorded: the
+    # only ones the content backstop (second loop) needs to check, since
+    # a moved-to or freshly-bound path is verified by the logic around
+    # it, in this same pass.
+    unmoved_at: dict[str, sqlite3.Row] = {}
     for o in occurrences:
         relative = o["relative_path"]
         if relative in files:
+            unmoved_at[relative] = o
             continue
         if scope.parts and PurePosixPath(relative).parts[: len(scope.parts)] != scope.parts:
             continue
@@ -225,8 +326,12 @@ def scan_occurrences(
         else:
             counts.unreachable += 1
 
+    backstop_budget = {"files": 0, "bytes": 0}
     for relative, path in sorted(files.items()):
         if relative in held:
+            occurrence = unmoved_at.get(relative)
+            if occurrence is not None:
+                _backstop_check(db, occurrence, path, hash_cache, counts, backstop_budget)
             continue
         identity = file_identity(path)
         if identity is None:
@@ -243,6 +348,59 @@ def scan_occurrences(
             held.add(relative)
             counts.bound += 1
     return counts
+
+
+def _backstop_check(
+    db: Database,
+    occurrence: sqlite3.Row,
+    path: Path,
+    hash_cache: dict[tuple[str, int, int, int], str] | None,
+    counts: ScanCounts,
+    budget: dict[str, int],
+) -> None:
+    """The content backstop for a held path whose file did not move this
+    pass (module docstring, "Content backstop"). A metadata match alone
+    is never trusted here — that is exactly the blind spot this guards.
+    Hashes ``path``, within the pass's ``budget``, only when its current
+    identity (size, mtime, inode) has not been hash-verified before;
+    retires the occurrence on a verified mismatch and requests a parse
+    of the new content. ``hash_cache`` is required: with none, the
+    backstop is skipped entirely (archive mode's startup-recovery call,
+    before #1612, passed none; ``reconciler.sweep_paths`` now always
+    does, #1612 point 5)."""
+    if hash_cache is None or occurrence["content_hash"] is None:
+        return
+    identity = file_identity(path)
+    if identity is None:
+        # Unreadable or gone between the walk and here: unstable, not a
+        # removal the scan can establish on its own.
+        counts.unverified += 1
+        return
+    key = (str(path), *identity)
+    if key in hash_cache:
+        return
+    if budget["files"] >= _BACKSTOP_MAX_FILES or budget["bytes"] >= _BACKSTOP_MAX_BYTES:
+        # Over this pass's budget: left for a later pass, which will see
+        # the same cache miss (nothing here has changed its identity).
+        return
+    try:
+        digest = _sha256(path)
+    except OSError:
+        counts.unverified += 1
+        return
+    counts.hashed += 1
+    budget["files"] += 1
+    budget["bytes"] += identity[0]
+    if digest == occurrence["content_hash"]:
+        hash_cache[key] = digest
+        return
+    if db.retire_mismatched_occurrence(occurrence["id"], occurrence["relative_path"]):
+        counts.stale += 1
+        db.queue_enqueue_if_absent(str(path), REASON_STALE_CONTENT)
+    else:
+        # The occurrence moved or retired since active_occurrences() read
+        # it: not this scan's call to make any more.
+        counts.unreachable += 1
 
 
 def _hash_unindexed(

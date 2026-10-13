@@ -30,6 +30,7 @@ from src.database import EMBEDDING_DIM, Database
 from src.embed_identity import CALIBRATION_TEXT
 from src.extractors import NOT_CONTAINER_IDENTIFIER
 from src.maildir import SyncStamp
+from src.occurrence_scan import file_identity
 from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
@@ -8976,7 +8977,9 @@ class TestTrashedFilesWithReconciliation:
         queue.enqueue(str(live), REASON_INITIAL_SCAN)
         drain()
         live.rename(trashed)
-        reconciler.handle_moved(str(live), str(trashed))  # tombstones it
+        reconciler.handle_moved(
+            str(live), str(trashed), verified_identity=file_identity(trashed)
+        )  # tombstones it
         queue.enqueue(str(trashed), REASON_INITIAL_SCAN)  # e.g. a retry still pending
 
         drain()
@@ -8986,7 +8989,7 @@ class TestTrashedFilesWithReconciliation:
         # Restoring clears the tombstone, moves the job, and makes it due
         # now rather than after the park delay.
         trashed.rename(live)
-        reconciler.handle_moved(str(trashed), str(live))
+        reconciler.handle_moved(str(trashed), str(live), verified_identity=file_identity(live))
         drain()
         assert not queue.has_pending_row(str(live))
         assert db.is_indexed(str(live))
@@ -9020,7 +9023,9 @@ class TestTrashedFilesWithReconciliation:
         drain()
         live.rename(trashed)
         # The startup scan follows the rename once the bytes match (#1567).
-        db.update_filepath(str(live), str(trashed), move_occurrence=True)
+        db.update_filepath(
+            str(live), str(trashed), move_occurrence=True, verified_identity=file_identity(trashed)
+        )
         queue.enqueue(str(trashed), REASON_INITIAL_SCAN)
         drain()  # parked
         assert queue.has_pending_row(str(trashed))

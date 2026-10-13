@@ -158,8 +158,9 @@ class Reconciler:
         has one. Returns a small summary dict for logging/tests:
         ``renamed`` / ``retired`` / ``bound`` occurrences, ``tombstoned``
         messages newly marked, ``cleared`` messages unmarked,
-        ``unreachable`` / ``unverified`` occurrences left as they were, and
-        whether the scan was ``complete``."""
+        ``unreachable`` / ``unverified`` occurrences left as they were,
+        ``stale`` occurrences the content backstop retired, and whether
+        the scan was ``complete``."""
         before = self.db.count_tombstoned_messages()
         scan = scan_occurrences(self.db, self.maildir_root, hash_cache=self._hash_cache)
         self.db.clear_live_tombstones()
@@ -176,12 +177,13 @@ class Reconciler:
             "unreachable": scan.unreachable,
             "unverified": scan.unverified,
             "hashed": scan.hashed,
+            "stale": scan.stale,
             "complete": scan.complete,
         }
         if any(v for k, v in counts.items() if k != "complete"):
             log.info(
                 "reconciler sweep: tombstoned=%d cleared=%d renamed=%d retired=%d bound=%d "
-                "unreachable=%d unverified=%d hashed=%d",
+                "unreachable=%d unverified=%d hashed=%d stale=%d",
                 tombstoned,
                 cleared,
                 scan.renamed,
@@ -190,19 +192,36 @@ class Reconciler:
                 scan.unreachable,
                 scan.unverified,
                 scan.hashed,
+                scan.stale,
             )
         _log_scan("reconciler sweep", scan)
         return counts
 
-    def handle_moved(self, src_path: str, dest_path: str) -> None:
+    def handle_moved(
+        self,
+        src_path: str,
+        dest_path: str,
+        *,
+        verified_identity: tuple[int, int, int] | None = None,
+    ) -> None:
         """Live tombstone detection from watchdog ``on_moved`` events.
 
         The rename carries the file's occurrence (``update_filepath``),
         whose transaction clears the message's tombstones when it leaves
         it live (a restore). A message left with no live occurrence (the
         rename added ``T``) is tombstoned at once.
+
+        ``verified_identity`` is the caller's pre-verification of
+        ``dest_path``'s bytes against the source occurrence's claimant
+        (``occurrence_scan.verify_rename_bytes``, #1612), re-checked by
+        ``update_filepath`` inside its transaction before the occurrence
+        moves; ``None`` when there was no active occurrence to verify,
+        or verification failed (the caller then does not expect this
+        rename to carry one forward).
         """
-        claimant_id = self.db.update_filepath(src_path, dest_path, move_occurrence=True)
+        claimant_id = self.db.update_filepath(
+            src_path, dest_path, move_occurrence=True, verified_identity=verified_identity
+        )
         if claimant_id is None:
             entry = self.db.find_active_occurrence(dest_path)
             if entry is None:
@@ -578,7 +597,12 @@ class Reconciler:
         return self.db.count_total_messages()
 
 
-def sweep_paths(db: Database, *, maildir_root: Path) -> dict[str, Any]:
+def sweep_paths(
+    db: Database,
+    *,
+    maildir_root: Path,
+    hash_cache: dict[tuple[str, int, int, int], str] | None = None,
+) -> dict[str, Any]:
     """Reconcile the occurrences with the Maildir
     (``occurrence_scan.scan_occurrences``) without tombstoning any message:
     follow the renames mbsync made while the watcher missed them (a flag
@@ -593,13 +617,20 @@ def sweep_paths(db: Database, *, maildir_root: Path) -> dict[str, Any]:
     ``Reconciler.handle_moved`` applies live (#860), and every other
     message with a live occurrence has its stale tombstones cleared too.
 
+    ``hash_cache``, kept by the caller across calls (as
+    ``Reconciler._hash_cache`` is), enables the content backstop of held
+    paths and the hashing of unindexed ``T``-flagged or dead-lettered
+    ones (#1612); with none, both are skipped. Every caller of this
+    function passes one, including archive mode, which has no
+    ``Reconciler`` to hold it.
+
     Recording the renames before the walk keeps it from re-indexing them
     as new mail. Returns a summary dict so the caller can log how much
     drift there was (useful when diagnosing "new mail shows up in search
     late" on mailboxes where the indexer restarts often).
     """
     before = db.count_tombstoned_messages()
-    scan = scan_occurrences(db, maildir_root)
+    scan = scan_occurrences(db, maildir_root, hash_cache=hash_cache)
     db.clear_live_tombstones()
     # Counted across the scan too: a restoring rename it follows clears
     # the message's tombstones in the same write.
@@ -610,17 +641,19 @@ def sweep_paths(db: Database, *, maildir_root: Path) -> dict[str, Any]:
         or scan.unreachable
         or scan.bound
         or scan.unverified
+        or scan.stale
         or tombstones_cleared
     ):
         log.info(
             "startup rename sweep: renamed=%d retired=%d unreachable=%d tombstones_cleared=%d "
-            "bound=%d unverified=%d",
+            "bound=%d unverified=%d stale=%d",
             scan.renamed,
             scan.retired,
             scan.unreachable,
             tombstones_cleared,
             scan.bound,
             scan.unverified,
+            scan.stale,
         )
     _log_scan("startup rename sweep", scan)
     return {
@@ -630,6 +663,7 @@ def sweep_paths(db: Database, *, maildir_root: Path) -> dict[str, Any]:
         "tombstones_cleared": tombstones_cleared,
         "bound": scan.bound,
         "unverified": scan.unverified,
+        "stale": scan.stale,
         "complete": scan.complete,
     }
 

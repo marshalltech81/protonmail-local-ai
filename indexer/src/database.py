@@ -46,7 +46,7 @@ from .extractors import (
 from .maildir import is_trashed, message_state, resolve_current_path
 from .occurrences import OccurrenceLocatorError, SeedFunctions, locate
 from .parser import PARSE_CAPS, participant_names
-from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL
+from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL, STALE_ENQUEUE_SQL
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
     FTS_SUBJECT_SCAN_ROWS,
@@ -3612,6 +3612,29 @@ class Database:
         ).fetchone()
         return row is not None
 
+    @_synchronized
+    def is_indexed_and_fresh(self, filepath: str) -> bool:
+        """Whether ``filepath`` is indexed (as ``is_indexed``) AND its
+        current size and mtime still match the ``indexed_files`` record
+        (#1612): a cheap admission shortcut for the Maildir walk and the
+        watcher's new-mail gate, so a stale record (its bytes replaced
+        without an observed rename, or carried stale across a schema
+        change) no longer hides a changed file from parsing forever. A
+        file with no ``indexed_files`` record is not indexed at all, so
+        this returns the same ``False`` as ``is_indexed``. Pure metadata:
+        the hash-verified backstop lives in ``occurrence_scan``.
+        """
+        row = self._conn.execute(
+            "SELECT size, mtime_ns FROM indexed_files WHERE filepath = ?", (filepath,)
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            st = os.stat(filepath)
+        except OSError:
+            return False
+        return (st.st_size, st.st_mtime_ns) == (row["size"], row["mtime_ns"])
+
     # -------------------------------------------------------------------------
     # indexing_jobs — durable retry / dead-letter queue.
     #
@@ -3663,6 +3686,16 @@ class Database:
         cur = self._conn.execute(REPARSE_ENQUEUE_SQL)
         self._conn.commit()
         return cur.rowcount
+
+    @_synchronized
+    def queue_enqueue_if_absent(self, filepath: str, reason: str) -> bool:
+        """Run ``STALE_ENQUEUE_SQL`` for one path and return whether a row
+        was inserted (``False`` when one was already there, whatever its
+        state, which is left untouched, #1612)."""
+        now_iso = datetime.now(UTC).isoformat()
+        cur = self._conn.execute(STALE_ENQUEUE_SQL, (filepath, reason, now_iso, now_iso, now_iso))
+        self._conn.commit()
+        return cur.rowcount > 0
 
     @_synchronized
     def queue_fetch_due_batch(
@@ -4107,7 +4140,9 @@ class Database:
                 or self._active_at(cur, new_path) is not None
             ):
                 return False
-            self._rename_rows(cur, self._absolute(old_relative_path), new_path, True)
+            self._rename_rows(
+                cur, self._absolute(old_relative_path), new_path, True, verified_identity=identity
+            )
         return True
 
     @_synchronized
@@ -4120,6 +4155,26 @@ class Database:
         with self.transaction():
             if resolve_current_path(Path(self._absolute(relative_path))) is not None:
                 return False
+            cur = self._conn.execute(
+                "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
+                "WHERE id = ? AND state = 'active' AND relative_path = ?",
+                (datetime.now(UTC).isoformat(), occurrence_id, relative_path),
+            )
+            return cur.rowcount > 0
+
+    @_synchronized
+    def retire_mismatched_occurrence(self, occurrence_id: int, relative_path: str) -> bool:
+        """Retire an active occurrence whose file is still there but whose
+        bytes a content-hash check proved no longer match its claimant
+        (``occurrence_scan``'s periodic backstop, #1612): unlike
+        ``retire_vanished_occurrence``, the file need not be gone — a
+        metadata match is a fast admission shortcut, not proof, so this
+        is the path for a verified mismatch rather than an absence.
+        Retires only this occurrence; any other occurrence of the same
+        claimant is untouched, and the caller enqueues the path for its
+        own reparse. Returns False, changing nothing, when the occurrence
+        moved or retired since the check ran."""
+        with self.transaction():
             cur = self._conn.execute(
                 "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
                 "WHERE id = ? AND state = 'active' AND relative_path = ?",
@@ -4515,21 +4570,50 @@ class Database:
         if not is_trashed(filepath):
             cur.execute("DELETE FROM pending_deletions WHERE claimant_id = ?", (claimant_id,))
 
-    def _move_occurrence(self, cur: sqlite3.Cursor, old_path: str, new_path: str) -> str | None:
+    def _move_occurrence(
+        self,
+        cur: sqlite3.Cursor,
+        old_path: str,
+        new_path: str,
+        verified_identity: tuple[int, int, int] | None,
+    ) -> tuple[str | None, bool]:
         """Carry the occurrence at ``old_path`` through a rename whose
         bytes are known to be unchanged (an observed watcher event, or a
         scan that verified them) to ``new_path`` (#1566), and return its
-        claimant ID. A flag rename or a ``new``/``cur`` move keeps the
-        folder and uniq, so it keeps the occurrence; a change of folder or
-        uniq retires it and binds the destination to the same claimant, in
-        the caller's transaction, so the move is atomic.
+        claimant ID (or ``None``) and whether a record this function
+        consulted was found to mismatch ``new_path`` rather than simply
+        having nothing to say about it (#1612) — the caller gates
+        carrying other file-identity rows forward on this, so a stale
+        record is never propagated under its new name. A flag rename or
+        a ``new``/``cur`` move keeps the folder and uniq, so it keeps the
+        occurrence; a change of folder or uniq retires it and binds the
+        destination to the same claimant, in the caller's transaction, so
+        the move is atomic.
 
         A path with no active occurrence whose ``indexed_files`` record
         carries the content hash of an indexed message (a byte-identical
-        copy no occurrence held yet) binds the destination to that message
-        instead (#1141); any other path changes nothing and returns
-        ``None``. The caller removes the message's tombstones when the
-        move leaves it live.
+        copy no occurrence held yet) binds the destination to that
+        message instead (#1141); any other such path changes nothing.
+        When that record's size and mtime no longer match ``new_path``,
+        or ``new_path`` cannot be read, the mismatch is reported so the
+        record is not carried under the new name either — it is as stale
+        as the occurrence it failed to bind. A path whose
+        ``indexed_files`` record names no current message's content
+        (migration-era tracking data no message claims) has nothing to
+        verify, so it is not a mismatch; the caller's indexed_files carry
+        is unaffected either way, since it is pure bookkeeping there, not
+        an identity claim. The caller removes the message's tombstones
+        when the move leaves it live.
+
+        An active occurrence at ``old_path`` is carried forward only when
+        ``verified_identity`` (size, mtime, inode, captured by the caller
+        when it verified ``new_path``'s bytes against the occurrence's
+        claimant, ``occurrence_scan.verify_rename_bytes``) still matches
+        ``new_path`` now, inside this transaction (#1612): a stale
+        occurrence record must not be trusted to carry a changed file
+        forward silently. A caller with nothing to verify (``None``)
+        gets no move — the file is left to the normal new-mail path,
+        which binds it to its own claimant.
         """
         old = locate(old_path, self.account.maildir_root)
         row = cur.execute(
@@ -4547,7 +4631,7 @@ class Database:
                 (old_path,),
             ).fetchone()
             if prior is None:
-                return None
+                return None, False
             # The record may be stale: a retired path reused by another
             # file whose creation was missed. Bind only a destination with
             # the size and mtime recorded for it (the file identity the
@@ -4556,18 +4640,20 @@ class Database:
             try:
                 st = os.stat(new_path)
             except OSError:
-                return None
+                return None, True
             if (st.st_size, st.st_mtime_ns) != (prior["size"], prior["mtime_ns"]):
-                return None
+                return None, True
             self._bind_occurrence(cur, prior["claimant_id"], new_path, provenance="rename")
-            return str(prior["claimant_id"])
+            return str(prior["claimant_id"]), False
+        if verified_identity is None or not _same_file(new_path, verified_identity):
+            return None, True
         if (new.folder, new.uniq) != (row["folder"], row["uniq"]):
             cur.execute(
                 "UPDATE message_occurrences SET state = 'retired', retired_at = ? WHERE id = ?",
                 (now, row["id"]),
             )
             self._bind_occurrence(cur, row["claimant_id"], new_path, provenance="rename")
-            return str(row["claimant_id"])
+            return str(row["claimant_id"]), False
         state = message_state(new_path)
         cur.execute(
             "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
@@ -4587,7 +4673,7 @@ class Database:
                 row["id"],
             ),
         )
-        return str(row["claimant_id"])
+        return str(row["claimant_id"]), False
 
     def _write_message_record(self, cur: sqlite3.Cursor, msg, thread_id: str) -> None:
         """Upsert ``msg``'s ``messages`` row and replace its participants.
@@ -4828,6 +4914,7 @@ class Database:
         new_path: str,
         *,
         move_occurrence: bool = False,
+        verified_identity: tuple[int, int, int] | None = None,
     ) -> str | None:
         """Carry a file's rows through a Maildir rename: its
         ``indexed_files`` record (identity columns kept: mbsync renames
@@ -4846,17 +4933,41 @@ class Database:
         occurrences alone: a sweep that found the file by its uniq alone
         has not seen its bytes (the reconciliation scan verifies them
         first, ``move_verified_occurrence``).
+
+        When an active occurrence exists at ``old_path``,
+        ``verified_identity`` (``new_path``'s size, mtime and inode,
+        captured by the caller when it verified the destination's bytes
+        against the occurrence's claimant, ``occurrence_scan.
+        verify_rename_bytes``) is re-checked here, inside the
+        transaction, before the occurrence is carried forward (#1612): a
+        caller that did not verify (``None``), or whose verified file was
+        replaced again since, gets no move for that occurrence — the file
+        is left to the normal new-mail path. A path with no active
+        occurrence is unaffected: ``_move_occurrence`` verifies that case
+        itself, from ``indexed_files``.
         """
         if old_path == new_path:
             return None
         with self.transaction():
-            return self._rename_rows(self._conn.cursor(), old_path, new_path, move_occurrence)
+            return self._rename_rows(
+                self._conn.cursor(), old_path, new_path, move_occurrence, verified_identity
+            )
 
     def _rename_rows(
-        self, cur: sqlite3.Cursor, old_path: str, new_path: str, move_occurrence: bool
+        self,
+        cur: sqlite3.Cursor,
+        old_path: str,
+        new_path: str,
+        move_occurrence: bool,
+        verified_identity: tuple[int, int, int] | None = None,
     ) -> str | None:
         """``update_filepath``'s writes, in the caller's transaction."""
-        claimant_id = self._move_occurrence(cur, old_path, new_path) if move_occurrence else None
+        claimant_id: str | None = None
+        mismatched = False
+        if move_occurrence:
+            claimant_id, mismatched = self._move_occurrence(
+                cur, old_path, new_path, verified_identity
+            )
         if claimant_id is not None:
             # A rename that leaves the message live (a restore) ends its loss.
             cur.execute(
@@ -4868,12 +4979,20 @@ class Database:
         # Carry the file-identity columns forward on rename. mbsync
         # renames files in place for flag changes; the content on disk
         # is unchanged, so reindexing just to recompute ``size`` /
-        # ``mtime_ns`` / ``content_hash`` would be wasted I/O.
+        # ``mtime_ns`` / ``content_hash`` would be wasted I/O. For a
+        # ``move_occurrence`` caller this is refused on ``mismatched``
+        # (#1612): ``_move_occurrence`` reports that only when a record
+        # it consulted (the occurrence's claimant, or an indexed_files
+        # row naming a current message) was found to disagree with
+        # ``new_path`` — never merely because there was nothing to say,
+        # which is the common case for a path with no active occurrence
+        # and no matching indexed_files row (plain bookkeeping, not an
+        # identity claim).
         prior = cur.execute(
             "SELECT size, mtime_ns, content_hash FROM indexed_files WHERE filepath = ?",
             (old_path,),
         ).fetchone()
-        if prior is not None:
+        if prior is not None and not mismatched:
             cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (old_path,))
             cur.execute(
                 "INSERT OR REPLACE INTO indexed_files "

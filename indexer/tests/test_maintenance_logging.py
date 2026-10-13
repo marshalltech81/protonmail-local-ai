@@ -711,7 +711,8 @@ class TestReconcileSummary:
         assert line.levelno == logging.INFO
         assert re.fullmatch(
             rf"maintenance pass=reconcile {_MS} tombstoned=2 cleared=1 renamed=3 retired=4 "
-            r"bound=5 scan=partial threads_reaped=1 threads_rebuilt=0 blocked_threads=0 brake=ok",
+            r"bound=5 stale=0 scan=partial threads_reaped=1 threads_rebuilt=0 blocked_threads=0 "
+            r"brake=ok",
             line.getMessage(),
         )
         db.close()
@@ -898,7 +899,7 @@ class TestOnMovedFailureLogsTypeOnly:
             calls.append(a)
             raise sqlite3.OperationalError(MARKER)
 
-        db = SimpleNamespace(is_indexed=lambda _p: True)
+        db = SimpleNamespace(is_indexed=lambda _p: True, find_active_occurrence=lambda _p: None)
         reconciler = SimpleNamespace(handle_moved=handle_moved)
         handler = main.MaildirHandler(db, None, reconciler=reconciler)  # type: ignore[arg-type]
 
@@ -920,6 +921,7 @@ class TestOnMovedFailureLogsTypeOnly:
 
         db = SimpleNamespace(
             is_indexed=lambda _p: True,
+            find_active_occurrence=lambda _p: None,
             has_pending_deletion=lambda _p: False,
             update_filepath=update_filepath,
         )
@@ -946,6 +948,7 @@ class TestOnMovedFailureLogsTypeOnly:
 
         db = SimpleNamespace(
             is_indexed=lambda _p: True,
+            find_active_occurrence=lambda _p: None,
             has_pending_deletion=has_pending_deletion,
             update_filepath=lambda *a, **_kw: calls.append(a),
         )

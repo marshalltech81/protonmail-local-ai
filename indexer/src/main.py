@@ -122,6 +122,7 @@ from .maildir import (
     parse_sync_stamp_rename,
     read_sync_stamp,
 )
+from .occurrence_scan import verify_rename_bytes
 from .parser import (
     Attachment,
     Message,
@@ -1278,17 +1279,43 @@ class MaildirHandler(FileSystemEventHandler):
                 self.ingestion_state.read_collection()
             return
 
-        if self.db.is_indexed(src_path) or self.db.find_active_occurrence(src_path) is not None:
-            # Case 1: rename of an indexed file or of an occurrence (a
-            # copy the reconciliation scan bound without indexing it).
-            # The occurrence follows the observed rename (#1566): a flag
-            # rename keeps it, a move across folders replaces it, in one
-            # transaction with the file's other rows. If that write fails
-            # it rolls back whole: the destination stays unindexed and the
-            # periodic Maildir walk or scan picks it up.
+        occurrence = self.db.find_active_occurrence(src_path)
+        # Case 1: rename of an indexed file or of an occurrence (a copy
+        # the reconciliation scan bound without indexing it). An active
+        # occurrence's claimant is verified against the destination's
+        # bytes before it is trusted (#1612): a stale occurrence record
+        # must not carry a changed file forward as if it were the same
+        # message. A path indexed but with no active occurrence (a
+        # retired-vanished stray) has nothing to verify here —
+        # ``_move_occurrence`` checks that case itself, from
+        # ``indexed_files``. A verification failure takes Case 2 below,
+        # whatever ``is_indexed(src_path)`` says: the occurrence's
+        # claimant is what this rename event is about, and a stray
+        # indexed_files record alongside it does not make the mismatch
+        # less real.
+        verified_identity = None
+        if occurrence is not None:
+            verified_identity = verify_rename_bytes(
+                self.db, src_path, dest_path, occurrence["claimant_id"]
+            )
+            take_case_1 = verified_identity is not None
+            if not take_case_1:
+                warn_rate_limited(
+                    log,
+                    "on_moved: %d rename's destination bytes did not match the "
+                    "source occurrence's claimant; treating as new mail",
+                    1,
+                    level=logging.WARNING,
+                    attachment=False,
+                )
+        else:
+            take_case_1 = self.db.is_indexed(src_path)
+        if take_case_1:
             if self.reconciler is not None:
                 try:
-                    self.reconciler.handle_moved(src_path, dest_path)
+                    self.reconciler.handle_moved(
+                        src_path, dest_path, verified_identity=verified_identity
+                    )
                 except Exception as e:
                     log.error("reconciler on_moved failed: %s", type(e).__name__)
             else:
@@ -1308,7 +1335,12 @@ class MaildirHandler(FileSystemEventHandler):
                 try:
                     leftover_tombstone = restored and self.db.has_pending_deletion(src_path)
                     # An observed rename event: the occurrence follows (#1566).
-                    self.db.update_filepath(src_path, dest_path, move_occurrence=True)
+                    self.db.update_filepath(
+                        src_path,
+                        dest_path,
+                        move_occurrence=True,
+                        verified_identity=verified_identity,
+                    )
                 except Exception as e:
                     log.error("update_filepath failed on rename: %s", type(e).__name__)
                     return
@@ -1331,7 +1363,7 @@ class MaildirHandler(FileSystemEventHandler):
         # longer indexed) and must not be mistaken for new mail.
         if (
             dest_path_obj.parent.name in ("cur", "new")
-            and not self.db.is_indexed(dest_path)
+            and not self.db.is_indexed_and_fresh(dest_path)
             and not self._is_reaped_or_deleted(dest_path)
         ):
             self.queue.enqueue(dest_path, REASON_ON_MOVED)
@@ -1357,6 +1389,13 @@ SUMMARY_MAX_INTERVAL_SECS = 300.0
 OUTCOMES_LOG_MIN_INTERVAL_SECS = 60.0
 _last_outcomes_log: float | None = None
 _monotonic = time.monotonic
+
+# Content-backstop / unindexed-file hash cache for every ``sweep_paths``
+# call this process makes (#1612): archive mode has no ``Reconciler`` to
+# hold one (mirror mode's lives on ``Reconciler._hash_cache``), so this
+# module-level dict is the one it keeps across calls, keyed by path,
+# size, mtime and inode exactly as ``occurrence_scan`` keys it.
+_sweep_hash_cache: dict[tuple[str, int, int, int], str] = {}
 
 
 def _log_attachment_outcomes(*, force: bool = False) -> None:
@@ -3296,15 +3335,21 @@ def _enqueue_unindexed_messages(
     backstop for any file whose event was missed (a restart, event
     coalescing, a delivery while the observer was not running).
 
-    Skips files that are already indexed, dead-lettered, or already
-    queued. ``enqueue`` is ``INSERT OR REPLACE``, so re-enqueueing a
-    queued row would reset an in-flight retry cascade to zero attempts
-    — repeated walks could then retry a failing file forever without
-    it ever reaching the dead-letter state. Dead rows are left for the
-    operator: the walk only proves the file exists on disk, not that
-    anything about it changed since the last failure. (Watchdog
-    ``on_created`` / ``on_moved`` events still go through ``enqueue``
-    and DO reset prior state, because those signal a real change.)
+    Skips files that are already indexed AND fresh (``is_indexed_and_
+    fresh``: the ``indexed_files`` record's size and mtime still match,
+    #1612), dead-lettered, or already queued. A stale record — the
+    file's bytes changed without an observed rename — falls through
+    these same gates rather than being silently skipped forever: dead
+    or already-queued still hold it back (below), but it is otherwise
+    treated like any newly-discovered file. ``enqueue`` is ``INSERT OR
+    REPLACE``, so re-enqueueing a queued row would reset an in-flight
+    retry cascade to zero attempts — repeated walks could then retry a
+    failing file forever without it ever reaching the dead-letter
+    state. Dead rows are left for the operator: the walk only proves
+    the file exists on disk, not that anything about it changed since
+    the last failure. (Watchdog ``on_created`` / ``on_moved`` events
+    still go through ``enqueue`` and DO reset prior state, because
+    those signal a real change.)
 
     ``skip_trashed`` must be True whenever deletion reconciliation is
     enabled. A T-flagged file is then deleted upstream: after the
@@ -3337,7 +3382,7 @@ def _enqueue_unindexed_messages(
     for filepath in _iter_maildir_messages(root):
         seen += 1
         path_str = str(filepath)
-        if db.is_indexed(path_str):
+        if db.is_indexed_and_fresh(path_str):
             continue
         if skip_trashed and is_trashed(filepath):
             continue
@@ -3407,7 +3452,7 @@ def _refresh_folder_watches(
     folder_watches.refresh()
     if not folder_watches.recovery_pending:
         return False
-    sweep_paths(db, maildir_root=MAILDIR_PATH)
+    sweep_paths(db, maildir_root=MAILDIR_PATH, hash_cache=_sweep_hash_cache)
     _enqueue_unindexed_messages(db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed)
     folder_watches.recovery_pending = False
     return True
@@ -3803,7 +3848,7 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> bool
                 brake = "ok"
             log.info(
                 "maintenance pass=reconcile ms=%d tombstoned=%d cleared=%d renamed=%d "
-                "retired=%d bound=%d scan=%s threads_reaped=%d threads_rebuilt=%d "
+                "retired=%d bound=%d stale=%d scan=%s threads_reaped=%d threads_rebuilt=%d "
                 "blocked_threads=%d brake=%s",
                 (_monotonic() - started) * 1000,
                 swept.get("tombstoned", 0),
@@ -3811,6 +3856,7 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> bool
                 swept.get("renamed", 0),
                 swept.get("retired", 0),
                 swept.get("bound", 0),
+                swept.get("stale", 0),
                 "complete" if swept.get("complete", True) else "partial",
                 reaped.get("threads_reaped", 0),
                 reaped.get("threads_rebuilt", 0),
@@ -3843,7 +3889,7 @@ def _run_periodic_rescan(
     which the walk skips because the copy is already marked indexed. In
     archive mode nothing else revisits that while the indexer runs."""
     try:
-        sweep_paths(db, maildir_root=MAILDIR_PATH)
+        sweep_paths(db, maildir_root=MAILDIR_PATH, hash_cache=_sweep_hash_cache)
     except Exception as e:
         # The walk below still runs: it finds missed new mail in every
         # readable folder, whatever stopped the sweep.
@@ -4035,7 +4081,7 @@ def main():
     # indexed: otherwise the walk reprocesses every file renamed while
     # the indexer was down as new mail.
     try:
-        sweep_paths(db, maildir_root=MAILDIR_PATH)
+        sweep_paths(db, maildir_root=MAILDIR_PATH, hash_cache=_sweep_hash_cache)
     except Exception as e:
         log.error("startup rename sweep failed: %s", type(e).__name__)
 

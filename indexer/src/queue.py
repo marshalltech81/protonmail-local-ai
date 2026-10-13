@@ -105,6 +105,11 @@ REASON_REEXTRACT = "reextract"
 # Re-read an already indexed message so a parser change that keeps chunk
 # IDs fills its per-message rows (#1078). Queued by ``REPARSE_ENQUEUE_SQL``.
 REASON_REPARSE = "reparse"
+# A path whose bytes a freshness or content-hash check (the Maildir walk,
+# the watcher's new-mail gate, or occurrence_scan's periodic backstop)
+# found changed under an occurrence or indexed_files record that still
+# named it (#1612). Queued by ``STALE_ENQUEUE_SQL``.
+REASON_STALE_CONTENT = "stale_content"
 
 # Queue every indexed source file for a reparse, in one statement. A
 # migration that adds parser-produced per-message data ends with this
@@ -125,6 +130,22 @@ SELECT filepath, 'reparse', 'queued', 0,
        strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
        strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
 FROM indexed_files WHERE true
+ON CONFLICT(filepath) DO NOTHING;"""
+
+# Queue one path whose content a backstop check (not a fresh watcher
+# event) found changed, without disturbing a row already there: a
+# pending retry's attempts and error, or a dead letter's status, stay as
+# they are until the worker or the operator (``make requeue-dead``)
+# acts on them (#1612). ``queue_enqueue``'s ``INSERT OR REPLACE`` is for
+# a watcher event (a path genuinely new to the queue, or fresh intent);
+# this statement is for a detection that can recur on a later pass before
+# the worker catches up, so it must not keep resetting state the
+# detection itself did not change. Modeled on ``REPARSE_ENQUEUE_SQL``,
+# for one path rather than every indexed file.
+STALE_ENQUEUE_SQL = """\
+INSERT INTO indexing_jobs
+    (filepath, reason, status, attempts, created_at, updated_at, next_attempt_at)
+VALUES (?, ?, 'queued', 0, ?, ?, ?)
 ON CONFLICT(filepath) DO NOTHING;"""
 
 # Stages ``defer`` is called with. The queue heartbeat counts deferrals

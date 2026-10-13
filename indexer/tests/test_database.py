@@ -25,6 +25,7 @@ from src.database import (
     Database,
 )
 from src.migrations import runner
+from src.occurrence_scan import file_identity
 
 from tests.conftest import (
     TEST_ACCOUNT,
@@ -2858,16 +2859,28 @@ class TestReconciliationSupport:
         )
         assert db.count_total_messages() == 2
 
-    def test_update_filepath_moves_the_indexed_row_and_the_occurrence(self, db):
-        msg = make_message(filepath="/old/cur/path")
+    def test_update_filepath_moves_the_indexed_row_and_the_occurrence(self, db, tmp_path):
+        old_path = tmp_path / "old" / "cur" / "path"
+        old_path.parent.mkdir(parents=True)
+        old_path.write_bytes(b"body")
+        new_path = tmp_path / "old" / "cur" / "path:2,S"
+        msg = make_message(filepath=str(old_path))
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
 
-        db.update_filepath("/old/cur/path", "/old/cur/path:2,S", move_occurrence=True)
+        old_path.rename(new_path)
+        # The occurrence is carried forward only once its destination's
+        # bytes are verified (#1612); a genuine rename is its own proof.
+        db.update_filepath(
+            str(old_path),
+            str(new_path),
+            move_occurrence=True,
+            verified_identity=file_identity(new_path),
+        )
 
-        assert db.find_active_occurrence("/old/cur/path:2,S") is not None
-        assert db.find_active_occurrence("/old/cur/path") is None
-        assert db.is_indexed("/old/cur/path:2,S") is True
-        assert db.is_indexed("/old/cur/path") is False
+        assert db.find_active_occurrence(str(new_path)) is not None
+        assert db.find_active_occurrence(str(old_path)) is None
+        assert db.is_indexed(str(new_path)) is True
+        assert db.is_indexed(str(old_path)) is False
 
     def test_update_filepath_without_the_occurrence_moves_only_file_rows(self, db):
         msg = make_message(filepath="/old/cur/path")
@@ -5296,16 +5309,21 @@ class TestMessagesTable:
         ]
         assert index_cols == ["address", "name"]
 
-    def test_update_filepath_moves_the_occurrence_locator(self, db):
-        msg = make_message(message_id="m1@example.com", filepath="/maildir/INBOX/cur/m1:2,S")
+    def test_update_filepath_moves_the_occurrence_locator(self, db, tmp_path):
+        old = tmp_path / "maildir/INBOX/cur/m1:2,S"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"body")
+        new = tmp_path / "maildir/INBOX/cur/m1:2,RS"
+        msg = make_message(message_id="m1@example.com", filepath=str(old))
         db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
 
+        old.rename(new)
         db.update_filepath(
-            "/maildir/INBOX/cur/m1:2,S", "/maildir/INBOX/cur/m1:2,RS", move_occurrence=True
+            str(old), str(new), move_occurrence=True, verified_identity=file_identity(new)
         )
 
         row = db._conn.execute("SELECT relative_path FROM message_occurrences").fetchone()
-        assert row["relative_path"] == "maildir/INBOX/cur/m1:2,RS"
+        assert row["relative_path"] == str(new).lstrip("/")
 
     def test_removing_message_or_thread_cascades(self, db):
         m1 = make_message(message_id="m1@example.com", filepath="/m/1")
@@ -5330,38 +5348,69 @@ class TestUpdateFilepathWithFolder:
     the file's rows in one transaction — all commit, or none does
     (#1566, #1567)."""
 
-    def _seed(self, db):
-        msg = make_message(message_id="m1@example.com", filepath="/md/INBOX/cur/m1")
+    def _seed(self, db, tmp_path):
+        old = tmp_path / "md/INBOX/cur/m1"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"body")
+        msg = make_message(message_id="m1@example.com", filepath=str(old))
         db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+        return old
 
-    def _state(self, db):
+    def _state(self, db, old):
         row = db._conn.execute(
             "SELECT folder, relative_path FROM message_occurrences WHERE state = 'active'"
         ).fetchone()
-        return row["folder"], row["relative_path"], db.is_indexed("/md/INBOX/cur/m1")
+        return row["folder"], row["relative_path"], db.is_indexed(str(old))
 
-    def test_updates_locator_and_folder_together(self, db):
-        self._seed(db)
-        db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", move_occurrence=True)
-        assert self._state(db) == ("md/Archive", "md/Archive/cur/m1", False)
+    def test_updates_locator_and_folder_together(self, db, tmp_path):
+        old = self._seed(db, tmp_path)
+        new = tmp_path / "md/Archive/cur/m1"
+        new.parent.mkdir(parents=True)
+        old.rename(new)
+        db.update_filepath(
+            str(old), str(new), move_occurrence=True, verified_identity=file_identity(new)
+        )
+        assert self._state(db, old) == (
+            str(new.parent.parent.relative_to("/")),
+            str(new.relative_to("/")),
+            False,
+        )
 
-    def test_rolls_back_with_an_enclosing_transaction(self, db):
-        self._seed(db)
+    def test_rolls_back_with_an_enclosing_transaction(self, db, tmp_path):
+        old = self._seed(db, tmp_path)
+        new = tmp_path / "md/Archive/cur/m1"
+        new.parent.mkdir(parents=True)
+        old.rename(new)
         with pytest.raises(RuntimeError), db.transaction():
-            db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", move_occurrence=True)
+            db.update_filepath(
+                str(old), str(new), move_occurrence=True, verified_identity=file_identity(new)
+            )
             raise RuntimeError("caller failed after the rename")
-        assert self._state(db) == ("md/INBOX", "md/INBOX/cur/m1", True)
+        assert self._state(db, old) == (
+            str(old.parent.parent.relative_to("/")),
+            str(old.relative_to("/")),
+            True,
+        )
 
-    def test_a_failed_occurrence_write_rolls_back_the_file_rows(self, db):
-        self._seed(db)
+    def test_a_failed_occurrence_write_rolls_back_the_file_rows(self, db, tmp_path):
+        old = self._seed(db, tmp_path)
+        new = tmp_path / "md/Archive/cur/m1"
+        new.parent.mkdir(parents=True)
+        old.rename(new)
         db._conn.execute(
             "CREATE TRIGGER fail_move BEFORE INSERT ON message_occurrences "
             "BEGIN SELECT RAISE(ABORT, 'injected'); END"
         )
         with pytest.raises(sqlite3.IntegrityError, match="injected"):
-            db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", move_occurrence=True)
-        assert self._state(db) == ("md/INBOX", "md/INBOX/cur/m1", True)
-        assert not db.is_indexed("/md/Archive/cur/m1")
+            db.update_filepath(
+                str(old), str(new), move_occurrence=True, verified_identity=file_identity(new)
+            )
+        assert self._state(db, old) == (
+            str(old.parent.parent.relative_to("/")),
+            str(old.relative_to("/")),
+            True,
+        )
+        assert not db.is_indexed(str(new))
 
 
 class TestMaildirFlagState:
@@ -5393,21 +5442,37 @@ class TestMaildirFlagState:
             ("/md/INBOX/cur/m1:2,FST", (1, 1, 0)),  # trashed keeps the rest
         ],
     )
-    def test_rename_updates_the_flags(self, db, dest, expected):
-        msg = make_message(filepath="/md/INBOX/new/m1")
+    def test_rename_updates_the_flags(self, db, tmp_path, dest, expected):
+        old = tmp_path / "md/INBOX/new/m1"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"body")
+        new = tmp_path / dest.lstrip("/")
+        new.parent.mkdir(parents=True)
+        msg = make_message(filepath=str(old))
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
-        db.update_filepath("/md/INBOX/new/m1", dest, move_occurrence=True)
-        assert self._flags(db) == (dest, *expected)
+        old.rename(new)
+        db.update_filepath(
+            str(old), str(new), move_occurrence=True, verified_identity=file_identity(new)
+        )
+        assert self._flags(db) == (str(new), *expected)
 
-    def test_cross_folder_move_updates_flags_and_folder(self, db):
-        msg = make_message(filepath="/md/INBOX/cur/m1:2,S")
+    def test_cross_folder_move_updates_flags_and_folder(self, db, tmp_path):
+        old = tmp_path / "md/INBOX/cur/m1:2,S"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"body")
+        new = tmp_path / "md/Archive/cur/m1:2,FS"
+        new.parent.mkdir(parents=True)
+        msg = make_message(filepath=str(old))
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
-        db.update_filepath("/md/INBOX/cur/m1:2,S", "/md/Archive/cur/m1:2,FS", move_occurrence=True)
-        assert self._flags(db) == ("/md/Archive/cur/m1:2,FS", 1, 1, 0)
+        old.rename(new)
+        db.update_filepath(
+            str(old), str(new), move_occurrence=True, verified_identity=file_identity(new)
+        )
+        assert self._flags(db) == (str(new), 1, 1, 0)
         folder = db._conn.execute(
             "SELECT folder FROM message_occurrences WHERE state = 'active'"
         ).fetchone()[0]
-        assert folder == "md/Archive"
+        assert folder == str(new.parent.parent.relative_to("/"))
 
     def test_reindex_rewrites_the_flags(self, db):
         """A re-parse of the same file (the claimant is unchanged) takes the
