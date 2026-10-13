@@ -213,7 +213,11 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # v14 seed could not bind gets a retired occurrence, and
 # ``messages.content_hash`` is indexed; no reparse
 # (``migrations/0015_occurrence_readers.sql``).
-SCHEMA_VERSION = 15
+# v16 (#1592): ``account_collection_state`` keeps each account's latest
+# mbsync collection outcome, read from mbsync's collection status file;
+# empty until the indexer first reads it, no reparse
+# (``migrations/0016_account_collection_state.sql``).
+SCHEMA_VERSION = 16
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -287,6 +291,68 @@ PENDING_SCHEMA_STATEMENTS = (
     )
     """,
     "CREATE INDEX idx_pending_deletions_claimant ON pending_deletions(claimant_id, marked_at)",
+)
+
+# mbsync's latest collection outcome per account (#1592), shared by the
+# initial schema; the v16 migration file repeats it. One row per account,
+# replaced by the indexer from mbsync's collection status file
+# (``collection_status.py``) and read by mcp-server's get_mailbox_status.
+# ``status`` is ``unknown`` (with ``unknown_reason``, and the record
+# columns NULL) when the file is missing, legacy, malformed, unsupported,
+# unreadable or names another account. ``success_delivered`` says whether
+# the last success is the sync the indexer acknowledged through the
+# success stamp. ``unrecovered_failure_attempt_id`` is the failed attempt
+# the indexer last saw, kept until a later success is delivered.
+COLLECTION_STATE_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE account_collection_state (
+        account_id                     INTEGER PRIMARY KEY REFERENCES accounts(id),
+        status                         TEXT NOT NULL CHECK (status IN ('known', 'unknown')),
+        unknown_reason                 TEXT CHECK (unknown_reason IN ('missing', 'legacy',
+                                           'malformed', 'unsupported', 'account_mismatch',
+                                           'unreadable')),
+        run_deadline_secs              INTEGER,
+        sync_interval_secs             INTEGER,
+        attempt_id                     TEXT,
+        attempt_started_at             TEXT,
+        attempt_outcome                TEXT CHECK (attempt_outcome IN ('in_progress', 'succeeded',
+                                           'succeeded_with_withheld_folders', 'failed')),
+        terminal_attempt_id            TEXT,
+        terminal_completed_at          TEXT,
+        terminal_outcome               TEXT CHECK (terminal_outcome IN ('succeeded',
+                                           'succeeded_with_withheld_folders', 'failed')),
+        terminal_withheld_folders      INTEGER CHECK (terminal_withheld_folders >= 0),
+        terminal_failure_class         TEXT CHECK (terminal_failure_class IN ('deadline', 'killed',
+                                           'error', 'permission_repair', 'interrupted')),
+        success_attempt_id             TEXT,
+        success_completed_at           TEXT,
+        success_delivered              INTEGER CHECK (success_delivered IN (0, 1)),
+        unrecovered_failure_attempt_id TEXT,
+        observed_at                    TEXT NOT NULL,
+        CHECK ((status = 'unknown') = (unknown_reason IS NOT NULL))
+    )
+    """,
+)
+
+# The columns ``record_ingestion_state`` fills from a collection state
+# mapping; ``account_id`` and ``observed_at`` it sets itself.
+COLLECTION_STATE_COLUMNS = (
+    "status",
+    "unknown_reason",
+    "run_deadline_secs",
+    "sync_interval_secs",
+    "attempt_id",
+    "attempt_started_at",
+    "attempt_outcome",
+    "terminal_attempt_id",
+    "terminal_completed_at",
+    "terminal_outcome",
+    "terminal_withheld_folders",
+    "terminal_failure_class",
+    "success_attempt_id",
+    "success_completed_at",
+    "success_delivered",
+    "unrecovered_failure_attempt_id",
 )
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -1501,9 +1567,17 @@ class Database:
         ``T``-flagged) and removed once it has one again; see
         ``Database.mark_lost_messages``. ``marked_at`` is ISO 8601 UTC so
         the reaper's lexicographic cutoff comparison is well-defined.
+
+        ``account_collection_state`` holds each account's latest mbsync
+        collection outcome (#1592, ``COLLECTION_STATE_SCHEMA_STATEMENTS``);
+        ``migrations/0016_account_collection_state.sql`` creates it on an
+        existing index.
         """
         for statement in (
-            ACCOUNT_SCHEMA_STATEMENTS + OCCURRENCE_SCHEMA_STATEMENTS + PENDING_SCHEMA_STATEMENTS
+            ACCOUNT_SCHEMA_STATEMENTS
+            + OCCURRENCE_SCHEMA_STATEMENTS
+            + PENDING_SCHEMA_STATEMENTS
+            + COLLECTION_STATE_SCHEMA_STATEMENTS
         ):
             cur.execute(statement)
 
@@ -3813,21 +3887,50 @@ class Database:
         sync_completed_at: str | None,
         sync_interval_secs: int | None,
         seen_at: str,
+        collection: Mapping[str, object] | None = None,
     ) -> None:
-        """Replace the single ``ingestion_state`` row."""
-        self._conn.execute(
-            """
-            INSERT INTO ingestion_state
-                (id, sync_completed_at, sync_interval_secs, indexer_seen_at)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                sync_completed_at = excluded.sync_completed_at,
-                sync_interval_secs = excluded.sync_interval_secs,
-                indexer_seen_at = excluded.indexer_seen_at
-            """,
-            (sync_completed_at, sync_interval_secs, seen_at),
-        )
-        self._conn.commit()
+        """Replace the single ``ingestion_state`` row and, with
+        ``collection`` (``account_collection_state``'s columns other than
+        ``account_id`` and ``observed_at``), this account's collection
+        state row, in one transaction, so mcp-server reads the acknowledged
+        sync and the collection outcome as one snapshot (#1592)."""
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO ingestion_state
+                    (id, sync_completed_at, sync_interval_secs, indexer_seen_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    sync_completed_at = excluded.sync_completed_at,
+                    sync_interval_secs = excluded.sync_interval_secs,
+                    indexer_seen_at = excluded.indexer_seen_at
+                """,
+                (sync_completed_at, sync_interval_secs, seen_at),
+            )
+            if collection is not None:
+                values = {name: collection.get(name) for name in COLLECTION_STATE_COLUMNS}
+                values["account_id"] = self.account_id
+                values["observed_at"] = seen_at
+                columns = ", ".join(values)
+                placeholders = ", ".join(f":{name}" for name in values)
+                self._conn.execute(
+                    f"INSERT OR REPLACE INTO account_collection_state ({columns}) "  # nosec B608 - fixed column names
+                    f"VALUES ({placeholders})",
+                    values,
+                )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    @_synchronized
+    def get_collection_state(self) -> dict | None:
+        """This account's ``account_collection_state`` row, or ``None``
+        before the indexer first records one."""
+        row = self._conn.execute(
+            "SELECT * FROM account_collection_state WHERE account_id = ?", (self.account_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     @_synchronized
     def queue_stats(self) -> dict[str, int]:

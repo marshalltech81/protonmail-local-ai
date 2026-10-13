@@ -71,6 +71,12 @@ from .chunker import (
     estimate_tokens,
     truncate_to_tokens,
 )
+from .collection_status import (
+    COLLECTION_STATUS_NAME,
+    CollectionStatus,
+    Unknown,
+    read_collection_status,
+)
 from .database import EMBEDDING_DIM, SCHEMA_VERSION, CompletenessClearing, Database
 from .embed_identity import (
     CalibrationRequestError,
@@ -850,6 +856,18 @@ class _IngestionStateRecorder:
 
     Writes at most once per ``interval_secs``; mcp-server's staleness
     thresholds are minutes.
+
+    It also keeps mbsync's latest collection outcome (#1592), read from
+    the collection status file at startup (``read_collection``), before
+    every write, and on each rename of the file, under the same lock as
+    the acknowledgements, and records it per account in the same
+    transaction as ``ingestion_state``. After a failed attempt the
+    failure stays unrecovered (and the index not current) until a later
+    success is delivered: the last success in the file is the sync named
+    by the acknowledged stamp, compared by its completion time, which
+    mbsync writes identically into both. The file's records are taken in
+    publication order (the file always holds the newest), never ordered
+    by their times.
     """
 
     def __init__(self, db: Database, maildir_root: Path, interval_secs: float = 30):
@@ -865,6 +883,14 @@ class _IngestionStateRecorder:
         self._covered = 0
         self._reported = 0
         self._held: SyncStamp | None = None
+        # The collection status last read (None before the first read),
+        # the failed attempt not yet followed by a delivered success (kept
+        # across restarts in the account's row), and the last unknown
+        # reason and failed attempt logged, so each is logged once.
+        self._collection: CollectionStatus | Unknown | None = None
+        self._unrecovered: str | None = None
+        self._logged_reason: str | None = None
+        self._logged_failure: str | None = None
 
     def read_stamp(self) -> SyncStamp | None:
         """The stamp on disk now, for acknowledging after a walk."""
@@ -956,15 +982,124 @@ class _IngestionStateRecorder:
         ):
             self._acked = stamp
 
+    def read_collection(self) -> None:
+        """Read mbsync's collection status file now (startup, each write,
+        each rename onto it). Serialized with the acknowledgements and
+        other reads, so the newest publication read is the one kept."""
+        with self._lock:
+            if self._collection is None:
+                # First read: an unrecovered failure recorded before a
+                # restart still holds, and is not logged again. Called
+                # from the watcher thread too, so a database error must
+                # not escape: the read waits for the next heartbeat.
+                try:
+                    stored = self.db.get_collection_state()
+                except sqlite3.Error as e:
+                    warn_rate_limited(
+                        log,
+                        "reading the stored collection state failed: %s",
+                        type(e).__name__,
+                        attachment=False,
+                    )
+                    return
+                if stored is not None:
+                    self._unrecovered = stored["unrecovered_failure_attempt_id"]
+                    self._logged_failure = self._unrecovered
+            status = read_collection_status(self.maildir_root, self.db.account.scope_uuid)
+            self._observe_collection(status)
+
+    def _success_delivered(self, status: CollectionStatus) -> bool:
+        # Called with ``_lock`` held.
+        success = status.last_success
+        return (
+            success is not None
+            and self._acked is not None
+            and success.completed_at == self._acked.completed_at
+        )
+
+    def _observe_collection(self, status: CollectionStatus | Unknown) -> None:
+        # Called with ``_lock`` held. Logs each change once: an unknown
+        # status (by its fixed reason), a readable one again, a newly seen
+        # failed attempt, and the recovery from it.
+        self._collection = status
+        if isinstance(status, Unknown):
+            if status.reason != self._logged_reason:
+                self._logged_reason = status.reason
+                log.warning(
+                    "mbsync collection status unavailable (reason=%s); get_mailbox_status "
+                    "reports the latest collection outcome as unknown",
+                    status.reason,
+                )
+            return
+        if self._logged_reason is not None:
+            self._logged_reason = None
+            log.info("mbsync collection status is readable again")
+        terminal = status.last_terminal
+        if terminal is not None and terminal.outcome == "failed":
+            self._unrecovered = terminal.attempt_id
+            if terminal.attempt_id != self._logged_failure:
+                self._logged_failure = terminal.attempt_id
+                withheld = terminal.withheld_far_side_folders
+                log.warning(
+                    "mbsync collection attempt failed (failure_class=%s, "
+                    "withheld_far_side_folders=%s); the index is not current until a later "
+                    "successful sync is delivered",
+                    terminal.failure_class,
+                    "unknown" if withheld is None else withheld,
+                )
+        elif self._unrecovered is not None and self._success_delivered(status):
+            self._unrecovered = None
+            log.info(
+                "mbsync collection recovered: a successful sync after the failed attempt "
+                "was delivered to the index"
+            )
+
+    def _collection_row(self) -> dict[str, object] | None:
+        # Called with ``_lock`` held: the account's row as last read, or
+        # None before the first read.
+        status = self._collection
+        if status is None:
+            return None
+        if isinstance(status, Unknown):
+            return {
+                "status": "unknown",
+                "unknown_reason": status.reason,
+                "unrecovered_failure_attempt_id": self._unrecovered,
+            }
+        terminal, success = status.last_terminal, status.last_success
+        return {
+            "status": "known",
+            "run_deadline_secs": status.run_deadline_secs,
+            "sync_interval_secs": status.sync_interval_secs,
+            "attempt_id": status.attempt_id,
+            "attempt_started_at": status.attempt_started_at,
+            "attempt_outcome": status.attempt_outcome,
+            "terminal_attempt_id": terminal.attempt_id if terminal else None,
+            "terminal_completed_at": terminal.completed_at if terminal else None,
+            "terminal_outcome": terminal.outcome if terminal else None,
+            "terminal_withheld_folders": terminal.withheld_far_side_folders if terminal else None,
+            "terminal_failure_class": terminal.failure_class if terminal else None,
+            "success_attempt_id": success.attempt_id if success else None,
+            "success_completed_at": success.completed_at if success else None,
+            "success_delivered": int(self._success_delivered(status)) if success else None,
+            "unrecovered_failure_attempt_id": self._unrecovered,
+        }
+
     def maybe_record(self, now: float) -> None:
         if self._last_write is not None and now - self._last_write < self.interval_secs:
             return
-        acked = self._acked
+        # The heartbeat's read of the collection status, then one snapshot
+        # of it and the acknowledged sync for the write.
+        self.read_collection()
+        with self._lock:
+            acked = self._acked
+            collection = self._collection_row()
         try:
             self.db.record_ingestion_state(
                 sync_completed_at=acked.completed_at if acked else None,
                 sync_interval_secs=acked.sync_interval_secs if acked else None,
                 seen_at=datetime.now(UTC).isoformat(),
+                collection=collection,
             )
         except sqlite3.Error as e:
             # Retried on every heartbeat until a write succeeds.
@@ -1123,6 +1258,14 @@ class MaildirHandler(FileSystemEventHandler):
         if dest_path_obj.name == PERMS_REPAIRED_NAME and dest_path_obj.parent == MAILDIR_PATH:
             if self.sync_completed is not None:
                 self.sync_completed.set()
+            return
+
+        # mbsync published its collection status (#1592): read the file as
+        # it is now (the newest publication), in order with the stamp's
+        # rename. It acknowledges nothing.
+        if dest_path_obj.name == COLLECTION_STATUS_NAME and dest_path_obj.parent == MAILDIR_PATH:
+            if self.ingestion_state is not None:
+                self.ingestion_state.read_collection()
             return
 
         if self.db.is_indexed(src_path) or self.db.find_active_occurrence(src_path) is not None:
@@ -3825,6 +3968,9 @@ def main():
     global _ingestion_state
     ingestion_state = _IngestionStateRecorder(db, MAILDIR_PATH)
     _ingestion_state = ingestion_state
+    # mbsync's collection status as it is at startup (#1592); a rebuilt
+    # index recovers it from the file at the first write.
+    ingestion_state.read_collection()
     sync_completed = threading.Event()
     directory_created = threading.Event()
     handler = MaildirHandler(

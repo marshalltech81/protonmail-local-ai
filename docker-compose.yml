@@ -57,6 +57,11 @@ services:
       # accepted (PLAN.md decision 46). Read once at startup; no control
       # depends on it.
       SOURCE_MODE: ${SOURCE_MODE:-}
+      # The account the index is registered to (#1596), named in the
+      # collection status mbsync publishes for the indexer (#1592); the
+      # indexer reads a status naming another account as unknown.
+      # Required: make init-secrets writes it to .env.
+      ACCOUNT_SCOPE: ${ACCOUNT_SCOPE}
       # The container's name for this Mac, which forwards to its 127.0.0.1;
       # empty means host.docker.internal. Only the names in
       # mbsync/proton-settings.sh are accepted, by validate-env.sh and by

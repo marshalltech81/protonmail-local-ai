@@ -957,7 +957,8 @@ Maildir copy of a message as its own occurrence (#1566). Upgrade with
 A plain `docker compose up` without the line starts nothing useful:
 Compose warns that `ACCOUNT_SCOPE` is not set, and the indexer and
 mcp-server exit with "ACCOUNT_SCOPE is not set" before opening the
-index, so nothing is migrated. Run `make up` instead. If a migration is
+index, so nothing is migrated; mbsync, which names the account in its
+collection status (#1592), exits with it too before syncing. Run `make up` instead. If a migration is
 interrupted, the index stays at v13 with no account recorded, and the
 next start retries it (see docs/troubleshooting.md, "Indexer stops
 during a schema migration").

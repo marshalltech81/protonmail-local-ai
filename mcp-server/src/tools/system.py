@@ -13,7 +13,14 @@ from mcp.types import CallToolResult
 
 from ..lib import timings
 from ..lib.build_identity import git_commit
-from .outputs import MailboxStatusOutput, QueueCounts, read_only, tool_result
+from .outputs import (
+    CollectionAttempt,
+    CollectionStatus,
+    MailboxStatusOutput,
+    QueueCounts,
+    read_only,
+    tool_result,
+)
 
 log = logging.getLogger("mcp.tools.system")
 
@@ -104,6 +111,72 @@ def not_current_reasons(
     return reasons
 
 
+def _time(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def collection_status(row: dict | None) -> CollectionStatus:
+    """mbsync's latest collection outcome from the indexer's
+    ``account_collection_state`` row (#1592); ``None`` (not recorded yet)
+    and an unknown status read as an unknown outcome, never a success."""
+    if row is None:
+        return CollectionStatus(
+            outcome="unknown",
+            outcome_at=None,
+            withheld_far_side_folders=None,
+            failure_class=None,
+            latest_attempt=None,
+            last_success_at=None,
+            failure_unrecovered=False,
+            unknown_reason="not_recorded",
+            observed_at=None,
+        )
+    unrecovered = row["unrecovered_failure_attempt_id"] is not None
+    if row["status"] != "known":
+        return CollectionStatus(
+            outcome="unknown",
+            outcome_at=None,
+            withheld_far_side_folders=None,
+            failure_class=None,
+            latest_attempt=None,
+            last_success_at=None,
+            failure_unrecovered=unrecovered,
+            unknown_reason=row["unknown_reason"],
+            observed_at=_time(row["observed_at"]),
+        )
+    terminal = row["terminal_outcome"]
+    return CollectionStatus(
+        outcome=terminal or "unknown",
+        outcome_at=_time(row["terminal_completed_at"]),
+        withheld_far_side_folders=row["terminal_withheld_folders"],
+        failure_class=row["terminal_failure_class"],
+        latest_attempt=CollectionAttempt(
+            outcome=row["attempt_outcome"],
+            started_at=datetime.fromisoformat(row["attempt_started_at"]),
+        ),
+        last_success_at=_time(row["success_completed_at"]),
+        failure_unrecovered=unrecovered,
+        unknown_reason=None if terminal else "no_completed_attempt",
+        observed_at=_time(row["observed_at"]),
+    )
+
+
+def collection_reasons(collection: CollectionStatus) -> list[str]:
+    """Why mbsync's collection keeps the index from being current: after a
+    failed attempt, until a later success is delivered to the index."""
+    if collection.outcome == "failed":
+        return [
+            f"mbsync's latest collection attempt failed ({collection.failure_class}); the "
+            "index is not current until a later successful sync is delivered to it"
+        ]
+    if collection.failure_unrecovered:
+        return [
+            "mbsync's last failed collection attempt has not yet been followed by a "
+            "successful sync delivered to the index"
+        ]
+    return []
+
+
 def _mailbox_status(db) -> MailboxStatusOutput:
     stats = db.get_mailbox_status()
     state = stats["ingestion"] or {}
@@ -124,10 +197,13 @@ def _mailbox_status(db) -> MailboxStatusOutput:
         queue=queue,
         now=now,
     )
+    collection = collection_status(stats["collection"])
+    reasons += collection_reasons(collection)
     return MailboxStatusOutput(
         server_version=git_commit(),
         current=not reasons,
         not_current_reasons=reasons,
+        collection=collection,
         last_sync_at=last_sync_at,
         sync_interval_secs=state.get("sync_interval_secs"),
         indexer_last_seen_at=indexer_seen,
@@ -164,6 +240,7 @@ def _render(out: MailboxStatusOutput) -> str:
     q = out.queue
     lines += [
         f"Last mail sync: {_when(out.last_sync_at, out.checked_at)}",
+        *_collection_lines(out),
         f"Indexer seen:   {_when(out.indexer_last_seen_at, out.checked_at)}",
         f"Queue:          {q.pending:,} pending, {q.retrying:,} retrying, "
         f"{q.deferred:,} deferred, {q.extraction_deferred:,} extraction deferred, "
@@ -222,6 +299,44 @@ def _render(out: MailboxStatusOutput) -> str:
     return "\n".join(lines)
 
 
+_UNKNOWN_REASON_TEXT = {
+    "not_recorded": "the indexer has not recorded it yet",
+    "missing": "mbsync has not published its collection status",
+    "legacy": "mbsync's collection status predates this version",
+    "malformed": "mbsync's collection status could not be read",
+    "unsupported": "mbsync's collection status has a format this version does not read",
+    "account_mismatch": "mbsync's collection status names another account",
+    "unreadable": "mbsync's collection status could not be opened",
+    "no_completed_attempt": "no collection attempt has completed yet",
+}
+
+
+def _collection_lines(out: MailboxStatusOutput) -> list[str]:
+    """mbsync's latest collection outcome (#1592), as counts and fixed
+    text, and Bridge/Proton upstream currency, always unknown."""
+    c = out.collection
+    if c.outcome == "unknown":
+        head = f"unknown ({_UNKNOWN_REASON_TEXT[c.unknown_reason or 'not_recorded']})"
+    elif c.outcome == "failed":
+        head = f"failed ({c.failure_class}), {_when(c.outcome_at, out.checked_at)}"
+    else:
+        head = f"succeeded, {_when(c.outcome_at, out.checked_at)}"
+    lines = [f"Mail collection: {head}"]
+    if c.withheld_far_side_folders:
+        n = c.withheld_far_side_folders
+        lines.append(
+            f"  {n:,} far-side folder{'' if n == 1 else 's'} could not be opened (most likely "
+            "renamed or deleted in Proton); the rest synced and their local copies are kept."
+        )
+    if c.latest_attempt is not None and c.latest_attempt.outcome == "in_progress":
+        lines.append(
+            f"  Latest attempt started {_when(c.latest_attempt.started_at, out.checked_at)} with "
+            "no outcome recorded yet; this does not show whether mbsync is still running."
+        )
+    lines.append("Upstream (Bridge/Proton) currency: unknown")
+    return lines
+
+
 def _conflict_lines(out: MailboxStatusOutput) -> list[str]:
     """Message-ID conflicts as counts and a fixed hint, never the IDs (#455)."""
     ids, extra = out.conflicting_message_ids, out.extra_claimant_files
@@ -251,17 +366,24 @@ def register_system_tools(server, db):
         This server answers only from the local index, which mbsync fills
         from Proton once per sync interval (sync_interval_secs); it never
         contacts Proton itself. The index is current when mail synced
-        recently, the indexer is running, and no message is waiting to be
+        recently, the indexer is running, no message is waiting to be
         indexed (pending, retrying or deferred) or to have its remaining
-        attachments extracted (extraction deferred). When it is not
+        attachments extracted (extraction deferred), and no failed mail
+        collection is waiting for a later successful one. When it is not
         current, the reasons are listed: say so before relying on the
         results, since recent mail or attachment text may be missing.
         Mail that reached Proton after the last sync is not in the index
-        yet, even when the index is current.
+        yet, even when the index is current. collection reports mbsync's
+        latest collection from the Bridge app: succeeded, succeeded with
+        a count of far-side folders it could not open, failed (with a
+        class) or unknown.
+        upstream_currency, whether Bridge itself is in step with Proton,
+        is always unknown.
 
         Returns server_version (the deployed source commit, with -dirty for
         local changes, or unknown when build identity is unavailable),
-        current and the reasons it is false, last sync time, indexer
+        current and the reasons it is false, the collection outcome and
+        upstream currency, last sync time, indexer
         liveness, queue counts (pending, retrying, deferred, extraction
         deferred, parked trashed files that do not count against
         current, dead, and how many waiting messages are already

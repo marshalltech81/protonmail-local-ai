@@ -4732,9 +4732,11 @@ class Database:
         return int(match.group(1))
 
     def get_mailbox_status(self) -> dict:
-        """Index counts, queue depth, and the indexer's ``ingestion_state``
-        row (``None`` until the indexer first reports), read in one
-        snapshot so the counts and the queue agree.
+        """Index counts, queue depth, the indexer's ``ingestion_state``
+        row (``None`` until the indexer first reports) and the account's
+        ``account_collection_state`` row (``None`` until the indexer first
+        records mbsync's collection status, #1592), read in one snapshot
+        so the counts and the queue agree.
 
         Queue rows are ``pending`` (not yet failed), ``retrying``
         (failed at least once, will retry), ``deferred`` (postponed by
@@ -4803,6 +4805,14 @@ class Database:
                 "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
             ).fetchone()
             stats["ingestion"] = dict(state) if state is not None else None
+            # mbsync's latest collection outcome, as the indexer recorded
+            # it for the index's account (#1592; one account, checked at
+            # startup); None before the indexer first records it.
+            collection = conn.execute(
+                "SELECT c.* FROM account_collection_state c "
+                "JOIN accounts a ON a.id = c.account_id ORDER BY a.id LIMIT 1"
+            ).fetchone()
+            stats["collection"] = dict(collection) if collection is not None else None
             conflicts = conn.execute(MESSAGE_ID_CONFLICTS_SQL).fetchone()
             stats["conflicting_message_ids"] = conflicts[0]
             stats["extra_claimant_files"] = conflicts[1]

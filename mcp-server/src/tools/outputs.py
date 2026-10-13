@@ -1158,6 +1158,72 @@ class HeaderPredicateCapability(_Output):
     )
 
 
+CollectionOutcome = Literal["succeeded", "succeeded_with_withheld_folders", "failed"]
+
+
+class CollectionAttempt(_Output):
+    outcome: Literal["in_progress", "succeeded", "succeeded_with_withheld_folders", "failed"] = (
+        Field(
+            description="in_progress means only that the attempt started and no terminal "
+            "outcome was recorded for it; it does not show whether mbsync is still running."
+        )
+    )
+    started_at: datetime
+
+
+class CollectionStatus(_Output):
+    outcome: Literal["succeeded", "succeeded_with_withheld_folders", "failed", "unknown"] = Field(
+        description="mbsync's latest completed collection from the Bridge app: "
+        "succeeded; succeeded_with_withheld_folders (the rest synced, but far-side "
+        "folders could not be opened, most likely renamed or deleted in Proton; their "
+        "local copies are kept); failed; or unknown (see unknown_reason). Not Proton's "
+        "or Bridge's own state (upstream_currency)."
+    )
+    outcome_at: datetime | None = Field(description="When that collection ended.")
+    withheld_far_side_folders: int | None = Field(
+        description="How many far-side folders that collection could not open; null when "
+        "unknown. Folder names are never reported."
+    )
+    failure_class: (
+        Literal["deadline", "killed", "error", "permission_repair", "interrupted"] | None
+    ) = Field(
+        description="Why it failed: deadline (stopped at SYNC_DEADLINE_SECONDS), killed "
+        "(killed after ignoring the stop, or by the kernel), error (mbsync failed), "
+        "permission_repair (new mail could not be made readable to the indexer) or "
+        "interrupted (mbsync was stopped); null unless failed."
+    )
+    latest_attempt: CollectionAttempt | None = Field(
+        description="The latest attempt, which may still be in progress."
+    )
+    last_success_at: datetime | None = Field(
+        description="When the last successful collection ended."
+    )
+    failure_unrecovered: bool = Field(
+        description="A failed collection has not yet been followed by a successful one "
+        "delivered to the index; current is false while it is true."
+    )
+    unknown_reason: (
+        Literal[
+            "not_recorded",
+            "missing",
+            "legacy",
+            "malformed",
+            "unsupported",
+            "account_mismatch",
+            "unreadable",
+            "no_completed_attempt",
+        ]
+        | None
+    ) = Field(
+        description="Why outcome is unknown: not yet recorded by the indexer, mbsync's status "
+        "file missing, written by an older mbsync, malformed, of an unsupported format, "
+        "naming another account or unreadable, or no attempt completed yet; null otherwise."
+    )
+    observed_at: datetime | None = Field(
+        description="When the indexer last read mbsync's collection status."
+    )
+
+
 class MailboxStatusOutput(_Output):
     server_version: str = Field(
         description="MCP server's deployed source commit, with -dirty for local changes; "
@@ -1165,11 +1231,21 @@ class MailboxStatusOutput(_Output):
     )
     current: bool = Field(
         description="True only when mail synced from Proton recently, the indexer is "
-        "running, and no message is pending, retrying, deferred or extraction_deferred. "
+        "running, no message is pending, retrying, deferred or extraction_deferred, and no "
+        "failed collection is unrecovered (collection.failure_unrecovered). "
         "Mail that reached Proton "
         "after last_sync_at is not searchable either way."
     )
     not_current_reasons: list[str] = Field(description="Why current is false; empty when true.")
+    collection: CollectionStatus = Field(
+        description="mbsync's latest collection outcome from the Bridge app, apart from "
+        "whether the index has caught up with the local Maildir (current)."
+    )
+    upstream_currency: Literal["unknown"] = Field(
+        default="unknown",
+        description="Whether Bridge has synchronized with Proton and serves current "
+        "content: always unknown, since nothing this server can observe establishes it.",
+    )
     last_sync_at: datetime | None = Field(
         description="When mbsync last completed a successful sync from Proton."
     )

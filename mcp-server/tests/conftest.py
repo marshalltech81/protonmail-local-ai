@@ -254,6 +254,28 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         INSERT INTO accounts VALUES
             (1, '00000000-0000-4000-8000-000000000001', 'proton-bridge',
              '2024-01-01T00:00:00+00:00');
+        -- mbsync's latest collection outcome per account (indexer
+        -- schema v16, #1592).
+        CREATE TABLE account_collection_state (
+            account_id                     INTEGER PRIMARY KEY REFERENCES accounts(id),
+            status                         TEXT NOT NULL,
+            unknown_reason                 TEXT,
+            run_deadline_secs              INTEGER,
+            sync_interval_secs             INTEGER,
+            attempt_id                     TEXT,
+            attempt_started_at             TEXT,
+            attempt_outcome                TEXT,
+            terminal_attempt_id            TEXT,
+            terminal_completed_at          TEXT,
+            terminal_outcome               TEXT,
+            terminal_withheld_folders      INTEGER,
+            terminal_failure_class         TEXT,
+            success_attempt_id             TEXT,
+            success_completed_at           TEXT,
+            success_delivered              INTEGER,
+            unrecovered_failure_attempt_id TEXT,
+            observed_at                    TEXT NOT NULL
+        );
         CREATE TABLE message_occurrences (
             id                INTEGER PRIMARY KEY,
             account_id        INTEGER NOT NULL REFERENCES accounts(id),
@@ -345,9 +367,13 @@ def write_ingestion(
     sync_interval_secs: int | None = None,
     indexer_seen_at: str | None = None,
     jobs: tuple[tuple[str | int | None, ...], ...] = (),
+    collection: dict | None = None,
 ) -> None:
     """Write the indexer-owned ``ingestion_state`` row (when
-    ``indexer_seen_at`` is given) and ``indexing_jobs`` rows as
+    ``indexer_seen_at`` is given), the account's
+    ``account_collection_state`` row (when ``collection`` is given: its
+    columns other than ``account_id``, ``observed_at`` defaulting to
+    ``indexer_seen_at``) and ``indexing_jobs`` rows as
     ``(status, attempts, last_error_class[, reason[, last_stage[, last_error]]])``
     into a fixture database (reason ``x`` when omitted, stage and error
     NULL)."""
@@ -357,6 +383,13 @@ def write_ingestion(
             conn.execute(
                 "INSERT INTO ingestion_state VALUES (1, ?, ?, ?)",
                 (sync_completed_at, sync_interval_secs, indexer_seen_at),
+            )
+        if collection is not None:
+            row = {"account_id": 1, "observed_at": indexer_seen_at or "", **collection}
+            conn.execute(
+                f"INSERT INTO account_collection_state ({', '.join(row)}) "  # nosec B608 - test column names
+                f"VALUES ({', '.join('?' for _ in row)})",
+                tuple(row.values()),
             )
         for i, job in enumerate(jobs):
             status, attempts, error_class, reason, last_stage, last_error = (
