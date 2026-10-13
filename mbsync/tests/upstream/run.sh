@@ -247,15 +247,16 @@ acquire_mods() {
     local go="$WORK/hostgo/go/bin/go" mod before
     for mod in gluon proton-bridge; do
         before="$(sha256 "$WORK/src/$mod/go.sum")$(sha256 "$WORK/src/$mod/go.mod")"
-        # Exports, not prefix assignments: bounded is a shell function.
-        (cd "$WORK/src/$mod" &&
-            export GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOSUMDB=sum.golang.org \
-                GONOSUMDB='' GOPRIVATE='' GONOPROXY='' GOINSECURE='' \
-                GOMODCACHE="$WORK/gomodcache" GOCACHE="$WORK/hostgocache" GOPATH="$WORK/hostgopath" &&
-            export GOPROXY=https://proxy.golang.org &&
-            bounded "$ACQUIRE_TIMEOUT_SECS" "$go" mod download &&
-            export GOPROXY=off &&
-            "$go" mod verify >/dev/null) || die "$mod: module download or verify failed"
+        # In this shell, not a subshell, so the cleanup paths see bounded's
+        # process group (PROBE); go -C replaces cd.
+        bounded "$ACQUIRE_TIMEOUT_SECS" env GOTOOLCHAIN=local GOFLAGS=-mod=readonly \
+            GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
+            GONOSUMDB='' GOPRIVATE='' GONOPROXY='' GOINSECURE='' \
+            GOMODCACHE="$WORK/gomodcache" GOCACHE="$WORK/hostgocache" GOPATH="$WORK/hostgopath" \
+            "$go" -C "$WORK/src/$mod" mod download || die "$mod: module download failed or passed $ACQUIRE_TIMEOUT_SECS s"
+        env GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOPROXY=off \
+            GOMODCACHE="$WORK/gomodcache" GOCACHE="$WORK/hostgocache" GOPATH="$WORK/hostgopath" \
+            "$go" -C "$WORK/src/$mod" mod verify >/dev/null || die "$mod: go mod verify failed"
         [[ "$before" == "$(sha256 "$WORK/src/$mod/go.sum")$(sha256 "$WORK/src/$mod/go.mod")" ]] ||
             die "$mod: go.sum or go.mod changed"
         prov "modules $mod go-mod-download+verify=ok go.sum unchanged (sum.golang.org)"
@@ -575,6 +576,7 @@ cmd_execute() {
     else
         rc=1
     fi
+    final_measure
     stop_watchdog
     docker rm -f "$RUNC" >/dev/null
     cp "$WORK/provenance.txt" "$out/provenance.txt"
@@ -680,6 +682,19 @@ watchdog_term() {
     [[ -z "$PROBE" ]] || kill -s KILL -- "-$PROBE" 2>/dev/null || true
     [[ -z "$why" ]] || watchdog_fire
     exit 0
+}
+
+# One last measurement after the suites, before the watchdog stops: a
+# burst written just before the last suite exited would otherwise fall
+# between two samples. Over the cap or unreadable fails the run.
+final_measure() {
+    local size written
+    size="$(bounded "$PROBE_TIMEOUT_SECS" docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
+    written="$(container_written_bytes)" || written=""
+    [[ "$size" =~ ^[0-9]+$ && "$written" =~ ^[0-9]+$ ]] ||
+        die "cannot measure the execution container's layer size or bytes written"
+    ((size <= EXEC_MAX_WRITE_BYTES && written <= EXEC_MAX_WRITE_BYTES)) ||
+        die "the execution container wrote more than $EXEC_MAX_WRITE_BYTES bytes"
 }
 
 # Fails when the execution container has stopped (the watchdog fired).
