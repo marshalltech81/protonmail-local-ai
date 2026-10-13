@@ -43,15 +43,22 @@ stop_leftovers() {
 # path: it is written through a descriptor opened on a new file while no
 # test process runs, and read back through /dev/fd, which reopens that
 # same inode, after every test process has ended. A FIFO or symlink the
-# tests put in its place is never opened.
+# tests put in its place is never opened. Each suite also builds with its
+# own new, empty GOCACHE and TMPDIR, created while no test process runs and
+# removed after it, so an earlier suite cannot plant build-cache entries
+# or temp files that a later one uses.
 run() {
-    local name="$1" mod="$2" pkg="$3" timeout="$4" rc=0 log="/home/h/logs/$1.log" w r output
+    local name="$1" mod="$2" pkg="$3" timeout="$4" rc=0 log="/home/h/logs/$1.log" w r output cache tmp
     stop_leftovers
+    cache="$(mktemp -d /home/h/gocache/suite.XXXXXXXX)"
+    tmp="$(mktemp -d /tmp/suite.XXXXXXXX)"
     rm -f "$log"
     exec {w}>"$log"
-    (cd "/home/h/src/$mod" && go test -v -count=1 -p 1 -timeout "$timeout" -run '^TestIssue1583' "$pkg") \
+    (cd "/home/h/src/$mod" && GOCACHE="$cache" TMPDIR="$tmp" \
+        go test -v -count=1 -p 1 -timeout "$timeout" -run '^TestIssue1583' "$pkg") \
         >&"$w" 2>&1 || rc=$?
     stop_leftovers
+    rm -rf "$cache" "$tmp"
     exec {r}<"/dev/fd/$w" {w}>&-
     output="$(head -c 8388608 <&"$r")"
     exec {r}<&-

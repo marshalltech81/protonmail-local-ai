@@ -45,9 +45,12 @@ set -Eeuo pipefail
 #        run.sh acquire|assemble <work-dir>
 #        run.sh execute <work-dir> <out-dir> [debug]
 #        run.sh clean <work-dir>
-# <work-dir> and <out-dir> must not exist yet (run.sh creates them with
-# mode 700); <work-dir> lives outside the repository (it
-# holds upstream trees, downloads and builds). Needs docker (Linux
+# acquire and all create <work-dir>, which must not exist yet; assemble,
+# execute and clean take a <work-dir> acquire created. execute and all
+# create <out-dir>, which must not exist yet, and keep it only when the
+# harness passes. Both are created with mode 700, under a parent only this
+# account can write. <work-dir> lives outside the repository (it holds
+# upstream trees, downloads and builds). Needs docker (Linux
 # arm64 or amd64 engine), git, curl, jq, gpgv, xz, python3 and shasum or
 # sha256sum on the host
 # (clean needs only docker). Not part of CI or `make test`.
@@ -535,7 +538,9 @@ cmd_execute() {
     stop_watchdog
     docker rm -f "$RUNC" >/dev/null
     cp "$WORK/provenance.txt" "$out/provenance.txt"
-    OUT_PENDING=""
+    # Only a passing run keeps its out dir: a failed test's results may
+    # stop part way.
+    [[ "$rc" -ne 0 ]] || OUT_PENDING=""
     printf 'execute: exit=%s\n' "$rc"
     return "$rc"
 }
