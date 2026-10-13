@@ -552,10 +552,14 @@ class TestReap:
         assert db.get_thread(thread_id) is not None
         assert count_pending_deletions(db) == 0
 
-    def test_the_reap_lists_no_directory(self, db, threader, embedder, maildir, monkeypatch):
+    def test_the_reap_lists_each_directory_at_most_once(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
         """#336: each tombstone whose mapped file was gone made the live
-        check list the folder again. Liveness is now the occurrence state
-        the sweep reconciled (#1567), so the reap lists nothing at all."""
+        check list the folder again. Liveness is the occurrence state the
+        sweep reconciled (#1567); the reap's on-disk restore check
+        (review rounds 4 and 5 on #1612) lists each directory at most once
+        per pass."""
         import os
 
         paths = []
@@ -587,7 +591,11 @@ class TestReap:
             db, embedder, _default_config(force=True), maildir_root=db.account.maildir_root
         )
         assert rec.reap()["threads_reaped"] == 20
-        assert listed == []
+        # ``Path.iterdir`` may list through ``os.scandir``: at most one
+        # listing (each hook once) per directory, and only INBOX's.
+        directories = {str(p) for p in listed}
+        assert len(directories) <= 2
+        assert len(listed) <= 2 * len(directories)
 
     def test_reap_clears_an_orphan_tombstone_for_a_live_message(
         self, db, threader, embedder, maildir

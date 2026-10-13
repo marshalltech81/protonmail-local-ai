@@ -3339,9 +3339,10 @@ startup rather than picking a mode.
    any indexing job still queued for those paths, all in one transaction,
    which first re-checks that every message it removes still has no live
    occurrence and a tombstone past the grace window, and that none of
-   those paths, nor the name an upstream restore gives one (the `T` flag
-   dropped, or the folder's other `cur`/`new`), is back on disk without
-   the `T` flag (a few `stat` calls, no directory listing), so a restore, a copy bound by a sweep, a
+   those paths, nor a file with the same uniq in its folder's `cur` or
+   `new` (an upstream restore renames it), is back on disk without the
+   `T` flag (`stat` calls first, then the pass's directory listings, each
+   directory listed at most once per pass, #336), so a restore, a copy bound by a sweep, a
    restore the sweep has not seen yet (logged at INFO), or a restore and
    a fresh loss after the reaper read its candidates is left for a later
    pass. It then either rebuilds

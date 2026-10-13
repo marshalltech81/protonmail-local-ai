@@ -4806,6 +4806,7 @@ class Database:
         *,
         grace_cutoff: str | None = None,
         copy_paths: Sequence[str] = (),
+        listings: dict[Path, dict[str, Path]] | None = None,
     ) -> bool:
         """Remove a thread and every derived row. Used when the last message
         in a thread has been reaped.
@@ -4836,6 +4837,7 @@ class Database:
                     ).fetchall()
                 ],
                 copy_paths,
+                listings,
             ):
                 self._conn.rollback()
                 return False
@@ -4915,7 +4917,11 @@ class Database:
         return cur.execute(sql + " LIMIT 1", params).fetchone() is not None
 
     def _restored_on_disk(
-        self, cur: sqlite3.Cursor, claimant_ids: list[str], copy_paths: Sequence[str]
+        self,
+        cur: sqlite3.Cursor,
+        claimant_ids: list[str],
+        copy_paths: Sequence[str],
+        listings: dict[Path, dict[str, Path]] | None,
     ) -> bool:
         """Whether a file of ``claimant_ids`` is back on disk outside the
         trash: one of the paths the reap would unmark (``_occurrence_paths``
@@ -4925,13 +4931,23 @@ class Database:
         (review round 4 on #1612): a copy restored after the sweep is not
         an occurrence yet, and reaping would unmark it, so the message
         waits for the next sweep, which binds it. A constant number of
-        ``stat`` calls per path and no directory listing (#336); a restore
-        that also changed other flags is found by the next sweep's walk."""
+        ``stat`` calls per path; with ``listings``, the reaper's per-pass
+        cache of directory listings (``resolve_current_path``), a file
+        with the path's uniq under any flags too (a restore that changed
+        other flags, review round 5), each directory listed at most once
+        per pass (#336)."""
         for path in [*self._occurrence_paths(cur, claimant_ids), *copy_paths]:
             if any(
                 os.path.exists(candidate) and not is_trashed(candidate)
                 for candidate in _restore_names(Path(path))
             ):
+                restored = True
+            elif listings is not None:
+                current = resolve_current_path(Path(path), listings)
+                restored = current is not None and current.exists() and not is_trashed(current)
+            else:
+                restored = False
+            if restored:
                 log.info(
                     "reaper: kept a message whose file is back on disk since the sweep; "
                     "the next sweep binds it"
@@ -4948,6 +4964,7 @@ class Database:
         *,
         grace_cutoff: str | None = None,
         copy_paths: Sequence[str] = (),
+        listings: dict[Path, dict[str, Path]] | None = None,
     ) -> list[str] | None:
         """Atomically rewrite a thread and remove reaped messages.
 
@@ -4980,7 +4997,7 @@ class Database:
             cur.execute("BEGIN IMMEDIATE")
             if self._has_unreapable_messages(
                 cur, thread.thread_id, reaped_claimant_ids, grace_cutoff=grace_cutoff
-            ) or self._restored_on_disk(cur, reaped_claimant_ids, copy_paths):
+            ) or self._restored_on_disk(cur, reaped_claimant_ids, copy_paths, listings):
                 self._conn.rollback()
                 return None
             self._rewrite_thread_row(cur, thread, embedding)

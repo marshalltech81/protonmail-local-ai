@@ -941,3 +941,18 @@ class TestReviewRound4:
         result = box.reconciler.reap()
         assert (result["threads_reaped"], result["threads_rebuilt"]) == (0, 0)
         assert box.messages() == 2
+
+
+class TestReviewRound5:
+    """Review round 5 on #1612."""
+
+    def test_a_restore_that_changes_other_flags_is_not_reaped(self, box):
+        path = box.put("INBOX/cur/w5:2,S", _eml("reflagged@example.test"))
+        box.index(path)
+        trashed = path.with_name("w5:2,ST")
+        path.rename(trashed)
+        assert box.reconciler.sweep()["tombstoned"] == 1
+        # Restored upstream with another flag change; no sweep or watcher yet.
+        trashed.rename(path.with_name("w5:2,RS"))
+        assert box.reconciler.reap()["threads_reaped"] == 0
+        assert box.messages() == 1

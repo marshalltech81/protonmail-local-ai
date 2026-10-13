@@ -275,8 +275,11 @@ class Reconciler:
 
         threads_reaped = 0
         threads_rebuilt = 0
+        # Directory listings for the reap's restore check, shared by the
+        # pass so each directory is listed at most once (#336).
+        listings: dict[Path, dict[str, Path]] = {}
         for thread_id, dead in grouped.items():
-            reaped, rebuilt = self._reap_thread(thread_id, dead, cutoff, copies)
+            reaped, rebuilt = self._reap_thread(thread_id, dead, cutoff, copies, listings)
             threads_reaped += int(reaped)
             threads_rebuilt += int(rebuilt)
 
@@ -380,6 +383,7 @@ class Reconciler:
         dead: list,
         cutoff: str,
         copies: Mapping[str, list[str]] | None = None,
+        listings: dict[Path, dict[str, Path]] | None = None,
     ) -> tuple[bool, bool]:
         """Reap one thread. Returns (fully_reaped, rebuilt).
 
@@ -387,8 +391,10 @@ class Reconciler:
         database re-checks inside the reap transaction that each still has
         no live occurrence and a tombstone at or before ``cutoff``, since
         the watcher may restore (or restore and trash again) a message, or
-        a sweep bind a copy, meanwhile. ``copies`` maps a message to the
-        other indexed paths holding its bytes, unmarked with it."""
+        a sweep bind a copy, meanwhile, and that no file of it is back on
+        disk outside the trash (``listings``, the pass's directory cache).
+        ``copies`` maps a message to the other indexed paths holding its
+        bytes, unmarked with it."""
         copies = copies or {}
         dead_ids = {d["claimant_id"] for d in dead}
         copy_paths = [p for d in dead for p in copies.get(d["claimant_id"], [])]
@@ -399,7 +405,7 @@ class Reconciler:
             # Whole thread gone. Drop everything; the .eml files stay on
             # disk because the indexer never deletes Maildir files.
             if not self.db.delete_thread_completely(
-                thread_id, grace_cutoff=cutoff, copy_paths=copy_paths
+                thread_id, grace_cutoff=cutoff, copy_paths=copy_paths, listings=listings
             ):
                 log.info(
                     "reaper: a thread changed since its tombstones were read; retrying next pass",
@@ -547,6 +553,7 @@ class Reconciler:
             sorted(dead_ids),
             grace_cutoff=cutoff,
             copy_paths=copy_paths,
+            listings=listings,
         )
         if removed is None:
             log.info(
