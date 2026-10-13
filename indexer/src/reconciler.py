@@ -159,8 +159,9 @@ class Reconciler:
         ``renamed`` / ``retired`` / ``bound`` occurrences, ``tombstoned``
         messages newly marked, ``cleared`` messages unmarked,
         ``unreachable`` / ``unverified`` occurrences left as they were,
-        ``stale`` occurrences the content backstop retired, and whether
-        the scan was ``complete``."""
+        ``stale`` occurrences the content backstop retired,
+        ``backstop_deferred`` held paths the backstop left unhashed on
+        this pass's budget, and whether the scan was ``complete``."""
         before = self.db.count_tombstoned_messages()
         scan = scan_occurrences(self.db, self.maildir_root, hash_cache=self._hash_cache)
         self.db.clear_live_tombstones()
@@ -178,12 +179,13 @@ class Reconciler:
             "unverified": scan.unverified,
             "hashed": scan.hashed,
             "stale": scan.stale,
+            "backstop_deferred": scan.backstop_deferred,
             "complete": scan.complete,
         }
         if any(v for k, v in counts.items() if k != "complete"):
             log.info(
                 "reconciler sweep: tombstoned=%d cleared=%d renamed=%d retired=%d bound=%d "
-                "unreachable=%d unverified=%d hashed=%d stale=%d",
+                "unreachable=%d unverified=%d hashed=%d stale=%d backstop_deferred=%d",
                 tombstoned,
                 cleared,
                 scan.renamed,
@@ -193,6 +195,7 @@ class Reconciler:
                 scan.unverified,
                 scan.hashed,
                 scan.stale,
+                scan.backstop_deferred,
             )
         _log_scan("reconciler sweep", scan)
         return counts
@@ -203,7 +206,7 @@ class Reconciler:
         dest_path: str,
         *,
         verified_identity: tuple[int, int, int] | None = None,
-    ) -> None:
+    ) -> str | None:
         """Live tombstone detection from watchdog ``on_moved`` events.
 
         The rename carries the file's occurrence (``update_filepath``),
@@ -218,6 +221,14 @@ class Reconciler:
         moves; ``None`` when there was no active occurrence to verify,
         or verification failed (the caller then does not expect this
         rename to carry one forward).
+
+        Returns the claimant ID the rename carried or bound forward (or
+        was already found active at ``dest_path``), or ``None`` when
+        neither ``update_filepath`` nor an existing occurrence at
+        ``dest_path`` has one (#1612 round 10 review): the rename did
+        not actually move or bind anything, and the caller must not
+        treat ``dest_path`` as handled — it falls through to the
+        new-mail path instead of waiting for the periodic Maildir scan.
         """
         claimant_id = self.db.update_filepath(
             src_path, dest_path, move_occurrence=True, verified_identity=verified_identity
@@ -225,10 +236,11 @@ class Reconciler:
         if claimant_id is None:
             entry = self.db.find_active_occurrence(dest_path)
             if entry is None:
-                return
+                return None
             claimant_id = entry["claimant_id"]
         if is_trashed(dest_path) and self.db.mark_lost_messages(claimant_id):
             log.info("tombstoned via on_moved: %s", dest_path)
+        return claimant_id
 
     # -----------------------------------------------------------------
     # Reap
@@ -642,11 +654,12 @@ def sweep_paths(
         or scan.bound
         or scan.unverified
         or scan.stale
+        or scan.backstop_deferred
         or tombstones_cleared
     ):
         log.info(
             "startup rename sweep: renamed=%d retired=%d unreachable=%d tombstones_cleared=%d "
-            "bound=%d unverified=%d stale=%d",
+            "bound=%d unverified=%d stale=%d backstop_deferred=%d",
             scan.renamed,
             scan.retired,
             scan.unreachable,
@@ -654,6 +667,7 @@ def sweep_paths(
             scan.bound,
             scan.unverified,
             scan.stale,
+            scan.backstop_deferred,
         )
     _log_scan("startup rename sweep", scan)
     return {
@@ -664,6 +678,7 @@ def sweep_paths(
         "bound": scan.bound,
         "unverified": scan.unverified,
         "stale": scan.stale,
+        "backstop_deferred": scan.backstop_deferred,
         "complete": scan.complete,
     }
 

@@ -4414,6 +4414,17 @@ comparing the digest to the occurrence's claimant, bounded per pass:
   gone again between the walk and the check), the path is counted
   `unverified`, never retired: the backstop only acts on a positive
   mismatch it could prove.
+- **On a budget already spent**, the path is left unhashed and counted
+  `backstop_deferred` (#1612 round 10 review), surfaced in the
+  `reconciler sweep` / `startup rename sweep` log lines, so an
+  operator can tell this secondary check is incomplete for those paths
+  this pass rather than it silently never running for them. Ordinary
+  budget exhaustion defers the path to a later pass's fresh budget;
+  a single held file whose own size always exceeds the whole byte
+  budget hits this same return on every pass, never getting hashed at
+  all, which stays an accepted gap in this secondary backstop (the
+  watcher's rename verification and the walk's freshness check are the
+  primary defense).
 
 `reconciler.sweep_paths` always threads a `hash_cache` through to
 `scan_occurrences` now, including from its three archive-mode call

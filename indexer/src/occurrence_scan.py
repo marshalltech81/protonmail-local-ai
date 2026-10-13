@@ -41,7 +41,13 @@ Maildir root and comparing it with the account's active occurrences:
   merely a one-time check. A verified mismatch retires only that
   occurrence (its file is still there, so this is distinct from a
   vanished file) and requests a parse of the new content; an unreadable
-  or unstable file is left unverified, not retired.
+  or unstable file is left unverified, not retired. A path the
+  per-pass budget leaves unhashed (``_BACKSTOP_MAX_FILES`` /
+  ``_BACKSTOP_MAX_BYTES`` already spent, or the file's own size always
+  exceeds the byte budget) counts as ``backstop_deferred`` and is
+  surfaced in the pass's log line, so an operator can tell this
+  secondary check is incomplete rather than silently never running for
+  that path.
 
 Every write re-checks, in its own transaction, that the occurrence or
 path is as the scan saw it, so a rename the watcher records meanwhile
@@ -123,6 +129,13 @@ class ScanCounts:
     # occurrence's claimant (#1612): that occurrence was retired and a
     # reparse of the path requested.
     stale: int = 0
+    # A held path the content backstop left unhashed this pass because
+    # the per-pass budget (``_BACKSTOP_MAX_FILES`` / ``_BACKSTOP_MAX_BYTES``)
+    # was already spent, including a single file whose own size always
+    # exceeds the byte budget (#1612 round 10 review): stale-content
+    # detection is incomplete for these paths until a later pass picks
+    # them up.
+    backstop_deferred: int = 0
     complete: bool = True
 
 
@@ -392,7 +405,10 @@ def _backstop_check(
         # identity) — including a file whose own size always exceeds the
         # budget, an accepted gap in this secondary backstop (module
         # docstring: the watcher's rename verification and the walk's
-        # freshness check are the primary defense).
+        # freshness check are the primary defense). Counted rather than
+        # left silent (#1612 round 10 review), so an operator can tell
+        # stale-content detection is incomplete this pass.
+        counts.backstop_deferred += 1
         return
     try:
         digest = _sha256(path)

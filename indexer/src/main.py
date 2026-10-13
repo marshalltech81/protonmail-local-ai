@@ -1311,13 +1311,15 @@ class MaildirHandler(FileSystemEventHandler):
         else:
             take_case_1 = self.db.is_indexed(src_path)
         if take_case_1:
+            bound_claimant: str | None = None
             if self.reconciler is not None:
                 try:
-                    self.reconciler.handle_moved(
+                    bound_claimant = self.reconciler.handle_moved(
                         src_path, dest_path, verified_identity=verified_identity
                     )
                 except Exception as e:
                     log.error("reconciler on_moved failed: %s", type(e).__name__)
+                    return
             else:
                 # Archive mode has no reconciler; still move the
                 # indexed_files row and the occurrence forward so future
@@ -1335,16 +1337,26 @@ class MaildirHandler(FileSystemEventHandler):
                 try:
                     leftover_tombstone = restored and self.db.has_pending_deletion(src_path)
                     # An observed rename event: the occurrence follows (#1566).
-                    self.db.update_filepath(
+                    bound_claimant = self.db.update_filepath(
                         src_path,
                         dest_path,
                         move_occurrence=True,
                         verified_identity=verified_identity,
                     )
+                    if bound_claimant is None:
+                        # Nothing moved or bound (a stale indexed_files
+                        # record whose path was reused for different
+                        # bytes, or a verify race): dest_path may
+                        # already carry its own active occurrence from
+                        # elsewhere (a concurrent scan), the same
+                        # fallback ``Reconciler.handle_moved`` applies.
+                        entry = self.db.find_active_occurrence(dest_path)
+                        if entry is not None:
+                            bound_claimant = entry["claimant_id"]
                 except Exception as e:
                     log.error("update_filepath failed on rename: %s", type(e).__name__)
                     return
-                if leftover_tombstone:
+                if leftover_tombstone and bound_claimant is not None:
                     # One line per restore, within the indexer's shared
                     # per-window budget: a folder restored at once fires
                     # one event per message, and the rest are counted on
@@ -1356,7 +1368,16 @@ class MaildirHandler(FileSystemEventHandler):
                         level=logging.INFO,
                         attachment=False,
                     )
-            return
+            if bound_claimant is not None:
+                return
+            # _move_occurrence (via update_filepath / Reconciler.handle_
+            # moved) found nothing to bind or move: a retired path's
+            # stale indexed_files record was reused for different bytes,
+            # or a verify race left the rename uncarried (#1612 round
+            # 10 review). Nothing was actually moved, so dest_path is
+            # unindexed and must not wait for the periodic Maildir
+            # rescan — fall through to Case 2 below, the same as a path
+            # that was never ``take_case_1`` at all.
 
         # Case 2: new delivery — enqueue for the worker. A flag rename
         # of an already-reaped file also lands here (its source is no
@@ -3848,8 +3869,8 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> bool
                 brake = "ok"
             log.info(
                 "maintenance pass=reconcile ms=%d tombstoned=%d cleared=%d renamed=%d "
-                "retired=%d bound=%d stale=%d scan=%s threads_reaped=%d threads_rebuilt=%d "
-                "blocked_threads=%d brake=%s",
+                "retired=%d bound=%d stale=%d backstop_deferred=%d scan=%s threads_reaped=%d "
+                "threads_rebuilt=%d blocked_threads=%d brake=%s",
                 (_monotonic() - started) * 1000,
                 swept.get("tombstoned", 0),
                 swept.get("cleared", 0),
@@ -3857,6 +3878,7 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> bool
                 swept.get("retired", 0),
                 swept.get("bound", 0),
                 swept.get("stale", 0),
+                swept.get("backstop_deferred", 0),
                 "complete" if swept.get("complete", True) else "partial",
                 reaped.get("threads_reaped", 0),
                 reaped.get("threads_rebuilt", 0),

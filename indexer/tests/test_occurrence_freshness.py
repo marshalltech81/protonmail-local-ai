@@ -344,6 +344,68 @@ class TestWatcherRenameVerification:
             box.close()
 
 
+class TestWatcherFallsThroughOnAnUnboundRename:
+    """main.py's on_moved Case 1 (~1313): with no active occurrence at
+    the source, ``take_case_1`` is set from ``Database.is_indexed``
+    alone — a retired path can still carry a stale ``indexed_files``
+    row. When that path is reused for different bytes and renamed,
+    ``_move_occurrence``'s own metadata check correctly refuses to bind
+    or move anything (round 9's guard), but both Case 1 branches used
+    to return anyway instead of falling through to Case 2: the
+    replacement went unindexed until the periodic Maildir rescan
+    (#1612 round 10 review)."""
+
+    def _retired_stale_path(self, box: Box, relative: str, message_id: str):
+        """Index a message, then retire its occurrence by deleting the
+        file and running a complete scan: ``find_active_occurrence`` is
+        ``None`` afterward, but ``is_indexed`` stays ``True`` (stale) —
+        ``indexed_files`` rows are never touched by retirement."""
+        path = box.put(relative, _eml(message_id))
+        box.index(path)
+        path.unlink()
+        scan_occurrences(box.db, box.root)
+        assert box.db.find_active_occurrence(str(path)) is None
+        assert box.db.is_indexed(str(path))
+        return path
+
+    def test_archive_mode_falls_through_to_case_2(self, tmp_path):
+        box = Box(tmp_path)
+        try:
+            path = self._retired_stale_path(box, "INBOX/cur/f1:2,S", "retiredstale1@example.test")
+            dest = box.root / "INBOX/cur/f1:2,RS"
+            dest.write_bytes(_eml("different1@example.test", "a completely different message"))
+
+            queue = IndexingQueue(box.db, max_attempts=3, base_backoff_seconds=0)
+            # No reconciler: the archive-mode Case 1 branch.
+            handler = main.MaildirHandler(box.db, queue)
+            with patch.object(main, "MAILDIR_PATH", box.root):
+                handler.on_moved(_moved(path, dest))
+
+            assert box.db.find_active_occurrence(str(dest)) is None
+            assert queue.has_pending_row(str(dest))
+        finally:
+            box.close()
+
+    def test_mirror_mode_falls_through_to_case_2(self, tmp_path):
+        box = Box(tmp_path)
+        try:
+            path = self._retired_stale_path(box, "INBOX/cur/f2:2,S", "retiredstale2@example.test")
+            dest = box.root / "INBOX/cur/f2:2,RS"
+            dest.write_bytes(_eml("different2@example.test", "a completely different message"))
+
+            queue = IndexingQueue(box.db, max_attempts=3, base_backoff_seconds=0)
+            # ``box.reconciler``: the mirror-mode Case 1 branch
+            # (``Reconciler.handle_moved``).
+            handler = main.MaildirHandler(box.db, queue, reconciler=box.reconciler)
+            with patch.object(main, "MAILDIR_PATH", box.root):
+                handler.on_moved(_moved(path, dest))
+
+            assert box.db.find_active_occurrence(str(dest)) is None
+            assert queue.has_pending_row(str(dest))
+        finally:
+            box.close()
+
+
 class TestContentBackstop:
     """occurrence_scan.scan_occurrences's content backstop: a metadata
     match alone is never trusted for a held path (design point 3)."""
@@ -433,12 +495,17 @@ class TestContentBackstop:
 
             first = scan_occurrences(box.db, box.root, hash_cache=cache)
             assert first.hashed == 1
+            # The second file waits for a later pass's fresh budget —
+            # counted, not left silent (#1612 round 10 review).
+            assert first.backstop_deferred == 1
 
             second = scan_occurrences(box.db, box.root, hash_cache=cache)
             assert second.hashed == 1
+            assert second.backstop_deferred == 0
 
             third = scan_occurrences(box.db, box.root, hash_cache=cache)
             assert third.hashed == 0
+            assert third.backstop_deferred == 0
         finally:
             box.close()
 
@@ -451,7 +518,10 @@ class TestContentBackstop:
         (``budget["bytes"] >= cap``) lets the very first, oversized
         file through untouched, since 0 is never >= a positive cap
         (#1612 round 8 review) — the check must be against the
-        prospective total."""
+        prospective total. Every pass hits the same return for this
+        file (its own size always exceeds the whole budget), so it is
+        never backstop-verified; this must still be counted, not left
+        silent (#1612 round 10 review)."""
         import src.occurrence_scan as scan_module
 
         box = Box(tmp_path)
@@ -463,6 +533,7 @@ class TestContentBackstop:
             monkeypatch.setattr(scan_module, "_BACKSTOP_MAX_BYTES", path.stat().st_size - 1)
             counts = scan_occurrences(box.db, box.root, hash_cache={})
             assert counts.hashed == 0
+            assert counts.backstop_deferred == 1
             assert box.db.find_active_occurrence(str(path)) is not None
         finally:
             box.close()
@@ -484,10 +555,13 @@ class TestContentBackstop:
             cache: dict = {}
             first = scan_occurrences(box.db, box.root, hash_cache=cache)
             assert first.hashed == 1
+            assert first.backstop_deferred == 1
             second = scan_occurrences(box.db, box.root, hash_cache=cache)
             assert second.hashed == 1
+            assert second.backstop_deferred == 0
             third = scan_occurrences(box.db, box.root, hash_cache=cache)
             assert third.hashed == 0
+            assert third.backstop_deferred == 0
             assert box.db.find_active_occurrence(str(a)) is not None
             assert box.db.find_active_occurrence(str(b)) is not None
         finally:
