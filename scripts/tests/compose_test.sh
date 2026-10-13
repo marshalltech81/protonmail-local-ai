@@ -133,12 +133,13 @@ def bounded_logging:
        network: "bridge-net-\($u)", password_file,
        # The declared environment this account collector must carry,
        # compared below value-for-value against what is rendered (review
-       # round 6, finding 3). It already includes BRIDGE_CERT_FINGERPRINT
-       # and the hardcoded BRIDGE_CERT_PIN_ROTATE, so this one check also
-       # covers the two trust values round 5 (finding 3) checked
-       # separately: both come from collector_env(), the same function
-       # render_compose() calls, so declaration and render agree by
-       # construction.
+       # round 6, finding 3). It already includes BRIDGE_CERT_FINGERPRINT,
+       # so this one check also covers the trust-value check round 5
+       # (finding 3) checked separately: it comes from collector_env(),
+       # the same function render_compose() calls, so declaration and
+       # render agree by construction. Pin rotation is a one-run command,
+       # not configuration (#1609): collector_env() sets no environment
+       # key for it at all.
        environment})) as $own
 # Every declared collector, the base mbsync included when an account is at
 # /maildir, keeps each of its own resources. The /maildir entry carries
@@ -327,14 +328,16 @@ def bounded_logging:
               # the same values the translator renders), so every key it
               # sets must come through with its declared value, not just
               # BRIDGE_USER.
-              # This also covers the two trust values round 5 (finding 3,
+              # This also covers the trust-value check round 5 (finding 3,
               # security) checked separately and more narrowly at the
-              # time -- BRIDGE_CERT_FINGERPRINT and the hardcoded
-              # BRIDGE_CERT_PIN_ROTATE -- since both are already part of
-              # $c.environment (collector_env() always sets them, never
-              # from a per-account setting for the latter), so comparing
-              # every declared key catches a rotated pin or a substituted
-              # fingerprint the same way, without a separate check.
+              # time -- BRIDGE_CERT_FINGERPRINT -- since it is already
+              # part of $c.environment (collector_env() always sets it),
+              # so comparing every declared key catches a substituted
+              # fingerprint the same way, without a separate check. Pin
+              # rotation is a one-run command, not configuration (#1609):
+              # collector_env() sets no environment key for it, so an
+              # extra BRIDGE_CERT_PIN_ROTATE key falls to the key-name
+              # check above instead.
               ($c.environment // {} | to_entries[] | select(. as $kv
                     | ($s.environment // {})[$kv.key] != $kv.value)
                 | "\($c.service): environment \(.key) does not match its declaration"))
@@ -1259,24 +1262,23 @@ EOF
 }
 
 # The environment check above compared only key names at the time, which
-# mbsync itself also sets for BRIDGE_CERT_FINGERPRINT and
-# BRIDGE_CERT_PIN_ROTATE, so an overlay keeping both names could still
-# rotate the persisted pin or substitute another account's certificate
-# fingerprint: the entrypoint would then accept an attacker's
-# certificate and send this account's mounted Bridge password to it
-# (review round 5, finding 3, security). The declared-value check added
-# for round 6, finding 3 now catches both, since collector_env() always
-# sets BRIDGE_CERT_PIN_ROTATE to "false" and the account's own
-# certificate fingerprint -- here mbsync-$UUID_B's own is replaced with
-# $UUID_C's account's.
+# mbsync itself also sets for BRIDGE_CERT_FINGERPRINT, so an overlay
+# keeping that name could still substitute another account's
+# certificate fingerprint: the entrypoint would then accept an
+# attacker's certificate and send this account's mounted Bridge password
+# to it (review round 5, finding 3, security). The declared-value check
+# added for round 6, finding 3 now catches it, since collector_env()
+# always sets the account's own certificate fingerprint -- here
+# mbsync-$UUID_B's own is replaced with $UUID_C's account's. (Pin
+# rotation was the other trust value this check covered until #1616:
+# it is now a one-run command, not configuration, so collector_env()
+# sets no environment key for it at all.)
 generated_collectors_bind_trust_values_to_their_declarations() {
     expect_generated_rejected three-proton "" \
-        "mbsync-$UUID_B: environment BRIDGE_CERT_PIN_ROTATE does not match its declaration" \
         "mbsync-$UUID_B: environment BRIDGE_CERT_FINGERPRINT does not match its declaration" <<EOF
 services:
   mbsync-$UUID_B:
     environment:
-      BRIDGE_CERT_PIN_ROTATE: "true"
       BRIDGE_CERT_FINGERPRINT: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 EOF
 }
@@ -1293,14 +1295,17 @@ EOF
 # exfiltrate the legacy account's mail (review round 6, finding 1,
 # security). The comparison above now iterates $declared, which adds
 # the /maildir entry back with the same shape, so every one of those
-# checks now also runs for a generated legacy mbsync.
+# checks now also runs for a generated legacy mbsync -- including the
+# declared-value check (not just the key-name one), exercised here with
+# the legacy account's own BRIDGE_CERT_FINGERPRINT ("a" * 64,
+# fixtures/legacy.toml) substituted.
 generated_collectors_apply_bindings_to_the_legacy_service() {
     expect_generated_rejected three-proton "" \
         "mbsync: image or build differs from mbsync" \
         "mbsync: user is not the mbsync UID 1001:1001" \
         "mbsync: sets an entrypoint override" \
         "mbsync: environment sets BASH_ENV, which mbsync does not set" \
-        "mbsync: environment BRIDGE_CERT_PIN_ROTATE does not match its declaration" <<EOF
+        "mbsync: environment BRIDGE_CERT_FINGERPRINT does not match its declaration" <<EOF
 services:
   mbsync:
     build:
@@ -1309,7 +1314,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     environment:
       BASH_ENV: "/tmp/x"
-      BRIDGE_CERT_PIN_ROTATE: "true"
+      BRIDGE_CERT_FINGERPRINT: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 EOF
 }
 

@@ -68,11 +68,11 @@ def declared(config: dict[str, Any]) -> list[dict[str, Any]]:
             # renderer regression drop a required value, such as
             # BRIDGE_USER, or empty one, such as BRIDGE_CERT_FINGERPRINT,
             # without tripping anything. Comparing every declared value
-            # also subsumes the two trust-value checks added for round
-            # 5, finding 3 (BRIDGE_CERT_FINGERPRINT, BRIDGE_CERT_PIN_ROTATE):
-            # both are already part of collector_env()'s output, the same
-            # function render_compose() calls, so the declaration and
-            # the render agree by construction.
+            # also subsumes the trust-value check added for round 5,
+            # finding 3 (BRIDGE_CERT_FINGERPRINT): it is already part of
+            # collector_env()'s output, the same function render_compose()
+            # calls, so the declaration and the render agree by
+            # construction.
             "environment": oc.collector_env(account),
         }
         for account in config["accounts"]
