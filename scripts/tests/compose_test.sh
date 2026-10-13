@@ -104,6 +104,13 @@ expect_hardening_and_exposure() {
 # shellcheck disable=SC2016 # a jq program: its $ are jq's
 readonly HARDENING_VIOLATIONS='
 def set($k): has($k) and .[$k] != null and .[$k] != false and .[$k] != [] and .[$k] != {};
+# Unlike the list/map fields set() covers, Compose merges entrypoint and
+# command by replacement, not by appending: an override of [] explicitly
+# resets either to empty rather than leaving the previous layer alone, so
+# set()s != [] would wrongly call that an unset key (review round 4).
+# Checked directly against docker compose config: entrypoint: [] /
+# command: [] renders as [] even for a service only one layer defines.
+def overridden($k): has($k) and .[$k] != null;
 def list($k): .[$k] // [];
 def bounded_logging:
     . != null and (.driver == "none" or .driver == "local"
@@ -202,7 +209,18 @@ def bounded_logging:
         # holds the legacy mbsync to it (mbsync_keeps_its_hardening_and_no_port_is_exposed),
         # but nothing held a collector to it, and AGENTS.md forbids
         # extra_hosts on any mbsync-family service without the #1499
-        # decision (review round 3).
+        # decision (review round 3). Three more gaps in the same
+        # "runs with the same password, Maildir/state and network a
+        # collector keeps" class (review round 4): entrypoint/command
+        # checked with set() missed the explicit [] override (see
+        # overridden() above); nothing compared the rendered user
+        # against the fixed UID the image sets (mbsync/Dockerfile,
+        # AGENTS.md "current expected UIDs"), so a substituted non-root
+        # UID that cannot write /maildir or /state still passed; and
+        # environment was not compared at all, so a startup-hook
+        # variable Bash itself reads (BASH_ENV and the like) could run
+        # injected code reading the mounted secret before
+        # /entrypoint.sh does anything.
         ($base[0].services["mbsync"] as $bbase
             | (if $bbase.init == true and $s.init != true
                 then "\($c.service): init is not true" else empty end),
@@ -219,13 +237,17 @@ def bounded_logging:
                 then "\($c.service): mem_limit is missing or above the base" else empty end),
               (if $s.image != $bbase.image or $s.build != $bbase.build
                 then "\($c.service): image or build differs from mbsync" else empty end),
-              (if ($s | set("entrypoint")) then "\($c.service): sets an entrypoint override" else empty end),
-              (if ($s | set("command")) then "\($c.service): sets a command override" else empty end),
+              (if $s.user != "1001:1001"
+                then "\($c.service): user is not the mbsync UID 1001:1001" else empty end),
+              (if ($s | overridden("entrypoint")) then "\($c.service): sets an entrypoint override" else empty end),
+              (if ($s | overridden("command")) then "\($c.service): sets a command override" else empty end),
               (if ($s | set("healthcheck")) then "\($c.service): sets a healthcheck override" else empty end),
               (if ($s | set("post_start")) then "\($c.service): sets a post_start hook" else empty end),
               (if ($s | set("pre_stop")) then "\($c.service): sets a pre_stop hook" else empty end),
               (if ($s | set("configs")) then "\($c.service): mounts a config" else empty end),
-              (if ($s | set("extra_hosts")) then "\($c.service): sets extra_hosts" else empty end))
+              (if ($s | set("extra_hosts")) then "\($c.service): sets extra_hosts" else empty end),
+              ($s.environment // {} | keys[] | select(. as $k | ($bbase.environment // {} | has($k)) | not)
+                | "\($c.service): environment sets \(.), which mbsync does not set"))
       end),
   # A declared collector keeps its own secret (mounted as bridge_pass),
   # both volumes and its network: an overlay with !reset cannot take them.
@@ -766,14 +788,29 @@ expect_generated_hardening() {
         "$BASE" "$@" "$WORK/replace-mbsync.yml" "$WORK/generated/$case/compose.accounts.yml"
 }
 
+# Every declared collector is in the render, and no other service: the
+# expected set is derived from case $1's own collectors.json (the
+# generator's input, independent of the render under test), not a
+# literal list naming only the last case checked (review round 4,
+# finding 3) -- render_compose emitting an extra but otherwise-hardened
+# service for only one-proton or two-proton would otherwise pass every
+# check in the loop and go unnoticed once a later case's own correct set
+# is the only thing asserted.
+expect_generated_service_set() {
+    local case="$1" expected
+    expected="$(jq -c '["indexer", "mcp-server"]
+            + map(if .maildir_root == "/maildir" then "mbsync" else "mbsync-\(.scope_uuid)" end)
+            | sort' "$WORK/generated/$case/collectors.json")"
+    expect "(.services | keys | sort) == $expected"
+}
+
 generated_collectors_keep_the_hardening() {
     local case
     for case in "${GENERATED_CASES[@]}"; do
         expect_generated_hardening "$case" || return 1
         expect_generated_hardening "$case" "$HARDENED" || return 1
+        expect_generated_service_set "$case" || return 1
     done
-    # Every declared collector is in the render: the check saw them all.
-    expect "(.services | keys) == [\"indexer\", \"mbsync\", \"mbsync-$UUID_B\", \"mbsync-$UUID_C\", \"mcp-server\"]"
 }
 
 # Negative fixtures for generated Compose: the overlay on stdin is merged
@@ -1054,6 +1091,88 @@ configs:
 EOF
 }
 
+# entrypoint: [] / command: [] is the same execution-path override as
+# above, but set() (review round 2/3's helper) treats an empty list as
+# an unset key, so this case slipped past the non-empty fixture above
+# (review round 4, finding 2). Confirmed directly against docker compose
+# config: an empty-list override still renders as [], distinct from the
+# key being absent, so the check must test key presence instead.
+generated_collectors_reject_empty_entrypoint_and_command_overrides() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: sets an entrypoint override" \
+        "mbsync-$UUID_B: sets a command override" <<EOF
+services:
+  mbsync-$UUID_B:
+    entrypoint: []
+    command: []
+EOF
+}
+
+# A collector reusing mbsync's own image still runs as whatever user:
+# the Compose file names, which takes precedence over the image's own
+# USER mbsync (UID 1001, mbsync/Dockerfile). Neither the generic
+# non-root check nor the image/build check above catches a substituted
+# non-root UID, which still cannot write /maildir (owned by 1001:1001)
+# or /state (review round 4, finding 4).
+generated_collectors_require_the_mbsync_uid() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: user is not the mbsync UID 1001:1001" <<EOF
+services:
+  mbsync-$UUID_B:
+    user: "1002:1002"
+EOF
+}
+
+# A variable Bash itself reads at startup (BASH_ENV, and ENV for a POSIX
+# sh invoked non-interactively) runs injected code before /entrypoint.sh
+# does anything, with the same Bridge password and bridge-net access a
+# collector legitimately keeps -- an alternate execution path under the
+# environment field rather than entrypoint/command/healthcheck/the lifecycle
+# hooks already covered above (review round 4, finding 5, security). Held
+# to the environment keys docker-compose.yml's own mbsync service names,
+# which already cover everything collector_env()
+# (scripts/config/operator_config.py) sets.
+generated_collectors_reject_unexpected_environment_keys() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: environment sets BASH_ENV, which mbsync does not set" <<EOF
+services:
+  mbsync-$UUID_B:
+    environment:
+      BASH_ENV: "/tmp/x"
+EOF
+}
+
+# Reproduces review round 4, finding 3: an extra but fully hardened
+# service that render_compose emits only for one case passes every
+# check above (it is new, non-root and keeps no base resource), so only
+# the per-case service-set check -- not one run after the whole loop
+# against a later, unaffected case -- catches it.
+generated_collectors_service_set_catches_a_case_only_extra_service() {
+    cat >"$WORK/extra-service.yml" <<'EOF'
+services:
+  extra:
+    image: example.invalid/extra:1
+    init: true
+    read_only: true
+    user: "65534:65534"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 16
+    logging:
+      driver: none
+EOF
+    expect_generated_hardening one-proton "$WORK/extra-service.yml" || return 1
+    if expect_generated_service_set one-proton; then
+        printf 'the one-proton service set accepted an unexpected extra service\n'
+        return 1
+    fi
+    # The regression this guards against: the unmodified, later case
+    # still passes its own check, so an assertion run only once at the
+    # end of the loop would see nothing wrong.
+    expect_generated_hardening three-proton || return 1
+    expect_generated_service_set three-proton
+}
+
 the_base_runs_mbsync_indexer_and_mcp_server() {
     render "$BASE"
     expect '.services | keys == ["indexer", "mbsync", "mcp-server"]' || return 1
@@ -1323,6 +1442,14 @@ check "generated collectors keep the mbsync baseline hardening" \
     generated_collectors_keep_the_mbsync_baseline_hardening
 check "generated collectors keep the mbsync implementation" \
     generated_collectors_keep_the_mbsync_implementation
+check "generated collectors reject empty entrypoint and command overrides" \
+    generated_collectors_reject_empty_entrypoint_and_command_overrides
+check "generated collectors require the mbsync UID" \
+    generated_collectors_require_the_mbsync_uid
+check "generated collectors reject unexpected environment keys" \
+    generated_collectors_reject_unexpected_environment_keys
+check "generated collectors' service set catches a case-only extra service" \
+    generated_collectors_service_set_catches_a_case_only_extra_service
 check "omitted rerank and inference settings render without a warning" \
     omitted_rerank_and_inference_settings_render_without_a_warning
 check "ACCOUNT_SCOPE is required and reaches the indexer and mcp-server" \
