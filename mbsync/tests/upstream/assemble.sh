@@ -47,7 +47,7 @@ mv "$IN/src" "$HOME_DIR/src"
 mv "$IN/download" "$HOME_DIR/gomodcache/cache/download"
 install -m 0755 -o 0 -g 0 "$IN/run_inside.sh" "$HOME_DIR/run_inside.sh"
 chown -R 0:0 "$HOME_DIR/src" "$HOME_DIR/gomodcache"
-chmod -R go-w "$HOME_DIR/src" "$HOME_DIR/gomodcache"
+chmod -R u=rwX,go=rX "$HOME_DIR/src" "$HOME_DIR/gomodcache"
 # Extract every module from the verified downloads now, offline, so the
 # cache is complete before any code runs (go checks each zip against
 # go.sum; extracted modules are read-only).

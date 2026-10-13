@@ -483,6 +483,10 @@ cmd_assemble() {
     rsync_tree "$WORK/src/proton-bridge" "$stage/src/proton-bridge"
     cp -R "$WORK/gomodcache/cache/download" "$stage/download"
     cp "$HERE/run_inside.sh" "$stage/run_inside.sh"
+    # Readable by every user and writable by none but the owner, whatever
+    # the operator's umask: apt reads the repository as its _apt user, and
+    # the harness user reads the trees and modules.
+    chmod -R u+rwX,go+rX,go-w "$stage"
     docker rm -f "$ASM" >/dev/null 2>&1 || true
     # --pull=never: the verified base must already be local; no registry
     # request happens in this phase.
@@ -759,12 +763,13 @@ fetch_result() {
     [[ "$(wc -c <"$dest" | tr -d ' ')" -le 1048576 ]] || die "$name: larger than 1 MiB"
 }
 
-# Removes this work dir's containers, the assembly stage and a partial
-# out dir when a standalone acquire, assemble or execute fails, keeping
-# the failure status.
+# Kills a running bounded job and removes this work dir's containers, the
+# assembly stage and a partial out dir when a standalone acquire, assemble
+# or execute fails or is interrupted, keeping the failure status.
 phase_cleanup() {
     local rc=$?
     trap - EXIT
+    [[ -z "$PROBE" ]] || kill -s KILL -- "-$PROBE" 2>/dev/null || true
     [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true
     [[ -z "$OUT_PENDING" ]] || rm -rf "$OUT_PENDING"
     if [[ -n "$ASM" ]]; then
@@ -848,6 +853,11 @@ main() {
     [[ -n "$verb" && -n "${2:-}" ]] || die "usage: run.sh all|acquire|assemble|execute|clean <work-dir> [out-dir]"
     WORK="$(resolve_work "$2")"
     readonly WORK
+    # A signal ends the run through exit, so the EXIT cleanup runs. It also
+    # kills a bounded job, which job control keeps out of the terminal's
+    # process group (Ctrl-C does not reach it).
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     # clean needs only docker, so it still works when an acquire-only
     # tool is missing or the engine's architecture is unsupported.
     if [[ "$verb" == clean ]]; then
@@ -881,7 +891,7 @@ main() {
             # Clean up at exit. An earlier failure keeps its status; a
             # failed cleanup after a success exits 1. cmd_clean runs in a
             # subshell so its die cannot replace the earlier status.
-            trap 'rc=$?; trap - EXIT; [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true; [[ -z "$OUT_PENDING" ]] || rm -rf "$OUT_PENDING"; (cmd_clean) || { [[ "$rc" -ne 0 ]] || rc=1; }; exit "$rc"' EXIT
+            trap 'rc=$?; trap - EXIT; [[ -z "$PROBE" ]] || kill -s KILL -- "-$PROBE" 2>/dev/null || true; [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true; [[ -z "$OUT_PENDING" ]] || rm -rf "$OUT_PENDING"; (cmd_clean) || { [[ "$rc" -ne 0 ]] || rc=1; }; exit "$rc"' EXIT
             cmd_acquire
             cmd_assemble
             cmd_execute "$out"
