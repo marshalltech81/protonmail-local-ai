@@ -1178,6 +1178,16 @@ superseded entries keep their number and one line.
     rows; they are necessary, not sufficient, evidence for #1598's
     acceptance rule, and server-side guarantees stay with #1584.
 
+54. **Selected query clocks and paging (2026-10-13, #1150):** the owner
+    approved serving `effective`, `sent` and `occurred` on
+    `query_messages` and `query_attachments`, retaining keyset paging
+    with scan-and-sort for `sent` and `occurred` under the current
+    schema. Missing selected clocks remain indeterminate. Index
+    optimization stays in #1123; new clock indexes are not a
+    correctness prerequisite. The Opus 5.5 and Codex GPT-6.1 Sol
+    panel agreed. The synthetic timings establish neither complete-walk
+    performance nor tail-latency or concurrency limits.
+
 ## Notes for Agents
 
 - Read `AGENTS.md` before making changes.
