@@ -650,18 +650,20 @@ watchdog_loop() {
 # PROBE while it runs: git fetch, for one, starts helpers that would
 # outlive a kill of its own pid.
 bounded() {
-    local secs="$1" rc=0 i=0
+    local secs="$1" rc=0 end
     shift
+    # An absolute end time, so a slow or suspended host cannot stretch the
+    # limit (SECONDS counts whole seconds since the shell started).
+    end=$((SECONDS + secs))
     set -m
     "$@" &
     PROBE=$!
     set +m
     while kill -0 "$PROBE" 2>/dev/null; do
-        if ((i >= secs * 10)); then
+        if ((SECONDS >= end)); then
             kill -s KILL -- "-$PROBE" 2>/dev/null || true
             break
         fi
-        i=$((i + 1))
         sleep 0.1
     done
     wait "$PROBE" || rc=$?
