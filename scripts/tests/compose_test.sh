@@ -43,6 +43,7 @@ render() {
         ${GIT_COMMIT:+GIT_COMMIT="$GIT_COMMIT"} \
         ${EMBED_BASE_URL:+EMBED_BASE_URL="$EMBED_BASE_URL"} \
         ${EMBED_MODEL:+EMBED_MODEL="$EMBED_MODEL"} \
+        ${ACCOUNT_SCOPE:+ACCOUNT_SCOPE="$ACCOUNT_SCOPE"} \
         ${RENDER_MCP_PORT:+MCP_PORT="$RENDER_MCP_PORT"} \
         ${RENDER_ENV[@]+"${RENDER_ENV[@]}"} \
         docker compose --project-directory "$ROOT_DIR" --env-file /dev/null "${args[@]}" \
@@ -686,7 +687,8 @@ mbsync_keeps_its_hardening_and_no_port_is_exposed() {
 # RERANK_MODE=cohere and INFERENCE_BASE_URL when INFERENCE_MODE is not
 # none.
 omitted_rerank_and_inference_settings_render_without_a_warning() {
-    EMBED_BASE_URL=default EMBED_MODEL=synthetic-embed render "$BASE"
+    ACCOUNT_SCOPE=00000000-0000-4000-8000-000000000001 EMBED_BASE_URL=default \
+        EMBED_MODEL=synthetic-embed render "$BASE"
     expect '.services["mcp-server"].environment.RERANK_MODE == "none"' || return 1
     expect '.services["mcp-server"].environment.RERANK_BASE_URL == ""' || return 1
     expect '.services["mcp-server"].environment.RERANK_MODEL == ""' || return 1
@@ -695,6 +697,22 @@ omitted_rerank_and_inference_settings_render_without_a_warning() {
     if grep -F 'is not set' "$WORK/compose.err"; then
         return 1
     fi
+}
+
+# ACCOUNT_SCOPE (#1596) is a required setting, so Compose keeps it bare
+# and warns when it is unset (validate-env.sh and both services refuse
+# it); SOURCE_MODE is optional. Both reach the indexer and mcp-server.
+account_scope_is_required_and_reaches_both_services() {
+    local service
+    ACCOUNT_SCOPE=00000000-0000-4000-8000-000000000001 EMBED_BASE_URL=default \
+        EMBED_MODEL=synthetic-embed render "$BASE"
+    for service in indexer mcp-server; do
+        expect ".services[\"$service\"].environment.ACCOUNT_SCOPE == \"00000000-0000-4000-8000-000000000001\"" || return 1
+        expect ".services[\"$service\"].environment.SOURCE_MODE == \"\"" || return 1
+    done
+    expect '.services.mbsync.environment | has("ACCOUNT_SCOPE") | not' || return 1
+    EMBED_BASE_URL=default EMBED_MODEL=synthetic-embed render "$BASE"
+    grep -E 'ACCOUNT_SCOPE[\\"]* variable is not set' "$WORK/compose.err" >/dev/null
 }
 
 # Each image is built with the source commit it logs at startup (#887):
@@ -830,6 +848,8 @@ check "merged hardening rejects a service a top-level include brings in" \
     merged_hardening_rejects_an_included_service
 check "omitted rerank and inference settings render without a warning" \
     omitted_rerank_and_inference_settings_render_without_a_warning
+check "ACCOUNT_SCOPE is required and reaches the indexer and mcp-server" \
+    account_scope_is_required_and_reaches_both_services
 check "every image is built with the source commit" every_image_is_built_with_the_source_commit
 check "make build passes the source commit" make_build_passes_the_source_commit
 

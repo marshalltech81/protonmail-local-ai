@@ -11,9 +11,19 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from src.account import AccountConfig
 from src.database import Database
 from src.parser import Message
 from src.threader import Thread, Threader
+
+# The account every test database is bound to (#1596). Its Maildir root
+# is ``/`` so every absolute path a test indexes lies inside it; tests of
+# the root itself build their own ``AccountConfig``.
+TEST_ACCOUNT = AccountConfig(
+    scope_uuid="00000000-0000-4000-8000-000000000001",
+    provider="proton-bridge",
+    maildir_root=Path("/"),
+)
 
 
 def make_mock_embedder(vector: list[float] | None = None) -> MagicMock:
@@ -236,6 +246,15 @@ def count_pending_deletions(db: Database) -> int:
 
 
 @pytest.fixture(autouse=True)
+def _account_env(monkeypatch):
+    """``main()`` and the maintenance commands read the account from the
+    environment (#1596): give them ``TEST_ACCOUNT``'s scope, and the
+    default provider whatever the shell exports."""
+    monkeypatch.setenv("ACCOUNT_SCOPE", TEST_ACCOUNT.scope_uuid)
+    monkeypatch.delenv("SOURCE_MODE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_extractor_warning_budget(monkeypatch):
     """The shared rate-limited line budget (``warn_rate_limited``,
     attachment and other lines) is process-wide; give each test a fresh
@@ -329,7 +348,7 @@ def _ooxml_child_in_process(request, monkeypatch):
 
 @pytest.fixture
 def db(tmp_path: Path) -> Database:
-    database = Database(tmp_path / "test.db")
+    database = Database(tmp_path / "test.db", account=TEST_ACCOUNT)
     try:
         yield database
     finally:

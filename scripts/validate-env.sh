@@ -621,6 +621,32 @@ if ! proton_problem="$(proton_settings_problem "$SOURCE_MODE" "$BRIDGE_HOST" \
     exit 1
 fi
 
+# Required: the account the index is registered to (#1596), a canonical
+# lower-case UUID compared exactly (Compose passes it as ${ACCOUNT_SCOPE}).
+# The indexer and mcp-server refuse the same values with the same fixed
+# text (indexer/src/account.py, mcp-server/src/lib/account.py), which
+# never repeats the value. `make init-secrets` writes one to .env when
+# the line is missing or empty. A value exported in the calling shell is
+# kept as it is, as for the Proton settings above.
+account_scope_problem() {
+    local LC_ALL=C
+    if [[ -z "$1" ]]; then
+        printf '%s\n' 'ACCOUNT_SCOPE is not set. Run make init-secrets, which writes a new one to .env when none is there, or restore the value this index was built with; see docs/setup.md and docs/troubleshooting.md "Account scope mismatch".'
+        return 1
+    fi
+    if [[ ! "$1" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        printf '%s\n' 'ACCOUNT_SCOPE must be a UUID in canonical lower-case form (8-4-4-4-12 hexadecimal digits). Restore the value this index was built with; see docs/troubleshooting.md "Account scope mismatch".'
+        return 1
+    fi
+}
+if [[ -z "${ACCOUNT_SCOPE+set}" ]]; then
+    ACCOUNT_SCOPE="$(get_env_value ACCOUNT_SCOPE)"
+fi
+if ! account_problem="$(account_scope_problem "$ACCOUNT_SCOPE")"; then
+    printf 'ERROR: %s\n' "$account_problem" >&2
+    exit 1
+fi
+
 # ----- INFERENCE -----
 INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-none}")"
 [[ "$INFERENCE_MODE" =~ ^(openai|anthropic|none)$ ]] || {

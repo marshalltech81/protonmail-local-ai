@@ -300,8 +300,9 @@ _SHELL_ONLY = {
     "BRIDGE_USER": ("mbsync", "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template"),
     "BRIDGE_CERT_FINGERPRINT": ("mbsync", "mbsync/entrypoint.sh"),
     # PLAN.md decision 46: checked by mbsync/proton-settings.sh, which the
-    # entrypoint and scripts/validate-env.sh both source.
-    "SOURCE_MODE": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
+    # entrypoint and scripts/validate-env.sh both source. SOURCE_MODE is
+    # also read by the indexer and mcp-server since #1596, so it is not
+    # shell-only.
     "BRIDGE_IMAP_PORT": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
     "BRIDGE_CERT_PIN_ROTATE": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
     "PROTON_FOLDER_EXCLUSIONS": (

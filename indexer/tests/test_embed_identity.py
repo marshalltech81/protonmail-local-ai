@@ -29,7 +29,7 @@ from src.embed_identity import (
 )
 
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
-from tests.conftest import make_message, make_thread
+from tests.conftest import TEST_ACCOUNT, make_message, make_thread
 
 ENDPOINT = "http://host.docker.internal:8001/v1"
 MODEL = "synthetic-embed-model"
@@ -65,7 +65,7 @@ def _rows(db: Database) -> list[sqlite3.Row]:
 
 @pytest.fixture
 def db(tmp_path):
-    database = Database(tmp_path / "mail.db")
+    database = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     yield database
     database.close()
 

@@ -49,6 +49,7 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 from watchdog.utils import UnsupportedLibcError
 
+from .account import account_config_from_env, maildir_root_from_env
 from .attachment_indexing import (
     AttachmentWritePlan,
     ExtractionBudget,
@@ -173,6 +174,8 @@ _GIT_COMMIT_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,64}")
 # values only (paths, modes, the endpoint, the model and limits): never
 # ``EMBED_API_KEY`` or any other secret, and never the whole environment.
 _IDENTITY_SETTINGS = (
+    "ACCOUNT_SCOPE",
+    "SOURCE_MODE",
     "MAILDIR_PATH",
     "SQLITE_PATH",
     "INDEXER_HEALTH_FILE",
@@ -321,7 +324,7 @@ def quiet_document_libraries() -> None:
 
 quiet_document_libraries()
 
-MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
+MAILDIR_PATH = maildir_root_from_env(os.environ)
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 # Operator source-authority rules (``config/authority.toml.example``),
 # at the fixed path where compose mounts ``./config`` read-only.
@@ -1155,7 +1158,12 @@ class MaildirHandler(FileSystemEventHandler):
                 try:
                     leftover_tombstone = restored and self.db.has_pending_deletion(src_path)
                     self.db.update_filepath(
-                        src_path, dest_path, folder=folder_change, clear_tombstone=restored
+                        src_path,
+                        dest_path,
+                        folder=folder_change,
+                        clear_tombstone=restored,
+                        # An observed rename event: the occurrence follows (#1566).
+                        move_occurrence=True,
                     )
                 except Exception as e:
                     log.error("update_filepath failed on rename: %s", type(e).__name__)
@@ -3729,6 +3737,9 @@ def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
 
 def main():
     embed_base_url = _validate_embed_config()
+    # Before the database opens: a missing or malformed ACCOUNT_SCOPE or
+    # SOURCE_MODE refuses with fixed text, and no migration runs (#1596).
+    account = account_config_from_env(os.environ, maildir_root=MAILDIR_PATH)
     log.info("Starting indexer...")
     log.info("  Maildir: %s", MAILDIR_PATH)
     log.info("  SQLite:  %s", SQLITE_PATH)
@@ -3736,7 +3747,7 @@ def main():
     # Before opening the database, so a malformed file fails fast.
     authority_rules = _load_authority_rules(AUTHORITY_RULES_PATH)
     operator_identity = _load_operator_identity(OPERATOR_IDENTITY_PATH)
-    db = Database(SQLITE_PATH)
+    db = Database(SQLITE_PATH, account=account)
     db.set_operator_identity(operator_identity)
     reclassified = db.set_authority_rules(authority_rules)
     if reclassified:

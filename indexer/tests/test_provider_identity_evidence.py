@@ -59,7 +59,7 @@ from src.queue import REASON_INITIAL_SCAN
 from src.reconciler import Reconciler, ReconcilerConfig
 from src.threader import Threader
 
-from tests.conftest import make_mock_embedder
+from tests.conftest import TEST_ACCOUNT, make_mock_embedder
 from tests.test_main import _UNIT_VECTOR, _drain, _make_queue
 
 # Synthetic identity values. They must never appear in a log line, a
@@ -149,7 +149,10 @@ class _Index:
         self.inbox = self.maildir / "INBOX" / "cur"
         self.inbox.mkdir(parents=True)
         monkeypatch.setattr(main, "MAILDIR_PATH", self.maildir)
-        self.db = Database(tmp_path / "mail.db")
+        self.db = Database(
+            tmp_path / "mail.db",
+            account=dataclasses.replace(TEST_ACCOUNT, maildir_root=self.maildir),
+        )
         self.threader = Threader(self.db)
         self.embedder = make_mock_embedder(_UNIT_VECTOR)
         self.queue = _make_queue(self.db)
@@ -789,11 +792,18 @@ class TestClaimantsStayIndependent:
         held_a = idx.rows_of(a)
         assert held_a.pop("pending_deletions") == [(str(trashed), a, thread_a, mock.ANY)]
         # Every other row of the first claimant is as it was, apart from
-        # the sweep following the flag rename to the trashed path.
+        # the sweep following the flag rename to the trashed path. The
+        # mailbox occurrence stays where it was: a sweep infers the rename
+        # from the uniq alone, a missed move left to reconciliation
+        # (#1566, #1567).
+
+        def follow(table: str, row: tuple) -> tuple:
+            if table == "message_occurrences":
+                return row
+            return tuple(str(trashed) if v == str(first) else v for v in row)
+
         renamed = {
-            table: sorted(
-                tuple(str(trashed) if v == str(first) else v for v in row) for row in rows
-            )
+            table: sorted(follow(table, row) for row in rows)
             for table, rows in rows_a.items()
             if table != "pending_deletions"
         }

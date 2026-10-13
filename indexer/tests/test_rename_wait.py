@@ -32,7 +32,7 @@ from src.queue import (
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_mock_embedder
+from tests.conftest import TEST_ACCOUNT, make_mock_embedder
 
 MARKER = "SYNTHETIC_RENAME_WAIT_MARKER"
 _VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
@@ -102,7 +102,7 @@ def _jobs(db: Database) -> dict[str, sqlite3.Row]:
 
 
 def _index_one(tmp_path: Path, *, body: str | None, attachment: bool = False, max_attempts=3):
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     queue = IndexingQueue(db, max_attempts=max_attempts, base_backoff_seconds=0)
     path = tmp_path / "INBOX" / "cur" / "m0:2,S"
     _write_eml(
@@ -167,7 +167,7 @@ def _shape_phase2_pending(tmp_path, monkeypatch):
     """Phase 1 committed (the path is indexed) but the embedder was down,
     so the chunks were never stored and the job is retried; one attempt
     was spent by an earlier failure."""
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     path = str(tmp_path / "INBOX" / "cur" / "m0:2,S")
     _write_eml(Path(path), "m0@example.com", body=f"body {MARKER}")
@@ -275,7 +275,7 @@ class TestARenameBeforeParseKeepsTheJob:
         """Its rename reaches the queue as a fresh ``on_moved`` job, so the
         old one has nothing to wait for."""
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
         gone = str(tmp_path / "INBOX" / "cur" / "never:2,S")
         queue.enqueue(gone, REASON_ON_CREATED)

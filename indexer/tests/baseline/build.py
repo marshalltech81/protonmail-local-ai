@@ -41,6 +41,7 @@ three-frame TIFF a frame past it.
 """
 
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -50,6 +51,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src import main
+from src.account import DEFAULT_SOURCE_MODE, AccountConfig
 from src.database import EMBEDDING_DIM, Database
 from src.embed_identity import verify_or_record_embedder
 from src.embedder import EmbeddingBackend, OpenAIEmbedder
@@ -75,6 +77,20 @@ from tests.baseline.hash_embedder import HashEmbedder
 # ``test_ocr_binaries_cover_the_executables_the_ocr_path_starts`` checks
 # this list against the commands those libraries name.
 OCR_BINARIES = ("tesseract", "pdftoppm", "pdfinfo")
+
+# The synthetic account the baseline index is registered to (#1596).
+BASELINE_ACCOUNT_SCOPE = "00000000-0000-4000-8000-00000000ba5e"
+
+
+def baseline_account(out_dir: Path) -> AccountConfig:
+    """The account of the index ``build`` writes under ``out_dir``, whose
+    Maildir is ``out_dir / "maildir"``, made absolute with parent
+    segments folded (occurrence locators need such a root)."""
+    return AccountConfig(
+        scope_uuid=BASELINE_ACCOUNT_SCOPE,
+        provider=DEFAULT_SOURCE_MODE,
+        maildir_root=Path(os.path.abspath(out_dir)) / "maildir",
+    )
 
 
 def require_ocr_binaries() -> None:
@@ -199,6 +215,10 @@ def build(
     ``RuntimeError`` if any message failed to index, so a broken corpus
     or pipeline fails loudly rather than producing a partial baseline.
     """
+    # Absolute with parent segments folded, so the Maildir paths the index
+    # stores are too: occurrence locators refuse relative paths and ``..``
+    # (the CLI may be given either).
+    out_dir = Path(os.path.abspath(out_dir))
     # A leftover index would make ``initial_index`` skip already-indexed
     # files and silently reuse stale state.
     if out_dir.exists() and any(out_dir.iterdir()):
@@ -212,7 +232,7 @@ def build(
         embedder = HashEmbedder()
     if query_embedder is None:
         query_embedder = embedder
-    db = Database(out_dir / "mail.db")
+    db = Database(out_dir / "mail.db", account=baseline_account(out_dir))
     try:
         record_identity(db)
         with (

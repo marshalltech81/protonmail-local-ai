@@ -230,6 +230,16 @@ CREATE VIRTUAL TABLE attachments_fts USING fts5(
 -- Message and occurrence identities whose records are worst-case
 -- (``--records mixed``), for an upload that leaves exactly those out.
 CREATE TABLE bench_worst (identity TEXT PRIMARY KEY);
+-- The account registry (#1596) with the benchmark's one account, which
+-- the WAL writer's mailbox occurrences reference.
+CREATE TABLE accounts (
+    id         INTEGER PRIMARY KEY,
+    scope_uuid TEXT NOT NULL UNIQUE,
+    provider   TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+INSERT INTO accounts (id, scope_uuid, provider, created_at)
+VALUES (1, '00000000-0000-4000-8000-00000000be0c', 'proton-bridge', '2026-01-01T00:00:00+00:00');
 """
 
 # Longest Message-ID the indexer accepts (indexer/src/parser.py
@@ -1573,7 +1583,7 @@ def phase_request_shape(path: str, shape: str) -> dict:
 
 # --- the WAL writer -----------------------------------------------------
 
-# The indexer's tables (schema v13) that it writes for every message but
+# The indexer's tables (schema v14) that it writes for every message but
 # no measured statement reads. ``build`` leaves them out, so a measured
 # statement that read one would fail there and read them only in the WAL
 # phase: ``test_measured_statements_read_no_table_only_the_wal_baseline_has``
@@ -1671,6 +1681,31 @@ CREATE TABLE IF NOT EXISTS indexing_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_indexing_jobs_status_next
     ON indexing_jobs(status, next_attempt_at);
+CREATE TABLE IF NOT EXISTS message_occurrences (
+    id                INTEGER PRIMARY KEY,
+    account_id        INTEGER NOT NULL REFERENCES accounts(id),
+    folder            TEXT NOT NULL,
+    uniq              TEXT NOT NULL,
+    claimant_id       TEXT NOT NULL REFERENCES messages(claimant_id) ON DELETE CASCADE,
+    relative_path     TEXT NOT NULL,
+    seen              INTEGER NOT NULL CHECK (seen IN (0, 1)),
+    flagged           INTEGER NOT NULL CHECK (flagged IN (0, 1)),
+    replied           INTEGER NOT NULL CHECK (replied IN (0, 1)),
+    trashed           INTEGER NOT NULL CHECK (trashed IN (0, 1)),
+    first_observed_at TEXT,
+    last_observed_at  TEXT,
+    internal_at       TEXT,
+    state             TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+    retired_at        TEXT,
+    provenance        TEXT NOT NULL CHECK (provenance IN ('parse', 'rename', 'migration')),
+    CHECK ((state = 'retired') = (retired_at IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_message_occurrences_key
+    ON message_occurrences(account_id, folder, uniq, claimant_id) WHERE state = 'active';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_message_occurrences_path
+    ON message_occurrences(account_id, relative_path) WHERE state = 'active';
+CREATE INDEX IF NOT EXISTS idx_message_occurrences_claimant
+    ON message_occurrences(claimant_id);
 """
 WRITER_TABLES = (
     "message_headers",
@@ -1683,7 +1718,49 @@ WRITER_TABLES = (
     "entity_aliases",
     "message_chunks_vec",
     "indexing_jobs",
+    "message_occurrences",
 )
+
+
+def _bind_occurrence(conn: sqlite3.Connection, rec, now: str) -> None:
+    """indexer/src/database.py ``_bind_occurrence`` (#1566): the file's
+    mailbox occurrence under the benchmark's one account, its path
+    relative to the Maildir root ``maildir_path`` uses: any other active
+    row at the path retired, then the row for its key upserted."""
+    relative = rec.path.removeprefix("/maildir/")
+    name = relative.rpartition("/")[2]
+    uniq, _sep, flags = name.partition(":2,")
+    values = (
+        rec.folder,
+        uniq,
+        rec.cid,
+        relative,
+        int("S" in flags),
+        int("F" in flags),
+        int("R" in flags),
+        int("T" in flags),
+    )
+    conn.execute(
+        "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
+        "WHERE account_id = 1 AND relative_path = ? AND state = 'active' "
+        "AND NOT (folder = ? AND uniq = ? AND claimant_id = ?)",
+        (now, relative, rec.folder, uniq, rec.cid),
+    )
+    conn.execute(
+        "INSERT INTO message_occurrences (account_id, folder, uniq, claimant_id, "
+        "relative_path, seen, flagged, replied, trashed, first_observed_at, "
+        "last_observed_at, state, provenance) "
+        "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'parse') "
+        "ON CONFLICT (account_id, folder, uniq, claimant_id) WHERE state = 'active' "
+        "DO UPDATE SET relative_path = excluded.relative_path, seen = excluded.seen, "
+        "flagged = excluded.flagged, replied = excluded.replied, "
+        "trashed = excluded.trashed, first_observed_at = "
+        "COALESCE(message_occurrences.first_observed_at, excluded.first_observed_at), "
+        "last_observed_at = excluded.last_observed_at",
+        (*values, now, now),
+    )
+
+
 # Each WAL configuration runs on a fresh copy of the built index at this
 # path (``run_wal``), so no configuration starts from the file an earlier
 # writer left (its freelist, B-tree splits, FTS segments, vector chunks).
@@ -2037,6 +2114,7 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
         (rec.path, now, len(rec.raw), time.time_ns(), hashlib.sha256(rec.raw).hexdigest()),
     )
     conn.execute(_UPSERT_MESSAGE, _message_values(rec, now, None))
+    _bind_occurrence(conn, rec, now)
     conn.execute("DELETE FROM message_headers WHERE claimant_id = ?", (rec.cid,))
     conn.executemany(
         "INSERT INTO message_headers (claimant_id, ordinal, name, name_normalized, raw_value, decoded_value) "

@@ -924,6 +924,13 @@ extraction cache by extractor module; after it, an attachment whose
 label selects a different extractor from the one that first read its
 bytes is re-extracted once, the next time its message is reprocessed.
 
+v14 (#1566) stores each message's file relative to the Maildir root
+(`MAILDIR_PATH`, `/maildir` in Compose). "A message path lies outside
+the configured Maildir root" means the index holds a path that is not
+below it, for example one built under another root; the migration
+stops with nothing applied. Restore the original `MAILDIR_PATH`, or
+rebuild the index. The message never names the path.
+
 ## Reparse or rebuild after an upgrade
 
 Some releases change what the parser stores for each message. Which
@@ -1188,6 +1195,42 @@ is usually `EMBED_MODEL`. The indexer exits and Docker restarts it
 until the account or setting is fixed. "did not become ready within
 ...s (last error: ...)" means every attempt within the connect
 deadline failed with a connection error, a timeout, a 5xx, 408 or 429.
+
+## Account scope mismatch
+
+The indexer or mcp-server exits at startup with one of these messages
+(see docs/architecture.md, "Account registry"). None of them prints the
+value, so compare `.env` yourself.
+
+- "ACCOUNT_SCOPE is not set": the service got an empty value. Run
+  `make init-secrets` (or `make up`, which runs it), which writes a new
+  UUID to `.env` only when the line is missing or empty, then
+  `make up`. For an index that already exists, first check whether the
+  value it was built with is recoverable (a copy of `.env`): a new UUID
+  does not match it, so the next start fails with "ACCOUNT_SCOPE
+  differs" below. A plain `docker compose up` does not write it; Compose
+  warns that the variable is not set.
+- "ACCOUNT_SCOPE must be a UUID in canonical lower-case form": `.env`
+  holds something other than 8-4-4-4-12 lower-case hexadecimal digits.
+  `make init-secrets` never replaces a value, so fix the line by hand:
+  restore the value the index was built with.
+- "ACCOUNT_SCOPE differs from the account this index was built for" or
+  "SOURCE_MODE differs from the provider ...": the configured pair is
+  not the one the index recorded. A different UUID is a different
+  account, never a rename. Restore the original `ACCOUNT_SCOPE` (and
+  `SOURCE_MODE`) in `.env`, or keep the new values and rebuild the index
+  from Maildir as in [Indexer refuses to
+  start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
+- "The index holds no account record" or "records more than one
+  account": the registry was changed outside the indexer. Rebuild the
+  index.
+- "The index has no account registry yet" (mcp-server only): the
+  indexer has not created or migrated the index yet. mcp-server's
+  restart picks it up; if it persists, check `docker compose logs
+  indexer`.
+
+Keep `ACCOUNT_SCOPE` with your `.env` backups: an index restored with
+`make restore-index` needs the value it was built with.
 
 ## Deletion reconciliation (mirror vs archive)
 

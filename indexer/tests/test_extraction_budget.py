@@ -56,7 +56,7 @@ from src.queue import (
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_message, make_mock_embedder, make_thread
+from tests.conftest import TEST_ACCOUNT, make_message, make_mock_embedder, make_thread
 
 MARKER = "SYNTHETIC_DEFER_MARKER"
 _UNIT_VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
@@ -152,7 +152,7 @@ def _prepare_kwargs(**overrides):
 
 
 def _setup_db(tmp_path) -> Database:
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     db.upsert_thread(
         make_thread(messages=[make_message(message_id="msg@x")], thread_id="thread-x"),
         [0.0] * EMBEDDING_DIM,
@@ -396,7 +396,7 @@ class Pipeline:
 
     def open(self) -> None:
         """Open the database and queue (again: a restart)."""
-        self.db = Database(self.tmp_path / "mail.db")
+        self.db = Database(self.tmp_path / "mail.db", account=TEST_ACCOUNT)
         self.queue = IndexingQueue(self.db, max_attempts=3, base_backoff_seconds=0)
 
     def restart(self) -> None:
@@ -1345,7 +1345,7 @@ class TestDatabase:
         db.close()
 
     def test_queue_write_commits_with_the_outer_transaction(self, tmp_path):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db)
         queue.enqueue("/m/a", REASON_INITIAL_SCAN)
         with pytest.raises(RuntimeError), db.transaction():

@@ -79,6 +79,8 @@ def test_missing_or_unusable_commit_is_logged_as_unknown(monkeypatch, caplog, va
 def test_config_hash_covers_only_the_named_non_secret_settings():
     names = set(main_mod._identity_settings())
     assert names == {
+        "ACCOUNT_SCOPE",
+        "SOURCE_MODE",
         "SQLITE_PATH",
         "INFERENCE_MODE",
         "INFERENCE_BASE_URL",

@@ -9,7 +9,7 @@ from src import parser
 from src.database import EMBEDDING_DIM
 from src.parser import SourceMetadata, parse_email_bytes
 
-from tests.conftest import make_thread
+from tests.conftest import TEST_ACCOUNT, make_thread
 
 RAW = (
     b"Message-ID: <same@example.test>\r\nSubject: synthetic\r\n"
@@ -149,7 +149,7 @@ def test_v12_migration_unknown_backfill_and_existing_dead_job(tmp_path):
     from tests.test_database import _schema_shape, _v12_from_fresh
 
     path = tmp_path / "old.db"
-    old = Database(path)
+    old = Database(path, account=TEST_ACCOUNT)
     msg = _parse()
     old.upsert_thread(make_thread([msg]), [0.1] * EMBEDDING_DIM)
     old._conn.execute(
@@ -165,9 +165,12 @@ def test_v12_migration_unknown_backfill_and_existing_dead_job(tmp_path):
     old._conn.commit()
     _v12_from_fresh(old)
     old.close()
-    migrated, fresh = Database(path), Database(tmp_path / "fresh.db")
+    migrated, fresh = (
+        Database(path, account=TEST_ACCOUNT),
+        Database(tmp_path / "fresh.db", account=TEST_ACCOUNT),
+    )
     try:
-        assert SCHEMA_VERSION == 13
+        assert SCHEMA_VERSION >= 13
         assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
         assert migrated._conn.execute("SELECT headers_complete FROM messages").fetchone()[0] is None
         assert migrated._conn.execute("SELECT COUNT(*) FROM message_headers").fetchone()[0] == 0

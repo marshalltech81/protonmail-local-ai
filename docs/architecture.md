@@ -484,6 +484,41 @@ startup only; periodic re-checks are tracked separately. An index that
 holds messages but no row, or predates the table, fails closed with
 rebuild instructions, since nothing says which embedder wrote it.
 
+#### Account registry
+
+The index records the account it serves (#1596, PLAN.md decision 47),
+so a changed or lost account setting is caught at startup instead of
+mixing two accounts' mail under one identity. `accounts` holds one row
+per account, today exactly one: `scope_uuid` is `ACCOUNT_SCOPE` from
+`.env` (a canonical lower-case UUID, not a secret and not a Proton
+identifier), `provider` is the normalized `SOURCE_MODE` (only
+`proton-bridge`), and `created_at` is the registration time, never a
+collection observation. Triggers abort any `UPDATE` or `DELETE`, so a
+row is never changed or removed: a different UUID is a different
+account, never a rename.
+
+`make init-secrets` (which `make up` runs) writes a random UUID to
+`.env` when the `ACCOUNT_SCOPE` line is missing or empty, and never
+replaces a value. `scripts/validate-env.sh`, the indexer and mcp-server
+each refuse a missing or malformed value, and `SOURCE_MODE` under the
+rule of `mbsync/proton-settings.sh`, with fixed text naming the setting
+and the fix, never the value. Compose passes `${ACCOUNT_SCOPE}` bare, as
+a required setting (`indexer/src/account.py`,
+`mcp-server/src/lib/account.py`).
+
+A fresh index inserts the row in its initial-schema transaction. An
+existing index binds it in the v14 migration: the indexer registers
+connection-local SQL functions holding the configured values before the
+migration runner starts, so the row commits with the version stamp or
+not at all. On every open the indexer (`Database`) and mcp-server (at
+startup, through its `mode=ro` / `query_only` connection) require
+exactly one stored account equal to the configured `(ACCOUNT_SCOPE,
+SOURCE_MODE)` pair, and otherwise exit with fixed text naming no value
+(docs/troubleshooting.md, "Account scope mismatch"); mcp-server also
+exits, and its restart policy retries, while the indexer has not yet
+created or migrated the index. The Maildir root is not part of the
+account: moving it keeps the index.
+
 Every enabled layer must name its endpoint: `{LAYER}_BASE_URL` is a
 URL, or `default` for the SDK's documented default endpoint. An empty
 value fails startup in `validate-env.sh`, the indexer and mcp-server
@@ -1225,6 +1260,57 @@ same, as a label per message) and for `search_emails`' thread filters
 (each leaf decided on its own against the thread, as before). A new
 predicate is written once there; `docs/mcp-tools.md`, "Filter
 predicates", lists the leaves.
+
+### Mailbox occurrences
+
+Each Maildir copy of a message is its own occurrence
+(`message_occurrences`, #1566, PLAN.md decision 47), so two
+byte-identical files in different folders keep their own folder, flags
+and observation times instead of sharing the one path, folder and flag
+state the `messages` row holds. An active occurrence is keyed by the
+account (`accounts`, see *Account registry*), its folder relative to the
+account, the file's Maildir uniq (the name before `:2,`, which flag
+renames and `new`/`cur` moves keep; `maildir.get_uniq`) and the claimant
+ID. Its path is relative to the account's Maildir root, unique among
+active rows, and computed structurally, component by component
+(`indexer/src/occurrences.py`): a path outside the root, a sibling that
+merely shares its spelling as a prefix or one with `..`, is refused with
+fixed text, never given the leaf folder name `_derive_folder` falls back
+to. Relocating the root alone keeps every occurrence.
+
+- **Ingest.** Every parsed file binds its occurrence in the Phase 1
+  transaction (`Database._bind_occurrence`): the active row with its key
+  takes the path, the S/F/R/T flags and the observation time, or a new
+  row is created. The claimant ID comes from the file's full content
+  hash, so a file binds only to the occurrence of its own bytes; any
+  other active row at that path is retired first, and a new file never
+  inherits a retired row.
+- **Observed renames.** A watcher rename event (`on_moved`, through
+  `Reconciler.handle_moved` in mirror mode) carries the occurrence in
+  the same transaction as `update_filepath`: a flag rename or a
+  `new`/`cur` move keeps it (path, flags and last observation updated);
+  a move to another folder, or any change of uniq, retires it and
+  creates the destination's for the same claimant, so the move is
+  atomic. Nothing else moves or retires an occurrence: a sweep that
+  finds a renamed file by its uniq alone has not seen its bytes, a remap
+  to a byte-identical copy (#1102) moves to a file with its own, and a
+  file that vanished is absence a sweep cannot establish (decision 47).
+  Those are missed moves and removals, so an active row can name a path
+  that no longer holds its file until completeness-gated reconciliation
+  (#1567) finds them.
+- **Columns.** `state` (`active` / `retired`) with `retired_at` as the
+  retirement mark; a retired row keeps its locator for diagnostics.
+  `provenance` records how the row was created (`parse`, an observed
+  `rename`, or the v14 `migration` seed); `first_observed_at` /
+  `last_observed_at` when the indexer saw the file (NULL on a seeded row
+  until a parse sees it, so no observation is invented); `internal_at`
+  stays NULL, unknown, until #1081 writes it. Rows go with their message
+  (`ON DELETE CASCADE`).
+
+Dormant in this release: nothing reads the table. The reconciler, the
+reaper and the MCP tools still read `messages.folder`, `filepath`, the
+flags and `message_thread_map.filepath`, which ingest keeps writing as
+before. #1567, #1568 and #1569 move the readers and drop those columns.
 
 ### Top-level header evidence
 
@@ -3147,6 +3233,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 14 | `0014_account_occurrences.sql` | `accounts` (#1596; see *Account registry*): the configured `ACCOUNT_SCOPE` and `SOURCE_MODE` provider, bound in the migration's own transaction through connection-local functions; update and delete triggers. `message_occurrences` (#1566; see *Mailbox occurrences*), seeded with one occurrence per message whose `indexed_files` record carries its content hash, relative to the configured `MAILDIR_PATH`; a stored path outside that root fails the migration closed with fixed text, and a message whose path holds other bytes gets none (a WARNING counts them). The migration ends with the shared reparse statement: the reparse observes each seeded occurrence and binds the files the seed cannot see (an unmapped byte-identical copy), with no embedding call; dead-lettered jobs stay dead. Claimant, chunk and thread IDs and vectors are unchanged. |
 | 13 | `0013_message_headers.sql` | Bounded ordered `message_headers` and nullable `messages.headers_complete` (#1079); existing rows start unknown and a queued reparse fills them. |
 | 12 | `0012_extraction_identifier.sql` | `attachment_extractions.identifier` (#1416; see the `attachment_extractions` row above and *Extractor dispatch*): how the payload's container was certified, `container@<n>` or `none@<n>`, NULL (unknown) on every row cached before it. The bytes are not in the database, so the migration ends with the shared reparse statement (see *Reparse in place*): every occurrence passes through the lookup once, which records `none@<n>` on a row whose payload has neither signature and identifies and re-extracts the rest. Unchanged chunks keep their IDs and vectors; text a re-identified container now yields is new chunks, sent to the configured embedder, so the upgrade embeds the newly readable Office attachments once. A container sent under a `message/*` label is kept as sent from this release, so its occurrence gets a new attachment ID on the reparse: the old occurrence, FTS row, chunks and vectors are removed and the new one is extracted and embedded. The startup sweep's identification arm queues the same rows and clears their occurrences' `text_complete` first, so a message whose extraction continuation the reparse leaves queued refreshes them too. |
 | 11 | `0011_extraction_cap_record.sql` | `attachment_extractions.ocr_pages_cap`, `digital_pages_cap` and `extracted_chars_cap` (#1418; see the `attachment_extractions` row above): the configured limit that cut the result, 0 when it did not, NULL (unknown) on every row cached before it. The extractor writes them, so no reparse is queued; the startup sweep re-queues once the messages using an incomplete `success` / `empty` row with no record (the bootstrap arm), and the re-extraction records the columns. |

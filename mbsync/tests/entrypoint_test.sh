@@ -2942,7 +2942,8 @@ validate_env_with() {
         mkdir -p "$root/scripts" "$root/mbsync" "$root/.secrets"
         cp "$REPO_ROOT/scripts/validate-env.sh" "$root/scripts/validate-env.sh"
         cp "$PROTON_SETTINGS" "$root/mbsync/proton-settings.sh"
-        printf '%s\n' 'BRIDGE_USER=placeholder@example.invalid' \
+        printf '%s\n' 'ACCOUNT_SCOPE=00000000-0000-4000-8000-000000000001' \
+            'BRIDGE_USER=placeholder@example.invalid' \
             "BRIDGE_CERT_FINGERPRINT=$FP_OLD" 'EMBED_BASE_URL=default' \
             'EMBED_MODEL=placeholder-embed-model' >"$root/.env"
         printf 'placeholder\n' >"$root/.secrets/bridge_pass.txt"

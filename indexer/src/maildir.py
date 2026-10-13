@@ -14,7 +14,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 
 FLAG_SEPARATOR = ":2,"
 TRASHED_FLAG = "T"
@@ -118,6 +118,19 @@ def get_uniq(path: Path | str) -> str:
     if FLAG_SEPARATOR in name:
         return name.rsplit(FLAG_SEPARATOR, 1)[0]
     return name
+
+
+def folder_name(relative: PurePath) -> str:
+    """The folder name of a Maildir folder directory given relative to the
+    Maildir root. mbsync writes child folders with ``SubFolders Legacy``
+    (#281): a top-level folder is the directory of that name, and each
+    later component gets one leading dot, which is removed here, so
+    ``Folders/.Clients/.cur`` is ``Folders/Clients/cur``. A component
+    without the dot is kept as it is; the root itself is ``.``."""
+    if not relative.parts:
+        return relative.as_posix()
+    first, *rest = relative.parts
+    return "/".join([first, *(c.removeprefix(".") for c in rest)])
 
 
 def resolve_current_path(

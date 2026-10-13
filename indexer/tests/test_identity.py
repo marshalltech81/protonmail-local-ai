@@ -24,7 +24,7 @@ from src.entities import (
     load_operator_identity,
 )
 
-from tests.conftest import make_message, make_thread
+from tests.conftest import TEST_ACCOUNT, make_message, make_thread
 
 MARKER = "synthetic-identity-marker"
 
@@ -221,12 +221,12 @@ class TestStartup:
 
         caplog.set_level(logging.INFO)
         path = _write(tmp_path, f'addresses = ["{MARKER}@mail.example"]\n')
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         monkeypatch.setattr(main, "OPERATOR_IDENTITY_PATH", path)
         monkeypatch.setattr(main, "EMBED_BASE_URL", "http://embed.example/v1")
         monkeypatch.setattr(main, "EMBED_MODEL", "synthetic-embed")
         monkeypatch.setattr(main, "EMBED_API_KEY", "unauthenticated")
-        monkeypatch.setattr(main, "Database", lambda _path: db)
+        monkeypatch.setattr(main, "Database", lambda _path, account: db)
 
         def stop(**_kw):
             raise _Stop

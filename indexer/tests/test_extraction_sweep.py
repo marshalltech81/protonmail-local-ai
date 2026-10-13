@@ -22,7 +22,7 @@ from src.extractors import (
 )
 from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 
-from tests.conftest import make_message, make_thread
+from tests.conftest import TEST_ACCOUNT, make_message, make_thread
 
 # Over two fetch batches per heavy message at the default batch size.
 OCCURRENCES = 2500
@@ -183,7 +183,7 @@ _SHAPES = {
 @pytest.fixture
 def mailbox(tmp_path):
     """One message per shape; yields the db, queue and filepaths."""
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     paths = {}
     for name, rows in _SHAPES.items():

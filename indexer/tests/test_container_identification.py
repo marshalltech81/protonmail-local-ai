@@ -58,6 +58,7 @@ from src.threader import Threader
 from src.timings import TimingAggregator
 
 from tests.conftest import (
+    TEST_ACCOUNT,
     WORD_MAIN_CT,
     WORKBOOK_MAIN_CT,
     make_message,
@@ -696,7 +697,7 @@ def _catalogue() -> list[dict]:
 @pytest.fixture(scope="module")
 def catalogue_db(tmp_path_factory):
     """One message per catalogue row, each occurrence using its own row."""
-    db = Database(tmp_path_factory.mktemp("cat") / "mail.db")
+    db = Database(tmp_path_factory.mktemp("cat") / "mail.db", account=TEST_ACCOUNT)
     rows = _catalogue()
     for row in rows:
         name = row["name"]
@@ -813,7 +814,7 @@ def _attachment(payload: bytes, filename: str, content_type: str) -> Attachment:
 class TestLookup:
     @pytest.fixture
     def db(self, tmp_path):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         msg = make_message(message_id="m@example.com")
         db.upsert_thread(make_thread(messages=[msg], thread_id="t-1"), _UNIT_VECTOR)
         yield db
@@ -1026,7 +1027,7 @@ class TestStartupSweep:
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
         monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", True)
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
         paths = {}
         for name, payload, ctype, filename in (

@@ -36,7 +36,7 @@ from .extractors import (
 )
 from .extractors import html as html_conversion
 from .extractors._runner import ChildError
-from .maildir import parse_flags
+from .maildir import folder_name, parse_flags
 
 log = logging.getLogger("indexer.parser")
 
@@ -1001,10 +1001,7 @@ def _derive_folder(path: Path, maildir_root: Path | None) -> str:
         except ValueError:
             pass
         else:
-            if not relative.parts:
-                return relative.as_posix()
-            first, *rest = relative.parts
-            return "/".join([first, *(c.removeprefix(".") for c in rest)])
+            return folder_name(relative)
     return folder_dir.name
 
 

@@ -325,6 +325,8 @@ class Reconciler:
                 dest_path,
                 folder=folder,
                 clear_tombstone=not is_trashed(dest_path),
+                # An observed rename event: the occurrence follows (#1566).
+                move_occurrence=True,
             )
         if is_trashed(dest_path):
             self.db.add_pending_deletion(dest_path, entry["claimant_id"], entry["thread_id"])

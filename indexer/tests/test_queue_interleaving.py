@@ -29,7 +29,7 @@ from src.queue import (
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_mock_embedder
+from tests.conftest import TEST_ACCOUNT, make_mock_embedder
 
 MARKER = "SYNTHETIC_INTERLEAVE_MARKER"
 _VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
@@ -59,7 +59,7 @@ def _succeed(queue: IndexingQueue, rows) -> None:
 
 @pytest.fixture
 def queue(tmp_path):
-    db = Database(tmp_path / "q.db")
+    db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
     yield IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     db.close()
 
@@ -245,7 +245,7 @@ def _drain(db, queue, embedder, *, batch_size=4, max_passes=None, breaker=None) 
 def _indexed(tmp_path: Path, n: int) -> tuple[Database, IndexingQueue, list[str]]:
     """``n`` messages indexed through the pipeline, then all queued for a
     reparse."""
-    db = Database(tmp_path / "mail.db")
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     paths = []
     for i in range(n):
@@ -418,7 +418,7 @@ class TestClaimCost:
 
     @pytest.mark.parametrize("backlog", [REASON_REPARSE, REASON_INITIAL_SCAN])
     def test_a_claim_over_a_33000_row_backlog_is_bounded(self, tmp_path, backlog):
-        db = Database(tmp_path / "q.db")
+        db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
         queue = IndexingQueue(db)
         self._fill(db, backlog, self.ROWS, "2026-01-01T00:00:00+00:00")
         other = REASON_ON_CREATED if backlog == REASON_REPARSE else REASON_REPARSE

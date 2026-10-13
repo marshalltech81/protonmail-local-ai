@@ -7,6 +7,8 @@ from src.database import Database
 from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 from src.stall_guard import StallGuard
 
+from tests.conftest import TEST_ACCOUNT
+
 
 class _Clock:
     def __init__(self) -> None:
@@ -17,7 +19,7 @@ class _Clock:
 
 
 def _running_queue(tmp_path, clock: _Clock) -> IndexingQueue:
-    db = Database(tmp_path / "q.db")
+    db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     queue.enqueue("/m/stuck", REASON_INITIAL_SCAN)
     queue.begin_attempt("/m/stuck")
@@ -27,7 +29,7 @@ def _running_queue(tmp_path, clock: _Clock) -> IndexingQueue:
 
 
 def test_idle_worker_is_never_stalled(tmp_path):
-    db = Database(tmp_path / "q.db")
+    db = Database(tmp_path / "q.db", account=TEST_ACCOUNT)
     exits: list[int] = []
     guard = StallGuard(IndexingQueue(db), limit_seconds=60, clock=_Clock(), exit_fn=exits.append)
     assert guard.check() is False

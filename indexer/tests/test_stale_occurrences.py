@@ -26,6 +26,7 @@ from src.queue import REASON_INITIAL_SCAN, REASON_REPARSE
 from src.threader import Threader
 from src.timings import TimingAggregator
 
+from tests.conftest import TEST_ACCOUNT
 from tests.test_extraction_budget import (
     MARKER,
     LaunchingExtractor,
@@ -648,7 +649,7 @@ class TestBatchPeerRestoresItsCache:
 
 class TestRestoreAttachmentExtraction:
     def test_restores_a_purged_row_as_it_was_and_never_overwrites(self, tmp_path):
-        db = Database(tmp_path / "mail.db")
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         db.store_attachment_extraction(
             attachment_id="a" * 64,
             extractor_module="text",

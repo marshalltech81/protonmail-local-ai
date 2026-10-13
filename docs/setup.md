@@ -69,6 +69,13 @@ Create the secrets directory and placeholder files:
 make init-secrets
 ```
 
+It also writes `ACCOUNT_SCOPE` to `.env` when that line is missing or
+empty: a random UUID naming the account the index is registered to
+(#1596). It is not a secret, but keep it with your `.env`: the indexer
+and mcp-server refuse to start on an index built under another value,
+and it is never replaced once set (docs/troubleshooting.md, "Account
+scope mismatch").
+
 This creates `.secrets/bridge_pass.txt`, `.secrets/inference_api_key.txt`,
 `.secrets/embed_api_key.txt`, and `.secrets/rerank_api_key.txt` as
 empty placeholders, and `.secrets/mcp_auth_token.txt` holding a random
@@ -377,6 +384,8 @@ services strip it. It fails fast if:
 
 - `BRIDGE_USER` is still unset or left at the placeholder value
 - `BRIDGE_CERT_FINGERPRINT` is unset or not a SHA-256 fingerprint
+- `ACCOUNT_SCOPE` is unset or not a canonical lower-case UUID
+  (`make init-secrets` writes one when the line is missing or empty)
 - `.secrets/bridge_pass.txt` is missing, empty, or not `600`
 - any enabled layer's secret file is missing, empty, or not `600`:
   `inference_api_key.txt` when `INFERENCE_MODE` is `anthropic` or
@@ -920,6 +929,38 @@ certificate, mbsync refuses to sync until you set
 `BRIDGE_CERT_FINGERPRINT` to the new fingerprint and accept it once:
 see "mbsync refuses to sync — Bridge cert pin mismatch" in
 [`troubleshooting.md`](troubleshooting.md).
+
+## Upgrading to the account registry (schema v14)
+
+From schema v14 the index records the account it serves (#1596):
+`ACCOUNT_SCOPE` in `.env` and the `SOURCE_MODE` provider, and each
+Maildir copy of a message as its own occurrence (#1566). Upgrade with
+`make up`, not a plain `docker compose up`:
+
+1. Take a snapshot first: `make backup-index BACKUP_DIR=<directory
+   outside the checkout>`.
+2. `make build`, then `make up`. `make up` runs `make init-secrets`,
+   which writes a new `ACCOUNT_SCOPE` to `.env` when the line is missing
+   or empty, and `make validate-env`, which refuses a missing or
+   malformed one before any container starts. The indexer then migrates
+   the index to v14: it records the account, seeds one occurrence per
+   message and queues a reparse of every indexed message, all in the
+   same transaction as the version stamp. The log shows `Migration v14
+   seeded N mailbox occurrence(s)`. The reparse then re-reads every
+   message without embedding calls, so it takes time on a large
+   mailbox but costs nothing at the embedder; search keeps working
+   throughout ([Reparse or rebuild after an
+   upgrade](troubleshooting.md#reparse-or-rebuild-after-an-upgrade)).
+3. Keep the new `.env` line with your backups. From now on the index
+   only opens under that value.
+
+A plain `docker compose up` without the line starts nothing useful:
+Compose warns that `ACCOUNT_SCOPE` is not set, and the indexer and
+mcp-server exit with "ACCOUNT_SCOPE is not set" before opening the
+index, so nothing is migrated. Run `make up` instead. If a migration is
+interrupted, the index stays at v13 with no account recorded, and the
+next start retries it (see docs/troubleshooting.md, "Indexer stops
+during a schema migration").
 
 ## Upgrading to the isync 1.5.1 mbsync image (Debian trixie)
 
