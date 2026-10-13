@@ -3403,8 +3403,10 @@ and what it holds. Call this when asked which version or build is running.
 | Field | Meaning |
 |---|---|
 | `server_version` | MCP server image's source commit, including `-dirty` for local changes; `unknown` when build identity is unavailable. This identifies the server code, not the MCP protocol or SQLite schema version |
-| `current` | `true` only when all three hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, and no message is pending, retrying, deferred or extraction deferred. A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
+| `current` | `true` only when all four hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, no message is pending, retrying, deferred or extraction deferred, and no failed mail collection waits for a later successful sync delivered to the indexer (`collection.failure_unrecovered`). A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |
+| `collection` | mbsync's latest collection from the Bridge app (#1592): `outcome` (`succeeded`, `succeeded_with_withheld_folders`, `failed`, or `unknown` with `unknown_reason`: `not_recorded`, `missing`, `legacy`, `malformed`, `unsupported`, `account_mismatch`, `unreadable` or `no_completed_attempt`), `outcome_at`, `withheld_far_side_folders` (how many far-side folders it could not open; null when unknown; never their names), `failure_class` (`deadline`, `killed`, `error`, `permission_repair`, `interrupted`), `latest_attempt` (`outcome`, possibly `in_progress`, and `started_at`), `last_success_at`, `failure_unrecovered` and `observed_at` (when the indexer last read it). `in_progress` only means an attempt started with no recorded end, not that mbsync is running. A success that withheld folders does not change `current` |
+| `upstream_currency` | Always `unknown`: whether Bridge itself has synchronized with Proton and serves current content is not observed |
 | `last_sync_at` / `sync_interval_secs` | mbsync's last successful sync from Bridge, and how often it syncs |
 | `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
 | `queue` | `pending` (found, not yet failed), `retrying` (failed at least once; will retry), `deferred` (postponed by the indexer without a failure of its own: a file it cannot read yet, an embedder outage or configuration error, or a job waiting for a rename; retried without spending attempts), `extraction_deferred` (messages already indexed whose attachment extraction reached the indexer's per-message budget: the rest of their attachments are extracted on later passes, #1236), `parked_trashed` (trashed files already indexed, waiting for the reaper to remove them or for the file to be restored, #1165), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`), `reparse` (of the pending, retrying, deferred and extraction_deferred jobs, those re-reading a message already indexed after an upgrade, #1078: searchable meanwhile, but data the upgrade adds is missing until it runs). `pending`, `retrying`, `deferred` and `extraction_deferred` make `current` false; `parked_trashed` and `dead` do not. A job that had already failed before an embedder outage deferred it counts as `retrying` |
@@ -3432,7 +3434,13 @@ mcp-server never talks to Bridge. mbsync writes a stamp at the Maildir
 root after each successful sync. The indexer acknowledges a sync only
 once every message it delivered is queued, and records it with its own
 liveness in the `ingestion_state` table that this tool reads (see
-"Index currency" in `docs/architecture.md`).
+"Index currency" in `docs/architecture.md`). mbsync also publishes its
+collection status before and after every attempt; the indexer records
+it per account in `account_collection_state`, in the same transaction,
+and this tool reads it as `collection` ("Collection status" there). The
+three are separate: `current` says the index caught up with the local
+Maildir, `collection` how mbsync's latest collection from Bridge ended,
+and `upstream_currency` (unknown) whether Bridge is in step with Proton.
 
 The same helper powers ``make status`` on the host: the Makefile target
 invokes the module-level ``get_mailbox_status`` directly against the

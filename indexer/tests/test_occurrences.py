@@ -512,7 +512,7 @@ class TestMigrationV14:
         path, before = _v13_index(tmp_path, root)
         db = Database(path, account=_account(root))
         try:
-            assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 15
+            assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 16
             rows = _occurrences(db)
             by_claimant = {o["claimant_id"]: o for o in rows}
             assert len(rows) == len(before["messages"]) == 2

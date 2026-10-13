@@ -162,7 +162,11 @@ class TestIngestionStateRecovery:
             if calls["n"] <= 3:
                 raise sqlite3.OperationalError(MARKER)
 
-        db = SimpleNamespace(record_ingestion_state=record)
+        db = SimpleNamespace(
+            record_ingestion_state=record,
+            get_collection_state=lambda: None,
+            account=SimpleNamespace(scope_uuid="00000000-0000-4000-8000-000000000001"),
+        )
         recorder = main._IngestionStateRecorder(db, tmp_path, interval_secs=30)  # type: ignore[arg-type]
         for i in range(3):
             recorder.maybe_record(now=float(i))

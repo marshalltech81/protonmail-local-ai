@@ -341,9 +341,11 @@ open the old name on Bridge, cannot, and logs:
 This is expected and harmless. The rest of the mailbox keeps syncing, the
 sync counts as successful (it does not count toward the restart threshold),
 and the last-sync stamp is still written, so `get_mailbox_status` does not
-report the mailbox as stale: the old folder has nothing left to pull. The
-log holds a count, not the folder names, because folder names are mailbox
-content.
+report the mailbox as stale: the old folder has nothing left to pull. Its
+`collection` block shows the run as `succeeded_with_withheld_folders` with
+`withheld_far_side_folders` set to the count, so it is not read as a clean
+sync, and `current` is unaffected (#1592). The log and the status hold a
+count, not the folder names, because folder names are mailbox content.
 
 The run still counts as a failure, as before, when mbsync reports any other
 error in the same run, exits with any status other than 1, or cannot open
@@ -365,6 +367,35 @@ The warning repeats for as long as the local copy exists. Nothing removes
 it automatically. Removing or moving the folder out of the Maildir yourself
 stops the warning, but its messages then count as deleted for the indexer
 (see [Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)).
+
+## get_mailbox_status reports a failed or unknown mail collection
+
+`get_mailbox_status` `collection` reports mbsync's latest collection
+from the Bridge app (#1592; see
+[architecture](architecture.md#collection-status)).
+
+- `outcome` `failed`: `failure_class` names the first cause, and the
+  mbsync log the details (`docker compose logs mbsync`): `deadline` (see
+  [mbsync stopped a sync at its deadline](#mbsync-stopped-a-sync-at-its-deadline)), `killed`, `error` (mbsync's own
+  errors), `permission_repair` (new mail could not be made readable to
+  the indexer) or `interrupted` (mbsync was stopped, for example by a
+  restart). `current` stays false, through retries, until a later sync
+  succeeds and the indexer has acknowledged it.
+- `outcome` `unknown`: `unknown_reason` says why. `not_recorded`: the
+  indexer has not read mbsync's status yet. `missing`: mbsync has not
+  published one, as before its first attempt or while running an older
+  image (rebuild and recreate it with `make up`). `legacy`, `malformed`
+  or `unsupported`: the file is not one this release reads; the next
+  attempt replaces it. `account_mismatch`: mbsync's `ACCOUNT_SCOPE`
+  differs from the indexer's; both read it from `.env`, so recreate
+  mbsync with `make up` (see [Account scope mismatch](#account-scope-mismatch)). `unreadable`: the
+  file is not a regular file the indexer can open.
+- `latest_attempt` `in_progress` only means an attempt started and has
+  no recorded end; it does not show whether mbsync is still running. Use
+  `docker compose ps mbsync` and its log.
+
+`upstream_currency` is always `unknown`: whether Bridge itself is in step
+with Proton is not observed.
 
 ## Remove mail from a folder you have just excluded
 
@@ -1211,8 +1242,9 @@ deadline failed with a connection error, a timeout, a 5xx, 408 or 429.
 ## Account scope mismatch
 
 The indexer or mcp-server exits at startup with one of these messages
-(see docs/architecture.md, "Account registry"). None of them prints the
-value, so compare `.env` yourself.
+(see docs/architecture.md, "Account registry"); mbsync, which names the
+account in its collection status (#1592), refuses the first two too.
+None of them prints the value, so compare `.env` yourself.
 
 - "ACCOUNT_SCOPE is not set": the service got an empty value. Run
   `make init-secrets` (or `make up`, which runs it), which writes a new

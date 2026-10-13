@@ -53,6 +53,11 @@ mbsync container
     `<folder>` or `<path>` in its place (#570), matched under the
     configured channel and store names; a channel line it cannot match
     is cut whole (#1498)
+  - Before and after every sync attempt, publishes its collection status
+    (`.mbsync-collection-status.json`) at the Maildir root: the latest
+    attempt, the last terminal outcome with its withheld far-side folder
+    count and failure class, and the last success, as counts and fixed
+    tokens (#1592; see [Collection status](#collection-status))
   - Healthcheck is liveness only: healthy while the sync loop is alive
     (a heartbeat touched around every attempt is fresh, or an mbsync or
     its permission repair walk is running, up to that run's deadline),
@@ -71,7 +76,8 @@ indexer container
   - Groups messages into threads via In-Reply-To / References headers
   - Calls EMBED_BASE_URL for vector embeddings
   - Writes to SQLite (FTS5 keyword index + sqlite-vec vector index)
-  - Records mbsync's last sync and its own liveness in `ingestion_state`
+  - Records mbsync's last sync and its own liveness in `ingestion_state`,
+    and mbsync's latest collection outcome in `account_collection_state`
         │                              │
         │  embed API                   │  writes
         ▼                              ▼
@@ -83,7 +89,8 @@ embedder (operator-supplied)  sqlite-volume
     by current schema            - attachments + attachments_fts,
                                    attachment_extractions
                                  - indexed_files, indexing_jobs,
-                                   ingestion_state
+                                   ingestion_state,
+                                   account_collection_state
                                  - pending_deletions, reaped_messages
                                    (reconciler)
                                  - entities, entity_aliases
@@ -233,9 +240,10 @@ No container is reachable from outside the machine.
 ## Health and Readiness Signals
 
 "Bridge is healthy" does not mean "mail is syncing". The path from
-Proton to a searchable index passes through six states, each reported
+Proton to a searchable index passes through seven states, each reported
 by a different signal, and each later state depends on the earlier
-ones (#274):
+ones (#274). The last row, Bridge's own currency with Proton, is not
+observed at all (#1317, #1592):
 
 | State | Meaning | Reported by | Not proven by it |
 | --- | --- | --- | --- |
@@ -244,7 +252,9 @@ ones (#274):
 | Bridge authenticated | An account is logged in to Bridge and accepts mbsync's `LOGIN` | No dedicated signal. Bridge listens, completes TLS and greets with no account logged in. The first proof is a successful sync; a rejected login is a failed sync in mbsync's log | — |
 | mbsync syncing | mbsync's sync loop is alive | mbsync container health (liveness: a heartbeat touched around every attempt, or a sync or its permission repair running, up to the run's deadline) | That any sync succeeded: the loop is healthy between failed attempts until five consecutive failures exit it and Docker restarts it |
 | Last successful sync | mbsync completed a sync | The success stamp `.mbsync-last-sync.json` at the Maildir root, written by mbsync. `get_mailbox_status` cannot read Maildir; its `last_sync_at` (and the reason `no successful mail sync has been recorded` or `last successful mail sync was ... ago`) is the last sync the indexer has acknowledged, after queuing that sync's mail, so it can lag the stamp | The stamp alone: that the indexer has read it. `last_sync_at`: that the queued mail is indexed yet |
-| Index current | The indexer has acknowledged a recent sync, has reported within the last 10 minutes, and has no pending, retrying, deferred or extraction-deferred jobs (parked trashed files do not count) | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
+| Latest collection outcome | How mbsync's latest attempt to collect from the Bridge app ended: succeeded, succeeded with far-side folders it could not open (a count), or failed (a class) | mbsync's collection status file, recorded by the indexer and reported as `get_mailbox_status` `collection` (see [Collection status](#collection-status)) | Which folders were withheld (names are never recorded). That mbsync is running: an attempt `in_progress` only says it started and nothing ended it. Anything about Bridge's own state |
+| Index current | The indexer has acknowledged a recent sync, has reported within the last 10 minutes, has no pending, retrying, deferred or extraction-deferred jobs (parked trashed files do not count), and no failed collection waits for a later success delivered to it | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
+| Upstream currency | Bridge has synchronized with Proton and serves current, complete content | Nothing: `get_mailbox_status` `upstream_currency` is always `unknown`. Bridge exposes no supported signal for it, and mail Bridge never delivers or delivers degraded is invisible here (#1317) | — |
 
 mbsync's own startup checks TLS and the pin with an error that names
 the cause, and its sync results and stamp report the rest. No
@@ -504,7 +514,9 @@ each refuse a missing or malformed value, and `SOURCE_MODE` under the
 rule of `mbsync/proton-settings.sh`, with fixed text naming the setting
 and the fix, never the value. Compose passes `${ACCOUNT_SCOPE}` bare, as
 a required setting (`indexer/src/account.py`,
-`mcp-server/src/lib/account.py`).
+`mcp-server/src/lib/account.py`). mbsync gets it too and refuses a
+missing or malformed value the same way: it names the account in its
+collection status (#1592; see *Collection status*).
 
 A fresh index inserts the row in its initial-schema transaction. An
 existing index binds it in the v14 migration: the indexer registers
@@ -3275,6 +3287,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 16 | `0016_account_collection_state.sql` | `account_collection_state` (#1592; see *Collection status*): mbsync's latest collection outcome per account, empty until the indexer first reads mbsync's collection status file. Nothing the parser produces is added, so no reparse is queued. |
 | 15 | `0015_occurrence_readers.sql` | The readers move to the occurrences (#1567, #1568, #1569). `message_occurrences` is rebuilt, rows and ids unchanged, to accept the `scan` provenance; a message the v14 seed could not bind gets a retired occurrence at its stored path (a WARNING counts them), so every message keeps one; `pending_deletions` is keyed by occurrence, each message's old tombstones carried over as one row with their latest mark, which the next sweep clears for a message that is still live; `messages.content_hash` is indexed; `messages.filepath`, `folder`, `seen`, `flagged` and `replied` and `message_thread_map.filepath` are dropped (each drop rewrites its table once). Nothing the parser produces is added, so no reparse is queued; claimant, chunk and thread IDs and vectors are unchanged. On a synthetic 36,500-message index (14,600 threads, 160 MB) the startup open including the migration took 0.4–0.5 s (three runs, Apple M5 Max). |
 | 14 | `0014_account_occurrences.sql` | `accounts` (#1596; see *Account registry*): the configured `ACCOUNT_SCOPE` and `SOURCE_MODE` provider, bound in the migration's own transaction through connection-local functions; update and delete triggers. `message_occurrences` (#1566; see *Mailbox occurrences*), seeded with one occurrence per message whose `indexed_files` record carries its content hash, relative to the configured `MAILDIR_PATH`; a stored path outside that root fails the migration closed with fixed text, and a message whose path holds other bytes gets none (a WARNING counts them). The migration ends with the shared reparse statement: the reparse observes each seeded occurrence and binds the files the seed cannot see (an unmapped byte-identical copy), with no embedding call; dead-lettered jobs stay dead. Claimant, chunk and thread IDs and vectors are unchanged. |
 | 13 | `0013_message_headers.sql` | Bounded ordered `message_headers` and nullable `messages.headers_complete` (#1079); existing rows start unknown and a queued reparse fills them. |
@@ -4172,6 +4185,70 @@ upserts the latest acknowledged sync and its own timestamp into the
 one-row `ingestion_state` table. A missed stamp event
 reads as a stale sync until the next rescan; a missed delivery event
 stays invisible to `current` until the rescan queues it.
+
+### Collection status
+
+The success stamp cannot tell a clean sync from one that skipped
+folders, and a failed attempt writes none, so mbsync also publishes a
+collection status (#1592; owner decision on the issue). It sits beside
+the stamp, which is unchanged, and reading it acknowledges nothing.
+
+- **File.** `.mbsync-collection-status.json`, format 1, one JSON line
+  of counts and fixed tokens, never a folder name: `format`,
+  `scope_uuid` (`ACCOUNT_SCOPE`), `run_deadline_secs`,
+  `sync_interval_secs`; `attempt` (its ID, `started_at` and `outcome`);
+  `last_terminal` (attempt ID, `completed_at`, `outcome`,
+  `withheld_far_side_folders`, null when the error filter's counts
+  never arrived, and `failure_class`); `last_success` (attempt ID,
+  `completed_at`). Each publication is written to a unique temporary
+  file in the Maildir root, made mode 0644 and renamed into place.
+- **When.** Before every attempt (`in_progress`) and after it (its
+  terminal outcome). A success is published after its stamp, with the
+  stamp's completion time; when the stamp cannot be written, the
+  success is still published (and is never delivered, since no stamp
+  names it) before mbsync exits for a restart. A caught stop (TERM or
+  INT) before the attempt has a result is published as `failed` with
+  class `interrupted`; one after it publishes that result. A shell
+  killed outright leaves the
+  `in_progress` record until the next start publishes. A start carries
+  the earlier records forward from the file itself, when it is in the
+  written shape and names the configured account; otherwise it warns
+  and starts with none.
+- **Outcomes.** `succeeded`; `succeeded_with_withheld_folders`, the
+  tolerated run whose only errors were far-side folders it could not
+  open (see [troubleshooting](troubleshooting.md#a-proton-folder-was-renamed-or-deleted));
+  `failed`, with the first cause as its class: `deadline` (stopped at
+  `SYNC_DEADLINE_SECONDS`), `killed` (killed after ignoring the stop,
+  or by the kernel), `error` (any other mbsync failure, a far-side
+  failure together with another error included), `permission_repair`
+  (mbsync succeeded, the repair failed) or `interrupted`. An attempt
+  `in_progress` means only "started, no terminal result recorded"; an
+  old one never proves the collector alive or dead.
+- **Order.** Attempt IDs are a per-start random token and a counter;
+  the records follow publication order (the file always holds the
+  newest), never their timestamps, so a clock rollback cannot reorder
+  them.
+- **Reading.** The indexer reads the file at startup, before every
+  `ingestion_state` write and on each rename onto it, under the lock
+  its acknowledgements use. It reads one open descriptor (a rename
+  mid-read leaves the old publication whole), only a regular file, at
+  most 4096 bytes. A missing, legacy (no `format`), malformed,
+  unsupported, unreadable or other-account file reads as `unknown`
+  with that reason and one fixed-text WARNING per change of reason,
+  never as a success.
+- **Storage.** `account_collection_state`, one row per account (v16),
+  replaced in the same transaction as `ingestion_state`, so the
+  acknowledged sync and the outcome are one snapshot. A rebuilt index
+  recovers the row from the file at its first write.
+- **Freshness.** After a failed attempt, `current` stays false through
+  retries until a later success is **delivered**: the file's last
+  success is the sync named by the stamp the indexer has acknowledged,
+  matched by its completion time, which mbsync writes identically into
+  both. The failed attempt is kept in the row
+  (`unrecovered_failure_attempt_id`) across restarts until then. A
+  success that withheld folders keeps the existing criteria and shows
+  its count. An `unknown` status leaves `current` to the existing
+  criteria, except that an unrecovered failure still holds it false.
 
 ## File Identity on `indexed_files`
 
