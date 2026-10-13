@@ -1211,27 +1211,25 @@ read-only: nothing here changes the state in Proton.
 
 ### Pending deletion
 
-Under mirror retention a message deleted in Proton (mbsync sets the
-Maildir `T` flag) or whose file went missing is tombstoned by the
-indexer and stays indexed until the grace window
-(`INDEXER_DELETION_GRACE_DAYS`) passes and the reaper removes it
-([Reaped sources](#reaped-sources)). Until then `get_message` and
-`query_messages` still list it, and mark it with
+Under mirror retention a message whose every copy was deleted in Proton
+(mbsync sets the Maildir `T` flag) or went missing has lost its last
+live occurrence; the indexer tombstones it, and it stays indexed until
+the grace window (`INDEXER_DELETION_GRACE_DAYS`) passes and the reaper
+removes it ([Reaped sources](#reaped-sources)). Until then `get_message`
+and `query_messages` still return it, and mark it with
 `pending_deletion: true` (`false` for every other message). The prose
 shows `Pending deletion: yes` in `get_message` and `| pending deletion`
-on the `query_messages` row. A tombstone counts only while it is on
-the message's current file, so under mirror retention a message
-restored upstream reads as live once the indexer sees the restore. The flag is read at query
-time and changes no totals or paging: an unfiltered `query_messages` count still includes these
-messages, and `query_messages` has no filter on it. Archive mode
+on the `query_messages` row. The flag is derived per message: it is true
+only while the message has no live occurrence (no active copy without
+the `T` flag) and a tombstone, so a message with another live copy, or
+one restored upstream, reads as live once the indexer sees the copy or
+the restore (#1567). The flag is read at query time and changes no
+totals or paging, and `query_messages` has no filter on it. Archive mode
 records no tombstones, so the flag is `false` there, except for
-tombstones left by an earlier mirror-mode run, which archive mode
-never reaps: such a message keeps `pending_deletion: true` until it is
-restored upstream (the `T` flag cleared), when the indexer clears the
-tombstone as it records the rename (live, or at the next startup's
-rename sweep) and the message reads as live. A
-leftover tombstone on a message that stays trashed is kept. `get_thread`
-rows do not carry it.
+tombstones left by an earlier mirror-mode run, which archive mode never
+reaps: such a message keeps `pending_deletion: true` until a copy of it
+is live again (the `T` flag cleared upstream, recorded live or at the
+next rename sweep). `get_thread` rows do not carry it.
 
 ### `list_threads`
 Browse threads in a folder: every thread with at least one message

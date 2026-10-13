@@ -725,13 +725,17 @@ class MessageRecord:
     cc_count: int | None = None
 
 
-# Whether the reconciler tombstoned the message (#794). A tombstone
-# counts only on the message's current file: one left under an old path
-# is stale, and the reaper clears it unreaped. ``filepath`` is the
-# table's primary key, so this is one lookup.
+# Whether the message awaits the reaper (#794): it lost its last live
+# occurrence (every copy is gone or ``T``-flagged) and the reconciler
+# tombstoned it (#1567). Tombstones are keyed by occurrence and written
+# only while the message has no live occurrence; one beside a live
+# occurrence is stale (the next sweep clears it), so it does not count.
+# Two indexed lookups by claimant ID.
 _PENDING_DELETION_COLUMN = (
-    "EXISTS (SELECT 1 FROM pending_deletions p WHERE p.filepath = m.filepath "
-    "AND p.claimant_id = m.claimant_id) AS pending_deletion"
+    "(NOT EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id "
+    "AND o.state = 'active' AND o.trashed = 0) "
+    "AND EXISTS (SELECT 1 FROM pending_deletions p WHERE p.claimant_id = m.claimant_id)) "
+    "AS pending_deletion"
 )
 
 # A message's ``sent_at`` as every query here returns it: only a

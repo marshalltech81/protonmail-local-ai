@@ -1291,26 +1291,34 @@ to. Relocating the root alone keeps every occurrence.
   `new`/`cur` move keeps it (path, flags and last observation updated);
   a move to another folder, or any change of uniq, retires it and
   creates the destination's for the same claimant, so the move is
-  atomic. Nothing else moves or retires an occurrence: a sweep that
-  finds a renamed file by its uniq alone has not seen its bytes, a remap
-  to a byte-identical copy (#1102) moves to a file with its own, and a
-  file that vanished is absence a sweep cannot establish (decision 47).
-  Those are missed moves and removals, so an active row can name a path
-  that no longer holds its file until completeness-gated reconciliation
-  (#1567) finds them.
+  atomic. A renamed file that no occurrence held but whose
+  `indexed_files` record carries an indexed message's hash binds the
+  destination to that message (#1141).
+- **Missed renames, found copies, vanished files.** The reconciliation
+  scan (*Occurrence reconciliation* under *Deletion Reconciliation*,
+  #1567) follows a rename the watcher missed once the file's bytes are
+  verified, binds a byte-identical copy no occurrence held (provenance
+  `scan`), and retires an occurrence whose file a complete scan did not
+  find; a partial scan retires nothing.
 - **Columns.** `state` (`active` / `retired`) with `retired_at` as the
   retirement mark; a retired row keeps its locator for diagnostics.
   `provenance` records how the row was created (`parse`, an observed
-  `rename`, or the v14 `migration` seed); `first_observed_at` /
+  `rename`, a reconciliation `scan` that verified a found copy's bytes,
+  or the `migration` seed: v14's, and v15's retired row for a message
+  the v14 seed could not bind); `first_observed_at` /
   `last_observed_at` when the indexer saw the file (NULL on a seeded row
   until a parse sees it, so no observation is invented); `internal_at`
   stays NULL, unknown, until #1081 writes it. Rows go with their message
   (`ON DELETE CASCADE`).
 
-Dormant in this release: nothing reads the table. The reconciler, the
-reaper and the MCP tools still read `messages.folder`, `filepath`, the
-flags and `message_thread_map.filepath`, which ingest keeps writing as
-before. #1567, #1568 and #1569 move the readers and drop those columns.
+The reconciler and the reaper read occurrences (#1567): a message is
+live while it has an active occurrence that is not `T`-flagged, and its
+tombstones in `pending_deletions` are keyed by occurrence (see *Deletion
+Reconciliation*). Every message keeps at least one occurrence: v15 gave
+a message the v14 seed could not bind a retired one at its stored path,
+since no file was verified to hold its bytes. A message is re-read (a
+re-extraction sweep, a reap's survivor) from an active occurrence, a
+live one first.
 
 ### Top-level header evidence
 
@@ -3233,6 +3241,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 15 | `0015_occurrence_readers.sql` | The readers move to the occurrences (#1567, #1568, #1569). `message_occurrences` is rebuilt, rows and ids unchanged, to accept the `scan` provenance; a message the v14 seed could not bind gets a retired occurrence at its stored path (a WARNING counts them), so every message keeps one; `pending_deletions` is keyed by occurrence, each message's old tombstones carried over as one row with their latest mark, which the next sweep clears for a message that is still live; `messages.content_hash` is indexed. Nothing the parser produces is added, so no reparse is queued; claimant, chunk and thread IDs and vectors are unchanged. |
 | 14 | `0014_account_occurrences.sql` | `accounts` (#1596; see *Account registry*): the configured `ACCOUNT_SCOPE` and `SOURCE_MODE` provider, bound in the migration's own transaction through connection-local functions; update and delete triggers. `message_occurrences` (#1566; see *Mailbox occurrences*), seeded with one occurrence per message whose `indexed_files` record carries its content hash, relative to the configured `MAILDIR_PATH`; a stored path outside that root fails the migration closed with fixed text, and a message whose path holds other bytes gets none (a WARNING counts them). The migration ends with the shared reparse statement: the reparse observes each seeded occurrence and binds the files the seed cannot see (an unmapped byte-identical copy), with no embedding call; dead-lettered jobs stay dead. Claimant, chunk and thread IDs and vectors are unchanged. |
 | 13 | `0013_message_headers.sql` | Bounded ordered `message_headers` and nullable `messages.headers_complete` (#1079); existing rows start unknown and a queued reparse fills them. |
 | 12 | `0012_extraction_identifier.sql` | `attachment_extractions.identifier` (#1416; see the `attachment_extractions` row above and *Extractor dispatch*): how the payload's container was certified, `container@<n>` or `none@<n>`, NULL (unknown) on every row cached before it. The bytes are not in the database, so the migration ends with the shared reparse statement (see *Reparse in place*): every occurrence passes through the lookup once, which records `none@<n>` on a row whose payload has neither signature and identifies and re-extracts the rest. Unchanged chunks keep their IDs and vectors; text a re-identified container now yields is new chunks, sent to the configured embedder, so the upgrade embeds the newly readable Office attachments once. A container sent under a `message/*` label is kept as sent from this release, so its occurrence gets a new attachment ID on the reparse: the old occurrence, FTS row, chunks and vectors are removed and the new one is extracted and embedded. The startup sweep's identification arm queues the same rows and clears their occurrences' `text_complete` first, so a message whose extraction continuation the reparse leaves queued refreshes them too. |
@@ -3256,6 +3265,14 @@ Instead, mbsync renames the file to add the IMAP `\Deleted` (Maildir `T`)
 flag. Without reconciliation, the local SQLite index keeps those messages
 forever.
 
+Each Maildir copy of a message is its own occurrence (see *Mailbox
+occurrences*). A message is **live** while it has a live occurrence: an
+active one that is not `T`-flagged. A `T`-flagged copy never counts as
+live, whatever folder it is in, and a Trash copy that is not `T`-flagged
+does (PLAN.md decision 47, #1567). Losing the last live occurrence is
+claimant-wide: it counts every occurrence of the message, in every
+account.
+
 The indexer runs a reconciler that handles this in two phases. It is on
 by default (mirror mode: upstream deletions leave the local index);
 `INDEXER_DELETION_ENABLED=false` turns it off (archive mode: the index is
@@ -3263,35 +3280,44 @@ append-only and keeps deleted mail). An unrecognized value fails indexer
 startup rather than picking a mode.
 
 1. **Tombstone** — a sweep at startup and every
-   `INDEXER_DELETION_SWEEP_INTERVAL_SECS` (default 1 h), plus a live
-   `on_moved` watchdog handler, record each `T`-flagged indexed file in a
-   `pending_deletions` table, unless a live byte-identical copy remains
-   (see *Byte-identical copies*). No primary
-   data is mutated at tombstone time, so the soft-delete is fully reversible
-   if mbsync un-flags the file on a later pull. A tombstone is recorded
-   only for the path `message_thread_map` currently holds for the
-   message, so a sweep that resolved a path before the watcher restored
-   or moved the file cannot leave a stale tombstone for the reaper.
-2. **Reap** — after a configurable grace window
-   (`INDEXER_DELETION_GRACE_DAYS`, default 7 days) the reaper first checks
-   the file each tombstoned message maps to now: if it exists and is not
-   trashed, the tombstone is stale (the file moved away and back during a
-   sweep) and is cleared instead of reaped. This check runs before the
-   mass-delete brake below counts the batch, so stale tombstones cannot
-   hold the brake shut. Otherwise it removes the
-   reaped message's rows from `message_thread_map` / `indexed_files` and
-   any indexing job still queued for its file (in the same transaction,
-   which first re-checks that every message it removes is still
-   tombstoned past the grace window, so a restore — or a restore and a
-   fresh tombstone — after the reaper read its tombstones is left for a
-   later pass), and
-   either rebuilds the parent thread from the surviving messages on disk
-   (re-parsed; the thread vector is the survivors' chunk mean, derived
-   from the stored sums with no re-embedding, #1356) or deletes the
-   thread entirely when nothing remains. Only when no chunk survives does
+   `INDEXER_DELETION_SWEEP_INTERVAL_SECS` (default 1 h) first reconciles
+   the occurrences with the Maildir (*Occurrence reconciliation* below),
+   then records a tombstone in `pending_deletions`, keyed by occurrence,
+   for each occurrence of every message with no live occurrence left,
+   and removes the tombstones of every message that has one again. The
+   live `on_moved` watchdog handler does the same for the message whose
+   file it saw renamed: a rename that adds `T` to its last live copy
+   tombstones it at once, and a rename that drops `T` (a restore)
+   removes its tombstones in the same write. Tombstones exist only while
+   a message has no live occurrence, and a sweep keeps the marks a
+   message already has, so the earliest mark is when the loss was first
+   seen. No primary data is mutated at tombstone time, so the soft-delete
+   is fully reversible if mbsync un-flags the file on a later pull.
+2. **Reap** — once a message's earliest tombstone is older than the grace
+   window (`INDEXER_DELETION_GRACE_DAYS`, default 7 days) and it still has
+   no live occurrence, the reaper removes its rows from
+   `message_thread_map` (its `messages` row, occurrences and tombstones
+   go by cascade), unmarks every path holding its bytes in
+   `indexed_files` (its occurrences' paths and every other recorded path
+   with its content hash, so a copy that comes back after a transient
+   outage is re-indexed by the next Maildir walk) and deletes any
+   indexing job still queued for those paths, all in one transaction,
+   which first re-checks that every message it removes still has no live
+   occurrence and a tombstone past the grace window, so a restore, a
+   copy bound by a sweep, or a restore and a fresh loss after the reaper
+   read its candidates is left for a later pass. It then either rebuilds
+   the parent thread from the surviving messages on disk (re-parsed from
+   an active occurrence, a live one first; the thread vector is the
+   survivors' chunk mean, derived from the stored sums with no
+   re-embedding, #1356) or deletes the thread entirely when nothing
+   remains. A survivor with no active occurrence (it is losing its last
+   copy too, within the grace window) cannot be re-parsed, so its thread
+   waits, visible in the blocked-thread count and WARNING, like a thread
+   whose survivor is unreadable (#1159). Only when no chunk survives does
    the rebuild embed a subject (the first non-empty subject among the
    survivors, oldest first, or `(empty thread)` when none has one); an
-   embedding failure there makes the reaper back off and retry on the next pass.
+   embedding failure there makes the reaper back off and retry on the
+   next pass.
 
 **Reaped-source records.** A citation or search hit from an earlier
 answer can name a message or thread the reaper has since removed. Such
@@ -3325,83 +3351,82 @@ not carried across a rebuild of the index from Maildir (reaped files
 are not reindexed), so after a rebuild an earlier reap reads as "not
 found".
 
-**Byte-identical copies.** Two files with the same bytes share one
-claimant ID (see *Claimant IDs*), so `message_thread_map` holds only
-the path indexed last, while `indexed_files` holds both (#1102). When a
-sweep finds a message's mapped file gone, it first looks for another
-indexed path with the same `content_hash` that still exists, with one
-pass over `indexed_files` per sweep covering every missing message. If
-one exists (a live copy is preferred to a `T`-flagged one), the message
-is remapped to that copy: its locator, folder and S/F/R state move as
-for a rename, and a tombstone or queued job on the gone path moves too
-unless the copy already has its own. The copy's tombstone is kept, but
-with the later of the two marks, or marked now when the gone path had
-none, so the grace period never starts before the message lost its
-last live path; of two queued jobs the runnable one is kept (the copy's, unless it is dead
-and the gone path's is not). The remap is refused when the watcher
-renamed the copy or moved the mapping since the sweep resolved it.
-After a refusal, or when the sweep's cached folder listing shows no
-copy (it can predate a copy coming back), the copies are resolved once
-more through one fresh listing shared by the whole retry phase, so each
-folder is listed at most once more per sweep. The trash rule then
-applies to the copy as to any file, so a `T`-flagged copy is tombstoned
-and a live one clears an earlier tombstone. A mapped file that still
-exists but is `T`-flagged is checked the same way, for a live copy
-only, in the same lookup: when one exists the message moves to it
-instead of being tombstoned, so trashing one copy does not reap a
-message whose other copy is live. The rename sweep (`sweep_paths`),
-which runs at startup, before each periodic rescan's Maildir walk and
-on folder-watch recovery, does the same remap for gone files, so
-archive mode does not keep the gone path, folder and flags. The INFO
-lines of both sweeps count these as `remapped=N`. Only a message with
-no surviving copy is tombstoned as missing (and a trashed one with no
-live copy as trashed), so removing every copy still reaps it as before, and the reap
-then unmarks every path with the message's bytes, not only the mapped
-one (looked up once per reap pass, unmarked by path in each thread's
-reap transaction, with any queue row on those paths): a copy that comes
-back after a transient outage is re-indexed by the next Maildir walk
-instead of staying marked indexed, or held by a dead job, with nothing
-left to repair it. Before a thread is reaped, each tombstoned message's
-copies are checked on disk once more, through a folder listing of its
-own: if mbsync restored one since the sweep, the message moves to it,
-its tombstone is cleared and it stays in the thread (logged at INFO
-with a count). These checks share a budget of 256 directory listings
-per reap pass. A check reserves its copies' distinct folders (each
-copy's directory and its `new`/`cur` sibling) before it runs and is
-charged what it listed, so a pass stays within the budget; the pass's
-first check always runs, even when it alone needs more (logged at INFO
-with the counts), since its cost is bounded by folders, which mail
-cannot grow. Messages past the budget stay tombstoned and are rebuilt
-into the thread as survivors (text, chunks and thread vector included),
-so the index stays consistent, while the checked ones are reaped; the
-next pass checks the rest, so a large thread is reaped over several
-passes. A message whose own file is gone cannot be rebuilt as a
-survivor, so it is checked first; if the budget leaves it unchecked,
-its thread waits, visible in the blocked-thread count and WARNING,
-until a pass reaches it (an unreadable survivor blocks the same way,
-#1159). A copy restored after its check is unmarked with the reaped
-message, and the next Maildir walk indexes it again. A remap the
-database refuses leaves the message tombstoned for the next pass, with
-a counted INFO line. The pass logs one WARNING with the count left, and
-each partial thread reap an INFO line with its counts. A failure of the
-rename sweep before a periodic rescan is logged at WARNING with its
-type and does not stop that rescan's walk, and its recovery is logged
-like the other recurring steps'. Known limitation (#1141): a copy that
-is not the mapped path and is moved to another folder keeps its old
-path in `indexed_files`, so the lookup cannot find it until the next
-periodic rescan indexes the destination.
+**Occurrence reconciliation.** The watcher carries an occurrence
+through every rename it observes. What it misses (renames while the
+indexer was down, a lost event) the reconciliation scan finds
+(`indexer/src/occurrence_scan.py`, #1567). It walks the account's
+Maildir root once and compares the files with the account's active
+occurrences:
+
+- **Missed renames.** An active occurrence whose file is gone, while its
+  folder holds a file with its Maildir uniq (a flag change, a `new`/`cur`
+  move), moves to that file once the file's bytes are verified to be the
+  message's: by the `indexed_files` identity (size and mtime match the
+  record, which a rename keeps, and the recorded hash is the message's),
+  else by hashing the file. A same-uniq file with other bytes is counted
+  as `unverified` and changes nothing.
+- **Found copies.** A file no active occurrence holds, whose bytes are an
+  indexed message's (looked up by `messages.content_hash`), is bound to
+  it as an occurrence with provenance `scan`: a byte-identical copy the
+  migration seed or the parse never bound, such as a `T`-flagged file the
+  drain parks, a dead-lettered job, or a copy moved across folders while
+  no occurrence held it (#1141). Its bytes come from its `indexed_files`
+  record when size and mtime match. Otherwise only a `T`-flagged or
+  dead-lettered file is hashed, and only by the mirror-mode sweep, once
+  per process for each path, size and mtime; any other unindexed file is
+  new mail the Maildir walk queues, and its parse binds it.
+- **Vanished files.** An active occurrence with neither is retired only
+  when the scan is complete: the walk read every directory under the
+  root. An unreadable directory or a missing root makes the scan partial:
+  it retires nothing (the occurrence stays active and is counted as
+  unreachable) and logs a WARNING with the number of unreadable
+  directories. A partial or failed scan never establishes absence, so it
+  cannot start a message's grace period. Completeness is per account: a
+  scan covers one account's root and never touches another account's
+  occurrences.
+
+Each write re-checks, in its own transaction, that the occurrence or
+path is as the scan saw it, and a retire re-checks the disk for the file
+or a file with its uniq, so a rename the watcher records meanwhile wins.
+The rename sweep (`sweep_paths`), which runs at startup, before each
+periodic rescan's Maildir walk and on folder-watch recovery, in archive
+mode too, runs the same scan without tombstoning anything; recording the
+renames first keeps the walk from re-indexing them as new mail.
+Retiring removes a locator, never a message: archive mode retires the
+occurrence of a vanished file but never reaps. The INFO lines of both
+sweeps count what they did (`renamed`, `retired`, `bound`, `unreachable`,
+`unverified`, and for the reconciler `tombstoned`, `cleared` and
+`hashed`). A failure of the rename sweep before a periodic rescan is
+logged at WARNING with its type and does not stop that rescan's walk,
+and its recovery is logged like the other recurring steps'.
+
+Byte-identical files share one claimant ID (see *Claimant IDs*), so
+removing one copy retires its occurrence and the message stays indexed
+through the other; trashing one copy marks its occurrence trashed and
+the message stays live while another copy is live. Only when every copy
+is `T`-flagged or gone is the message tombstoned, and the reap then
+unmarks every path with its bytes.
 
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) stops a
-reap pass outright, reaping nothing, when the tombstones past the grace
+reap pass outright, reaping nothing, when the messages past the grace
 window outnumber that fraction of total indexed messages; it does not
-reap a slice. Transient Bridge outages (vault rebuilds, folder renames, auth
-glitches) can cause mbsync to `T`-flag a huge batch at once; the brake
-stops the reaper from acting, while still recording tombstones that will
-clear themselves if mbsync reverts the flags. Up to 10
-tombstones per pass are always allowed regardless of the percentage so
+reap a slice. It counts messages (claimant IDs), however many
+occurrences each lost. Transient Bridge outages (vault rebuilds, folder
+renames, auth glitches) can cause mbsync to `T`-flag a huge batch at
+once; the brake stops the reaper from acting, while still recording
+tombstones that will clear themselves if mbsync reverts the flags. Up to
+10 messages per pass are always allowed regardless of the percentage so
 that routine cleanup on small mailboxes is not gated by the 5% default.
 `INDEXER_DELETION_FORCE=true` overrides the brake for intentional bulk
-cleanups.
+cleanups. Beside that unchanged global brake, a **per-account brake** is
+computed only while more than one account has an active occurrence
+(#1491 enables several; today the registry holds one, #1596): a message
+belongs to every account holding an occurrence of it, and an account
+whose past-grace messages outnumber `max(10, INDEXER_DELETION_MAX_BATCH_PCT`
+× its messages`)` has all of them held back for that pass, logged at
+ERROR with the account's numeric id and the counts, so a mass deletion in
+a small account is caught though the mailbox-wide count stays under the
+global brake. `INDEXER_DELETION_FORCE=true` overrides it too.
 
 `mbsync` keeps `Expunge None` regardless — the reaper cleans up the local
 index; it does not change mbsync's pull-only, no-destructive-delete posture
@@ -3415,9 +3440,11 @@ completeness*).
 
 **Trash under mirror.** Deleting a message in Proton normally moves it
 to Trash, and mbsync syncs the Trash folder. The INBOX copy is
-`T`-flagged and tombstoned, but a Trash copy with the same Message-ID
-arrives and is indexed, so the message is reaped only after it is
-purged from Trash (plus the grace window). To keep it out of results
+`T`-flagged, so its occurrence is no longer live, but a Trash copy
+arrives and is indexed: with the same bytes it is another occurrence of
+the message and keeps it live; with other bytes it is a message of its
+own, and the INBOX one is tombstoned. Either way the mail is reaped only
+after it is purged from Trash (plus the grace window). To keep it out of results
 meanwhile, the MCP server leaves Trash out of mailbox-wide retrieval
 unless a call names it (`folders=["Trash"]`, or `folder="Trash"` for
 `query_messages`); see *Trash is left out by default* in
@@ -4016,11 +4043,11 @@ reconciliation disabled (archive mode), the index is append-only and
 to archive also re-indexes mail an earlier mirror-mode run reaped,
 whose `T`-flagged files are still in the Maildir. Archive mode writes no
 tombstones and reaps nothing, but it inherits any `pending_deletions`
-row an earlier mirror-mode run left: the watchdog handler and the
-startup rename sweep carry such a tombstone along with flag renames,
-and clear it when a rename drops the `T` flag, so a message restored
-upstream stops reading as pending deletion (`docs/mcp-tools.md`,
-*Pending deletion*; #860). The handler logs one INFO line per restore
+row an earlier mirror-mode run left: the message keeps it through flag
+renames, and loses it when a rename the watchdog handler or the rename
+sweep records drops the `T` flag, or any other write gives the message a
+live occurrence again, so a message restored upstream stops reading as
+pending deletion (`docs/mcp-tools.md`, *Pending deletion*; #860). The handler logs one INFO line per restore
 within the indexer's shared per-window line budget (the rest are
 counted on the queue heartbeat's `suppressed_lines`); the sweep reports
 `tombstones_cleared=N` on its own line.
@@ -4117,24 +4144,23 @@ state intact: a file whose Phase 1 committed but whose Phase 2 is still
 pending is already indexed, so the rename is not re-enqueued, and a job
 left on the old path would be dropped as missing.
 
-`content_hash` is read by one lookup, `find_identical_copies`: when a
-message's mapped file is gone (or, for the reconciler sweep,
-`T`-flagged), the reconciler sweep and the rename sweep (`sweep_paths`:
-at startup, before each periodic rescan and on folder-watch recovery)
-look for another indexed path with the same bytes and
-remap the message to it, and the reaper unmarks every such path of a
-message it removes (see *Byte-identical copies* under *Deletion
-Reconciliation*, #1102). `indexed_files` has no `content_hash` index,
-so the lookup reads the wanted hashes by claimant ID and makes one pass
-over `indexed_files` per sweep or reap pass. `size` and `mtime_ns` are
-not read; they remain for a future pass that tells a flag-only rename
-from a genuine content change.
+The occurrence reconciliation scan (*Occurrence reconciliation* under
+*Deletion Reconciliation*, #1567) reads all three: a file whose size and
+mtime match its record (or, for a missed rename, the record of the path
+it was renamed from, since a rename keeps both) has the recorded
+`content_hash` as its bytes, which verifies a rename or names the
+message a found copy belongs to (`messages.content_hash` is indexed for
+that lookup) without reading the file; any other file is hashed only
+where the module docstring says. The reaper unmarks every path recorded
+with a removed message's hash (#1102); `indexed_files` has no
+`content_hash` index, so that lookup reads the wanted hashes by claimant
+ID and makes one pass over `indexed_files` per reap pass.
 
 Rows for which `stat` / hash capture failed at parse time carry NULL
-identity values. The lookup skips a message whose own hash is NULL, and
-a NULL row never matches a hash, so such a message is handled as before
-(tombstoned as missing when its file is gone); the columns are
-populated lazily on the next reindex of the file.
+identity values. A NULL row never verifies or binds anything, so the
+scan treats such a file as unknown (a vanished occurrence beside it is
+counted, not retired, only when a same-uniq file is there); the columns
+are populated lazily on the next reindex of the file.
 
 ## Vulnerability Scans
 

@@ -1063,20 +1063,24 @@ class TestPendingDeletion:
                 )
             rows = {
                 r[0]: (r[1], r[2])
-                for r in conn.execute("SELECT message_id, claimant_id, filepath FROM messages")
+                for r in conn.execute(
+                    "SELECT m.message_id, m.claimant_id, o.id FROM messages m "
+                    "JOIN message_occurrences o ON o.claimant_id = m.claimant_id"
+                )
             }
-            claimant, path = rows["doomed"]
-            # A tombstone on the message's current file marks it.
+            # A message whose every copy is T-flagged, tombstoned: pending.
+            claimant, occurrence = rows["doomed"]
+            conn.execute("UPDATE message_occurrences SET trashed = 1 WHERE id = ?", (occurrence,))
             conn.execute(
-                "INSERT INTO pending_deletions VALUES (?, ?, 't1', '2024-02-01T00:00:00+00:00')",
-                (path, claimant),
+                "INSERT INTO pending_deletions VALUES (?, ?, '2024-02-01T00:00:00+00:00')",
+                (occurrence, claimant),
             )
-            # One left under a path the message no longer has (the file
-            # moved out of the trash) does not: the reaper clears it.
-            claimant, _ = rows["restored"]
+            # A tombstone beside a live occurrence (restored before the
+            # next sweep cleared it) does not count (#1567).
+            claimant, occurrence = rows["restored"]
             conn.execute(
-                "INSERT INTO pending_deletions VALUES (?, ?, 't1', '2024-02-01T00:00:00+00:00')",
-                ("/maildir/INBOX/cur/restored:2,T", claimant),
+                "INSERT INTO pending_deletions VALUES (?, ?, '2024-02-01T00:00:00+00:00')",
+                (occurrence, claimant),
             )
             conn.commit()
             conn.close()

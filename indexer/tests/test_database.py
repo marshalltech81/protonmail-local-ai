@@ -26,7 +26,13 @@ from src.database import (
 )
 from src.migrations import runner
 
-from tests.conftest import TEST_ACCOUNT, count_pending_deletions, make_message, make_thread
+from tests.conftest import (
+    TEST_ACCOUNT,
+    count_pending_deletions,
+    lose_message,
+    make_message,
+    make_thread,
+)
 
 FAKE_EMBEDDING = [0.1] * EMBEDDING_DIM
 
@@ -35,16 +41,15 @@ def _tombstone_thread(db, thread_id: str) -> None:
     """Tombstone every message in ``thread_id``, as the reconciler does
     before ``delete_thread_completely``, which refuses otherwise."""
     for row in db.get_thread_messages(thread_id):
-        db.add_pending_deletion(row["filepath"], row["claimant_id"], thread_id)
+        lose_message(db, row["claimant_id"])
 
 
 def _reap_message(db, thread, message_id: str) -> list[str] | None:
     """Remove ``message_id`` from ``thread`` the way the reconciler does:
     tombstone it, then ``reap_thread_messages`` with a rewrite from the
     surviving messages. ``thread`` must keep at least one survivor."""
-    reaped = next(m for m in thread.messages if m.message_id == message_id)
     survivors = [m for m in thread.messages if m.message_id != message_id]
-    db.add_pending_deletion(reaped.filepath, message_id, thread.thread_id)
+    lose_message(db, message_id)
     rebuilt = make_thread(
         messages=survivors,
         thread_id=thread.thread_id,
@@ -104,7 +109,8 @@ class TestSchema:
         cols = {
             row[1] for row in db._conn.execute("PRAGMA table_info(pending_deletions)").fetchall()
         }
-        assert cols == {"filepath", "claimant_id", "thread_id", "marked_at"}
+        # Keyed by occurrence (#1567).
+        assert cols == {"occurrence_id", "claimant_id", "marked_at"}
 
     def test_reopening_initialized_database_does_not_error(self, tmp_path):
         """A fresh database created on first open is reopened cleanly on
@@ -119,8 +125,8 @@ class TestSchema:
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
         the current version (v14), skipping the migration files."""
-        assert SCHEMA_VERSION == 14
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 14
+        assert SCHEMA_VERSION == 15
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 15
 
     def test_fresh_install_has_a_nullable_ocr_pages_skipped_column(self, db):
         """#891: a count, NULL when unknown, with no default."""
@@ -318,7 +324,9 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
+        assert (
+            "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]" in caplog.text
+        )
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -555,13 +563,34 @@ def _only_the_v12_reparse(db: Database) -> bool:
     return {r[0] for r in jobs} == files and all(r[1] == "reparse" for r in jobs)
 
 
+def _revert_v15(db: Database) -> None:
+    """Undo what v15 changes (#1567): tombstones keyed by path again and
+    no content-hash index. The occurrences' provenance CHECK is not part
+    of the compared shape."""
+    db._conn.execute("DROP INDEX idx_messages_content_hash")
+    db._conn.execute("DROP TABLE pending_deletions")
+    db._conn.execute(
+        "CREATE TABLE pending_deletions (filepath TEXT PRIMARY KEY, claimant_id TEXT NOT NULL, "
+        "thread_id TEXT NOT NULL, marked_at TEXT NOT NULL)"
+    )
+    db._conn.execute("CREATE INDEX idx_pending_deletions_thread ON pending_deletions(thread_id)")
+
+
 def _drop_v14_tables(db: Database) -> None:
-    """Drop what v14 adds: the account registry (#1596) and mailbox
-    occurrences (#1566)."""
+    """Drop what v14 adds, the account registry (#1596) and mailbox
+    occurrences (#1566), after undoing v15."""
+    _revert_v15(db)
     db._conn.execute("DROP TABLE message_occurrences")
     for trigger in ("accounts_never_updated", "accounts_never_deleted"):
         db._conn.execute(f"DROP TRIGGER {trigger}")
     db._conn.execute("DROP TABLE accounts")
+
+
+def _v14_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v14 shape (#1567)."""
+    _revert_v15(db)
+    db._conn.execute("UPDATE schema_version SET version = 14")
+    db._conn.commit()
 
 
 def _v13_from_fresh(db: Database) -> None:
@@ -737,7 +766,7 @@ class TestMigrationV6:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [6, 7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
+        assert "applied migrations: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
     @pytest.mark.parametrize("table, column", [c for c in _V6_COLUMNS if c[1] == "text_complete"])
@@ -1005,7 +1034,7 @@ class TestMigrationV12:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 14
+                == 15
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             row = migrated.get_attachment_extraction("h1", "text")
@@ -1027,7 +1056,7 @@ class TestMigrationV12:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [12, 13, 14]" in caplog.text
+        assert "applied migrations: [12, 13, 14, 15]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
 
@@ -1051,7 +1080,7 @@ class TestMigrationV11:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 14
+                == 15
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             row = migrated.get_attachment_extraction("h1", "text")
@@ -1072,7 +1101,7 @@ class TestMigrationV11:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [11, 12, 13, 14]" in caplog.text
+        assert "applied migrations: [11, 12, 13, 14, 15]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
 
@@ -1100,7 +1129,7 @@ class TestMigrationV10:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 14
+                == 15
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             assert (
@@ -1118,7 +1147,7 @@ class TestMigrationV10:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [10, 11, 12, 13, 14]" in caplog.text
+        assert "applied migrations: [10, 11, 12, 13, 14, 15]" in caplog.text
 
 
 class TestMigrationV9:
@@ -1140,7 +1169,7 @@ class TestMigrationV9:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 14
+                == 15
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             assert [
@@ -1158,7 +1187,7 @@ class TestMigrationV9:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [9, 10, 11, 12, 13, 14]" in caplog.text
+        assert "applied migrations: [9, 10, 11, 12, 13, 14, 15]" in caplog.text
 
 
 class TestMigrationV8:
@@ -1267,7 +1296,7 @@ class TestMigrationV8:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [8, 9, 10, 11, 12, 13, 14]" in caplog.text
+        assert "applied migrations: [8, 9, 10, 11, 12, 13, 14, 15]" in caplog.text
         assert "SYNTHETIC_V8_MARKER" not in caplog.text
 
     def test_a_failed_rebuild_leaves_v7_intact(self, tmp_path):
@@ -1339,7 +1368,7 @@ class TestMigrationV7:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
+        assert "applied migrations: [7, 8, 9, 10, 11, 12, 13, 14, 15]" in caplog.text
 
 
 class TestAttachmentTextCompleteness:
@@ -1462,7 +1491,7 @@ class TestMigrationV5:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
+        assert "applied migrations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]" in caplog.text
 
     @pytest.mark.parametrize("column", [c for c in _V5_COLUMNS if c != "caps_json"])
     def test_the_flag_columns_reject_other_values(self, db, column):
@@ -1592,7 +1621,7 @@ class TestMigrationV2:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
+        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
         db = Database(tmp_path / "v1.db", account=TEST_ACCOUNT)
@@ -1644,7 +1673,7 @@ class TestMigrationV3:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]" in caplog.text
+        assert "applied migrations: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path, monkeypatch):
@@ -2680,75 +2709,74 @@ class TestSendersColumn:
 
 
 class TestPendingDeletions:
-    def test_add_pending_deletion_returns_true_on_first_insert(self, db):
-        inserted = db.add_pending_deletion("/p", "msg@x", "t1")
-        assert inserted is True
+    """Tombstones are keyed by occurrence and written only while the
+    message has no live occurrence (#1567)."""
 
-    def test_add_pending_deletion_is_idempotent(self, db):
-        db.add_pending_deletion("/p", "msg@x", "t1")
-        # Second call must not update marked_at nor report an insert
-        assert db.add_pending_deletion("/p", "msg@x", "t1") is False
-        assert count_pending_deletions(db) == 1
+    def _one(self, db, path="/p/INBOX/cur/m1:2,S", message_id="msg@x"):
+        msg = make_message(message_id=message_id, filepath=path)
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        return msg
 
-    def test_add_pending_deletion_refuses_a_path_the_message_no_longer_maps_to(self, db):
-        """#301: a sweep holding a stale path must not tombstone a message
-        the watcher has since moved; the reaper matches tombstones by
-        message ID, so the stale row would delete the live message."""
-        msg = make_message(message_id="moved@x", filepath="/cur/moved:2,ST")
-        thread = make_thread(messages=[msg])
-        db.upsert_thread(thread, FAKE_EMBEDDING)
-        db.update_filepath("/cur/moved:2,ST", "/cur/moved:2,S", clear_tombstone=True)
-
-        assert db.add_pending_deletion("/cur/moved:2,ST", "moved@x", thread.thread_id) is False
+    def test_a_live_message_is_not_marked(self, db):
+        self._one(db)
+        assert db.mark_lost_messages() == 0
         assert count_pending_deletions(db) == 0
-        assert db.add_pending_deletion("/cur/moved:2,S", "moved@x", thread.thread_id) is True
 
-    def test_add_pending_deletion_writes_iso8601_utc_timestamp(self, db):
+    def test_marking_is_idempotent_and_keeps_the_first_mark(self, db):
+        self._one(db, "/p/INBOX/cur/m1:2,ST")
+        assert db.mark_lost_messages() == 1
+        (first,) = db._conn.execute("SELECT marked_at FROM pending_deletions").fetchall()
+        assert db.mark_lost_messages() == 0
+        assert db._conn.execute("SELECT marked_at FROM pending_deletions").fetchall() == [first]
+
+    def test_marking_one_message_leaves_the_others(self, db):
+        self._one(db, "/p/INBOX/cur/a:2,ST", "a@x")
+        self._one(db, "/p/INBOX/cur/b:2,ST", "b@x")
+        assert db.mark_lost_messages("a@x") == 1
+        assert [r[0] for r in db._conn.execute("SELECT claimant_id FROM pending_deletions")] == [
+            "a@x"
+        ]
+
+    def test_marks_are_iso8601_utc(self, db):
         """Regression: ``datetime('now')`` produced a space-separated,
         TZ-less timestamp that sorted lexicographically before the
         reaper's ISO 8601 cutoff, reaping tombstones up to a day early."""
-        db.add_pending_deletion("/iso", "iso@x", "t1")
-        row = db._conn.execute(
-            "SELECT marked_at FROM pending_deletions WHERE filepath = '/iso'"
-        ).fetchone()
-        marked_at = row["marked_at"]
-        assert "T" in marked_at, f"expected 'T' separator, got {marked_at!r}"
-        assert marked_at.endswith("+00:00"), f"expected '+00:00' TZ, got {marked_at!r}"
+        self._one(db, "/p/INBOX/cur/iso:2,ST", "iso@x")
+        db.mark_lost_messages()
+        (marked_at,) = db._conn.execute("SELECT marked_at FROM pending_deletions").fetchone()
+        assert "T" in marked_at and marked_at.endswith("+00:00")
 
-    def test_tombstone_comparison_includes_cutoff_day(self, db):
-        """End-to-end: a tombstone marked just now compared against a cutoff
-        one second ago must NOT be reaped. Previously the space vs T
-        mismatch made it look older than the cutoff."""
-        from datetime import UTC, datetime, timedelta
-
-        db.add_pending_deletion("/today", "today@x", "t1")
+    def test_a_mark_made_now_is_not_past_a_cutoff_a_second_ago(self, db):
+        self._one(db, "/p/INBOX/cur/today:2,ST", "today@x")
+        db.mark_lost_messages()
         cutoff = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
-        result = db.list_pending_deletions_older_than(cutoff)
-        assert not any(r["filepath"] == "/today" for r in result)
+        assert db.reapable_messages(cutoff) == []
 
-    def test_clear_pending_deletion(self, db):
-        db.add_pending_deletion("/p", "msg@x", "t1")
-        db.clear_pending_deletion("/p")
-        assert db.has_pending_deletion("/p") is False
+    def test_reapable_messages_filter_by_the_earliest_mark(self, db):
+        self._one(db, "/p/INBOX/cur/old:2,ST", "old@x")
+        self._one(db, "/p/INBOX/cur/new:2,ST", "new@x")
+        lose_message(db, "old@x", "2000-01-01T00:00:00+00:00")
+        lose_message(db, "new@x")
+        rows = db.reapable_messages("2024-01-01T00:00:00+00:00")
+        assert [(r["claimant_id"], r["lost_at"]) for r in rows] == [
+            ("old@x", "2000-01-01T00:00:00+00:00")
+        ]
 
-    def test_has_pending_deletion(self, db):
-        assert db.has_pending_deletion("/p") is False
-        db.add_pending_deletion("/p", "msg@x", "t1")
-        assert db.has_pending_deletion("/p") is True
-
-    def test_list_pending_deletions_older_than_filters(self, db):
-        db.add_pending_deletion("/old", "msg1", "t1")
-        # Walk the marked_at back manually to simulate an aged tombstone
-        db._conn.execute(
-            "UPDATE pending_deletions SET marked_at = '2000-01-01T00:00:00+00:00' "
-            "WHERE filepath = '/old'"
-        )
+    def test_a_live_occurrence_makes_a_message_unreapable_and_clears_it(self, db):
+        msg = self._one(db, "/p/INBOX/cur/live:2,S", "live@x")
+        lose_message(db, msg.claimant_id, "2000-01-01T00:00:00+00:00")
+        db._conn.execute("UPDATE message_occurrences SET trashed = 0")
         db._conn.commit()
-        db.add_pending_deletion("/new", "msg2", "t1")
+        assert db.reapable_messages("2024-01-01T00:00:00+00:00") == []
+        assert db.clear_live_tombstones() == 1
+        assert count_pending_deletions(db) == 0
 
-        old = db.list_pending_deletions_older_than("2024-01-01T00:00:00+00:00")
-        assert len(old) == 1
-        assert old[0]["filepath"] == "/old"
+    def test_has_pending_deletion_reads_the_message_at_the_path(self, db):
+        self._one(db, "/p/INBOX/cur/h:2,ST", "h@x")
+        assert db.has_pending_deletion("/p/INBOX/cur/h:2,ST") is False
+        db.mark_lost_messages()
+        assert db.has_pending_deletion("/p/INBOX/cur/h:2,ST") is True
+        assert db.has_pending_deletion("/p/INBOX/cur/other") is False
 
 
 # ---------------------------------------------------------------------------
@@ -2757,15 +2785,15 @@ class TestPendingDeletions:
 
 
 class TestReconciliationSupport:
-    def test_find_message_entry_by_filepath(self, db):
+    def test_find_active_occurrence(self, db):
         msg = make_message(filepath="/maildir/INBOX/cur/find_me")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
-        row = db.find_message_entry_by_filepath("/maildir/INBOX/cur/find_me")
+        row = db.find_active_occurrence("/maildir/INBOX/cur/find_me")
         assert row is not None
-        assert row["message_id"] == msg.message_id
+        assert row["claimant_id"] == msg.claimant_id
 
-    def test_find_message_entry_by_filepath_miss(self, db):
-        assert db.find_message_entry_by_filepath("/nope") is None
+    def test_find_active_occurrence_miss(self, db):
+        assert db.find_active_occurrence("/nope") is None
 
     def test_count_total_messages(self, db):
         assert db.count_total_messages() == 0
@@ -2777,39 +2805,43 @@ class TestReconciliationSupport:
         )
         assert db.count_total_messages() == 2
 
-    def test_update_filepath_moves_map_indexed_and_tombstone_rows(self, db):
-        msg = make_message(filepath="/old/path")
+    def test_update_filepath_moves_the_indexed_row_and_the_occurrence(self, db):
+        msg = make_message(filepath="/old/cur/path")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
-        db.add_pending_deletion("/old/path", msg.message_id, make_thread().thread_id)
 
-        db.update_filepath("/old/path", "/new/path")
+        db.update_filepath("/old/cur/path", "/old/cur/path:2,S", move_occurrence=True)
 
-        assert db.find_message_entry_by_filepath("/new/path") is not None
-        assert db.find_message_entry_by_filepath("/old/path") is None
-        assert db.is_indexed("/new/path") is True
-        assert db.is_indexed("/old/path") is False
-        assert db.has_pending_deletion("/new/path") is True
-        assert db.has_pending_deletion("/old/path") is False
+        assert db.find_active_occurrence("/old/cur/path:2,S") is not None
+        assert db.find_active_occurrence("/old/cur/path") is None
+        assert db.is_indexed("/old/cur/path:2,S") is True
+        assert db.is_indexed("/old/cur/path") is False
+
+    def test_update_filepath_without_the_occurrence_moves_only_file_rows(self, db):
+        msg = make_message(filepath="/old/cur/path")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        assert db.update_filepath("/old/cur/path", "/old/cur/path:2,S") is None
+        assert db.is_indexed("/old/cur/path:2,S") is True
+        assert db.find_active_occurrence("/old/cur/path") is not None
 
     def test_update_filepath_noop_when_paths_equal(self, db):
         msg = make_message(filepath="/same")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
-        db.update_filepath("/same", "/same")  # must not raise
-        assert db.find_message_entry_by_filepath("/same") is not None
+        assert db.update_filepath("/same", "/same", move_occurrence=True) is None
+        assert db.find_active_occurrence("/same") is not None
 
-    def test_reap_removes_map_indexed_and_tombstone(self, db):
+    def test_reap_removes_the_message_its_occurrences_and_file_rows(self, db):
         msg1 = make_message(message_id="keep@x", filepath="/keep")
         msg2 = make_message(message_id="drop@x", filepath="/drop")
         thread = make_thread(messages=[msg1, msg2])
         db.upsert_thread(thread, FAKE_EMBEDDING)
 
-        assert _reap_message(db, thread, "drop@x") == ["/drop"]
+        assert _reap_message(db, thread, "drop@x") == ["drop@x"]
 
-        assert db.find_message_entry_by_filepath("/drop") is None
+        assert db.find_active_occurrence("/drop") is None
         assert db.is_indexed("/drop") is False
-        assert db.has_pending_deletion("/drop") is False
+        assert count_pending_deletions(db) == 0
         # Other message and parent thread row stay intact
-        assert db.find_message_entry_by_filepath("/keep") is not None
+        assert db.find_active_occurrence("/keep") is not None
         assert db.get_thread(thread.thread_id) is not None
 
     def test_reap_skips_unknown_message_id(self, db):
@@ -2820,25 +2852,37 @@ class TestReconciliationSupport:
 
         assert db.reap_thread_messages(thread, FAKE_EMBEDDING, ["ghost@x"]) == []
 
-        assert db.find_message_entry_by_filepath("/keep") is not None
+        assert db.find_active_occurrence("/keep") is not None
         assert db.get_thread(thread.thread_id) is not None
+
+    def test_reap_refuses_a_message_that_is_live_again(self, db):
+        msg1 = make_message(message_id="keep@x", filepath="/keep")
+        msg2 = make_message(message_id="back@x", filepath="/back")
+        thread = make_thread(messages=[msg1, msg2])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        lose_message(db, "back@x")
+        db._conn.execute("UPDATE message_occurrences SET trashed = 0")
+        db._conn.commit()
+        rebuilt = make_thread(messages=[msg1], thread_id=thread.thread_id)
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["back@x"]) is None
+        assert db.find_active_occurrence("/back") is not None
 
     def test_delete_thread_completely_removes_all_dependent_rows(self, db):
         msg1 = make_message(message_id="d1@x", filepath="/d/1")
         msg2 = make_message(message_id="d2@x", filepath="/d/2")
         thread = make_thread(messages=[msg1, msg2], thread_id="doomed", subject="doomedsubject")
         db.upsert_thread(thread, FAKE_EMBEDDING)
-        db.add_pending_deletion("/d/1", "d1@x", "doomed")
 
         _tombstone_thread(db, "doomed")
-        db.delete_thread_completely("doomed")
+        assert db.delete_thread_completely("doomed") is True
 
         assert db.get_thread("doomed") is None
-        assert db.find_message_entry_by_filepath("/d/1") is None
-        assert db.find_message_entry_by_filepath("/d/2") is None
+        assert db.find_active_occurrence("/d/1") is None
+        assert db.find_active_occurrence("/d/2") is None
         assert db.is_indexed("/d/1") is False
         assert db.is_indexed("/d/2") is False
-        assert db.has_pending_deletion("/d/1") is False
+        assert count_pending_deletions(db) == 0
+        assert db._conn.execute("SELECT COUNT(*) FROM message_occurrences").fetchone()[0] == 0
         # threads_fts uses contentless_delete=1 with rowid-keyed deletes; a
         # MATCH against the old subject must return zero hits after the
         # thread is reaped.
@@ -2906,7 +2950,7 @@ class TestReapThreadMessages:
         db.upsert_thread(t1, FAKE_EMBEDDING)
         t2 = threader.assign_thread(reply)
         db.upsert_thread(t2, FAKE_EMBEDDING)
-        db.add_pending_deletion("/r/2", "r2@x", t1.thread_id)
+        lose_message(db, "r2@x")
         return t1, original, reply
 
     def test_atomic_reap_rewrites_thread_and_removes_reaped_rows(self, db, threader):
@@ -2925,7 +2969,7 @@ class TestReapThreadMessages:
 
         removed = db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["r2@x"])
 
-        assert removed == ["/r/2"]
+        assert removed == ["r2@x"]
         # message_thread_map only has the survivor now
         map_ids = {
             r["message_id"]
@@ -3008,8 +3052,8 @@ class TestReapRewritesThreadRow:
             date_first=original.date,
             date_last=kept.date,
         )
-        db.add_pending_deletion("/s/3", "s3@x", t1.thread_id)
-        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["s3@x"]) == ["/s/3"]
+        lose_message(db, "s3@x")
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["s3@x"]) == ["s3@x"]
         assert (hits("keptzx1"), hits("gonezx2")) == (1, 0)
         assert db.get_thread(t1.thread_id).subject == "hello world"
 
@@ -3039,8 +3083,8 @@ class TestReapRewritesThreadRow:
             date_first=reply.date,
             date_last=reply.date,
         )
-        db.add_pending_deletion("/r/1", "r1@x", t1.thread_id)
-        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["r1@x"]) == ["/r/1"]
+        lose_message(db, "r1@x")
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["r1@x"]) == ["r1@x"]
 
         row = db._conn.execute(
             "SELECT body_text FROM threads WHERE thread_id = ?", (t1.thread_id,)
@@ -3094,8 +3138,10 @@ class TestReapRewritesThreadRow:
             date_first=reply.date,
             date_last=reply.date,
         )
-        db.add_pending_deletion("/ds/1", "ds-original@x", t1.thread_id)
-        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["ds-original@x"]) == ["/ds/1"]
+        lose_message(db, "ds-original@x")
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["ds-original@x"]) == [
+            "ds-original@x"
+        ]
 
         # The display label must now reflect the surviving message,
         # not the reaped root.
@@ -3148,8 +3194,8 @@ class TestReapRewritesThreadRow:
             date_first=survivors[0].date,
             date_last=survivors[-1].date,
         )
-        db.add_pending_deletion("/bl/0", "bl-0@x", thread.thread_id)
-        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["bl-0@x"]) == ["/bl/0"]
+        lose_message(db, "bl-0@x")
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["bl-0@x"]) == ["bl-0@x"]
 
         assert db.get_thread_display_subject(thread.thread_id) == expected
 
@@ -3182,8 +3228,8 @@ class TestReapRewritesThreadRow:
             date_first=original.date,
             date_last=original.date,
         )
-        db.add_pending_deletion("/r/4", "r4@x", t1.thread_id)
-        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["r4@x"]) == ["/r/4"]
+        lose_message(db, "r4@x")
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["r4@x"]) == ["r4@x"]
 
         # Primary thread row reflects the new subject
         thread_row = db._conn.execute(
@@ -4215,7 +4261,7 @@ class TestExtractionPurgeOnRemoval:
         _attach(db, "pu4b@x", thread.thread_id, attachment_id)
         _cache_extraction(db, attachment_id)
         for mid in ("pu4a@x", "pu4b@x"):
-            db.add_pending_deletion(f"/m/{mid}", mid, thread.thread_id)
+            lose_message(db, mid)
         survivors = make_thread(
             messages=[m for m in thread.messages if m.message_id == "pu4-keep@x"],
             thread_id=thread.thread_id,
@@ -4367,7 +4413,7 @@ class TestSecureDelete:
         assert db.wal_checkpoint_truncate()[0] == 0
         assert self._MARKER.encode() in db.path.read_bytes()
 
-        assert _reap_message(db, thread, "sd@x") == ["/m/sd@x"]
+        assert _reap_message(db, thread, "sd@x") == ["sd@x"]
 
         assert db.get_attachment_extraction(attachment_id, "pdf") is None
         assert db.wal_checkpoint_truncate()[0] == 0
@@ -4447,7 +4493,7 @@ class TestFtsScrub:
         raw = db.path.read_bytes()
         for marker in (self._THREAD, self._CHUNK, self._FILE):
             assert marker.encode() in raw
-        assert _reap_message(db, thread, "fts@x") == ["/m/fts@x"]
+        assert _reap_message(db, thread, "fts@x") == ["fts@x"]
 
     def test_reaped_terms_survive_without_scrub(self, db, threader):
         """Shows the check below can fail: after the reap and a
@@ -4735,7 +4781,7 @@ class TestFtsScrub:
         gone = make_message(message_id="g2@x", filepath="/m/g2", body_text="gone")
         thread = make_thread([gone, keep])
         db.upsert_thread(thread, FAKE_EMBEDDING)
-        assert _reap_message(db, thread, "g2@x") == ["/m/g2"]
+        assert _reap_message(db, thread, "g2@x") == ["g2@x"]
         db.scrub_reaped_fts()
         assert budgets[0] == -1
 
@@ -5194,14 +5240,16 @@ class TestMessagesTable:
         ]
         assert index_cols == ["address", "name"]
 
-    def test_update_filepath_moves_message_locator(self, db):
+    def test_update_filepath_moves_the_occurrence_locator(self, db):
         msg = make_message(message_id="m1@example.com", filepath="/maildir/INBOX/cur/m1:2,S")
         db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
 
-        db.update_filepath("/maildir/INBOX/cur/m1:2,S", "/maildir/INBOX/cur/m1:2,RS")
+        db.update_filepath(
+            "/maildir/INBOX/cur/m1:2,S", "/maildir/INBOX/cur/m1:2,RS", move_occurrence=True
+        )
 
-        row = db._conn.execute("SELECT filepath FROM messages").fetchone()
-        assert row["filepath"] == "/maildir/INBOX/cur/m1:2,RS"
+        row = db._conn.execute("SELECT relative_path FROM message_occurrences").fetchone()
+        assert row["relative_path"] == "maildir/INBOX/cur/m1:2,RS"
 
     def test_removing_message_or_thread_cascades(self, db):
         m1 = make_message(message_id="m1@example.com", filepath="/m/1")
@@ -5222,50 +5270,54 @@ class TestMessagesTable:
 
 
 class TestUpdateFilepathWithFolder:
-    """A cross-folder rename records the new locator and folder in one
-    transaction — both commit, or neither does."""
+    """An observed cross-folder rename replaces the occurrence and moves
+    the file's rows in one transaction — all commit, or none does
+    (#1566, #1567)."""
 
     def _seed(self, db):
         msg = make_message(message_id="m1@example.com", filepath="/md/INBOX/cur/m1")
         db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
 
     def _state(self, db):
-        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
-        mapped = db._conn.execute("SELECT filepath FROM message_thread_map").fetchone()
-        return row["folder"], row["filepath"], mapped["filepath"]
+        row = db._conn.execute(
+            "SELECT folder, relative_path FROM message_occurrences WHERE state = 'active'"
+        ).fetchone()
+        return row["folder"], row["relative_path"], db.is_indexed("/md/INBOX/cur/m1")
 
     def test_updates_locator_and_folder_together(self, db):
         self._seed(db)
-        db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", folder="Archive")
-        assert self._state(db) == ("Archive", "/md/Archive/cur/m1", "/md/Archive/cur/m1")
+        db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", move_occurrence=True)
+        assert self._state(db) == ("md/Archive", "md/Archive/cur/m1", False)
 
     def test_rolls_back_with_an_enclosing_transaction(self, db):
         self._seed(db)
         with pytest.raises(RuntimeError), db.transaction():
-            db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", folder="Archive")
+            db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", move_occurrence=True)
             raise RuntimeError("caller failed after the rename")
-        assert self._state(db) == ("INBOX", "/md/INBOX/cur/m1", "/md/INBOX/cur/m1")
+        assert self._state(db) == ("md/INBOX", "md/INBOX/cur/m1", True)
 
-    def test_folder_failure_rolls_back_the_locator(self, db):
+    def test_a_failed_occurrence_write_rolls_back_the_file_rows(self, db):
         self._seed(db)
         db._conn.execute(
-            "CREATE TRIGGER fail_folder BEFORE UPDATE OF folder ON messages "
+            "CREATE TRIGGER fail_move BEFORE INSERT ON message_occurrences "
             "BEGIN SELECT RAISE(ABORT, 'injected'); END"
         )
         with pytest.raises(sqlite3.IntegrityError, match="injected"):
-            db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", folder="Archive")
-        assert self._state(db) == ("INBOX", "/md/INBOX/cur/m1", "/md/INBOX/cur/m1")
-        assert db.is_indexed("/md/INBOX/cur/m1")
+            db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", move_occurrence=True)
+        assert self._state(db) == ("md/INBOX", "md/INBOX/cur/m1", True)
         assert not db.is_indexed("/md/Archive/cur/m1")
 
 
 class TestMaildirFlagState:
-    """``seen`` / ``flagged`` / ``replied`` follow the stored filepath's
-    ``:2,<flags>`` suffix, written in the same statement as the path."""
+    """An occurrence's ``seen`` / ``flagged`` / ``replied`` / ``trashed``
+    follow its file's ``:2,<flags>`` suffix, written with its path."""
 
     def _flags(self, db):
-        row = db._conn.execute("SELECT filepath, seen, flagged, replied FROM messages").fetchone()
-        return row["filepath"], row["seen"], row["flagged"], row["replied"]
+        row = db._conn.execute(
+            "SELECT relative_path, seen, flagged, replied, trashed FROM message_occurrences "
+            "WHERE state = 'active'"
+        ).fetchone()
+        return "/" + row["relative_path"], row["seen"], row["flagged"], row["replied"]
 
     def test_upsert_records_the_flags_of_the_indexed_file(self, db):
         msg = make_message(filepath="/md/INBOX/cur/m1:2,FS")
@@ -5288,15 +5340,18 @@ class TestMaildirFlagState:
     def test_rename_updates_the_flags(self, db, dest, expected):
         msg = make_message(filepath="/md/INBOX/new/m1")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
-        db.update_filepath("/md/INBOX/new/m1", dest)
+        db.update_filepath("/md/INBOX/new/m1", dest, move_occurrence=True)
         assert self._flags(db) == (dest, *expected)
 
     def test_cross_folder_move_updates_flags_and_folder(self, db):
         msg = make_message(filepath="/md/INBOX/cur/m1:2,S")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
-        db.update_filepath("/md/INBOX/cur/m1:2,S", "/md/Archive/cur/m1:2,FS", folder="Archive")
+        db.update_filepath("/md/INBOX/cur/m1:2,S", "/md/Archive/cur/m1:2,FS", move_occurrence=True)
         assert self._flags(db) == ("/md/Archive/cur/m1:2,FS", 1, 1, 0)
-        assert db._conn.execute("SELECT folder FROM messages").fetchone()[0] == "Archive"
+        folder = db._conn.execute(
+            "SELECT folder FROM message_occurrences WHERE state = 'active'"
+        ).fetchone()[0]
+        assert folder == "md/Archive"
 
     def test_reindex_rewrites_the_flags(self, db):
         """A re-parse of the same file (the claimant is unchanged) takes the
@@ -5312,19 +5367,26 @@ class TestMaildirFlagState:
         assert self._flags(db) == ("/md/INBOX/cur/m1:2,", 0, 0, 0)
 
 
-def test_rename_lookups_use_the_filepath_index(db):
-    """Every flag rename updates ``messages`` by filepath; without an index
-    that is a full-table scan under the shared write lock."""
-    for sql, params in (
+def test_rename_and_scan_lookups_use_an_index(db):
+    """Every flag rename looks its occurrence up by path, and the
+    reconciliation scan a found copy's message by content hash (#1567);
+    without an index each is a full-table scan under the shared write
+    lock."""
+    for sql, params, index in (
         (
-            "UPDATE messages SET filepath = ?, seen = ?, flagged = ?, replied = ? "
-            "WHERE filepath = ?",
-            ("a", 0, 0, 0, "b"),
+            "SELECT id FROM message_occurrences "
+            "WHERE account_id = ? AND relative_path = ? AND state = 'active'",
+            (1, "a"),
+            "idx_message_occurrences_path",
         ),
-        ("UPDATE messages SET folder = ? WHERE filepath = ?", ("a", "b")),
+        (
+            "SELECT claimant_id FROM messages WHERE content_hash = ? ORDER BY claimant_id LIMIT 1",
+            ("a",),
+            "idx_messages_content_hash",
+        ),
     ):
         plan = " ".join(r["detail"] for r in db._conn.execute("EXPLAIN QUERY PLAN " + sql, params))
-        assert "idx_messages_filepath" in plan, plan
+        assert index in plan, plan
 
 
 @pytest.mark.parametrize(
@@ -5521,7 +5583,9 @@ class TestZeroVectorRecoveryBatching:
 
         assert sorted(found) == sorted(stuck_paths)
         vec_lookups = [s for s in statements if "FROM threads_vec WHERE thread_id IN" in s]
-        map_lookups = [s for s in statements if "FROM message_thread_map WHERE thread_id IN" in s]
+        map_lookups = [
+            s for s in statements if "FROM message_thread_map t WHERE t.thread_id IN" in s
+        ]
         assert len(vec_lookups) == 4  # ceil(40 / 10)
         assert len(map_lookups) == 2  # ceil(14 / 10)
 
@@ -5611,8 +5675,8 @@ class TestFtsSubjectScanBound:
             date_first=survivors[0].date,
             date_last=survivors[-1].date,
         )
-        db.add_pending_deletion("/long/0", "long0@x", "long0@x")
+        lose_message(db, "long0@x")
         before = len(calls)
-        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["long0@x"]) == ["/long/0"]
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["long0@x"]) == ["long0@x"]
         assert len(calls) - before <= 1 + threader_mod.FTS_SUBJECT_SCAN_ROWS
         assert max(calls[before:]) <= threader_mod.FTS_SUBJECT_SCAN_CHARS

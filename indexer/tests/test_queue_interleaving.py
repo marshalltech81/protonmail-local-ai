@@ -287,7 +287,7 @@ class TestPipeline:
         embedder = make_mock_embedder(_VECTOR)
         assert _drain(db, queue, embedder, max_passes=1) == 4
         assert phase1_order == [fresh, *paths[:3]]
-        assert db.find_message_entry_by_filepath(fresh) is not None
+        assert db.find_active_occurrence(fresh) is not None
         db.close()
 
     def test_mail_arriving_mid_drain_goes_ahead_of_the_rest(
@@ -327,7 +327,7 @@ class TestPipeline:
         assert row["last_error"] == main.RENAME_DEFERRED_ERROR
         wait = datetime.fromisoformat(row["next_attempt_at"]) - datetime.now(UTC)
         assert wait > timedelta(seconds=main.RENAME_DEFER_SECS - 10)
-        assert db.find_message_entry_by_filepath(fresh) is not None
+        assert db.find_active_occurrence(fresh) is not None
         # Not claimed again before the wait ends.
         assert paths[0] not in [r["filepath"] for r in queue.claim_batch(8)]
         db.close()

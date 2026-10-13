@@ -34,7 +34,14 @@ from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import TEST_ACCOUNT, make_message, make_mock_embedder, make_ole2, make_thread
+from tests.conftest import (
+    TEST_ACCOUNT,
+    lose_message,
+    make_message,
+    make_mock_embedder,
+    make_ole2,
+    make_thread,
+)
 
 # Captured before any test monkeypatches the name, so the sorted
 # wrapper installed by ``_run`` still walks the real Maildir.
@@ -578,8 +585,11 @@ class TestOnMovedIndexesDestination:
 
         def state():
             return [
-                tuple(r)
-                for r in db._conn.execute("SELECT filepath, seen, flagged, replied FROM messages")
+                ("/" + r[0], *r[1:])
+                for r in db._conn.execute(
+                    "SELECT relative_path, seen, flagged, replied FROM message_occurrences "
+                    "WHERE state = 'active'"
+                )
             ]
 
         assert state() == [(str(delivered), 0, 0, 0)]
@@ -4462,7 +4472,7 @@ class TestRequeueOcrDisabledExtractions:
             },
         )
         rows = self._ocr_disabled_rows(db)
-        assert sorted((r["filepath"], r["extraction_error"]) for r in rows) == sorted(
+        assert sorted(("/" + r["relative_path"], r["extraction_error"]) for r in rows) == sorted(
             [
                 (paths["photo"], OCR_DISABLED_ERROR),
                 (paths["scan"], SCANNED_PDF_OCR_DISABLED_ERROR),
@@ -7940,20 +7950,28 @@ class TestMessageRecordsEndToEnd:
         dest.parent.mkdir(parents=True)
         src.rename(dest)
         db._conn.execute(
-            "CREATE TRIGGER fail_folder BEFORE UPDATE OF folder ON messages "
+            "CREATE TRIGGER fail_move BEFORE INSERT ON message_occurrences "
             "BEGIN SELECT RAISE(ABORT, 'injected'); END"
         )
         main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
 
-        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
-        assert (row["folder"], row["filepath"]) == ("INBOX", str(src))
+        def active():
+            return db._conn.execute(
+                "SELECT folder, relative_path FROM message_occurrences WHERE state = 'active'"
+            ).fetchall()
+
+        ((folder, relative),) = active()
+        assert folder.endswith("INBOX") and "/" + relative == str(src)
         assert not db.is_indexed(str(dest))
 
-        db._conn.execute("DROP TRIGGER fail_folder")
+        db._conn.execute("DROP TRIGGER fail_move")
+        # The periodic rescan's sweep retires the vanished source (#1567),
+        # then its walk queues the destination.
+        main.sweep_paths(db, maildir_root=maildir)
         assert main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN) == 1
         _drain(queue, db, embedder, Threader(db))
-        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
-        assert (row["folder"], row["filepath"]) == ("Archive", str(dest))
+        ((folder, relative),) = active()
+        assert folder.endswith("Archive") and "/" + relative == str(dest)
 
     def _ingest_headers(self, tmp_path, monkeypatch, headers: str, message_id: str):
         maildir = tmp_path / "maildir"
@@ -8430,10 +8448,10 @@ class TestMessageRecordsEndToEnd:
         )
 
         row = db._conn.execute(
-            "SELECT folder, filepath FROM messages WHERE message_id = 'moved@example.com'"
+            "SELECT folder, relative_path FROM message_occurrences WHERE state = 'active'"
         ).fetchone()
-        assert row["filepath"] == str(dest)
-        assert row["folder"] == "Archive"
+        assert "/" + row["relative_path"] == str(dest)
+        assert row["folder"].endswith("Archive")
 
     def test_flag_rename_within_folder_keeps_folder(self, tmp_path, monkeypatch):
         maildir = tmp_path / "maildir"
@@ -8443,21 +8461,23 @@ class TestMessageRecordsEndToEnd:
         db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
-        folder_before = db._conn.execute("SELECT folder FROM messages").fetchone()["folder"]
+        occurrence = "SELECT id, folder, relative_path FROM message_occurrences"
+        before = db._conn.execute(occurrence).fetchone()
 
         dest = src.with_name("1700000000.M1.host:2,RS")
         src.rename(dest)
         main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
 
-        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
-        assert row["filepath"] == str(dest)
-        assert row["folder"] == folder_before
+        (row,) = db._conn.execute(occurrence).fetchall()
+        assert "/" + row["relative_path"] == str(dest)
+        assert (row["id"], row["folder"]) == (before["id"], before["folder"])
 
-    # The ``EXISTS`` predicate mcp-server's ``get_message`` / ``query_messages``
-    # evaluate for ``pending_deletion`` (``mcp-server/src/lib/sqlite.py``).
+    # The message-level ``pending_deletion`` derived from the occurrences
+    # (#1567): no live occurrence and a tombstone.
     _PENDING_DELETION_SQL = (
-        "SELECT EXISTS (SELECT 1 FROM pending_deletions p WHERE p.filepath = m.filepath "
-        "AND p.claimant_id = m.claimant_id) FROM messages m"
+        "SELECT NOT EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = "
+        "m.claimant_id AND o.state = 'active' AND o.trashed = 0) AND EXISTS (SELECT 1 FROM "
+        "pending_deletions p WHERE p.claimant_id = m.claimant_id) FROM messages m"
     )
 
     def _index_with_leftover_tombstone(self, tmp_path, monkeypatch, subject: str):
@@ -8470,9 +8490,9 @@ class TestMessageRecordsEndToEnd:
         db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
-        entry = db.find_message_entry_by_filepath(str(src))
+        entry = db.find_active_occurrence(str(src))
         assert entry is not None
-        assert db.add_pending_deletion(str(src), entry["claimant_id"], entry["thread_id"])
+        lose_message(db, entry["claimant_id"])
         assert db._conn.execute(self._PENDING_DELETION_SQL).fetchone()[0] == 1
         return db, queue, src
 
@@ -8498,8 +8518,7 @@ class TestMessageRecordsEndToEnd:
         # Nothing reaped: the message, its locator and its chunks survive
         # under the restored name.
         assert db.is_indexed(str(dest))
-        row = db._conn.execute("SELECT filepath FROM messages").fetchone()
-        assert row["filepath"] == str(dest)
+        assert db.find_active_occurrence(str(dest)) is not None
         assert db._conn.execute("SELECT count(*) FROM message_thread_map").fetchone()[0] == 1
         assert db._conn.execute("SELECT count(*) FROM message_chunks").fetchone()[0] == 1
         assert db._conn.execute("SELECT count(*) FROM reaped_messages").fetchone()[0] == 0
@@ -8529,9 +8548,9 @@ class TestMessageRecordsEndToEnd:
             paths.append(src)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
         for src in paths:
-            entry = db.find_message_entry_by_filepath(str(src))
+            entry = db.find_active_occurrence(str(src))
             assert entry is not None
-            assert db.add_pending_deletion(str(src), entry["claimant_id"], entry["thread_id"])
+            lose_message(db, entry["claimant_id"])
         handler = main.MaildirHandler(db, queue)
 
         with caplog.at_level(logging.INFO):
@@ -8918,6 +8937,7 @@ class TestTrashedFilesWithReconciliation:
                 max_batch_pct=1.0,
                 force=False,
             ),
+            maildir_root=maildir,
         )
         queue.enqueue(str(live), REASON_INITIAL_SCAN)
         drain()
@@ -8965,7 +8985,8 @@ class TestTrashedFilesWithReconciliation:
         queue.enqueue(str(live), REASON_INITIAL_SCAN)
         drain()
         live.rename(trashed)
-        db.update_filepath(str(live), str(trashed))
+        # The startup scan follows the rename once the bytes match (#1567).
+        db.update_filepath(str(live), str(trashed), move_occurrence=True)
         queue.enqueue(str(trashed), REASON_INITIAL_SCAN)
         drain()  # parked
         assert queue.has_pending_row(str(trashed))
@@ -9728,9 +9749,9 @@ class TestWalMaintenance:
             keep = make_message(message_id="k@x", filepath="/m/k", body_text="survivor")
             thread = make_thread([reaped, keep])
             db.upsert_thread(thread, embedding)
-            db.add_pending_deletion("/m/r", "r@x", thread.thread_id)
+            lose_message(db, "r@x")
             rebuilt = make_thread([keep], thread_id=thread.thread_id, subject=thread.subject)
-            assert db.reap_thread_messages(rebuilt, embedding, ["r@x"]) == ["/m/r"]
+            assert db.reap_thread_messages(rebuilt, embedding, ["r@x"]) == ["r@x"]
             assert db.wal_checkpoint_truncate()[0] == 0
             assert b"zqmaintmark" in db.path.read_bytes()
 

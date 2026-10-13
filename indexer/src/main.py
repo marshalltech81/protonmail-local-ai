@@ -121,7 +121,6 @@ from .parser import (
     Message,
     MessageNestingError,
     OversizedMessageError,
-    _derive_folder,
     message_sort_time,
     parse_email,
 )
@@ -1126,45 +1125,37 @@ class MaildirHandler(FileSystemEventHandler):
                 self.sync_completed.set()
             return
 
-        if self.db.is_indexed(src_path):
-            # Case 1: rename of an existing indexed message. Flag renames
-            # stay in one folder; a move across folders also carries the
-            # new folder, recorded atomically with the locator. If that
-            # write fails it rolls back whole: the destination stays
-            # unindexed and the periodic Maildir walk re-indexes it.
-            dest_folder = _derive_folder(dest_path_obj, MAILDIR_PATH)
-            folder_change = (
-                dest_folder if dest_folder != _derive_folder(Path(src_path), MAILDIR_PATH) else None
-            )
+        if self.db.is_indexed(src_path) or self.db.find_active_occurrence(src_path) is not None:
+            # Case 1: rename of an indexed file or of an occurrence (a
+            # copy the reconciliation scan bound without indexing it).
+            # The occurrence follows the observed rename (#1566): a flag
+            # rename keeps it, a move across folders replaces it, in one
+            # transaction with the file's other rows. If that write fails
+            # it rolls back whole: the destination stays unindexed and the
+            # periodic Maildir walk or scan picks it up.
             if self.reconciler is not None:
                 try:
-                    self.reconciler.handle_moved(src_path, dest_path, folder=folder_change)
+                    self.reconciler.handle_moved(src_path, dest_path)
                 except Exception as e:
                     log.error("reconciler on_moved failed: %s", type(e).__name__)
             else:
                 # Archive mode has no reconciler; still move the
-                # indexed_files / message_thread_map filepath forward so
-                # future lookups find the current on-disk name. A rename
-                # that drops the T flag restores the message, so clear a
-                # tombstone an earlier mirror-mode run left on it (same
-                # rule as ``Reconciler.handle_moved``) rather than carry
-                # it to the live name, where it would report the message
-                # as pending deletion for ever (#860). Archive mode never
-                # reaps, so a leftover tombstone otherwise outlives the
-                # restore. The lookup stays inside the error boundary:
-                # watchdog does not catch handler exceptions, and one
-                # escaping here would end the observer thread.
+                # indexed_files row and the occurrence forward so future
+                # lookups find the current on-disk name. A rename that
+                # drops the T flag restores the message, and the move
+                # clears a tombstone an earlier mirror-mode run left on
+                # it (same rule as ``Reconciler.handle_moved``), where it
+                # would otherwise report the message as pending deletion
+                # for ever (#860). Archive mode never reaps, so a
+                # leftover tombstone otherwise outlives the restore. The
+                # lookup stays inside the error boundary: watchdog does
+                # not catch handler exceptions, and one escaping here
+                # would end the observer thread.
                 restored = not is_trashed(dest_path_obj)
                 try:
                     leftover_tombstone = restored and self.db.has_pending_deletion(src_path)
-                    self.db.update_filepath(
-                        src_path,
-                        dest_path,
-                        folder=folder_change,
-                        clear_tombstone=restored,
-                        # An observed rename event: the occurrence follows (#1566).
-                        move_occurrence=True,
-                    )
+                    # An observed rename event: the occurrence follows (#1566).
+                    self.db.update_filepath(src_path, dest_path, move_occurrence=True)
                 except Exception as e:
                     log.error("update_filepath failed on rename: %s", type(e).__name__)
                     return
@@ -2580,7 +2571,7 @@ def _drain_queue_batched(
         batch: list[_BatchedMsg] = []
         for row in rows:
             if skip_trashed and is_trashed(row["filepath"]):
-                if db.find_message_entry_by_filepath(row["filepath"]) is None:
+                if db.find_active_occurrence(row["filepath"]) is None:
                     queue.mark_skipped(row["filepath"], reason="trashed")
                 else:
                     queue.defer(
@@ -3655,12 +3646,15 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> None
                 brake = "ok"
             log.info(
                 "maintenance pass=reconcile ms=%d tombstoned=%d cleared=%d renamed=%d "
-                "missing=%d threads_reaped=%d threads_rebuilt=%d blocked_threads=%d brake=%s",
+                "retired=%d bound=%d scan=%s threads_reaped=%d threads_rebuilt=%d "
+                "blocked_threads=%d brake=%s",
                 (_monotonic() - started) * 1000,
                 swept.get("tombstoned", 0),
                 swept.get("cleared", 0),
                 swept.get("renamed", 0),
-                swept.get("missing", 0),
+                swept.get("retired", 0),
+                swept.get("bound", 0),
+                "complete" if swept.get("complete", True) else "partial",
                 reaped.get("threads_reaped", 0),
                 reaped.get("threads_rebuilt", 0),
                 reaped.get("blocked_threads", 0),

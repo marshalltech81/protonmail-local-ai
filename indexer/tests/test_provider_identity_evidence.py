@@ -758,10 +758,12 @@ class TestClaimantsStayIndependent:
         for table in populated:
             assert rows_a[table] and rows_b[table], table
         paths = {
-            r["claimant_id"]: r["filepath"]
-            for r in idx.db._conn.execute("SELECT claimant_id, filepath FROM messages")
+            r["claimant_id"]: idx.maildir / r["relative_path"]
+            for r in idx.db._conn.execute(
+                "SELECT claimant_id, relative_path FROM message_occurrences WHERE state = 'active'"
+            )
         }
-        assert paths == {a: str(first), b: str(second)}
+        assert paths == {a: first, b: second}
         text_a = " ".join(idx.chunks_of(a).values())
         text_b = " ".join(idx.chunks_of(b).values())
         assert "alphaword" in text_a and "betaword" not in text_a
@@ -779,39 +781,35 @@ class TestClaimantsStayIndependent:
         held = idx.reconciler(grace_days=1)
         held.sweep()
         held.reap()
+        (occurrence_a,) = rows_a["message_occurrences"]
         tombstones = [
-            (r["filepath"], r["claimant_id"], r["thread_id"])
+            tuple(r)
             for r in idx.db._conn.execute(
-                "SELECT filepath, claimant_id, thread_id FROM pending_deletions"
+                "SELECT occurrence_id, claimant_id FROM pending_deletions"
             )
         ]
-        (thread_a,) = idx.db._conn.execute(
-            "SELECT thread_id FROM messages WHERE claimant_id = ?", (a,)
-        ).fetchone()
-        assert tombstones == [(str(trashed), a, thread_a)]
+        assert tombstones == [(occurrence_a[0], a)]
         held_a = idx.rows_of(a)
-        assert held_a.pop("pending_deletions") == [(str(trashed), a, thread_a, mock.ANY)]
-        # Every other row of the first claimant is as it was, apart from
-        # the sweep following the flag rename to the trashed path. The
-        # mailbox occurrence stays where it was: a sweep infers the rename
-        # from the uniq alone, a missed move left to reconciliation
-        # (#1566, #1567).
-
-        def follow(table: str, row: tuple) -> tuple:
-            if table == "message_occurrences":
-                return row
-            return tuple(str(trashed) if v == str(first) else v for v in row)
-
+        assert held_a.pop("pending_deletions") == [(occurrence_a[0], a, mock.ANY)]
+        # The sweep followed the flag rename to the trashed path once the
+        # bytes matched (#1567): the same occurrence, now trashed. Every
+        # other row of the first claimant is as it was.
+        (moved,) = held_a.pop("message_occurrences")
+        assert moved[0] == occurrence_a[0]
+        assert idx.maildir / moved[5] == trashed
         renamed = {
-            table: sorted(follow(table, row) for row in rows)
+            table: rows
             for table, rows in rows_a.items()
-            if table != "pending_deletions"
+            if table not in ("pending_deletions", "message_occurrences")
         }
         assert held_a == renamed
         assert idx.rows_of(b) == rows_b
         assert not idx.db._conn.execute("SELECT 1 FROM reaped_messages").fetchall()
         idx.assert_identity_stored_only_as_header_evidence(both)
-        observed |= {t for t, r in held_a.items() if r} | {"pending_deletions"}
+        observed |= {t for t, r in held_a.items() if r} | {
+            "pending_deletions",
+            "message_occurrences",
+        }
 
         idx.reconciler(grace_days=0).reap()
 

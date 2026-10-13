@@ -245,6 +245,23 @@ def count_pending_deletions(db: Database) -> int:
     return int(db._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])
 
 
+def lose_message(db: Database, claimant_id: str, marked_at: str | None = None) -> None:
+    """Make a message lose its last live occurrence, as mbsync ``T``-flagging
+    every copy would (#1567): its active occurrences are marked trashed and
+    each of its occurrences is tombstoned, at ``marked_at`` (now when not
+    given). Tests that need a reapable message without renaming files."""
+    db._conn.execute(
+        "UPDATE message_occurrences SET trashed = 1 WHERE claimant_id = ? AND state = 'active'",
+        (claimant_id,),
+    )
+    db._conn.execute(
+        "INSERT OR REPLACE INTO pending_deletions (occurrence_id, claimant_id, marked_at) "
+        "SELECT id, claimant_id, ? FROM message_occurrences WHERE claimant_id = ?",
+        (marked_at or datetime.now(UTC).isoformat(), claimant_id),
+    )
+    db._conn.commit()
+
+
 @pytest.fixture(autouse=True)
 def _account_env(monkeypatch):
     """``main()`` and the maintenance commands read the account from the

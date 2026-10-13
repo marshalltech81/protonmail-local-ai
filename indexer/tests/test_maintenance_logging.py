@@ -209,7 +209,14 @@ class _FakeReconciler:
         err = self.outcomes.pop(0)
         if err is not None:
             raise err
-        return {"tombstoned": 2, "cleared": 1, "renamed": 3, "missing": 0}
+        return {
+            "tombstoned": 2,
+            "cleared": 1,
+            "renamed": 3,
+            "retired": 4,
+            "bound": 5,
+            "complete": False,
+        }
 
     def reap(self):
         return {"threads_reaped": 1, "threads_rebuilt": 0, "aborted": False, "blocked_threads": 0}
@@ -699,8 +706,8 @@ class TestReconcileSummary:
         (line,) = _messages(caplog, "maintenance pass=reconcile")
         assert line.levelno == logging.INFO
         assert re.fullmatch(
-            rf"maintenance pass=reconcile {_MS} tombstoned=2 cleared=1 renamed=3 missing=0 "
-            r"threads_reaped=1 threads_rebuilt=0 blocked_threads=0 brake=ok",
+            rf"maintenance pass=reconcile {_MS} tombstoned=2 cleared=1 renamed=3 retired=4 "
+            r"bound=5 scan=partial threads_reaped=1 threads_rebuilt=0 blocked_threads=0 brake=ok",
             line.getMessage(),
         )
         db.close()

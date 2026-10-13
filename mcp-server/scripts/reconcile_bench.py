@@ -28,8 +28,9 @@ Run it inside the mcp-server image (docs/mcp-tools.md, "Certifying a
 paged run: sizing"). The tables mirror the indexer's ``messages``,
 ``message_participants``, ``message_participant_names``,
 ``message_chunks`` and ``message_chunks_fts``, ``entities``,
-``attachments``, ``attachments_fts``, ``attachment_extractions`` and
-``pending_deletions`` with all their indexes, and hold the rows the
+``attachments``, ``attachments_fts``, ``attachment_extractions``,
+``accounts``, ``message_occurrences`` and ``pending_deletions`` with all
+their indexes, and hold the rows the
 indexer writes for the messages ``render_eml`` describes
 (indexer/tests/test_reconcile_bench_fidelity.py indexes those files
 with the indexer and compares). Other tables (threads, vectors, header evidence, the
@@ -121,6 +122,7 @@ CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
 CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
 CREATE INDEX idx_messages_effective ON messages(effective_at);
 CREATE INDEX idx_messages_filepath ON messages(filepath);
+CREATE INDEX idx_messages_content_hash ON messages(content_hash);
 CREATE TABLE message_participants (
     claimant_id TEXT NOT NULL,
     role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
@@ -214,12 +216,12 @@ CREATE TABLE attachment_extractions (
     PRIMARY KEY (attachment_id, extractor_module)
 );
 CREATE TABLE pending_deletions (
-    filepath    TEXT PRIMARY KEY,
-    claimant_id TEXT NOT NULL,
-    thread_id   TEXT NOT NULL,
-    marked_at   TEXT NOT NULL
+    occurrence_id INTEGER PRIMARY KEY
+                  REFERENCES message_occurrences(id) ON DELETE CASCADE,
+    claimant_id   TEXT NOT NULL,
+    marked_at     TEXT NOT NULL
 );
-CREATE INDEX idx_pending_deletions_thread ON pending_deletions(thread_id);
+CREATE INDEX idx_pending_deletions_claimant ON pending_deletions(claimant_id, marked_at);
 CREATE VIRTUAL TABLE attachments_fts USING fts5(
     filename,
     content_type,
@@ -240,6 +242,34 @@ CREATE TABLE accounts (
 );
 INSERT INTO accounts (id, scope_uuid, provider, created_at)
 VALUES (1, '00000000-0000-4000-8000-00000000be0c', 'proton-bridge', '2026-01-01T00:00:00+00:00');
+-- Each message's mailbox occurrence (#1566), which the server's readers
+-- join for folder, flags and pending deletion (#1567, #1568).
+CREATE TABLE message_occurrences (
+    id                INTEGER PRIMARY KEY,
+    account_id        INTEGER NOT NULL REFERENCES accounts(id),
+    folder            TEXT NOT NULL,
+    uniq              TEXT NOT NULL,
+    claimant_id       TEXT NOT NULL REFERENCES messages(claimant_id) ON DELETE CASCADE,
+    relative_path     TEXT NOT NULL,
+    seen              INTEGER NOT NULL CHECK (seen IN (0, 1)),
+    flagged           INTEGER NOT NULL CHECK (flagged IN (0, 1)),
+    replied           INTEGER NOT NULL CHECK (replied IN (0, 1)),
+    trashed           INTEGER NOT NULL CHECK (trashed IN (0, 1)),
+    first_observed_at TEXT,
+    last_observed_at  TEXT,
+    internal_at       TEXT,
+    state             TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+    retired_at        TEXT,
+    provenance        TEXT NOT NULL
+                      CHECK (provenance IN ('parse', 'rename', 'scan', 'migration')),
+    CHECK ((state = 'retired') = (retired_at IS NOT NULL))
+);
+CREATE UNIQUE INDEX idx_message_occurrences_key
+    ON message_occurrences(account_id, folder, uniq, claimant_id) WHERE state = 'active';
+CREATE UNIQUE INDEX idx_message_occurrences_path
+    ON message_occurrences(account_id, relative_path) WHERE state = 'active';
+CREATE INDEX idx_message_occurrences_claimant
+    ON message_occurrences(claimant_id);
 """
 
 # Longest Message-ID the indexer accepts (indexer/src/parser.py
@@ -925,6 +955,7 @@ def build(
             cid, tid, shape = rec.cid, rec.tid, rec.shape
             conn.execute("BEGIN")
             conn.execute(_INSERT_MESSAGE, _message_values(rec, now, 1))
+            _bind_occurrence(conn, rec, now)
             # One participant row per (role, address), named by its first
             # display name; every distinct name in the name rows.
             conn.executemany(
@@ -1681,31 +1712,6 @@ CREATE TABLE IF NOT EXISTS indexing_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_indexing_jobs_status_next
     ON indexing_jobs(status, next_attempt_at);
-CREATE TABLE IF NOT EXISTS message_occurrences (
-    id                INTEGER PRIMARY KEY,
-    account_id        INTEGER NOT NULL REFERENCES accounts(id),
-    folder            TEXT NOT NULL,
-    uniq              TEXT NOT NULL,
-    claimant_id       TEXT NOT NULL REFERENCES messages(claimant_id) ON DELETE CASCADE,
-    relative_path     TEXT NOT NULL,
-    seen              INTEGER NOT NULL CHECK (seen IN (0, 1)),
-    flagged           INTEGER NOT NULL CHECK (flagged IN (0, 1)),
-    replied           INTEGER NOT NULL CHECK (replied IN (0, 1)),
-    trashed           INTEGER NOT NULL CHECK (trashed IN (0, 1)),
-    first_observed_at TEXT,
-    last_observed_at  TEXT,
-    internal_at       TEXT,
-    state             TEXT NOT NULL CHECK (state IN ('active', 'retired')),
-    retired_at        TEXT,
-    provenance        TEXT NOT NULL CHECK (provenance IN ('parse', 'rename', 'migration')),
-    CHECK ((state = 'retired') = (retired_at IS NOT NULL))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_message_occurrences_key
-    ON message_occurrences(account_id, folder, uniq, claimant_id) WHERE state = 'active';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_message_occurrences_path
-    ON message_occurrences(account_id, relative_path) WHERE state = 'active';
-CREATE INDEX IF NOT EXISTS idx_message_occurrences_claimant
-    ON message_occurrences(claimant_id);
 """
 WRITER_TABLES = (
     "message_headers",
@@ -1718,7 +1724,6 @@ WRITER_TABLES = (
     "entity_aliases",
     "message_chunks_vec",
     "indexing_jobs",
-    "message_occurrences",
 )
 
 
@@ -1726,7 +1731,8 @@ def _bind_occurrence(conn: sqlite3.Connection, rec, now: str) -> None:
     """indexer/src/database.py ``_bind_occurrence`` (#1566): the file's
     mailbox occurrence under the benchmark's one account, its path
     relative to the Maildir root ``maildir_path`` uses: any other active
-    row at the path retired, then the row for its key upserted."""
+    row at the path retired, then the row for its key upserted, and the
+    message's tombstones removed when the file is live (#1567)."""
     relative = rec.path.removeprefix("/maildir/")
     name = relative.rpartition("/")[2]
     uniq, _sep, flags = name.partition(":2,")
@@ -1759,6 +1765,8 @@ def _bind_occurrence(conn: sqlite3.Connection, rec, now: str) -> None:
         "last_observed_at = excluded.last_observed_at",
         (*values, now, now),
     )
+    if "T" not in flags:
+        conn.execute("DELETE FROM pending_deletions WHERE claimant_id = ?", (rec.cid,))
 
 
 # Each WAL configuration runs on a fresh copy of the built index at this

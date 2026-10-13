@@ -50,6 +50,7 @@ _TABLES = (
     "attachments_fts",
     "attachment_extractions",
     "pending_deletions",
+    "message_occurrences",
 )
 
 # Tables the indexer writes for every message that no measured statement
@@ -67,7 +68,6 @@ _WRITER_TABLES = (
     "entity_aliases",
     "message_chunks_vec",
     "indexing_jobs",
-    "message_occurrences",
 )
 
 # Values only the wall clock decides: the time the indexer wrote the row.
@@ -213,7 +213,8 @@ def test_benchmark_rows_are_the_rows_the_indexer_writes(bench, tmp_path, monkeyp
             ("message_participant_names", "claimant_id, role, address, name"),
             ("entities", "entity_id"),
             ("attachment_extractions", "attachment_id, extractor_module"),
-            ("pending_deletions", "filepath"),
+            ("pending_deletions", "occurrence_id"),
+            ("message_occurrences", "id"),
             # Chunks and occurrences in insertion order: their FTS rowids
             # follow it.
             ("message_chunks", "fts_rowid"),
@@ -993,7 +994,7 @@ def _identical_embeddings(bench, monkeypatch, records):
 _ALL_ROWS = {
     **_WRITER_ROWS,
     "attachments": "attachment_occurrence_id",
-    "pending_deletions": "filepath",
+    "pending_deletions": "occurrence_id",
 }
 _VECTORS = {"threads_vec": "thread_id", "message_chunks_vec": "chunk_id"}
 

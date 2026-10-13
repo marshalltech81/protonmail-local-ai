@@ -253,9 +253,9 @@ class ListedMessage(MessageHeaders):
 
     thread_id: str
     pending_deletion: bool = Field(
-        description="Deleted in Proton (the file's Maildir T flag) or its file missing "
-        "locally. Mirror retention removes it from the index after the grace period; archive "
-        "mode never does. Still listed and counted until removed."
+        description="Every copy deleted in Proton (Maildir T flag) or missing locally, and "
+        "tombstoned. Mirror retention removes it from the index after the grace period; archive "
+        "mode never does."
     )
 
 

@@ -395,9 +395,11 @@ be recalled. To remove the local copy as well:
    ([Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)):
    - **Mirror** (`INDEXER_DELETION_ENABLED=true`, the default): the next
      reconciler sweep (at indexer startup and every
-     `INDEXER_DELETION_SWEEP_INTERVAL_SECS`) tombstones each message
-     whose file is gone, unless a byte-identical copy remains in another
-     folder, in which case the message stays indexed under that copy.
+     `INDEXER_DELETION_SWEEP_INTERVAL_SECS`) retires the occurrence of
+     each file that is gone, once its Maildir scan reads every folder,
+     and tombstones each message left with no live copy; a message with
+     a byte-identical copy in another folder (not `T`-flagged) stays
+     indexed through that copy.
      The reaper removes tombstoned messages from the index after
      `INDEXER_DELETION_GRACE_DAYS`; until then they stay searchable. If
      more are past the grace window at once than
@@ -1284,11 +1286,21 @@ Tombstones and reaper actions can be inspected directly:
 docker exec indexer python -c '
 import os, sqlite3
 db = sqlite3.connect("file:" + os.environ["SQLITE_PATH"] + "?mode=ro", uri=True)
-print(db.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])'
+print(db.execute("SELECT COUNT(DISTINCT claimant_id) FROM pending_deletions").fetchone()[0])'
 ```
 
-The reaper sweeps `pending_deletions` on startup and once per
-`INDEXER_DELETION_SWEEP_INTERVAL_SECS`. If you want a deletion to land
+That counts the messages that lost their last live copy (a tombstone
+is kept per occurrence, #1567). The reaper sweeps `pending_deletions`
+on startup and once per `INDEXER_DELETION_SWEEP_INTERVAL_SECS`.
+
+If the sweep logs `reconciler sweep: the Maildir scan was partial (<n>
+unreadable director(ies)); no occurrence was retired`, a folder under the
+Maildir root is not readable by the indexer (mbsync creates folders
+0700 and opens them in its permission repair) or the root is missing.
+While it lasts no vanished file's occurrence is retired, so no message
+starts a grace period because of a missing file; `T`-flagged files are
+still tombstoned. Fix the folder's permissions (or the mount); the next
+sweep is complete and retires what is really gone. If you want a deletion to land
 immediately for testing, drop the grace window to `0` and recreate the
 indexer as described above.
 
@@ -1611,12 +1623,16 @@ Queue and maintenance (all INFO unless noted):
   queued nothing. `seen` is message files walked, `queued` the ones
   with no event that the rescan picked up.
 - `maintenance pass=reconcile ms=<ms> tombstoned=<n> cleared=<n>
-  renamed=<n> missing=<n> threads_reaped=<n> threads_rebuilt=<n>
-  blocked_threads=<n> brake=<ok|tripped|forced>`, after each deletion
-  reconciliation pass (mirror mode only). `brake=tripped` means the
-  mass-delete brake held this pass's reaps back (see "Deletion
-  reconciliation"); `forced` means `INDEXER_DELETION_FORCE=true`
-  disables the brake.
+  renamed=<n> retired=<n> bound=<n> scan=<complete|partial>
+  threads_reaped=<n> threads_rebuilt=<n> blocked_threads=<n>
+  brake=<ok|tripped|forced>`, after each deletion reconciliation pass
+  (mirror mode only). `tombstoned` and `cleared` count messages that
+  lost their last live copy or got one back; `renamed`, `retired` and
+  `bound` count occurrences the Maildir scan followed, retired or found
+  (`docs/architecture.md`, "Occurrence reconciliation"); `scan=partial`
+  means it retired nothing. `brake=tripped` means the mass-delete brake
+  held this pass's reaps back (see "Deletion reconciliation"); `forced`
+  means `INDEXER_DELETION_FORCE=true` disables the brake.
 - `maintenance pass=watch_refresh ms=<ms> watches=<n>`, after each
   periodic Maildir watch refresh; `watches` is the number of
   directories readable when the watch was last scheduled.

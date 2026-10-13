@@ -6,27 +6,42 @@ deleted on ProtonMail is never physically removed from the local Maildir.
 Instead, mbsync renames the file to add the IMAP ``\\Deleted`` / Maildir ``T``
 flag. Without reconciliation the local index keeps the message forever.
 
-The reconciler provides a two-phase path. It runs by default (mirror
-mode); ``INDEXER_DELETION_ENABLED=false`` opts out (archive mode):
+Each Maildir copy of a message is its own occurrence (#1566). A message
+is live while it has a live occurrence: an active one that is not
+``T``-flagged (PLAN.md decision 47). The reconciler provides a two-phase
+path over that. It runs by default (mirror mode);
+``INDEXER_DELETION_ENABLED=false`` opts out (archive mode):
 
-1. **Tombstone**: a sweep (at startup and on the reconcile interval) plus live
-   ``on_moved`` detection record each ``T``-flagged indexed file, unless a
-   live byte-identical copy remains, into the ``pending_deletions`` table. No primary data is
-   mutated — if mbsync un-flags the file on a later pull, the tombstone is
-   cleared without data loss.
+1. **Tombstone**: a sweep (at startup and on the reconcile interval)
+   first reconciles the occurrences with the Maildir
+   (``occurrence_scan.scan_occurrences``: missed renames followed, found
+   copies bound, and occurrences whose file a complete scan did not find
+   retired; a partial scan retires nothing; ``sweep_paths`` runs the same
+   scan, in archive mode too, before every Maildir walk). It then records a tombstone
+   in ``pending_deletions`` for each occurrence of every message with no
+   live occurrence left, and removes the tombstones of every message
+   that has one again. Live ``on_moved`` detection does the same for the
+   message whose file it saw renamed. No primary data is mutated: if
+   mbsync un-flags a file on a later pull, the tombstones are cleared
+   without data loss. Losing the last live occurrence is claimant-wide,
+   across every account.
 
-2. **Reap**: after a configurable grace window the reaper deletes the
-   message's ``message_thread_map`` / ``indexed_files`` rows, and either
-   rebuilds the parent thread from the surviving messages on disk or removes
-   the thread entirely when no messages remain. The same transaction
-   writes an identifier-only ``reaped_messages`` record per message so
-   mcp-server can report a cited source as reaped; records
-   expire after ``REAPED_RECORD_RETENTION_DAYS``.
+2. **Reap**: once a message's earliest tombstone is past the grace
+   window the reaper deletes its ``message_thread_map`` row (its
+   ``messages`` row, occurrences and tombstones cascade) and unmarks every
+   path holding its bytes, and either rebuilds the parent thread from the
+   surviving messages on disk or removes the thread entirely when no
+   messages remain. The same transaction writes an identifier-only
+   ``reaped_messages`` record per message so mcp-server can report a cited
+   source as reaped; records expire after ``REAPED_RECORD_RETENTION_DAYS``.
 
 A mass-delete brake skips a whole reap pass, reaping nothing, when more
-tombstones are past the grace window than a fraction of the mailbox allows,
+messages are past the grace window than a fraction of the mailbox allows,
 so a transient Bridge outage (vault rebuild, folder rename, auth glitch) that
 causes mbsync to mark a large batch as ``T`` cannot silently wipe the index.
+With more than one active account, a per-account brake also holds back the
+messages of an account whose own count passes that fraction of its
+messages (#1567).
 """
 
 from __future__ import annotations
@@ -40,14 +55,15 @@ from typing import Any
 
 from .database import Database
 from .embedder import EmbeddingBackend, scrub_embed_error
-from .maildir import is_trashed, resolve_current_path
-from .parser import OversizedMessageError, _derive_folder, parse_email
+from .maildir import is_trashed
+from .occurrence_scan import ScanCounts, scan_occurrences
+from .parser import OversizedMessageError, parse_email
 from .threader import Thread, Threader
 
 log = logging.getLogger("indexer.reconciler")
 
 # Floor of the mass-delete brake's threshold: a pass with more
-# past-grace tombstones than ``max(this, max_batch_pct * total)`` reaps
+# past-grace messages than ``max(this, max_batch_pct * total)`` reaps
 # nothing. Without it, with a 5% default and a 10-message mailbox, a
 # single deletion is 10% and would trip the brake. See ``reap()``.
 _REAP_ABSOLUTE_FLOOR = 10
@@ -61,107 +77,17 @@ _REAP_ABSOLUTE_FLOOR = 10
 # silent retry.
 _BLOCKED_ESCALATION_THRESHOLD = 3
 
-# Directory listings the pre-reap live-copy check may spend in one reap
-# pass (#1102). Each tombstoned message with identical copies has them
-# resolved through a listing of its own, since a shared one can predate
-# mbsync restoring a copy. A check reserves its copies' distinct
-# directories (``_candidate_dirs``) before it runs and is charged what it
-# listed, so a pass stays within the budget, except that the pass's first
-# check always runs: its cost is bounded by folders, which mail cannot
-# grow. Messages past the budget are left for the next pass; the checked
-# ones are reaped, so every pass makes progress. A listing of a large
-# folder costs a few ms.
-_LIVE_COPY_RECHECK_LISTINGS = 256
 
-
-def _is_live(filepath: str | None, listings: dict[Path, dict[str, Path]]) -> bool:
-    """True when the message file at ``filepath`` (or its flag-renamed
-    successor) exists and is not trashed. ``listings`` is the caller's
-    per-pass directory cache for ``resolve_current_path``."""
-    if filepath is None:
-        return False
-    current = resolve_current_path(Path(filepath), listings)
-    return current is not None and not is_trashed(current)
-
-
-def _remap_to_identical_copies(
-    db: Database,
-    moves: list[tuple[Any, str, bool]],
-    listings: dict[Path, dict[str, Path]],
-    maildir_root: Path | None,
-) -> dict[str, Path]:
-    """Remap messages to a byte-identical copy still on disk, and return
-    ``claimant_id -> copy`` for those remapped (#1102).
-
-    ``moves`` holds ``(map row, path it maps to now, live_only)``: a row
-    whose file is gone takes any copy, a row whose file is ``T``-flagged
-    only a live one (moving it to another trashed copy changes nothing).
-
-    Byte-identical files share one claimant ID and the mapping holds only
-    one of their paths, while ``indexed_files`` holds every path. One
-    lookup covers all of ``moves``. A live copy is preferred to a trashed
-    one, so a trashed copy that sorts first cannot get the message reaped
-    while a live copy remains. The remap moves the locator, folder and
-    S/F/R state; it never tombstones or clears anything, so each caller
-    applies its own trash rule to the copy.
-
-    When the pass's directory cache shows no copy, or the database
-    refuses a remap because the copy vanished after it was resolved (the
-    watcher renamed it meanwhile), the copies are resolved once more
-    through a fresh listing shared by the whole retry phase, and the
-    remap retried once: the pass's cache can be stale for that folder.
-    """
-    if not moves:
-        return {}
-    copies = db.find_identical_copies([row["claimant_id"] for row, _, _ in moves])
-    remapped: dict[str, Path] = {}
-    # The retry phase's own listing: fresh, built on first use, shared
-    # by every message so a folder is listed once more per pass at most.
-    fresh: dict[Path, dict[str, Path]] = {}
-    for row, from_path, live_only in moves:
-        candidates = copies.get(row["claimant_id"], [])
-        for cache in (listings, fresh):
-            copy = _pick_copy(candidates, cache, live_only=live_only)
-            if copy is None:
-                # The pass's listing can predate a copy coming back.
-                continue
-            dest_folder = _derive_folder(copy, maildir_root)
-            same_folder = dest_folder == _derive_folder(Path(from_path), maildir_root)
-            if db.remap_to_identical_copy(
-                from_path, str(copy), folder=None if same_folder else dest_folder
-            ):
-                remapped[row["claimant_id"]] = copy
-                break
-    return remapped
-
-
-def _candidate_dirs(candidates: list[str]) -> int:
-    """How many directories ``resolve_current_path`` may list to resolve
-    ``candidates``: each one's directory, and its ``new`` / ``cur``
-    sibling when it is one of those (``maildir.resolve_current_path``)."""
-    dirs: set[Path] = set()
-    for candidate in candidates:
-        parent = Path(candidate).parent
-        dirs.add(parent)
-        if parent.name in {"new", "cur"}:
-            dirs.add(parent.parent / ("cur" if parent.name == "new" else "new"))
-    return len(dirs)
-
-
-def _pick_copy(
-    candidates: list[str], listings: dict[Path, dict[str, Path]], *, live_only: bool
-) -> Path | None:
-    """The current path of the first live candidate, else (unless
-    ``live_only``) of the first trashed one; ``None`` when none fits."""
-    found = [
-        current
-        for path in candidates
-        if (current := resolve_current_path(Path(path), listings)) is not None
-    ]
-    live = next((p for p in found if not is_trashed(p)), None)
-    if live is not None or live_only:
-        return live
-    return found[0] if found else None
+def _log_scan(prefix: str, counts: ScanCounts) -> None:
+    """The scan's WARNING when it was partial: it retired nothing."""
+    if not counts.complete:
+        log.warning(
+            "%s: the Maildir scan was partial (%d unreadable director(ies)); "
+            "no occurrence was retired, %d left unreachable",
+            prefix,
+            counts.unreadable,
+            counts.unreachable,
+        )
 
 
 @dataclass(frozen=True)
@@ -181,14 +107,19 @@ class Reconciler:
         db: Database,
         embedder: EmbeddingBackend,
         config: ReconcilerConfig,
-        maildir_root: Path | None = None,
+        maildir_root: Path,
     ):
         self.db = db
         self.embedder = embedder
         self.config = config
-        # Passed through to parse_email when re-reading survivors so nested
-        # folder paths (``Clients/ABC``) are preserved during thread rebuild.
+        # The Maildir root the scan walks, and against which survivors are
+        # re-parsed so nested folder paths (``Clients/ABC``) are preserved
+        # during thread rebuild.
         self.maildir_root = maildir_root
+        # File hashes of unindexed ``T``-flagged or dead-lettered files
+        # the scan read, by path, size and mtime, so each is read once per
+        # process (``occurrence_scan``).
+        self._hash_cache: dict[tuple[str, int, int], str] = {}
         # Threads currently stuck in the reap path because a survivor
         # cannot be parsed (corrupt MIME header, runtime bug in the
         # parser, oversized survivor file). Counter increments each
@@ -213,162 +144,88 @@ class Reconciler:
         # episode rather than spamming on every retry. Clears together
         # with the attempt counter when the thread reaps successfully.
         self._escalated_threads: set[str] = set()
-        # The live-copy check's per-pass budget use and what it left
-        # (``_check_live_copies``); reset at the start of each ``reap()``.
-        self._recheck_listings = 0
-        self._recheck_runs = 0
-        self._left_unchecked = 0
 
     # -----------------------------------------------------------------
     # Tombstone detection
     # -----------------------------------------------------------------
 
     def sweep(self) -> dict:
-        """Walk every indexed file, update filepaths after flag renames, and
-        record tombstones for ``T``-flagged files. Returns a small summary
-        dict for logging/tests.
-
-        A message whose mapped file is gone or ``T``-flagged is first
-        matched against the other indexed paths with the same bytes
-        (#1102): byte-identical files share one claimant ID, and the
-        mapping holds only one of their paths. When such a copy still
-        exists (for a trashed file, a live one) the message is remapped to
-        it and the usual trash rule applies to the copy; only a message
-        with no such copy is tombstoned.
-        """
-        counts = {"tombstoned": 0, "cleared": 0, "renamed": 0, "missing": 0, "remapped": 0}
-
-        listings: dict[Path, dict[str, Path]] = {}
-        gone = []
-        trashed: list[tuple[Any, Path]] = []
-        for row in self.db.iter_message_map():
-            stored = Path(row["filepath"])
-            current = resolve_current_path(stored, listings)
-
-            if current is None:
-                # Settled after the walk, with one lookup for all of them.
-                gone.append(row)
-                continue
-
-            if str(current) != row["filepath"]:
-                # mbsync renamed the file for a non-deletion flag change
-                # (e.g. S → SR). Keep the stored path aligned.
-                self.db.update_filepath(row["filepath"], str(current))
-                counts["renamed"] += 1
-
-            if is_trashed(current):
-                # Settled after the walk too: a live copy keeps it.
-                trashed.append((row, current))
-                continue
-            self._apply_trash_rule(row, current, counts)
-
-        remapped = _remap_to_identical_copies(
-            self.db,
-            [(row, row["filepath"], False) for row in gone]
-            + [(row, str(current), True) for row, current in trashed],
-            listings,
-            self.maildir_root,
-        )
-        counts["remapped"] = len(remapped)
-        for row, current in trashed:
-            self._apply_trash_rule(row, remapped.get(row["claimant_id"], current), counts)
-        for row in gone:
-            copy = remapped.get(row["claimant_id"])
-            if copy is not None:
-                self._apply_trash_rule(row, copy, counts)
-                continue
-            # File fully gone — under Expunge None this is unexpected, but
-            # treat it as a tombstone so the index can heal. The reaper
-            # will still wait out the grace window before acting.
-            if self.db.add_pending_deletion(row["filepath"], row["claimant_id"], row["thread_id"]):
-                counts["missing"] += 1
-
-        if any(counts.values()):
+        """Reconcile the occurrences with the Maildir, retiring the ones a
+        complete scan did not find, then tombstone every message left with
+        no live occurrence and clear the tombstones of every message that
+        has one. Returns a small summary dict for logging/tests:
+        ``renamed`` / ``retired`` / ``bound`` occurrences, ``tombstoned``
+        messages newly marked, ``cleared`` messages unmarked,
+        ``unreachable`` / ``unverified`` occurrences left as they were, and
+        whether the scan was ``complete``."""
+        before = self.db.count_tombstoned_messages()
+        scan = scan_occurrences(self.db, self.maildir_root, hash_cache=self._hash_cache)
+        self.db.clear_live_tombstones()
+        # Counted across the scan too: a restoring rename it follows
+        # clears the message's tombstones in the same write.
+        cleared = max(0, before - self.db.count_tombstoned_messages())
+        tombstoned = self.db.mark_lost_messages()
+        counts = {
+            "tombstoned": tombstoned,
+            "cleared": cleared,
+            "renamed": scan.renamed,
+            "retired": scan.retired,
+            "bound": scan.bound,
+            "unreachable": scan.unreachable,
+            "unverified": scan.unverified,
+            "hashed": scan.hashed,
+            "complete": scan.complete,
+        }
+        if any(v for k, v in counts.items() if k != "complete"):
             log.info(
-                "reconciler sweep: tombstoned=%d cleared=%d renamed=%d missing=%d remapped=%d",
-                counts["tombstoned"],
-                counts["cleared"],
-                counts["renamed"],
-                counts["missing"],
-                counts["remapped"],
+                "reconciler sweep: tombstoned=%d cleared=%d renamed=%d retired=%d bound=%d "
+                "unreachable=%d unverified=%d hashed=%d",
+                tombstoned,
+                cleared,
+                scan.renamed,
+                scan.retired,
+                scan.bound,
+                scan.unreachable,
+                scan.unverified,
+                scan.hashed,
             )
+        _log_scan("reconciler sweep", scan)
         return counts
 
-    def _apply_trash_rule(self, row, current: Path, counts: dict[str, int]) -> None:
-        """Tombstone ``current`` when it is ``T``-flagged; clear its
-        tombstone when mbsync reversed the flag within the grace window."""
-        current_filepath = str(current)
-        if is_trashed(current):
-            if self.db.add_pending_deletion(current_filepath, row["claimant_id"], row["thread_id"]):
-                counts["tombstoned"] += 1
-        elif self.db.has_pending_deletion(current_filepath):
-            # mbsync reversed the T flag before the grace window expired —
-            # the message is alive again, clear the tombstone.
-            self.db.clear_pending_deletion(current_filepath)
-            counts["cleared"] += 1
-
-    def handle_moved(self, src_path: str, dest_path: str, *, folder: str | None = None) -> None:
+    def handle_moved(self, src_path: str, dest_path: str) -> None:
         """Live tombstone detection from watchdog ``on_moved`` events.
 
-        ``folder`` is forwarded to ``update_filepath`` for a rename that
-        crosses Maildir folders.
+        The rename carries the file's occurrence (``update_filepath``),
+        whose transaction clears the message's tombstones when it leaves
+        it live (a restore). A message left with no live occurrence (the
+        rename added ``T``) is tombstoned at once.
         """
-        entry = self._find_entry_for_path(src_path) or self._find_entry_for_path(dest_path)
-        if entry is None:
-            return
-        if entry["filepath"] != dest_path:
-            # A restore clears the tombstone in the same write as the
-            # rename: the reaper, on the main thread, must never see the
-            # live path with an eligible tombstone still attached.
-            self.db.update_filepath(
-                entry["filepath"],
-                dest_path,
-                folder=folder,
-                clear_tombstone=not is_trashed(dest_path),
-                # An observed rename event: the occurrence follows (#1566).
-                move_occurrence=True,
-            )
-        if is_trashed(dest_path):
-            self.db.add_pending_deletion(dest_path, entry["claimant_id"], entry["thread_id"])
+        claimant_id = self.db.update_filepath(src_path, dest_path, move_occurrence=True)
+        if claimant_id is None:
+            entry = self.db.find_active_occurrence(dest_path)
+            if entry is None:
+                return
+            claimant_id = entry["claimant_id"]
+        if is_trashed(dest_path) and self.db.mark_lost_messages(claimant_id):
             log.info("tombstoned via on_moved: %s", dest_path)
-        elif self.db.has_pending_deletion(dest_path):
-            self.db.clear_pending_deletion(dest_path)
-            log.info("cleared tombstone via on_moved: %s", dest_path)
-
-    def _find_entry_for_path(self, path: str):
-        return self.db.find_message_entry_by_filepath(path)
 
     # -----------------------------------------------------------------
     # Reap
     # -----------------------------------------------------------------
 
     def reap(self) -> dict:
-        """Process tombstones older than the grace window.
+        """Remove the messages whose loss of their last live occurrence is
+        older than the grace window.
 
-        Groups tombstones by thread so each thread is rebuilt at most once per
+        Groups them by thread so each thread is rebuilt at most once per
         pass. Skips the batch entirely when the mass-delete brake trips,
-        unless ``INDEXER_DELETION_FORCE=true`` is set.
+        unless ``INDEXER_DELETION_FORCE=true`` is set; with more than one
+        active account, holds back the messages of an account whose own
+        brake trips.
         """
         cutoff = (datetime.now(UTC) - timedelta(days=self.config.grace_days)).isoformat()
-        tombstones = self.db.list_pending_deletions_older_than(cutoff)
-
-        # A tombstone claims the message was trashed or went missing when
-        # it was written. Check the file the message maps to now: if it
-        # exists outside the trash, the claim is stale (a move away and
-        # back during a sweep, or a tombstone left under a dead path by
-        # the #301 race), so clear it rather than reap. This runs before
-        # the brake so stale rows, which no sweep revisits, cannot hold it
-        # shut, and shares one listings cache so each folder is listed
-        # once per pass rather than once per tombstone.
-        listings: dict[Path, dict[str, Path]] = {}
-        eligible = []
-        for tomb in tombstones:
-            if _is_live(tomb["mapped_filepath"], listings):
-                self.db.clear_pending_deletion(tomb["filepath"])
-            else:
-                eligible.append(tomb)
-        tombstones = eligible
-        if not tombstones:
+        candidates = self.db.reapable_messages(cutoff)
+        if not candidates:
             return {"threads_reaped": 0, "threads_rebuilt": 0, "aborted": False}
 
         total_messages = self._total_messages()
@@ -380,18 +237,19 @@ class Reconciler:
             # brake's purpose is to catch a Bridge-outage-induced mass
             # tombstoning event, not to block routine single-message
             # cleanup — so allow at least ``_REAP_ABSOLUTE_FLOOR``
-            # tombstones per pass before gating.
+            # messages per pass before gating. Counted per message
+            # (claimant), however many occurrences each lost.
             max_allowed = max(
                 _REAP_ABSOLUTE_FLOOR,
                 int(total_messages * self.config.max_batch_pct),
             )
-            if len(tombstones) > max_allowed:
+            if len(candidates) > max_allowed:
                 log.error(
-                    "reaper aborted: %d tombstones past grace window exceed "
+                    "reaper aborted: %d messages past grace window exceed "
                     "mass-delete threshold (max allowed %d = max(%d, %.1f%% "
                     "of %d total messages); set INDEXER_DELETION_FORCE=true "
                     "to override)",
-                    len(tombstones),
+                    len(candidates),
                     max_allowed,
                     _REAP_ABSOLUTE_FLOOR,
                     self.config.max_batch_pct * 100,
@@ -401,37 +259,26 @@ class Reconciler:
                     "threads_reaped": 0,
                     "threads_rebuilt": 0,
                     "aborted": True,
-                    "tombstones_pending": len(tombstones),
+                    "tombstones_pending": len(candidates),
                 }
+            held = self._account_brake(candidates)
+            candidates = [c for c in candidates if c["claimant_id"] not in held]
 
         grouped: dict[str, list] = {}
-        for tomb in tombstones:
-            grouped.setdefault(tomb["thread_id"], []).append(tomb)
+        for candidate in candidates:
+            grouped.setdefault(candidate["thread_id"], []).append(candidate)
 
         # Other paths holding a reaped message's bytes are unmarked with
         # it (#1102); one lookup for the whole pass, since
         # ``indexed_files`` has no ``content_hash`` index.
-        copies = self.db.find_identical_copies([t["claimant_id"] for t in tombstones])
+        copies = self.db.paths_with_content([c["claimant_id"] for c in candidates])
 
         threads_reaped = 0
         threads_rebuilt = 0
-        # The live-copy check's budget and what it left, for this pass.
-        self._recheck_listings = 0
-        self._recheck_runs = 0
-        self._left_unchecked = 0
-
-        for thread_id, tombs in grouped.items():
-            reaped, rebuilt = self._reap_thread(thread_id, tombs, cutoff, copies)
+        for thread_id, dead in grouped.items():
+            reaped, rebuilt = self._reap_thread(thread_id, dead, cutoff, copies)
             threads_reaped += int(reaped)
             threads_rebuilt += int(rebuilt)
-
-        if self._left_unchecked:
-            log.warning(
-                "reaper: the live-copy re-check budget (%d directory listings) is "
-                "spent; %d message(s) left for the next pass",
-                _LIVE_COPY_RECHECK_LISTINGS,
-                self._left_unchecked,
-            )
 
         if threads_reaped or threads_rebuilt:
             log.info(
@@ -458,6 +305,42 @@ class Reconciler:
             # WARN/ERROR lines.
             "blocked_threads": blocked_count,
         }
+
+    def _account_brake(self, candidates: list) -> set[str]:
+        """The messages the per-account brake holds back this pass
+        (#1567): computed only while more than one account has an active
+        occurrence. A message belongs to every account holding an
+        occurrence of it; an account whose past-grace messages outnumber
+        ``max(_REAP_ABSOLUTE_FLOOR, max_batch_pct * its messages)`` keeps
+        all of them, logged at ERROR with the counts, so a mass deletion
+        in a small account is caught although the global count stays
+        under the global brake. The global brake is unchanged."""
+        if self.db.active_account_count() < 2:
+            return set()
+        per_account: dict[int, set[str]] = {}
+        accounts = self.db.accounts_of([c["claimant_id"] for c in candidates])
+        for claimant_id, account_ids in accounts.items():
+            for account_id in account_ids:
+                per_account.setdefault(account_id, set()).add(claimant_id)
+        totals = self.db.messages_per_account()
+        held: set[str] = set()
+        for account_id, claimant_ids in sorted(per_account.items()):
+            total = totals.get(account_id, 0)
+            max_allowed = max(_REAP_ABSOLUTE_FLOOR, int(total * self.config.max_batch_pct))
+            if len(claimant_ids) > max_allowed:
+                log.error(
+                    "reaper held back account %d: %d messages past grace window exceed "
+                    "its mass-delete threshold (max allowed %d = max(%d, %.1f%% of %d "
+                    "messages); set INDEXER_DELETION_FORCE=true to override)",
+                    account_id,
+                    len(claimant_ids),
+                    max_allowed,
+                    _REAP_ABSOLUTE_FLOOR,
+                    self.config.max_batch_pct * 100,
+                    total,
+                )
+                held |= claimant_ids
+        return held
 
     def _record_blocked(self, thread_id: str, survivor_path: str) -> int:
         """Bump the blocked-attempts counter for ``thread_id`` and return it.
@@ -494,37 +377,21 @@ class Reconciler:
     def _reap_thread(
         self,
         thread_id: str,
-        tombs: list,
+        dead: list,
         cutoff: str,
         copies: Mapping[str, list[str]] | None = None,
     ) -> tuple[bool, bool]:
         """Reap one thread. Returns (fully_reaped, rebuilt).
 
-        ``copies`` maps a claimant to the other indexed paths holding its
-        bytes. They are checked on disk first (``_check_live_copies``):
-        a message with a live copy is kept, one left unchecked by the
-        pass's budget stays a survivor for the next pass, and only the
-        rest are reaped, with their copies unmarked in the reap
-        transaction.
-
-        ``tombs`` is a snapshot; the database re-checks inside the reap
-        transaction that each message is still tombstoned at or before
-        ``cutoff``, since the watcher may restore (or restore and trash
-        again) a message meanwhile."""
-        # Survivors are chosen by claimant ID, which removal also uses:
-        # the watcher can rename a tombstoned file (a flag change) after
-        # ``tombs`` was read, and a stale snapshot path would let the
-        # deleted message be rebuilt into the thread as a survivor.
+        ``dead`` is a snapshot of the thread's reapable messages; the
+        database re-checks inside the reap transaction that each still has
+        no live occurrence and a tombstone at or before ``cutoff``, since
+        the watcher may restore (or restore and trash again) a message, or
+        a sweep bind a copy, meanwhile. ``copies`` maps a message to the
+        other indexed paths holding its bytes, unmarked with it."""
         copies = copies or {}
-        checked = len(tombs)
-        tombs, kept, left = self._check_live_copies(tombs, copies)
-        if kept:
-            # Its reap is cancelled, so the count it held no longer applies.
-            self._clear_blocked(thread_id)
-        if not tombs:
-            return False, False
-        dead_ids = {t["claimant_id"] for t in tombs}
-        copy_paths = [p for t in tombs for p in copies.get(t["claimant_id"], [])]
+        dead_ids = {d["claimant_id"] for d in dead}
+        copy_paths = [p for d in dead for p in copies.get(d["claimant_id"], [])]
         all_rows = self.db.get_thread_messages(thread_id)
         survivor_rows = [r for r in all_rows if r["claimant_id"] not in dead_ids]
 
@@ -538,13 +405,24 @@ class Reconciler:
                     "reaper: a thread changed since its tombstones were read; retrying next pass",
                 )
                 return False, False
-            log.info("reaped a thread (%d messages)", len(tombs))
+            log.info("reaped a thread (%d messages)", len(dead))
             self._clear_blocked(thread_id)
             return True, False
 
         # Thread has survivors — parse them from disk and rebuild.
         survivors: list = []
         for row in survivor_rows:
+            if row["filepath"] is None:
+                # No active occurrence: its file is gone (it is losing its
+                # last copy too, within the grace window). It cannot be
+                # re-parsed, so the thread waits for it.
+                attempts = self._record_blocked(thread_id, "(no active occurrence)")
+                log.warning(
+                    "reaper: a survivor has no file to re-read; "
+                    "skipping this reap pass (blocked attempts=%d)",
+                    attempts,
+                )
+                return False, False
             try:
                 msg = parse_email(Path(row["filepath"]), maildir_root=self.maildir_root)
             except (OSError, OversizedMessageError) as e:
@@ -660,116 +538,28 @@ class Reconciler:
             return False, False
 
         # Atomic reap: rewrite the thread row with survivors + tear down
-        # each reaped message's message_thread_map / indexed_files /
-        # pending_deletions rows inside a single BEGIN IMMEDIATE, so a
+        # each reaped message's rows inside a single BEGIN IMMEDIATE, so a
         # crash mid-reap cannot leave the thread row and the map
         # disagreeing about which messages belong.
-        removed_filepaths = self.db.reap_thread_messages(
+        removed = self.db.reap_thread_messages(
             rebuilt_thread,
             embedding,
-            [tomb["claimant_id"] for tomb in tombs],
+            sorted(dead_ids),
             grace_cutoff=cutoff,
             copy_paths=copy_paths,
         )
-        if removed_filepaths is None:
+        if removed is None:
             log.info(
                 "reaper: a thread changed since its tombstones were read; retrying next pass",
             )
             return False, False
         log.info(
             "rebuilt a thread: removed %d message(s), %d survive",
-            len(tombs),
+            len(removed),
             len(survivors),
         )
-        if left:
-            log.info(
-                "reaper: reaped %d of %d tombstoned message(s) in a thread; "
-                "%d left for the next pass",
-                len(tombs),
-                checked,
-                left,
-            )
         self._clear_blocked(thread_id)
         return False, True
-
-    def _check_live_copies(
-        self, tombs: list, copies: Mapping[str, list[str]]
-    ) -> tuple[list, int, int]:
-        """Check each tombstoned message's identical copies on disk and
-        return ``(to_reap, kept, left)`` (#1102).
-
-        The sweep found no live copy, but mbsync can restore one (drop its
-        ``T`` flag) before the reap, and that copy is not the mapped path,
-        so the watcher clears nothing for it. A message with a live copy
-        is remapped to it, its tombstone cleared, and it stays a survivor;
-        ``kept`` counts those. A remap the database refuses (the mapping or
-        the copy moved meanwhile) changes nothing: the message stays
-        tombstoned for the next pass and counts as left.
-
-        Each message's copies are resolved through a listing of its own,
-        charged to the pass's budget (``_LIVE_COPY_RECHECK_LISTINGS``).
-        Past the budget a message is left unchecked: it stays tombstoned
-        and a survivor of this pass's rebuild, whole, and the next pass
-        checks it (``left`` counts those). A message whose own file is gone
-        cannot be re-parsed as a survivor, so it is checked first; left
-        unchecked, it blocks the rebuild, and its thread waits on the
-        blocked-thread count and WARNING until the budget reaches it.
-        """
-        to_reap: list = []
-        kept = 0
-        left = 0
-        refused = 0
-        # Gone files first: they are the ones that cannot wait.
-        ordered = sorted(tombs, key=lambda t: Path(t["mapped_filepath"] or "").exists())
-        for tomb in ordered:
-            candidates = copies.get(tomb["claimant_id"], [])
-            if not candidates:
-                to_reap.append(tomb)
-                continue
-            reserve = _candidate_dirs(candidates)
-            if self._recheck_listings + reserve > _LIVE_COPY_RECHECK_LISTINGS:
-                if self._recheck_runs:
-                    left += 1
-                    self._left_unchecked += 1
-                    continue
-                log.info(
-                    "reaper: a live-copy check needs %d directory listing(s), over the "
-                    "budget of %d; run as the pass's first check",
-                    reserve,
-                    _LIVE_COPY_RECHECK_LISTINGS,
-                )
-            fresh: dict[Path, dict[str, Path]] = {}
-            copy = _pick_copy(candidates, fresh, live_only=True)
-            self._recheck_runs += 1
-            self._recheck_listings += len(fresh)
-            if copy is None:
-                to_reap.append(tomb)
-                continue
-            # Set: ``copies`` only holds claimants that are mapped.
-            mapped = tomb["mapped_filepath"]
-            dest_folder = _derive_folder(copy, self.maildir_root)
-            same_folder = dest_folder == _derive_folder(Path(mapped), self.maildir_root)
-            if not self.db.remap_to_identical_copy(
-                mapped, str(copy), folder=None if same_folder else dest_folder
-            ):
-                left += 1
-                refused += 1
-                continue
-            kept += 1
-            if self.db.has_pending_deletion(str(copy)):
-                self.db.clear_pending_deletion(str(copy))
-        if refused:
-            log.info(
-                "reaper: %d remap(s) to a live identical copy refused (the mapping "
-                "or the copy moved); retrying next pass",
-                refused,
-            )
-        if kept:
-            log.info(
-                "reaper: kept %d message(s) with a live identical copy restored since the sweep",
-                kept,
-            )
-        return to_reap, kept, left
 
     # -----------------------------------------------------------------
     # Helpers
@@ -779,77 +569,59 @@ class Reconciler:
         return self.db.count_total_messages()
 
 
-def sweep_paths(db: Database, *, maildir_root: Path | None = None) -> dict:
-    """Walk every indexed file and update the stored filepath when mbsync
-    has renamed it in place (e.g. a flag-only rename such as ``S`` →
-    ``SR``, or a ``new`` → ``cur`` promotion). Intended to be safe to
-    run on every indexer startup — unlike ``Reconciler.sweep()`` it does
-    NOT tombstone missing files, so it is safe under archive mode too,
-    while still healing path drift that accumulated while the indexer
-    was offline. A tombstone follows its file through the rename, except
-    that a rename which dropped the ``T`` flag restores the message, so
-    the tombstone is cleared with it (the rule ``Reconciler.handle_moved``
-    applies live): in archive mode no reconciler would clear it later, and
-    a tombstone a mirror-mode run left would otherwise report the restored
-    message as pending deletion for ever (#860).
+def sweep_paths(db: Database, *, maildir_root: Path) -> dict[str, Any]:
+    """Reconcile the occurrences with the Maildir
+    (``occurrence_scan.scan_occurrences``) without tombstoning any message:
+    follow the renames mbsync made while the watcher missed them (a flag
+    change such as ``S`` → ``SR``, a ``new`` → ``cur`` promotion), once the
+    file's bytes are verified, bind byte-identical copies the index
+    records, and retire an occurrence whose file a complete scan did not
+    find (a partial scan retires nothing). Safe on every indexer startup
+    and before every periodic walk, in archive mode too: retiring removes
+    a locator, never a message, and only ``Reconciler.sweep()`` tombstones.
+    A rename that leaves a tombstoned message live (it dropped the ``T``
+    flag) clears its tombstones in the same write, the rule
+    ``Reconciler.handle_moved`` applies live (#860), and every other
+    message with a live occurrence has its stale tombstones cleared too.
 
-    A message whose file is gone is remapped to a byte-identical copy
-    still on disk, as ``Reconciler.sweep`` does (#1102), so archive mode
-    does not keep the gone path, folder and flags for ever; a remap to a
-    live copy clears the message's tombstone like a restore.
-    ``maildir_root`` names the Maildir root for the copy's folder.
-
-    Returns a summary dict so the caller can log how much drift there
-    was (useful when diagnosing "new mail shows up in search late" on
-    mailboxes where the indexer restarts often).
+    Recording the renames before the walk keeps it from re-indexing them
+    as new mail. Returns a summary dict so the caller can log how much
+    drift there was (useful when diagnosing "new mail shows up in search
+    late" on mailboxes where the indexer restarts often).
     """
-    renamed = 0
-    tombstones_cleared = 0
-
-    listings: dict[Path, dict[str, Path]] = {}
-    gone = []
-    for row in db.iter_message_map():
-        stored = Path(row["filepath"])
-        current = resolve_current_path(stored, listings)
-
-        if current is None:
-            # File is no longer at any of the expected Maildir paths:
-            # settled after the walk, with one copy lookup for all.
-            gone.append(row)
-            continue
-
-        if str(current) != row["filepath"]:
-            restored = not is_trashed(current)
-            if restored and db.has_pending_deletion(row["filepath"]):
-                tombstones_cleared += 1
-            db.update_filepath(row["filepath"], str(current), clear_tombstone=restored)
-            renamed += 1
-
-    remapped = _remap_to_identical_copies(
-        db, [(row, row["filepath"], False) for row in gone], listings, maildir_root
-    )
-    for copy in remapped.values():
-        if not is_trashed(copy) and db.has_pending_deletion(str(copy)):
-            db.clear_pending_deletion(str(copy))
-            tombstones_cleared += 1
-    # A full sweep (with reconciliation enabled) would tombstone the
-    # rest; this lightweight variant just counts the miss so the
-    # operator can see the signal in logs.
-    unreachable = len(gone) - len(remapped)
-
-    if renamed or unreachable or remapped:
+    before = db.count_tombstoned_messages()
+    scan = scan_occurrences(db, maildir_root)
+    db.clear_live_tombstones()
+    # Counted across the scan too: a restoring rename it follows clears
+    # the message's tombstones in the same write.
+    tombstones_cleared = max(0, before - db.count_tombstoned_messages())
+    if (
+        scan.renamed
+        or scan.retired
+        or scan.unreachable
+        or scan.bound
+        or scan.unverified
+        or tombstones_cleared
+    ):
         log.info(
-            "startup rename sweep: renamed=%d unreachable=%d tombstones_cleared=%d remapped=%d",
-            renamed,
-            unreachable,
+            "startup rename sweep: renamed=%d retired=%d unreachable=%d tombstones_cleared=%d "
+            "bound=%d unverified=%d",
+            scan.renamed,
+            scan.retired,
+            scan.unreachable,
             tombstones_cleared,
-            len(remapped),
+            scan.bound,
+            scan.unverified,
         )
+    _log_scan("startup rename sweep", scan)
     return {
-        "renamed": renamed,
-        "unreachable": unreachable,
+        "renamed": scan.renamed,
+        "retired": scan.retired,
+        "unreachable": scan.unreachable,
         "tombstones_cleared": tombstones_cleared,
-        "remapped": len(remapped),
+        "bound": scan.bound,
+        "unverified": scan.unverified,
+        "complete": scan.complete,
     }
 
 

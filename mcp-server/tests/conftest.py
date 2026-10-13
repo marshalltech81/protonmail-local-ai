@@ -113,6 +113,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
         CREATE INDEX idx_messages_effective ON messages(effective_at);
         CREATE INDEX idx_messages_filepath ON messages(filepath);
+        CREATE INDEX idx_messages_content_hash ON messages(content_hash);
 
         CREATE TABLE message_headers (
             claimant_id TEXT NOT NULL,
@@ -250,15 +251,52 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             indexer_seen_at    TEXT NOT NULL
         );
 
-        -- Reconciler tombstones (indexer schema): files T-flagged or
-        -- missing, awaiting the reaper under mirror retention.
-        CREATE TABLE pending_deletions (
-            filepath    TEXT PRIMARY KEY,
-            claimant_id TEXT NOT NULL,
-            thread_id   TEXT NOT NULL,
-            marked_at   TEXT NOT NULL
+        -- The account registry and mailbox occurrences (indexer schema,
+        -- #1596, #1566): one account; each message's Maildir copies.
+        CREATE TABLE accounts (
+            id         INTEGER PRIMARY KEY,
+            scope_uuid TEXT NOT NULL UNIQUE,
+            provider   TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );
-        CREATE INDEX idx_pending_deletions_thread ON pending_deletions(thread_id);
+        INSERT INTO accounts VALUES
+            (1, '00000000-0000-4000-8000-000000000001', 'proton-bridge',
+             '2024-01-01T00:00:00+00:00');
+        CREATE TABLE message_occurrences (
+            id                INTEGER PRIMARY KEY,
+            account_id        INTEGER NOT NULL REFERENCES accounts(id),
+            folder            TEXT NOT NULL,
+            uniq              TEXT NOT NULL,
+            claimant_id       TEXT NOT NULL,
+            relative_path     TEXT NOT NULL,
+            seen              INTEGER NOT NULL CHECK (seen IN (0, 1)),
+            flagged           INTEGER NOT NULL CHECK (flagged IN (0, 1)),
+            replied           INTEGER NOT NULL CHECK (replied IN (0, 1)),
+            trashed           INTEGER NOT NULL CHECK (trashed IN (0, 1)),
+            first_observed_at TEXT,
+            last_observed_at  TEXT,
+            internal_at       TEXT,
+            state             TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+            retired_at        TEXT,
+            provenance        TEXT NOT NULL
+                              CHECK (provenance IN ('parse', 'rename', 'scan', 'migration')),
+            CHECK ((state = 'retired') = (retired_at IS NOT NULL))
+        );
+        CREATE UNIQUE INDEX idx_message_occurrences_key
+            ON message_occurrences(account_id, folder, uniq, claimant_id) WHERE state = 'active';
+        CREATE UNIQUE INDEX idx_message_occurrences_path
+            ON message_occurrences(account_id, relative_path) WHERE state = 'active';
+        CREATE INDEX idx_message_occurrences_claimant ON message_occurrences(claimant_id);
+
+        -- Reconciler tombstones (indexer schema), keyed by occurrence
+        -- (#1567): written while a message has no live occurrence,
+        -- awaiting the reaper under mirror retention.
+        CREATE TABLE pending_deletions (
+            occurrence_id INTEGER PRIMARY KEY,
+            claimant_id   TEXT NOT NULL,
+            marked_at     TEXT NOT NULL
+        );
+        CREATE INDEX idx_pending_deletions_claimant ON pending_deletions(claimant_id, marked_at);
 
         -- Identifier-only records of reaped messages (indexer schema).
         CREATE TABLE reaped_messages (
@@ -645,6 +683,15 @@ def _insert_message_record(
             *flags.values(),
         ),
     )
+    insert_occurrence(
+        cur,
+        claimant_of(message_id, variant),
+        folder,
+        f"{folder}/cur/{message_id}{variant}",
+        seen=seen,
+        flagged=flagged,
+        replied=replied,
+    )
     for role, value in participants:
         name, address = _split_address(value)
         if "@" not in address:
@@ -661,6 +708,49 @@ def _insert_message_record(
                 (claimant_of(message_id, variant), role, address, name),
             )
         _insert_entity(cur, address, name)
+
+
+def insert_occurrence(
+    cur: sqlite3.Cursor | sqlite3.Connection,
+    claimant_id: str,
+    folder: str,
+    relative_path: str,
+    *,
+    seen: bool = False,
+    flagged: bool = False,
+    replied: bool = False,
+    trashed: bool = False,
+    state: str = "active",
+    account_id: int = 1,
+    provenance: str = "parse",
+) -> int:
+    """One mailbox occurrence of a message, as the indexer binds a parsed
+    file (#1566): its folder, path relative to the account's Maildir root
+    and Maildir flags. Returns its id."""
+    uniq = relative_path.rpartition("/")[2].split(":2,")[0]
+    row = cur.execute(
+        "INSERT INTO message_occurrences (account_id, folder, uniq, claimant_id, "
+        "relative_path, seen, flagged, replied, trashed, first_observed_at, "
+        "last_observed_at, state, retired_at, provenance) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            account_id,
+            folder,
+            uniq,
+            claimant_id,
+            relative_path,
+            int(seen),
+            int(flagged),
+            int(replied),
+            int(trashed),
+            "2024-01-01T00:00:00+00:00",
+            "2024-01-01T00:00:00+00:00",
+            state,
+            None if state == "active" else "2024-01-02T00:00:00+00:00",
+            provenance,
+        ),
+    )
+    return int(row.lastrowid or 0)
 
 
 def _insert_entity(cur: sqlite3.Cursor, address: str, name: str | None) -> None:

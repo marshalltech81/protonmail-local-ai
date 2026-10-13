@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 from src import account as account_mod
 from src import main
-from src.database import EMBEDDING_DIM, SCHEMA_VERSION, Database
+from src.database import EMBEDDING_DIM, Database
 from src.occurrences import OUTSIDE_ROOT, OccurrenceLocatorError, locate
 from src.parser import _derive_folder, parse_email
 from src.queue import REASON_INITIAL_SCAN, REASON_REPARSE, IndexingQueue
@@ -25,7 +25,7 @@ from src.reconciler import Reconciler, ReconcilerConfig, sweep_paths
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import TEST_ACCOUNT, make_mock_embedder, make_thread
+from tests.conftest import TEST_ACCOUNT, lose_message, make_mock_embedder, make_thread
 from tests.test_database import _v13_from_fresh
 
 MARKER = "SYNTHETIC_OCCURRENCE_MARKER"
@@ -327,7 +327,7 @@ class TestRenames:
             (before,) = _active(db)
             dest = _put(root, "Archive/cur/f1:2,S", path.read_bytes())
             path.unlink()
-            db.update_filepath(str(path), str(dest), folder="Archive", move_occurrence=True)
+            db.update_filepath(str(path), str(dest), move_occurrence=True)
             old, new = _occurrences(db)
             assert (old["id"], old["state"]) == (before["id"], "retired")
             assert old["retired_at"] is not None
@@ -340,8 +340,6 @@ class TestRenames:
             )
             assert new["claimant_id"] == before["claimant_id"]
             assert new["provenance"] == "rename"
-            # The old columns move as before.
-            assert db._conn.execute("SELECT folder FROM messages").fetchone()[0] == "Archive"
         finally:
             db.close()
 
@@ -351,11 +349,9 @@ class TestRenames:
             (before,) = _active(db)
             outside = tmp_path / "maildir2" / "Archive" / "cur" / "f1:2,S"
             with pytest.raises(OccurrenceLocatorError):
-                db.update_filepath(str(path), str(outside), folder="Archive", move_occurrence=True)
+                db.update_filepath(str(path), str(outside), move_occurrence=True)
             assert _occurrences(db) == [before]
-            assert db._conn.execute("SELECT filepath FROM message_thread_map").fetchone()[0] == str(
-                path
-            )
+            assert db.is_indexed(str(path))
         finally:
             db.close()
 
@@ -364,7 +360,7 @@ class TestRenames:
         try:
             dest = _put(root, "Archive/cur/f1:2,S", path.read_bytes())
             path.unlink()
-            db.update_filepath(str(path), str(dest), folder="Archive", move_occurrence=True)
+            db.update_filepath(str(path), str(dest), move_occurrence=True)
             (retired,) = [o for o in _occurrences(db) if o["state"] == "retired"]
             # Other bytes arrive at the retired path: a new row for them.
             _put(root, "INBOX/cur/f1:2,S", _eml("other@example.test"))
@@ -407,41 +403,25 @@ class TestRenames:
             db.close()
 
     @pytest.mark.parametrize("sweep", ["startup", "reconciler"])
-    def test_a_rename_inferred_by_a_sweep_moves_no_occurrence(self, tmp_path, sweep):
-        """A sweep finds a renamed file by its uniq alone, without the
-        bytes: that is a missed move, left to completeness-gated
-        reconciliation (#1567), never bound to the claimant unverified
-        (Codex round 3 on #1601)."""
+    def test_a_rename_inferred_by_a_sweep_moves_the_occurrence_once_its_bytes_match(
+        self, tmp_path, sweep
+    ):
+        """A sweep finds a renamed file by its uniq; the occurrence follows
+        only once the file's bytes are verified (#1567), never bound to
+        the claimant on the uniq alone (Codex round 3 on #1601)."""
         db, root, path = self._one(tmp_path)
         try:
-            before = _occurrences(db)
+            (before,) = _occurrences(db)
             dest = root / "INBOX/cur/f1:2,FS"
             path.rename(dest)
             if sweep == "startup":
-                sweep_paths(db, maildir_root=root)
+                assert sweep_paths(db, maildir_root=root)["renamed"] == 1
             else:
-                Reconciler(db, make_mock_embedder(_VECTOR), _CONFIG, maildir_root=root).sweep()
-            # The old columns follow it as before; the occurrence does not.
-            assert db._conn.execute("SELECT filepath FROM message_thread_map").fetchone()[0] == str(
-                dest
-            )
-            assert _occurrences(db) == before
-        finally:
-            db.close()
-
-    def test_a_remap_to_an_identical_copy_moves_no_occurrence(self, tmp_path):
-        root = tmp_path / "maildir"
-        raw = _eml("dup@example.test")
-        first = _put(root, "INBOX/cur/d1:2,S", raw)
-        second = _put(root, "Archive/cur/d2:2,F", raw)
-        db = Database(tmp_path / "mail.db", account=_account(root))
-        try:
-            _drain(db, [first, second])
-            before = _occurrences(db)
-            mapped = db._conn.execute("SELECT filepath FROM message_thread_map").fetchone()[0]
-            other = str(first) if mapped == str(second) else str(second)
-            assert db.remap_to_identical_copy(mapped, other, folder=None)
-            assert _occurrences(db) == before
+                rec = Reconciler(db, make_mock_embedder(_VECTOR), _CONFIG, maildir_root=root)
+                assert rec.sweep()["renamed"] == 1
+            (after,) = _occurrences(db)
+            assert (after["id"], after["relative_path"]) == (before["id"], "INBOX/cur/f1:2,FS")
+            assert after["provenance"] == before["provenance"]
         finally:
             db.close()
 
@@ -449,7 +429,7 @@ class TestRenames:
         db, root, path = self._one(tmp_path)
         try:
             (row,) = _active(db)
-            assert db.add_pending_deletion(str(path), row["claimant_id"], row["claimant_id"])
+            lose_message(db, row["claimant_id"])
             thread_id = db._conn.execute("SELECT thread_id FROM messages").fetchone()[0]
             assert db.delete_thread_completely(thread_id)
             assert _occurrences(db) == []
@@ -486,6 +466,11 @@ def _v13_index(tmp_path: Path, root: Path) -> tuple[Path, dict]:
     trashed = b.with_name("s2:2,FT")
     b.rename(trashed)
     db.update_filepath(str(b), str(trashed), move_occurrence=True)
+    # v13 kept the locator and flags on ``messages`` (#1567 drops them).
+    db._conn.execute("UPDATE messages SET filepath = ? WHERE filepath = ?", (str(trashed), str(b)))
+    db._conn.execute(
+        "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?", (str(trashed), str(b))
+    )
     b = trashed
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     queue.enqueue(str(dead), REASON_INITIAL_SCAN)
@@ -520,7 +505,7 @@ class TestMigrationV14:
         path, before = _v13_index(tmp_path, root)
         db = Database(path, account=_account(root))
         try:
-            assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 14
+            assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 15
             rows = _occurrences(db)
             by_claimant = {o["claimant_id"]: o for o in rows}
             assert len(rows) == len(before["messages"]) == 2
@@ -704,20 +689,22 @@ class TestMigrationV14:
         conn.close()
         db = Database(path, account=_account(root))
         try:
-            assert [o["relative_path"] for o in _occurrences(db)] == [
-                "Folders/.Clients/cur/s2:2,FT"
-            ]
+            assert [o["relative_path"] for o in _active(db)] == ["Folders/.Clients/cur/s2:2,FT"]
+            # v15 gives it a retired occurrence (#1567): no file holds its bytes.
+            (retired,) = [o for o in _occurrences(db) if o["state"] == "retired"]
+            assert (retired["relative_path"], retired["provenance"]) == (
+                "INBOX/cur/s1:2,S",
+                "migration",
+            )
             jobs = {r[0] for r in db._conn.execute("SELECT filepath FROM indexing_jobs")}
             assert str(before["paths"]["a"]) in jobs
-            # A rename of that file before its reparse moves the old
-            # columns as before and binds nothing: the parse binds it.
+            # A rename of that file before its reparse binds nothing: its
+            # recorded bytes are no message's, and the parse binds it.
             a = before["paths"]["a"]
             dest = a.with_name("s1:2,FS")
             a.rename(dest)
             db.update_filepath(str(a), str(dest), move_occurrence=True)
-            assert [o["relative_path"] for o in _occurrences(db)] == [
-                "Folders/.Clients/cur/s2:2,FT"
-            ]
+            assert [o["relative_path"] for o in _active(db)] == ["Folders/.Clients/cur/s2:2,FT"]
             assert db.is_indexed(str(dest))
         finally:
             db.close()
@@ -733,6 +720,3 @@ class TestMigrationV14:
             Path(main.__file__).parent / "migrations" / "0014_account_occurrences.sql"
         ).read_text()
         assert sql.rstrip().endswith(REPARSE_ENQUEUE_SQL)
-
-    def test_the_schema_version_is_14(self):
-        assert SCHEMA_VERSION == 14

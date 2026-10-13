@@ -85,7 +85,7 @@ class _ConnSpy:
         return [
             c
             for c in self.cursors
-            if "JOIN message_thread_map m ON m.claimant_id = a.claimant_id" in c.sql
+            if "JOIN message_occurrences m ON m.id = (SELECT o.id" in c.sql
             and ("'unsupported'" in c.sql or "'too_large'" in c.sql)
         ]
 
@@ -247,7 +247,9 @@ def test_sweep_reads_bounded_batches_and_closes_its_cursors(mailbox, monkeypatch
         assert max(cursor.batches) <= database.SWEEP_FETCH_ROWS
         assert not cursor.fetchall_called
         assert cursor.closed
-        assert "ORDER BY" not in cursor.sql
+        # The only ordering is the per-message pick of the occurrence
+        # to re-read (#1567), never the whole result.
+        assert "ORDER BY" not in cursor.sql.replace("ORDER BY o.trashed, o.id LIMIT 1", "")
     assert len(no_extractor.batches) > 2
 
 
