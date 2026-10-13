@@ -191,7 +191,13 @@ def bounded_logging:
         # secret/volume/network exception above would be granted to any
         # service merely named mbsync-<uuid>, whatever image or
         # entrypoint it runs (review round 2, finding 2). Compare it
-        # against base mbsync directly for both.
+        # against base mbsync directly for both. mbsync itself sets none
+        # of healthcheck, post_start, pre_stop or configs (its healthcheck
+        # is baked into the image, mbsync/Dockerfile); any of the four on
+        # a collector is its own alternate in-container execution path,
+        # running with the same Bridge password, Maildir/state and
+        # network a collector keeps, just as an entrypoint or command override would
+        # (review round 3).
         ($base[0].services["mbsync"] as $bbase
             | (if $bbase.init == true and $s.init != true
                 then "\($c.service): init is not true" else empty end),
@@ -209,7 +215,11 @@ def bounded_logging:
               (if $s.image != $bbase.image or $s.build != $bbase.build
                 then "\($c.service): image or build differs from mbsync" else empty end),
               (if ($s | set("entrypoint")) then "\($c.service): sets an entrypoint override" else empty end),
-              (if ($s | set("command")) then "\($c.service): sets a command override" else empty end))
+              (if ($s | set("command")) then "\($c.service): sets a command override" else empty end),
+              (if ($s | set("healthcheck")) then "\($c.service): sets a healthcheck override" else empty end),
+              (if ($s | set("post_start")) then "\($c.service): sets a post_start hook" else empty end),
+              (if ($s | set("pre_stop")) then "\($c.service): sets a pre_stop hook" else empty end),
+              (if ($s | set("configs")) then "\($c.service): mounts a config" else empty end))
       end),
   # A declared collector keeps its own secret (mounted as bridge_pass),
   # both volumes and its network: an overlay with !reset cannot take them.
@@ -986,18 +996,37 @@ EOF
 # own build or image, or that it set no entrypoint/command override
 # (review round 2, finding 2: a substituted but otherwise hardened image
 # would still receive the account password, Maildir/state volumes and
-# network).
+# network). A healthcheck, post_start/pre_stop hook or mounted config is
+# the same risk under a different field: each runs its own command
+# inside the container while the image, entrypoint and command stay
+# mbsync's own (review round 3).
 generated_collectors_keep_the_mbsync_implementation() {
     expect_generated_rejected three-proton "" \
         "mbsync-$UUID_B: image or build differs from mbsync" \
         "mbsync-$UUID_B: sets an entrypoint override" \
-        "mbsync-$UUID_B: sets a command override" <<EOF
+        "mbsync-$UUID_B: sets a command override" \
+        "mbsync-$UUID_B: sets a healthcheck override" \
+        "mbsync-$UUID_B: sets a post_start hook" \
+        "mbsync-$UUID_B: sets a pre_stop hook" \
+        "mbsync-$UUID_B: mounts a config" <<EOF
 services:
   mbsync-$UUID_B:
     build: !reset null
     image: example.invalid/rootful:1
     entrypoint: ["/bin/sh", "-c"]
     command: ["true"]
+    healthcheck:
+      test: ["CMD", "true"]
+    post_start:
+      - command: ["true"]
+    pre_stop:
+      - command: ["true"]
+    configs:
+      - source: proton_settings
+        target: /app/proton-settings.sh
+configs:
+  proton_settings:
+    content: "echo pwned"
 EOF
 }
 
