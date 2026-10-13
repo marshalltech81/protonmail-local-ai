@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
 import pytest
+from src import account as account_mod
 from src import main
 from src.database import EMBEDDING_DIM, SCHEMA_VERSION, Database
 from src.occurrences import OUTSIDE_ROOT, OccurrenceLocatorError, locate
@@ -649,6 +650,46 @@ class TestMigrationV14:
             conn.close()
         # The right root then migrates it.
         Database(path, account=_account(root)).close()
+
+    @pytest.mark.parametrize("configured", ["maildir", "sub/../maildir"])
+    def test_relative_paths_a_v13_index_stored_are_seeded(self, tmp_path, monkeypatch, configured):
+        """An indexer run outside Compose with a relative ``MAILDIR_PATH``
+        walked a relative root and stored relative paths; the root is
+        now made absolute, so the seed resolves those legacy paths the
+        same way before relativizing them, instead of failing every
+        retry (Codex round 4 on #1601)."""
+        root = tmp_path / "maildir"
+        path, before = _v13_index(tmp_path, root)
+        conn = sqlite3.connect(path)
+        prefix = str(tmp_path) + "/"
+        for table in ("messages", "message_thread_map", "indexed_files"):
+            conn.execute(
+                f"UPDATE {table} SET filepath = substr(filepath, ?) "  # nosec B608
+                f"WHERE filepath LIKE ? || '%'",
+                (len(prefix) + 1, prefix),
+            )
+        conn.commit()
+        assert all(not r[0].startswith("/") for r in conn.execute("SELECT filepath FROM messages"))
+        conn.close()
+        (tmp_path / "sub").mkdir()
+        monkeypatch.chdir(tmp_path)
+        account = _account(account_mod.maildir_root_from_env({"MAILDIR_PATH": configured}))
+        db = Database(path, account=account)
+        try:
+            assert sorted(o["relative_path"] for o in _occurrences(db)) == [
+                "Folders/.Clients/cur/s2:2,FT",
+                "INBOX/cur/s1:2,S",
+            ]
+        finally:
+            db.close()
+
+    def test_an_absolute_legacy_path_outside_the_root_still_fails(self, tmp_path):
+        """Only relative paths are resolved; an absolute one is compared
+        as stored."""
+        root = tmp_path / "maildir"
+        path, _before = _v13_index(tmp_path, root)
+        with pytest.raises(OccurrenceLocatorError):
+            Database(path, account=_account(tmp_path / "other"))
 
     def test_a_message_whose_path_holds_other_bytes_is_left_for_the_reparse(self, tmp_path, caplog):
         caplog.set_level(logging.INFO)

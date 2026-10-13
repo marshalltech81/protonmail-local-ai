@@ -13,6 +13,7 @@ folder name ``parser._derive_folder`` falls back to.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -80,6 +81,13 @@ class SeedFunctions:
         self.refused = 0
 
     def _locate(self, filepath: str) -> Locator:
+        # An indexer run outside Compose with a relative MAILDIR_PATH
+        # stored the relative paths its walk yielded; the root is now made
+        # absolute against the working directory (``account.
+        # maildir_root_from_env``), so such a legacy path is resolved the
+        # same way first. An absolute path is compared as stored.
+        if not PurePosixPath(filepath).is_absolute():
+            filepath = os.path.abspath(filepath)
         try:
             return locate(filepath, self.root)
         except OccurrenceLocatorError:
