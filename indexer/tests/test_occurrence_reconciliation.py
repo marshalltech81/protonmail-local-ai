@@ -863,3 +863,31 @@ class TestReviewRound1:
             box.db.close()
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert not any("no verified file" in m for m in warnings)
+
+
+class TestReviewRound2:
+    """Review round 2 on #1612."""
+
+    def test_a_replaced_file_with_the_same_size_and_mtime_is_hashed_again(self, box):
+        """The hash cache is keyed by the file's inode too: a T-flagged
+        copy replaced by another file with the same size and mtime is not
+        bound with the old file's digest."""
+        raw = _eml("cached@example.test")
+        box.index(box.put("INBOX/cur/h1:2,S", raw))
+        other = _eml("cachex@example.test")
+        assert len(other) == len(raw)
+        cache: dict = {}
+        # Hashed once while it is another message's copy-to-be; then
+        # replaced by bytes of the same size and mtime.
+        copy = box.put("Trash/cur/h2:2,ST", other)
+        os.utime(copy, ns=(5, 5))
+        assert scan_occurrences(box.db, box.root, hash_cache=cache).bound == 0
+        swap = copy.with_name("swap")
+        swap.write_bytes(raw)
+        os.utime(swap, ns=(5, 5))
+        os.replace(swap, copy)
+        counts = scan_occurrences(box.db, box.root, hash_cache=cache)
+        # The replacement holds the indexed message's bytes: hashed again
+        # and bound, not skipped (or misbound) by the stale digest.
+        assert (counts.hashed, counts.bound) == (1, 1)
+        assert ("Trash/cur/h2:2,ST", 1) in box.active()

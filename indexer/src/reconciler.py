@@ -117,9 +117,9 @@ class Reconciler:
         # during thread rebuild.
         self.maildir_root = maildir_root
         # File hashes of unindexed ``T``-flagged or dead-lettered files
-        # the scan read, by path, size and mtime, so each is read once per
-        # process (``occurrence_scan``).
-        self._hash_cache: dict[tuple[str, int, int], str] = {}
+        # the scan read, by path, size, mtime and inode, so each file is
+        # read once per process (``occurrence_scan``).
+        self._hash_cache: dict[tuple[str, int, int, int], str] = {}
         # Threads currently stuck in the reap path because a survivor
         # cannot be parsed (corrupt MIME header, runtime bug in the
         # parser, oversized survivor file). Counter increments each

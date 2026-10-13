@@ -3407,7 +3407,7 @@ occurrences:
   no occurrence held it (#1141). Its bytes come from its `indexed_files`
   record when size and mtime match. Otherwise only a `T`-flagged or
   dead-lettered file is hashed, and only by the mirror-mode sweep, once
-  per process for each path, size and mtime; any other unindexed file is
+  per process for each path, size, mtime and inode; any other unindexed file is
   new mail the Maildir walk queues, and its parse binds it.
 - **Vanished files.** An active occurrence with neither is retired only
   when the scan is complete: the walk read every directory under the

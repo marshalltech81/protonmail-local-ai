@@ -161,14 +161,14 @@ def scan_occurrences(
     db: Database,
     root: Path,
     *,
-    hash_cache: dict[tuple[str, int, int], str] | None = None,
+    hash_cache: dict[tuple[str, int, int, int], str] | None = None,
 ) -> ScanCounts:
     """Reconcile the account's active occurrences under ``root`` with
     the files there (see the module docstring) and return the counts.
 
     ``hash_cache`` enables
     hashing of unindexed ``T``-flagged or dead-lettered files, keyed by
-    path, size and mtime so each is read once per process.
+    path, size, mtime and inode so each file is read once per process.
     """
     counts = ScanCounts()
     account_root = db.account.maildir_root
@@ -233,7 +233,7 @@ def scan_occurrences(
             continue
         content_hash = _recorded_hash(db, path, path)
         if content_hash is None and hash_cache is not None:
-            content_hash = _hash_unindexed(db, path, hash_cache, counts)
+            content_hash = _hash_unindexed(db, path, identity, hash_cache, counts)
         if content_hash is None:
             continue
         claimant_id = db.claimant_for_content(content_hash)
@@ -248,17 +248,17 @@ def scan_occurrences(
 def _hash_unindexed(
     db: Database,
     path: Path,
-    hash_cache: dict[tuple[str, int, int], str],
+    identity: tuple[int, int, int],
+    hash_cache: dict[tuple[str, int, int, int], str],
     counts: ScanCounts,
 ) -> str | None:
     """The content hash of a file the walk never indexes on its own: a
     ``T``-flagged one (mirror retention parks it) or one whose job is
     dead-lettered. Any other unindexed file is new mail the walk queues,
-    and its parse binds it. Cached by path, size and mtime."""
+    and its parse binds it. Cached by path and ``identity`` (size, mtime
+    and inode, as the bind re-checks), so a replacement with the same
+    size and mtime is hashed again (review round 2 on #1612)."""
     if not is_trashed(path) and db.queue_get_status(str(path)) != "dead":
-        return None
-    identity = _stat_identity(path)
-    if identity is None:
         return None
     key = (str(path), *identity)
     if key not in hash_cache:
