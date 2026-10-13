@@ -267,16 +267,24 @@ func (s *i1583Store) Get(id imap.InternalMessageID) ([]byte, error) {
 	return b, err
 }
 
+// i1583CountReader counts bytes as the store consumes them, so the probe
+// adds no buffering or copy to Gluon's streaming Set.
+type i1583CountReader struct {
+	r io.Reader
+	n *atomic.Int64
+}
+
+func (c i1583CountReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+
+	return n, err
+}
+
 func (s *i1583Store) Set(id imap.InternalMessageID, r io.Reader) error {
-	b, err := io.ReadAll(r)
-	if err != nil {
-		return err
-	}
-
 	s.sets.Add(1)
-	s.setBytes.Add(int64(len(b)))
 
-	return s.Store.Set(id, bytes.NewReader(b))
+	return s.Store.Set(id, i1583CountReader{r: r, n: &s.setBytes})
 }
 
 func (s *i1583Store) dropAll(tb testing.TB) int {

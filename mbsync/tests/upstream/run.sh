@@ -310,6 +310,13 @@ inputs_digest() {
     ) | "${SHA256_CMD[@]}" | cut -d' ' -f1
 }
 
+# assemble and execute both refuse inputs (run.sh included) that changed
+# since acquire recorded them.
+check_inputs() {
+    [[ "$(sed -n 's/^inputs sha256=\([0-9a-f]\{64\}\) .*/\1/p' "$WORK/provenance.txt")" == "$(inputs_digest)" ]] ||
+        die "inputs changed since acquire; run acquire again into a new work dir"
+}
+
 cmd_acquire() {
     # A new directory only this account can write: no other account can
     # swap or plant files in it between the checks and the copies.
@@ -333,8 +340,7 @@ cmd_assemble() {
     local stage="$WORK/stage" image
     set_names
     image="$IMAGE_REPO:$(work_tag)"
-    [[ "$(sed -n 's/^inputs sha256=\([0-9a-f]\{64\}\) .*/\1/p' "$WORK/provenance.txt")" == "$(inputs_digest)" ]] ||
-        die "inputs changed since acquire; run acquire again into a new work dir"
+    check_inputs
     rm -rf "$stage"
     mkdir -p "$stage"
     cp -R "$WORK/repo" "$stage/repo"
@@ -378,6 +384,7 @@ rsync_tree() {
 cmd_execute() {
     local out="$1" debug="${2:-}" rc=0 image
     set_names
+    check_inputs
     image="$IMAGE_REPO:$(work_tag)"
     [[ "$(docker image inspect --format '{{index .Config.Labels "i1583.provenance"}}' "$image")" == "$(sha256 "$WORK/provenance.txt")" ]] ||
         die "image $image was not assembled from this work dir's provenance"
@@ -426,14 +433,16 @@ cmd_clean() {
         tag="$(work_tag)"
         docker rm -f "$ACQ" "$ASM" "$RUNC" >/dev/null 2>&1 || true
         docker rmi "$IMAGE_REPO:$tag" >/dev/null 2>&1 || true
-        chmod -R u+w "$WORK"
-        rm -rf "$WORK"
         local left
-        # A failed query is a failure, not an empty answer.
+        # A failed query is a failure, not an empty answer. The work dir,
+        # which holds the only copy of the tag, goes only after Docker is
+        # verified clean, so a retry can still find what remains.
         left="$(docker ps -a --filter "name=^i1583-[a-z]+-$tag\$" --format '{{.Names}}')" || die "cannot list containers"
         [[ -z "$left" ]] || die "containers remain"
         left="$(docker image ls -q "$IMAGE_REPO:$tag")" || die "cannot list images"
         [[ -z "$left" ]] || die "image remains"
+        chmod -R u+w "$WORK"
+        rm -rf "$WORK"
     fi
     [[ ! -e "$WORK" ]] || die "work dir remains"
     printf 'clean: containers, image and work dir removed\n'
@@ -444,6 +453,10 @@ cmd_clean() {
 resolve_work() {
     local parent base path
     parent="$(cd -P "$(dirname "$1")" 2>/dev/null && pwd)" || die "work dir parent does not exist"
+    # Only this account may write the parent: otherwise another account
+    # could rename the directory and put its own (with symlinks) in place.
+    [[ -n "$(find "$parent" -maxdepth 0 -user "$(id -u)" ! -perm -g+w ! -perm -o+w)" ]] ||
+        die "the parent of the work and out dirs must be owned by this account and writable only by it"
     base="$(basename "$1")"
     [[ "$base" != "." && "$base" != ".." && "$base" != "/" ]] || die "work dir must name a directory"
     path="${parent%/}/$base"
