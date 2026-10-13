@@ -962,7 +962,10 @@ superseded entries keep their number and one line.
     Maildir-only rebuild needs a refresh (owner, 2026-10-11, #1313). The
     Proton path is extracted unchanged: rendered configuration,
     environment variables, channel and store names, public interfaces,
-    every control and the pin-rotation semantics. New configuration or
+    every control and the pin-rotation semantics, except that pin
+    rotation and forced deletion become one-run commands instead of
+    persistent settings, with the pin and fingerprint checks unchanged
+    (owner, 2026-10-12, #1353, #1609). New configuration or
     state formats, collectors, role behaviour, reconciliation, renamed
     channels or stores, any path around a Proton control (a synthetic
     source included) and additional sources each need their own
@@ -974,7 +977,9 @@ superseded entries keep their number and one line.
     validated by one shared helper at `scripts/validate-env.sh` and the
     mbsync entrypoint before rendering or any network use; a forbidden
     value is refused with fixed text naming the decision that would
-    allow it, never the value. The Bridge stays on this Mac: the host
+    allow it, never the value. Certificate pin rotation is the
+    exception: it becomes a one-run command, not a setting (owner,
+    2026-10-12, #1353, #1609). The Bridge stays on this Mac: the host
     is an allowlist of container aliases tested to forward to the
     host's `127.0.0.1`, the certificate name a loopback identity; off-Mac
     Bridge is #1499. #1313 enables metadata-only labels; the payload
@@ -983,22 +988,41 @@ superseded entries keep their number and one line.
     Channel and store names follow log redaction (#1498). Replacing the
     Compose literals with this validation is an owner decision under
     decision 43, which stands unchanged.
-47. **Mailbox occurrences (2026-10-11, #1083):** each Maildir copy of
-    a message is its own occurrence, keyed by account scope, folder,
-    Maildir uniq and claimant ID, bound only after its full content
-    hash is verified. The account scope is #1313's local account UUID,
-    kept outside SQLite; a mismatch fails startup closed. Occurrences
-    own folder, path, flags, observation dates, lifecycle, provenance
-    and arrival time; `messages` keeps content, headers and source
-    dates. A flag rename keeps an occurrence; a folder, uniq or content
-    change replaces it. A message is reaped only after losing its last
-    active occurrence that is not `T`-flagged, under the existing grace,
-    brakes and retention; a partial scan establishes no absence.
-    Filters match within one occurrence, results are deduplicated
-    before counting and paging, source counts stay the default, and
-    source categories derive from the folder at read time. The
-    migration seeds one occurrence per message and reparses without
-    re-embedding. The near-side UID and `.mbsyncstate` stay unread.
+47. **Mailbox occurrences (2026-10-11, #1083; amended 2026-10-12 and
+    2026-10-13):** each Maildir copy of a message is its own
+    occurrence, keyed by account, account-relative folder, Maildir uniq
+    and claimant ID, bound only after its full content hash is
+    verified. The account is a row of an append-only `accounts`
+    registry holding its scope UUID and provider (#1596);
+    `ACCOUNT_SCOPE` in `.env`, generated once by setup, is the
+    single-account form. The indexer and mcp-server each require
+    exactly one stored account matching the configured UUID and
+    provider and otherwise fail closed; recovery is restore or rebuild.
+    Occurrences own folder, an account-root-relative path unique among
+    live rows, flags, observation dates, lifecycle, provenance and
+    arrival time; `messages` keeps content, headers and source dates.
+    Relocating the account root alone keeps occurrences. A flag rename
+    keeps an occurrence; a folder, uniq or content change replaces it.
+    Pending deletions are keyed by occurrence. A message is reaped only
+    after losing its last active occurrence that is not `T`-flagged in
+    any account, under the existing grace, brakes and retention, with a
+    per-account brake beside the unchanged global one; a partial scan
+    establishes no absence. Filters match within one occurrence,
+    results are deduplicated before counting and paging, source counts
+    stay the default, and Trash and source categories derive from the
+    folder at read time under the provider of the occurrence's account.
+    A message is in the default scope when it has an active occurrence
+    outside its provider's Trash role, considering only its non-`T`
+    active occurrences when any exist, otherwise all its active ones
+    (owner, 2026-10-13, #1568). Two PRs
+    deliver it: PR 1 (#1596, #1566; schema v14) is additive and changes
+    no reader; PR 2 (#1567, #1568, #1569; v15) moves the readers and
+    drops the old columns. The v14 migration binds the account row,
+    seeds one occurrence per message whose stored path still holds its
+    content hash and queues a reparse without re-embedding. Claimant,
+    chunk and thread IDs are unchanged; account selectors and other
+    multi-account behaviour are decision 49. The near-side UID and
+    `.mbsyncstate` stay unread.
 
 48. **Exhaustive thread queries (2026-10-12, #1166):** `query_threads`
     shares the public message filters and evaluates the whole expression on
@@ -1008,6 +1032,140 @@ superseded entries keep their number and one line.
     participant counts and three-valued attachment presence. Each page is
     one fresh read snapshot; frozen cross-page populations are not claimed.
     No schema change or selectable date basis is introduced.
+49. **Several accounts in one deployment (2026-10-12, #1491):** the
+    goal is several accounts of different providers feeding one index
+    and MCP endpoint; decision 50's per-account configuration comes
+    before any multi-account code, with no interim list format.
+    Threading stays global: membership resolves by Message-ID, and
+    claimant, chunk and thread IDs and thread-level indexing are
+    unchanged. An account filter constrains which messages qualify at
+    occurrence level; thread context may include members held only by
+    another account, each labelled with its account. Account-local
+    conversations were rejected. The legacy account keeps `/maildir`;
+    added accounts mount at `/accounts/<UUID>`. Each account has its
+    own collector container with only its own non-empty mode-600
+    password secret, Maildir and state volumes, resource limits and
+    healthcheck; the indexer and mcp-server get no password, and the
+    indexer drops its health dependency on a single collector. Sync
+    stamp, watcher, deletion brake and collection status are per
+    account, with bounded round-robin scheduling. Search defaults to
+    the union of accounts, with account UUID-set filters, account
+    provenance on results, folders grouped by account, cursors bound to
+    the resolved account set, and source, occurrence and logical counts
+    kept distinct. Disabling an account keeps its data; explicit
+    removal retires that account's occurrences and labels, keeps
+    sources other accounts hold and keeps last-copy safeguards;
+    registry rows stay. Rotating a password recreates one collector.
+    Owner identities are per account, authority rules global. Generic
+    IMAP uses implicit TLS with system CA trust and hostname
+    verification and no certificate pinning (isync trusts a non-CA
+    `CertificateFile` certificate whatever its name, so a leaf pin
+    would drop the hostname check), password or app-password
+    authentication only, and explicit folder roles, an unknown role
+    staying unknown. Generic collectors use their own egress network,
+    separate from `bridge-net`, under a provider-aware Semgrep rule,
+    and never receive the Bridge password. Proton's controls are
+    unchanged; #1499 stays separate.
+50. **Operator configuration (2026-10-12, #1353):** a TOML file with
+    schema version 1 is the operator interface. A host-side translator
+    in Python 3.11+ (`tomllib`; host Python becomes a prerequisite)
+    produces today's runtime projections and
+    `.generated/compose.accounts.yml`, one hardened collector per
+    enabled account with only its own secret, volumes and provider
+    network; legacy service and volume names, `/maildir` and global
+    threads stay. `[global]` holds the model layers and their secret
+    references, MCP, indexer policy and authority rules. Each
+    `[[accounts]]` entry holds an immutable `scope_uuid`, an editable
+    `name`, `enabled`, `provider`, `maildir_root`, `password_file`,
+    connection and sync settings, mailbox selection, identity addresses
+    and exactly one provider table (`proton_bridge` or `imap`). At most
+    one account uses `/maildir`, every other one
+    `/accounts/<its scope_uuid>`. Proton accounts accept mailbox
+    exclusions only, and `mbsync/proton-settings.sh` still enforces the
+    mandatory ones; `imap` is defined but refused until #1606.
+    `config/mode` (mode 600, gitignored) holds exactly `legacy` or
+    `toml` and is written only by an explicit command (`make
+    migrate-config` writes `toml`, a fresh `make init-config`
+    `legacy`); an existing deployment without it, or a mixed
+    configuration, is refused with fixed text, with no fallback in
+    either direction. In TOML mode Compose runs with
+    `--env-file .generated/compose.env`, `.env` is not read and
+    inherited application variables are stripped. Migration imports
+    the effective `ACCOUNT_SCOPE` as the one account at `/maildir`,
+    checks it against the `accounts` row and never regenerates it. The
+    host rejects unknown keys, wrong types and ranges and mixed account
+    forms with fixed text; `scripts/validate-env.sh` independently
+    checks every account projection with value-free diagnostics, and
+    each service still validates what it is given. Every application
+    setting is mapped before the first PR merges. Maintenance overrides
+    (certificate pin rotation, forced deletion) become one-run
+    commands, not configuration (#1609). One enabled account is allowed
+    until #1605.
+51. **Collection status (2026-10-12, #1592, #1593):** mbsync publishes
+    a bounded format-1 JSON status file in the Maildir root, atomically
+    replaced before and after every attempt; the success stamp and its
+    acknowledgement are unchanged, and reading the status file never
+    acknowledges delivery. The file carries the account's scope UUID,
+    the current attempt, the last terminal outcome (`succeeded`,
+    `succeeded_with_withheld_folders`, or `failed` with a fixed failure
+    class, `interrupted` included) with a nullable withheld count, and
+    the last success, ordered by publication, never by timestamps;
+    folder names never appear. A far-side failure combined with any
+    other error is `failed`, and a leftover `in_progress` proves
+    nothing about whether the collector is alive. After a failure,
+    `current` stays false until a later success has been delivered (its
+    attempt is the one the acknowledged success stamp names); a success
+    that withheld folders keeps today's criteria and shows the count;
+    upstream Bridge/Proton currency stays the fixed "unknown". The
+    indexer stores the outcome per account in `account_collection_state`
+    at schema v16, after decision 47's v15. A missing, legacy,
+    malformed, unsupported or mismatched file reads as unknown with a
+    fixed-text WARNING, never as a success, and a rebuilt index
+    recovers the state from the file. `get_mailbox_status` gains a
+    `collection` block. The declared Bridge address scope is stored per
+    account; a changed declaration is reported with when it changed and
+    never refused (#1593, its own PR after #1592).
+52. **Provider identities and label observations (2026-10-12,
+    #1598):** a provider-identity candidate is derived from stored
+    header evidence, only from a complete header capture with exactly
+    one candidate field, so the migration queues no reparse;
+    reassessment runs in bounded, resumable batches keyed by policy
+    version and occurrence provenance. #1598 owns the acceptance and
+    binding rule, and until the owner approves one nothing is accepted:
+    candidates, versioned assessments with reasons and dated membership
+    observations are stored with no authoritative association or
+    logical deduplication, so label features show nothing. Assessments
+    are per occurrence and per account; `Recovered Messages` is always
+    rejected, and equal bytes count for neither acceptance nor
+    rejection. Label observations carry account, provider ID, label and
+    scan generation with no foreign key to an identity table, keep
+    their own retention and survive the reaping of every source; no
+    observation or candidate creates a logical-identity row. Logical
+    messages are a view over each occurrence's effective accepted
+    assessment, and a label joins a specific occurrence's accepted
+    assessment in the same account, never through the claimant or
+    equal bytes. Logical counts apply each occurrence's eligibility,
+    then deduplicate before counting and paging; source counts stay
+    the default.
+53. **Upstream Gluon and Bridge harness (2026-10-12, #1583):** the
+    pinned Gluon and Bridge commits are built and run locally for
+    #1316's identity evidence matrix, with acquisition kept apart from
+    execution. Commits, the Go toolchain `go.mod` names, modules
+    (unchanged `go.sum`, `go mod verify`), the Debian base digest
+    (checked against the publisher's) and exact-version packages are
+    fetched and verified first, with each artifact's provenance
+    recorded; assembly then runs with `--network none`. Execution uses
+    one disposable non-root container built from the Debian base, with
+    all capabilities dropped, `no-new-privileges`, memory and pids
+    limits, no ports, sockets, volumes, mounts, secrets, Maildir or
+    Bridge access, inputs by `docker cp`, and `GOTOOLCHAIN=local`,
+    `GOPROXY=off` and `-mod=readonly`. Output is allowlisted counts,
+    byte-equality outcomes, timings and fixed tokens, with no identity
+    values; the harness and synthetic fixtures live under
+    `mbsync/tests/upstream/`, and upstream trees, builds and the image
+    are removed. Results go into `docs/architecture.md` as executed
+    rows; they are necessary, not sufficient, evidence for #1598's
+    acceptance rule, and server-side guarantees stay with #1584.
 
 ## Notes for Agents
 
