@@ -249,11 +249,18 @@ func i1583ProbeOf(s *testSession) *i1583Probe {
 type i1583Store struct {
 	store.Store
 
-	gets, getBytes, sets, setBytes atomic.Int64
+	gets, misses, getBytes, sets, setBytes atomic.Int64
 }
 
+// Get counts a successful read of a full literal (gets, getBytes) apart
+// from a miss (an error, such as the literal not being stored).
 func (s *i1583Store) Get(id imap.InternalMessageID) ([]byte, error) {
 	b, err := s.Store.Get(id)
+	if err != nil {
+		s.misses.Add(1)
+		return b, err
+	}
+
 	s.gets.Add(1)
 	s.getBytes.Add(int64(len(b)))
 
@@ -282,6 +289,7 @@ func (s *i1583Store) dropAll(tb testing.TB) int {
 
 func (s *i1583Store) resetCounters() {
 	s.gets.Store(0)
+	s.misses.Store(0)
 	s.getBytes.Store(0)
 	s.sets.Store(0)
 	s.setBytes.Store(0)
@@ -1283,6 +1291,7 @@ func TestIssue1583Item8HeaderOnly(t *testing.T) {
 			i1583Rec(t, sc, phase+"_downstream_bytes", downstream)
 			i1583Rec(t, sc, phase+"_downstream_literal_bytes", literalBytesDown)
 			i1583Rec(t, sc, phase+"_store_full_literal_reads", st.gets.Load())
+			i1583Rec(t, sc, phase+"_store_misses", st.misses.Load())
 			i1583Rec(t, sc, phase+"_store_full_literal_bytes", st.getBytes.Load())
 			i1583Rec(t, sc, phase+"_store_writes", st.sets.Load())
 			i1583Rec(t, sc, phase+"_store_write_bytes", st.setBytes.Load())

@@ -39,7 +39,8 @@
 #        run.sh acquire|assemble <work-dir>
 #        run.sh execute <work-dir> <out-dir> [debug]
 #        run.sh clean <work-dir>
-# <work-dir> must be new or empty and lives outside the repository (it
+# <work-dir> and <out-dir> must not exist yet (run.sh creates them with
+# mode 700); <work-dir> lives outside the repository (it
 # holds upstream trees, downloads and builds). Needs docker (Linux
 # arm64 or amd64 engine), git, curl, jq, gpgv, xz, python3 and shasum or
 # sha256sum on the host. Not part of CI or `make test`.
@@ -310,8 +311,10 @@ inputs_digest() {
 }
 
 cmd_acquire() {
-    [[ ! -e "$WORK" || -z "$(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit)" ]] || die "work dir not empty"
-    mkdir -p "$WORK"
+    # A new directory only this account can write: no other account can
+    # swap or plant files in it between the checks and the copies.
+    [[ ! -e "$WORK" && ! -L "$WORK" ]] || die "work dir must not exist yet"
+    mkdir -m 700 "$WORK" || die "cannot create the work dir"
     od -An -N8 -tx1 /dev/urandom | tr -d ' \n' >"$WORK/$MARKER"
     set_names
     : >"$WORK/provenance.txt"
@@ -425,8 +428,12 @@ cmd_clean() {
         docker rmi "$IMAGE_REPO:$tag" >/dev/null 2>&1 || true
         chmod -R u+w "$WORK"
         rm -rf "$WORK"
-        [[ -z "$(docker ps -a --filter "name=^i1583-[a-z]+-$tag\$" --format '{{.Names}}')" ]] || die "containers remain"
-        [[ -z "$(docker image ls -q "$IMAGE_REPO:$tag")" ]] || die "image remains"
+        local left
+        # A failed query is a failure, not an empty answer.
+        left="$(docker ps -a --filter "name=^i1583-[a-z]+-$tag\$" --format '{{.Names}}')" || die "cannot list containers"
+        [[ -z "$left" ]] || die "containers remain"
+        left="$(docker image ls -q "$IMAGE_REPO:$tag")" || die "cannot list images"
+        [[ -z "$left" ]] || die "image remains"
     fi
     [[ ! -e "$WORK" ]] || die "work dir remains"
     printf 'clean: containers, image and work dir removed\n'
