@@ -413,6 +413,31 @@ REFUSALS += [
         "global.embedding.base_url must be default or start with http:// or https://.",
     ),
     (
+        # Review round 6: mcp-server reads every *_BASE_URL with urlsplit
+        # and refuses userinfo whatever the mode.
+        "a disabled layer's base_url with credentials",
+        [
+            ("global.inference.mode", "none"),
+            ("global.inference.base_url", f"https://u:{MARKER}@x.example"),
+        ],
+        "global.inference.base_url must not embed credentials (user:pass@host): put the key in the layer's api_key_file.",
+    ),
+    (
+        "a disabled layer's base_url with an @ and no scheme",
+        [("global.reranking.base_url", f"//u:{MARKER}@x.example")],
+        "global.reranking.base_url must not embed credentials (user:pass@host): put the key in the layer's api_key_file.",
+    ),
+    (
+        "a disabled layer's base_url urlsplit refuses",
+        [("global.reranking.base_url", f"http://[{MARKER}")],
+        "global.reranking.base_url is not a valid URL.",
+    ),
+    (
+        "an enabled layer's base_url urlsplit refuses",
+        [("global.embedding.base_url", f"https://[{MARKER}/v1")],
+        "global.embedding.base_url is not a valid URL.",
+    ),
+    (
         "a base_url with credentials",
         [("global.embedding.base_url", f"https://u:{MARKER}@x.example/v1")],
         "global.embedding.base_url must not embed credentials (user:pass@host): put the key in the layer's api_key_file.",
@@ -1257,6 +1282,69 @@ class CommandLine(unittest.TestCase):
         )
         self.assertNotIn(MARKER, result.stdout + result.stderr)
         self.assertFalse((self.dir / ".generated").exists())
+
+    def test_an_output_never_replaces_an_input(self) -> None:
+        # Review round 6: --out chooses the targets, so the reserved
+        # default outputs do not cover them; a target that is the
+        # configuration file, a configured secret or a protected file is
+        # refused before anything is written or removed.
+        legacy = (FIXTURES / "legacy.toml").read_text(encoding="utf-8")
+        (self.dir / "config").mkdir()
+        (self.dir / "out").mkdir()
+        key = self.dir / "out" / "compose.env"
+        key.write_text(MARKER)
+        config = self.dir / "config" / "config.toml"
+        config.write_text(
+            legacy.replace(
+                "[global.embedding]\n", '[global.embedding]\napi_key_file = "../out/compose.env"\n'
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(config, 0o600)
+        self.assertIn("../out/compose.env", config.read_text(encoding="utf-8"))
+        alone = self.dir / "alone" / "compose.env"
+        alone.parent.mkdir()
+        alone.write_text(legacy, encoding="utf-8")
+        os.chmod(alone, 0o600)
+        protected = self.dir / "config" / "identity.toml"
+        protected.write_text(MARKER)
+        cases = [
+            ("a configured secret", config, self.dir / "out", key),
+            ("the configuration file", alone, self.dir / "alone", alone),
+            ("a protected file", config, self.dir, protected),
+        ]
+        for description, config_path, out, target in cases:
+            with self.subTest(description):
+                before = target.read_bytes()
+                stderr = io.StringIO()
+                with (
+                    unittest.mock.patch.object(oc, "REPO_ROOT", self.dir),
+                    unittest.mock.patch("sys.stderr", stderr),
+                ):
+                    code = oc.main(["translate", "--config", str(config_path), "--out", str(out)])
+                self.assertEqual(code, 1)
+                self.assertRegex(
+                    stderr.getvalue(),
+                    r"^ERROR: --out: [a-z./]+ would replace the configuration file, a secret file "
+                    r"it names or a protected file; choose another output directory\.\n$",
+                )
+                self.assertNotIn(MARKER, stderr.getvalue())
+                self.assertEqual(target.read_bytes(), before)
+
+    def test_outputs_are_written_with_lf_line_ends(self) -> None:
+        # Review round 6: text mode would write CRLF on Windows, past the
+        # byte limits render_identity and render_authority check.
+        calls: list[dict[str, Any]] = []
+        real = os.fdopen
+
+        def recording(fd: int, *args: Any, **kwargs: Any) -> Any:
+            calls.append(kwargs)
+            return real(fd, *args, **kwargs)
+
+        with unittest.mock.patch("os.fdopen", recording):
+            oc.write_outputs(self.dir / "w", {"compose.env": "A='1'\nB='2'\n"})
+        self.assertEqual([c.get("newline") for c in calls], ["\n"])
+        self.assertEqual((self.dir / "w" / "compose.env").read_bytes(), b"A='1'\nB='2'\n")
 
 
 # --- Compose -----------------------------------------------------------------

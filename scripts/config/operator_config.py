@@ -39,6 +39,7 @@ import subprocess  # nosec B404 - runs bash on the repository's own settings fil
 import sys
 import tomllib
 import unicodedata
+import urllib.parse
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -635,6 +636,8 @@ def _check_model_layers(config_global: dict[str, Any]) -> None:
     scripts/validate-env.sh requires (_check_base_url)."""
     for layer in ("embedding", "inference", "reranking"):
         table = config_global[layer]
+        if table["base_url"] is not None:
+            _check_url_userinfo(f"global.{layer}.base_url", table["base_url"])
         if table["mode"] == "none":
             continue
         for key in ("base_url", "model"):
@@ -702,6 +705,20 @@ def _check_not_conventional(path: Path, key: str, names: tuple[str, ...], role: 
     if _any_same(_FileKey.of(path), [_FileKey.of(REPO_ROOT / n) for n in names]):
         raise ConfigError(
             f"{key} is {role} file ({', '.join(names)}): each secret goes only where it belongs."
+        )
+
+
+def _check_url_userinfo(path: str, value: str) -> None:
+    """mcp-server's _reject_url_userinfo, which reads every *_BASE_URL,
+    whatever the layer's mode: urlsplit must accept it and its netloc
+    hold no @. A disabled layer's value is projected too."""
+    try:
+        netloc = urllib.parse.urlsplit(value).netloc
+    except ValueError:
+        raise ConfigError(f"{path} is not a valid URL.") from None
+    if "@" in netloc:
+        raise ConfigError(
+            f"{path} must not embed credentials (user:pass@host): put the key in the layer's api_key_file."
         )
 
 
@@ -1470,7 +1487,8 @@ def _write_atomic(path: Path, text: str) -> None:
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        # LF on every platform: the byte limits are checked on LF text.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -1478,6 +1496,30 @@ def _write_atomic(path: Path, text: str) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def check_targets(
+    config: dict[str, Any], config_path: Path, out_dir: Path, outputs: dict[str, str | None]
+) -> None:
+    """No output, written or removed, is the configuration file, a secret
+    file it names, or a protected file (the reserved secrets, each role's
+    conventional file, AGENTS.md's sensitive data files). --out chooses
+    the targets, so this is checked against them, not the defaults."""
+    protected = [_FileKey.of(config_path)]
+    protected += [
+        _FileKey.of(config["global"][layer]["api_key_file"])
+        for layer in ("embedding", "inference", "reranking")
+    ]
+    protected += [_FileKey.of(account["password_file"]) for account in config["accounts"]]
+    names: tuple[str, ...] = RESERVED_SECRET_FILES + PASSWORD_SECRET_FILES + MODEL_KEY_SECRET_FILES
+    names += tuple(n for n in RESERVED_DATA_FILES if not n.startswith(".generated/"))
+    protected += [_FileKey.of(REPO_ROOT / name) for name in names]
+    for name in outputs:
+        if _any_same(_FileKey.of(out_dir / name), protected):
+            raise ConfigError(
+                f"--out: {name} would replace the configuration file, a secret file it names "
+                "or a protected file; choose another output directory."
+            )
 
 
 def write_outputs(out_dir: Path, outputs: dict[str, str | None]) -> None:
@@ -1500,7 +1542,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         data, base = load_file(args.config)
-        outputs = translate(validate(data, base))
+        config = validate(data, base)
+        outputs = translate(config)
+        check_targets(config, args.config, args.out, outputs)
         write_outputs(args.out, outputs)
     except ConfigError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

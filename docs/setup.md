@@ -967,8 +967,11 @@ and what `make validate-env` would refuse in the result (an enabled
 layer's `base_url` that is not `default` or an http(s) URL without
 credentials, an anthropic `base_url` ending in `/v1`, chunk budgets or
 an inference context that do not fit together, the example's placeholder
-username). No secret path may name `.secrets/mcp_auth_token.txt`. For
-the accounts:
+username), and any layer's `base_url`, enabled or not, that carries
+credentials or is not a URL `mcp-server` can split. No secret path may
+name `.secrets/mcp_auth_token.txt`. With `--out` set, it refuses an
+output directory where an output would replace the configuration file,
+a secret file it names or a protected file. For the accounts:
 
 - `scope_uuid` is the account's immutable UUID (today's
   `ACCOUNT_SCOPE`); two accounts with the same one are refused. `name`
