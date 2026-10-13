@@ -279,7 +279,7 @@ _CATEGORY_WORDS = {
 
 def _category_words(m: MessageRecord) -> list[str]:
     """The representative copy's source category in words: the copy
-    ``m.folder`` names, a former one for a message with no current copy
+    whose folder the row shows, a former one for a message with no current copy
     (review round 3 on #1612)."""
     return list(_CATEGORY_WORDS.get(m.category, [])) if m.category is not None else []
 

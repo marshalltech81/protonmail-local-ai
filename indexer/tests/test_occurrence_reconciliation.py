@@ -891,3 +891,53 @@ class TestReviewRound2:
         # and bound, not skipped (or misbound) by the stale digest.
         assert (counts.hashed, counts.bound) == (1, 1)
         assert ("Trash/cur/h2:2,ST", 1) in box.active()
+
+
+class TestReviewRound4:
+    """Review round 4 on #1612."""
+
+    def test_a_copy_restored_after_the_sweep_is_not_reaped(self, box, caplog):
+        """The reap re-checks the disk inside its transaction: a T flag
+        cleared upstream after the sweep keeps the message."""
+        caplog.set_level(logging.INFO)
+        path = box.put("INBOX/cur/w1:2,S", _eml("restored@example.test"))
+        box.index(path)
+        trashed = path.with_name("w1:2,ST")
+        path.rename(trashed)
+        assert box.reconciler.sweep()["tombstoned"] == 1
+        trashed.rename(path)  # restored upstream; no sweep or watcher yet
+        assert box.reconciler.reap()["threads_reaped"] == 0
+        assert box.messages() == 1
+        assert "file is back on disk since the sweep" in caplog.text
+        # The next sweep follows the rename back and clears the loss.
+        box.reconciler.sweep()
+        assert box.active() == [("INBOX/cur/w1:2,S", 0)]
+        assert box.tombstones() == []
+        assert MARKER not in caplog.text
+
+    def test_a_vanished_file_back_before_the_reap_is_kept(self, box):
+        path = box.put("INBOX/cur/w2:2,S", _eml("back@example.test"))
+        box.index(path)
+        raw = path.read_bytes()
+        path.unlink()
+        assert box.reconciler.sweep()["tombstoned"] == 1
+        path.write_bytes(raw)
+        assert box.reconciler.reap()["threads_reaped"] == 0
+        assert box.messages() == 1
+
+    def test_a_restored_message_in_a_partial_reap_is_kept(self, box):
+        first = box.put("INBOX/cur/w3:2,S", _eml("root3@example.test"))
+        reply = box.put(
+            "INBOX/cur/w4:2,S",
+            _eml("reply3@example.test").replace(
+                b"Subject:", b"In-Reply-To: <root3@example.test>\r\nSubject:", 1
+            ),
+        )
+        box.index(first, reply)
+        trashed = first.with_name("w3:2,ST")
+        first.rename(trashed)
+        assert box.reconciler.sweep()["tombstoned"] == 1
+        trashed.rename(first)
+        result = box.reconciler.reap()
+        assert (result["threads_reaped"], result["threads_rebuilt"]) == (0, 0)
+        assert box.messages() == 2

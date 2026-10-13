@@ -436,6 +436,8 @@ class TestRenames:
         try:
             (row,) = _active(db)
             lose_message(db, row["claimant_id"])
+            # Gone from disk too: a file back outside the trash is kept.
+            path.unlink()
             thread_id = db._conn.execute("SELECT thread_id FROM messages").fetchone()[0]
             assert db.delete_thread_completely(thread_id)
             assert _occurrences(db) == []

@@ -86,6 +86,20 @@ def _same_file(filepath: str, identity: tuple[int, int, int]) -> bool:
     return (st.st_size, st.st_mtime_ns, st.st_ino) == identity
 
 
+def _restore_names(path: Path) -> list[Path]:
+    """``path`` and the names an upstream restore can rename it to: the
+    ``T`` flag dropped from its ``:2,`` suffix, in its own directory or
+    its folder's other ``cur``/``new`` one."""
+    base, sep, flags = path.name.partition(":2,")
+    names = [path.name]
+    if sep and "T" in flags:
+        names.append(base + sep + flags.replace("T", ""))
+    dirs = [path.parent]
+    if path.parent.name in ("cur", "new"):
+        dirs.append(path.parent.with_name("new" if path.parent.name == "cur" else "cur"))
+    return [d / n for d in dirs for n in names]
+
+
 def _close_connection(conn: sqlite3.Connection) -> None:
     conn.close()
 
@@ -4810,7 +4824,19 @@ class Database:
         cur = self._conn.cursor()
         try:
             cur.execute("BEGIN IMMEDIATE")
-            if self._has_unreapable_messages(cur, thread_id, grace_cutoff=grace_cutoff):
+            if self._has_unreapable_messages(
+                cur, thread_id, grace_cutoff=grace_cutoff
+            ) or self._restored_on_disk(
+                cur,
+                [
+                    r["claimant_id"]
+                    for r in cur.execute(
+                        "SELECT claimant_id FROM message_thread_map WHERE thread_id = ?",
+                        (thread_id,),
+                    ).fetchall()
+                ],
+                copy_paths,
+            ):
                 self._conn.rollback()
                 return False
             row = cur.execute(
@@ -4888,6 +4914,31 @@ class Database:
             params.extend(claimant_ids)
         return cur.execute(sql + " LIMIT 1", params).fetchone() is not None
 
+    def _restored_on_disk(
+        self, cur: sqlite3.Cursor, claimant_ids: list[str], copy_paths: Sequence[str]
+    ) -> bool:
+        """Whether a file of ``claimant_ids`` is back on disk outside the
+        trash: one of the paths the reap would unmark (``_occurrence_paths``
+        and ``copy_paths``), or the same name with the ``T`` flag dropped
+        or in its folder's other ``cur``/``new`` directory (what an
+        upstream restore renames it to). Read inside the reap transaction
+        (review round 4 on #1612): a copy restored after the sweep is not
+        an occurrence yet, and reaping would unmark it, so the message
+        waits for the next sweep, which binds it. A constant number of
+        ``stat`` calls per path and no directory listing (#336); a restore
+        that also changed other flags is found by the next sweep's walk."""
+        for path in [*self._occurrence_paths(cur, claimant_ids), *copy_paths]:
+            if any(
+                os.path.exists(candidate) and not is_trashed(candidate)
+                for candidate in _restore_names(Path(path))
+            ):
+                log.info(
+                    "reaper: kept a message whose file is back on disk since the sweep; "
+                    "the next sweep binds it"
+                )
+                return True
+        return False
+
     @_synchronized
     def reap_thread_messages(
         self,
@@ -4929,7 +4980,7 @@ class Database:
             cur.execute("BEGIN IMMEDIATE")
             if self._has_unreapable_messages(
                 cur, thread.thread_id, reaped_claimant_ids, grace_cutoff=grace_cutoff
-            ):
+            ) or self._restored_on_disk(cur, reaped_claimant_ids, copy_paths):
                 self._conn.rollback()
                 return None
             self._rewrite_thread_row(cur, thread, embedding)

@@ -3332,14 +3332,19 @@ startup rather than picking a mode.
    no live occurrence, the reaper removes its rows from
    `message_thread_map` (its `messages` row, occurrences and tombstones
    go by cascade), unmarks every path holding its bytes in
-   `indexed_files` (its occurrences' paths and every other recorded path
-   with its content hash, so a copy that comes back after a transient
-   outage is re-indexed by the next Maildir walk) and deletes any
-   indexing job still queued for those paths, all in one transaction,
+   `indexed_files` (its active occurrences' paths, a retired one's while
+   `indexed_files` still records its bytes there, and every other
+   recorded path with its content hash, so a copy that comes back after a
+   transient outage is re-indexed by the next Maildir walk) and deletes
+   any indexing job still queued for those paths, all in one transaction,
    which first re-checks that every message it removes still has no live
-   occurrence and a tombstone past the grace window, so a restore, a
-   copy bound by a sweep, or a restore and a fresh loss after the reaper
-   read its candidates is left for a later pass. It then either rebuilds
+   occurrence and a tombstone past the grace window, and that none of
+   those paths, nor the name an upstream restore gives one (the `T` flag
+   dropped, or the folder's other `cur`/`new`), is back on disk without
+   the `T` flag (a few `stat` calls, no directory listing), so a restore, a copy bound by a sweep, a
+   restore the sweep has not seen yet (logged at INFO), or a restore and
+   a fresh loss after the reaper read its candidates is left for a later
+   pass. It then either rebuilds
    the parent thread from the surviving messages on disk (re-parsed from
    an active occurrence, a live one first; the thread vector is the
    survivors' chunk mean, derived from the stored sums with no
