@@ -126,7 +126,12 @@ def bounded_logging:
 | ($collectors[0] | map(select(.maildir_root != "/maildir") | .scope_uuid as $u
     | {service: "mbsync-\($u)", secret: "bridge_pass_\($u)", # pragma: allowlist secret
        volumes: {"/maildir": "maildir-\($u)", "/state": "mbsync-state-\($u)"},
-       network: "bridge-net-\($u)", password_file})) as $own
+       network: "bridge-net-\($u)", password_file,
+       # The declared trust values of this account (review round 5,
+       # finding 3), present only for a proton-bridge account: the
+       # certificate fingerprint the entrypoint must pin to, compared
+       # below against the rendered BRIDGE_CERT_FINGERPRINT.
+       provider, certificate_fingerprint})) as $own
 # Every declared collector, the base mbsync included when an account is at
 # /maildir, keeps each of its own resources.
 | ((if $collectors[0] | any(.[]; .maildir_root == "/maildir") then
@@ -230,6 +235,14 @@ def bounded_logging:
               ($bbase | list("security_opt")[]
                 | select(. as $o | $s | list("security_opt") | index($o) == null)
                 | "\($c.service): security_opt lost \(.)"),
+              # The mbsync entrypoint creates /tmp/mbsync on every start
+              # under the read-only root filesystem; neither the generic checks
+              # nor this block required tmpfs, so a collector could omit or
+              # reset it and fail at startup despite passing every other
+              # check (review round 5, finding 1).
+              ($bbase | list("tmpfs")[]
+                | select(. as $t | $s | list("tmpfs") | index($t) == null)
+                | "\($c.service): tmpfs lost \(.)"),
               (if ($s.pids_limit | type) == "number" and $s.pids_limit > $bbase.pids_limit
                 then "\($c.service): pids_limit is above the base" else empty end),
               (if $bbase.mem_limit != null
@@ -247,7 +260,23 @@ def bounded_logging:
               (if ($s | set("configs")) then "\($c.service): mounts a config" else empty end),
               (if ($s | set("extra_hosts")) then "\($c.service): sets extra_hosts" else empty end),
               ($s.environment // {} | keys[] | select(. as $k | ($bbase.environment // {} | has($k)) | not)
-                | "\($c.service): environment sets \(.), which mbsync does not set"))
+                | "\($c.service): environment sets \(.), which mbsync does not set"),
+              # The key-name check above allows BRIDGE_CERT_FINGERPRINT and
+              # BRIDGE_CERT_PIN_ROTATE because mbsync itself sets them, but
+              # never checked their values: an overlay keeping both names
+              # could still rotate the persisted pin or swap in another
+              # fingerprint, so the entrypoint would accept an attacker
+              # certificate and send the mounted Bridge password to it
+              # (review round 5, finding 3, security). Rotation is never
+              # configuration (collector_env(),
+              # scripts/config/operator_config.py): every collector value
+              # must stay "false", whatever its declaration says.
+              (if ($s.environment.BRIDGE_CERT_PIN_ROTATE // "") != "false"
+                then "\($c.service): BRIDGE_CERT_PIN_ROTATE is not false" else empty end),
+              (if $c.provider == "proton-bridge" and $c.certificate_fingerprint != null
+                    and ($s.environment.BRIDGE_CERT_FINGERPRINT // "") != $c.certificate_fingerprint
+                then "\($c.service): BRIDGE_CERT_FINGERPRINT does not match its declaration"
+                else empty end))
       end),
   # A declared collector keeps its own secret (mounted as bridge_pass),
   # both volumes and its network: an overlay with !reset cannot take them.
@@ -261,6 +290,14 @@ def bounded_logging:
         | select([$s | list("volumes")[] | select(.type == "volume" and .source == $v.value
             and .target == $v.key)] | length != 1)
         | "\($c.service): lacks its own volume \($v.value) at \($v.key)"),
+      # Mail must be written under /maildir, and the TLS pin under /state
+      # (mbsync/entrypoint.sh); the match above compares only type, source
+      # and target, so a read-only mount of either would still pass it
+      # while failing every sync at startup (review round 5, finding 2).
+      ($c.volumes | to_entries[] | . as $v
+        | select([$s | list("volumes")[] | select(.type == "volume" and .source == $v.value
+            and .target == $v.key and .read_only == true)] | length > 0)
+        | "\($c.service): volume \($v.value) at \($v.key) is read-only"),
       (if ($s.networks // {} | has($c.network)) | not
         then "\($c.service): lacks its own network \($c.network)" else empty end)),
   # Its secret is the password file the account declares, and its network
@@ -355,6 +392,11 @@ def bounded_logging:
         ($bs | list("security_opt")[]
             | select(. as $o | $s | list("security_opt") | index($o) == null)
             | "security_opt lost \(.)"),
+        # A read-only-root service that needs a writable /tmp (mbsync,
+        # indexer, mcp-server all mount one) keeps it (review round 5,
+        # finding 1): nothing generic enforced this before.
+        ($bs | list("tmpfs")[] | select(. as $t | $s | list("tmpfs") | index($t) == null)
+            | "tmpfs lost \(.)"),
         (if ($s.pids_limit | type) == "number" and $s.pids_limit > $bs.pids_limit
             then "pids_limit is above the base" else empty end),
         (if $bs.mem_limit != null
@@ -486,6 +528,16 @@ EOF
 services:
   mbsync:
     logging: !reset null
+EOF
+}
+
+# mbsync's entrypoint creates /tmp/mbsync under the read-only root
+# filesystem on every start (review round 5, finding 1).
+merged_hardening_rejects_reset_tmpfs() {
+    expect_overlay_rejected reset-tmpfs "mbsync: tmpfs lost /tmp" <<'EOF'
+services:
+  mbsync:
+    tmpfs: !reset []
 EOF
 }
 
@@ -1030,19 +1082,69 @@ EOF
 # (review round 2, finding 1): an overlay could reset its init or raise
 # its pids_limit or mem_limit past the base's, or drop a cap_drop or
 # security_opt entry, while the same mutation on mbsync itself is
-# rejected.
+# rejected. Clearing tmpfs is the same gap (review round 5, finding 1):
+# the entrypoint still needs a writable /tmp under the read-only root
+# filesystem.
 generated_collectors_keep_the_mbsync_baseline_hardening() {
     expect_generated_rejected three-proton "" \
         "mbsync-$UUID_B: init is not true" \
         "mbsync-$UUID_B: cap_drop lost ALL" \
         "mbsync-$UUID_B: security_opt lost no-new-privileges:true" \
+        "mbsync-$UUID_B: tmpfs lost /tmp" \
         "mbsync-$UUID_B: pids_limit is above the base" <<EOF
 services:
   mbsync-$UUID_B:
     init: !reset null
     cap_drop: !reset []
     security_opt: !reset []
+    tmpfs: !reset []
     pids_limit: 256
+EOF
+}
+
+# The collector's /maildir and /state mounts must stay writable; the
+# "lacks its own volume" check above compares only type, source and
+# target, so a read-only mount of either would still pass it while
+# failing every sync at startup (review round 5, finding 2). Long
+# syntax, since a short ``:ro`` suffix exercises the same field.
+generated_collectors_reject_read_only_data_volumes() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: volume maildir-$UUID_B at /maildir is read-only" \
+        "mbsync-$UUID_B: volume mbsync-state-$UUID_B at /state is read-only" <<EOF
+services:
+  mbsync-$UUID_B:
+    volumes: !override
+      - source: maildir-$UUID_B
+        target: /maildir
+        type: volume
+        read_only: true
+      - source: mbsync-state-$UUID_B
+        target: /state
+        type: volume
+        read_only: true
+EOF
+}
+
+# The environment check above compared only key names, which mbsync
+# itself also sets for BRIDGE_CERT_FINGERPRINT and BRIDGE_CERT_PIN_ROTATE,
+# so an overlay keeping both names could still rotate the persisted pin
+# or substitute another account's certificate fingerprint: the
+# entrypoint would then accept an attacker's certificate and send this
+# account's mounted Bridge password to it (review round 5, finding 3,
+# security). Rotation is never configuration (collector_env(),
+# scripts/config/operator_config.py), so every collector's value must
+# stay "false" regardless of its declaration; the fingerprint must match
+# the declaration exactly -- here mbsync-$UUID_B's own is replaced with
+# $UUID_C's account's.
+generated_collectors_bind_trust_values_to_their_declarations() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: BRIDGE_CERT_PIN_ROTATE is not false" \
+        "mbsync-$UUID_B: BRIDGE_CERT_FINGERPRINT does not match its declaration" <<EOF
+services:
+  mbsync-$UUID_B:
+    environment:
+      BRIDGE_CERT_PIN_ROTATE: "true"
+      BRIDGE_CERT_FINGERPRINT: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 EOF
 }
 
@@ -1396,6 +1498,7 @@ check "merged hardening rejects !reset on cap_drop" merged_hardening_rejects_res
 check "merged hardening rejects !reset on read_only" merged_hardening_rejects_reset_read_only
 check "merged hardening rejects !reset on pids_limit and logging" \
     merged_hardening_rejects_reset_pids_limit_and_logging
+check "merged hardening rejects !reset on tmpfs" merged_hardening_rejects_reset_tmpfs
 check "merged hardening rejects !override on security_opt" \
     merged_hardening_rejects_override_security_opt
 check "merged hardening rejects !override of a read-only volume" \
@@ -1440,6 +1543,10 @@ check "generated imap collectors get no Bridge secret or bridge-net" \
     generated_imap_collectors_get_no_bridge_secret_or_network
 check "generated collectors keep the mbsync baseline hardening" \
     generated_collectors_keep_the_mbsync_baseline_hardening
+check "generated collectors reject read-only data volumes" \
+    generated_collectors_reject_read_only_data_volumes
+check "generated collectors bind trust values to their declarations" \
+    generated_collectors_bind_trust_values_to_their_declarations
 check "generated collectors keep the mbsync implementation" \
     generated_collectors_keep_the_mbsync_implementation
 check "generated collectors reject empty entrypoint and command overrides" \
