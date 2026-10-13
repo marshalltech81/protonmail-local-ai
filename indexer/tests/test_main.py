@@ -3316,8 +3316,16 @@ class TestSteadyStateBatchedDrain:
         assert queue.stats() == {"queued": 3, "dead": 0}
 
 
-STAMP_JSON = '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60}'
-STAMP = SyncStamp(completed_at="2026-09-28T12:00:00+00:00", sync_interval_secs=60)
+STAMP_JSON = (
+    '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60, '
+    '"attempt_id": "0123456789ab-1", "generation": 1}'
+)
+STAMP = SyncStamp(
+    completed_at="2026-09-28T12:00:00+00:00",
+    sync_interval_secs=60,
+    attempt_id="0123456789ab-1",
+    generation=1,
+)
 
 
 class TestIngestionStateRecorder:
@@ -3351,26 +3359,39 @@ class TestIngestionStateRecorder:
         assert row["sync_interval_secs"] == 60
 
     def test_acknowledgement_never_moves_backwards(self, tmp_path, db):
-        """While the acknowledged stamp is not ahead of the clock."""
+        """A generation no higher than the one already acknowledged never
+        replaces it (#1621 thread, 2026-10-13): ordering is the durable
+        generation, never completed_at."""
         recorder = main._IngestionStateRecorder(db, tmp_path)
         recorder.acknowledge(STAMP)
-        recorder.acknowledge(SyncStamp("2026-09-28T11:00:00+00:00", 60))
+        recorder.acknowledge(SyncStamp("2026-09-28T11:00:00+00:00", 60, "0123456789ab-2", 1))
         recorder.acknowledge(None)
         recorder.maybe_record(now=100.0)
 
         assert self._state(db)["sync_completed_at"] == STAMP.completed_at
 
-    def test_a_future_acknowledged_stamp_yields_to_a_new_sync(self, tmp_path, db):
-        """After a clock rollback the acknowledged stamp is ahead of the
-        clock and every later sync sorts earlier; without yielding, the
-        status stays not current until the clock catches up (#332)."""
+    def test_acknowledgement_never_depends_on_the_wall_clock(self, tmp_path, db):
+        """#332's clock-ahead tolerance is gone: ordering by generation
+        instead of completed_at (#1621 thread, 2026-10-13) means a stamp
+        whose time is far in the future never blocks a higher-generation
+        sync, with no special case needed."""
         recorder = main._IngestionStateRecorder(db, tmp_path)
         future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
-        recorder.acknowledge(SyncStamp(future, 60))
-        recorder.acknowledge(STAMP)
+        recorder.acknowledge(SyncStamp(future, 60, "0123456789ab-1", 1))
+        recorder.acknowledge(SyncStamp(STAMP.completed_at, 60, "0123456789ab-2", 2))
         recorder.maybe_record(now=100.0)
 
         assert self._state(db)["sync_completed_at"] == STAMP.completed_at
+
+    def test_a_legacy_stamp_is_never_acknowledged(self, tmp_path, db):
+        """A stamp written before the 2026-10-13 delivery-identity fix
+        carries no generation, so it can never be ordered or acknowledged
+        — not even as the first stamp seen."""
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        recorder.acknowledge(SyncStamp("2026-09-28T12:00:00+00:00", 60))
+        recorder.maybe_record(now=100.0)
+
+        assert self._state(db)["sync_completed_at"] is None
 
     def test_writes_at_most_once_per_interval(self, tmp_path, db):
         recorder = main._IngestionStateRecorder(db, tmp_path, interval_secs=30)
@@ -3424,11 +3445,12 @@ class TestIngestionStateRecorder:
         recorder = main._IngestionStateRecorder(db, tmp_path)
         handler = main.MaildirHandler(db, _make_queue(db), ingestion_state=recorder)
         (tmp_path / main.SYNC_STAMP_NAME).write_text(
-            '{"completed_at": "2026-09-28T12:05:00Z", "sync_interval_secs": 60}'
+            '{"completed_at": "2026-09-28T12:05:00Z", "sync_interval_secs": 60, '
+            '"attempt_id": "0123456789ab-2", "generation": 2}'
         )
         handler.on_moved(
             FileMovedEvent(
-                str(tmp_path / ".mbsync-last-sync.2026-09-28T12:00:00Z.60.tmp"),
+                str(tmp_path / ".mbsync-last-sync.2026-09-28T12:00:00Z.60.0123456789ab-1.1.tmp"),
                 str(tmp_path / main.SYNC_STAMP_NAME),
             )
         )
@@ -3495,11 +3517,16 @@ def _overflow_lines(caplog) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.getMessage() == _OVERFLOW_WARNING]
 
 
-def _stamp_moved_event(root: Path, completed_at: str = "2026-09-28T12:00:00Z"):
+def _stamp_moved_event(
+    root: Path,
+    completed_at: str = "2026-09-28T12:00:00Z",
+    attempt_id: str = "0123456789ab-1",
+    generation: int = 1,
+):
     from watchdog.events import FileMovedEvent
 
     return FileMovedEvent(
-        str(root / f".mbsync-last-sync.{completed_at}.60.tmp"),
+        str(root / f".mbsync-last-sync.{completed_at}.60.{attempt_id}.{generation}.tmp"),
         str(root / main.SYNC_STAMP_NAME),
     )
 
@@ -3762,16 +3789,21 @@ class TestInotifyOverflow:
         assert len(lines) == 1
         assert "recovered from 2 inotify queue overflow(s)" in lines[0].getMessage()
 
-    def test_held_stamp_follows_arrival_order_across_a_clock_rollback(
-        self, tmp_path, db, monkeypatch
-    ):
-        """#1199: watchdog dispatches stamps in sync
-        order, so the last one handled is the newest sync even when the
-        clock rolled back between two syncs and its time sorts earlier."""
+    def test_held_stamp_follows_arrival_order_not_comparison(self, tmp_path, db, monkeypatch):
+        """#1199: watchdog dispatches stamps in sync order, so the last one
+        handled is the newest sync — the held slot is a plain overwrite,
+        never compared against the previous one, so a stamp whose own
+        fields would sort earlier (completed_at, before the 2026-10-13
+        generation-identity fix; or an out-of-order generation here) is
+        still the one acknowledged once the walk completes."""
         maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
         recorder.overflow_seen()
-        handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:05:00Z"))
-        handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:00:00Z"))
+        # Dispatched first with the higher generation, second with the
+        # lower one (STAMP's) — a scenario no real mbsync produces, but
+        # it proves the held slot does not pick the larger generation,
+        # only the most recently dispatched stamp.
+        handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:05:00Z", "0123456789ab-2", 2))
+        handler.on_moved(_stamp_moved_event(maildir))
 
         main._run_periodic_rescan(
             db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True

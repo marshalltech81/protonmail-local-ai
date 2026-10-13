@@ -1171,6 +1171,28 @@ superseded entries keep their number and one line.
     are removed. Results go into `docs/architecture.md` as executed
     rows; they are necessary, not sufficient, evidence for #1598's
     acceptance rule, and server-side guarantees stay with #1584.
+54. **Sync delivery identity (2026-10-13, #1592 thread on #1621,
+    decision_r4256151340/r4256221584):** `_success_delivered` matched a
+    collection-status success to the acknowledged success stamp by
+    comparing `completed_at` strings — a timestamp used as an attempt
+    identity. Across a host clock rollback, which `_acknowledge`
+    explicitly tolerated, a later retry's stamp could carry the same
+    `completed_at` as an older, already-acknowledged one; if that
+    retry's own rename event was then missed, the stale acknowledgement
+    still matched by timestamp and could clear an unrecovered failure
+    before the retry's stamp was ever observed. Fixed by identity, not
+    by patching the clock tolerance: the success stamp
+    (`.mbsync-last-sync.json`) now carries the same attempt ID
+    `collection_status` already assigns the sync, and mbsync allocates
+    and persists a durable, monotonically increasing success generation
+    in the `mbsync-state` volume (no SQLite schema change) before
+    anything names it, failing closed on allocation failure. The
+    indexer's `_acknowledge` orders stamps by this generation, never by
+    wall-clock time, so #332's clock-ahead tolerance is gone along with
+    the gap it left; `_success_delivered` matches by attempt ID
+    equality. A legacy stamp (no attempt ID or generation) is never
+    acknowledged and never proves delivery — a missing identity is
+    "cannot prove," never a match.
 
 ## Notes for Agents
 

@@ -318,13 +318,103 @@ fifo_pin_is_refused_without_reading() {
     [[ "$err" == *"not a regular file"* && -p "$PIN_FILE" ]] || return 1
 }
 
+# --- next_success_generation (#1621 thread, 2026-10-13) --------------------
+#
+# A durable, monotonically increasing counter in the state volume (never
+# SQLite): record_successful_sync allocates one per successful sync, so
+# the indexer can order acknowledged stamps without the wall clock and
+# never reuse a generation a stamp already claimed.
+
+generation_setup() {
+    STATE_DIR="$WORK/state-gen-$1"
+    GENERATION_FILE="$STATE_DIR/sync-generation"
+    load next_success_generation
+}
+
+first_generation_is_1() {
+    generation_setup first
+    mkdir -p "$STATE_DIR"
+    [[ "$(next_success_generation)" == "1" ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == "1" ]] || return 1
+    [[ "$(stat -c %a "$GENERATION_FILE" 2>/dev/null || stat -f %Lp "$GENERATION_FILE")" == "600" ]] \
+        || return 1
+}
+
+generation_increases_by_one_each_call() {
+    generation_setup increments
+    mkdir -p "$STATE_DIR"
+    [[ "$(next_success_generation)" == "1" ]] || return 1
+    [[ "$(next_success_generation)" == "2" ]] || return 1
+    [[ "$(next_success_generation)" == "3" ]] || return 1
+}
+
+generation_survives_a_restart() {
+    generation_setup restart
+    mkdir -p "$STATE_DIR"
+    next_success_generation >/dev/null
+    next_success_generation >/dev/null
+    # A fresh load, as a new container start would do.
+    load next_success_generation
+    [[ "$(next_success_generation)" == "3" ]] || return 1
+}
+
+first_generation_fails_closed_when_it_cannot_be_saved() {
+    generation_setup unsaved
+    # The state directory does not exist, so no write can succeed.
+    if next_success_generation; then
+        echo "a generation was allocated although it was never saved"
+        return 1
+    fi
+    [[ ! -e "$GENERATION_FILE" ]] || return 1
+}
+
+malformed_generation_is_refused_and_kept() {
+    generation_setup malformed
+    mkdir -p "$STATE_DIR"
+    printf 'not-a-number\n' >"$GENERATION_FILE"
+    if next_success_generation; then
+        echo "a generation was allocated over a malformed counter"
+        return 1
+    fi
+    [[ "$(cat "$GENERATION_FILE")" == "not-a-number" ]] || return 1
+}
+
+directory_generation_is_refused() {
+    generation_setup directory
+    mkdir -p "$GENERATION_FILE"
+    if next_success_generation; then
+        echo "a generation was allocated over a directory"
+        return 1
+    fi
+    [[ -d "$GENERATION_FILE" ]] || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+failed_generation_write_fails_closed_and_keeps_the_old_value() {
+    generation_setup write-fail
+    mkdir -p "$STATE_DIR"
+    printf '5\n' >"$GENERATION_FILE"
+    mv() { return 1; }
+    if next_success_generation; then
+        echo "a generation was allocated although it was never saved"
+        return 1
+    fi
+    [[ "$(cat "$GENERATION_FILE")" == "5" ]] || return 1
+    # No temporary file is left behind in the state directory.
+    [[ "$(find "$STATE_DIR" -type f | wc -l)" -eq 1 ]] || return 1
+}
+
 # --- collection status setup (#1592) ------------------------------------------
 
 # Every case that runs run_sync publishes the collection status, so each
-# gets its own status file and records. The cases are further down.
+# gets its own status file, records and success-generation counter. The
+# cases are further down.
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 collection_setup() {
     COLLECTION_STATUS_FILE="$MAILDIR_PATH/.mbsync-collection-status.json"
+    STATE_DIR="$WORK/state-$1"
+    GENERATION_FILE="$STATE_DIR/sync-generation"
+    mkdir -p "$STATE_DIR"
     collection_count=0
     collection_attempt_id=""
     collection_attempt_started_at=""
@@ -333,7 +423,8 @@ collection_setup() {
     collection_last_success="null"
     load collection_now load_collection_records \
         publish_collection_status begin_collection_attempt finish_collection_attempt \
-        record_collection_outcome record_successful_sync stamp_write_failed
+        record_collection_outcome next_success_generation record_successful_sync \
+        stamp_write_failed
     load_collection_records
 }
 
@@ -1586,13 +1677,19 @@ success_stamp_is_written_by_a_completed_sync() {
     MAILDIR_PATH="$WORK/maildir-stamp"
     SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
     SYNC_INTERVAL=60
-    mkdir -p "$MAILDIR_PATH"
-    load collection_now record_successful_sync
+    STATE_DIR="$WORK/state-stamp"
+    GENERATION_FILE="$STATE_DIR/sync-generation"
+    collection_attempt_id="0123456789ab-1"
+    mkdir -p "$MAILDIR_PATH" "$STATE_DIR"
+    load collection_now next_success_generation record_successful_sync
     record_successful_sync
-    grep -qE '^\{"completed_at": "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z", "sync_interval_secs": 60\}$' \
-        "$SYNC_STAMP_FILE" || return 1
+    grep -qE '^\{"completed_at": "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z", "sync_interval_secs": 60, '\
+'"attempt_id": "0123456789ab-1", "generation": 1\}$' "$SYNC_STAMP_FILE" || return 1
     [[ "$(stat -c %a "$SYNC_STAMP_FILE" 2>/dev/null || stat -f %Lp "$SYNC_STAMP_FILE")" == "644" ]] || return 1
     [[ "$(find "$MAILDIR_PATH" -type f | wc -l)" -eq 1 ]] || return 1
+    # The generation it allocated is persisted in the state volume, not
+    # the Maildir.
+    [[ "$(cat "$GENERATION_FILE")" == "1" ]] || return 1
 }
 
 # --- per-run deadline: a stalled mbsync is stopped (#282) --------------------
@@ -2572,6 +2669,17 @@ check "rotation replaces an unreadable pin file" rotation_replaces_an_unreadable
 check "rotation refuses a directory in the pin's place" \
     rotation_refuses_a_directory_in_the_pins_place
 check "a FIFO pin is refused without reading it" fifo_pin_is_refused_without_reading
+check "the first allocated success generation is 1" first_generation_is_1
+check "the success generation increases by one each call" generation_increases_by_one_each_call
+check "the success generation survives a restart" generation_survives_a_restart
+check "the first success generation fails closed when it cannot be saved" \
+    first_generation_fails_closed_when_it_cannot_be_saved
+check "a malformed success generation is refused and kept" \
+    malformed_generation_is_refused_and_kept
+check "a directory in the success generation's place is refused" \
+    directory_generation_is_refused
+check "a failed success generation write fails closed and keeps the old value" \
+    failed_generation_write_fails_closed_and_keeps_the_old_value
 check "sync succeeds when mbsync and the repair succeed" \
     sync_succeeds_when_mbsync_and_repair_succeed
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync
@@ -4004,7 +4112,8 @@ setting_changes_behaviour() {
             order_run BRIDGE_CERT_FINGERPRINT="$fp_a" SYNC_INTERVAL=4321
             order_is "$SYNCED_START" 143 \
                 && grep -qF '>>> Starting sync loop (interval: 4321s)...' "$ORDER_LOG" \
-                && grep -qF '"sync_interval_secs": 4321}' "$ORDER_DIR/maildir/.mbsync-last-sync.json" \
+                && grep -qF '"sync_interval_secs": 4321, "attempt_id"' \
+                    "$ORDER_DIR/maildir/.mbsync-last-sync.json" \
                 && health_verdict_changes SYNC_INTERVAL "$2"
             ;;
         SYNC_DEADLINE_SECONDS)

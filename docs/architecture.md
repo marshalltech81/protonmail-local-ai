@@ -4153,11 +4153,17 @@ issue).
 `get_mailbox_status` answers "is the index current?" from SQLite
 alone, because mcp-server mounts neither Maildir nor Bridge. After
 each successful sync, once the new files have been made readable,
-mbsync writes `.mbsync-last-sync.json` (completion time plus
-`SYNC_INTERVAL`) at the Maildir root. It writes a temporary file named
-after that sync (`.mbsync-last-sync.<time>.<interval>.tmp`) and
-renames it into place. The stamp sits outside every `cur`/`new`
-folder, so no Maildir walk or watchdog handler treats it as mail.
+mbsync writes `.mbsync-last-sync.json` (completion time, `SYNC_INTERVAL`,
+the sync's attempt ID — the same one `last_success` below names — and
+a durable success generation, in the `mbsync-state` volume rather than
+SQLite, that mbsync allocates and persists before anything names it)
+at the Maildir root. It writes a temporary file named after that sync
+(`.mbsync-last-sync.<time>.<interval>.<attempt_id>.<generation>.tmp`)
+and renames it into place. The stamp sits outside every `cur`/`new`
+folder, so no Maildir walk or watchdog handler treats it as mail. A
+stamp written before the 2026-10-13 delivery-identity fix (#1621
+thread) carries neither field; the indexer reads it, but never
+acknowledges or orders by it — see below.
 
 A stamp on disk does not prove the indexer has queued that sync's
 mail: the watcher may still be behind on its delivery events. So the
@@ -4178,9 +4184,14 @@ is queued:
 - when a Maildir walk (startup or the periodic rescan) finishes: the
   stamp read before the walk is acknowledged.
 
-Acknowledgements only move forward. With every health heartbeat
-(per message, per embed batch and per attachment page read, at most
-every 30 s), the indexer
+Acknowledgements only move forward, ordered by the stamp's success
+generation (2026-10-13, #1621 thread), never by its completion time: a
+clock rollback could otherwise let two different attempts publish the
+same `completed_at`, closing an identity gap rather than only
+reordering records. A stamp with no generation (the legacy shape) is
+never acknowledged, not even as the first one seen — it cannot be
+ordered. With every health heartbeat (per message, per embed batch and
+per attachment page read, at most every 30 s), the indexer
 upserts the latest acknowledged sync and its own timestamp into the
 one-row `ingestion_state` table. A missed stamp event
 reads as a stale sync until the next rescan; a missed delivery event
@@ -4191,7 +4202,10 @@ stays invisible to `current` until the rescan queues it.
 The success stamp cannot tell a clean sync from one that skipped
 folders, and a failed attempt writes none, so mbsync also publishes a
 collection status (#1592; owner decision on the issue). It sits beside
-the stamp, which is unchanged, and reading it acknowledges nothing.
+the stamp, and reading it acknowledges nothing. The stamp's format
+later changed (2026-10-13, #1621 thread) to carry the attempt ID and
+success generation the delivery-identity fix needs — see *Index
+currency* above and the Freshness bullet below.
 
 - **File.** `.mbsync-collection-status.json`, format 1, one JSON line
   of counts and fixed tokens, never a folder name: `format`,
@@ -4243,8 +4257,11 @@ the stamp, which is unchanged, and reading it acknowledges nothing.
 - **Freshness.** After a failed attempt, `current` stays false through
   retries until a later success is **delivered**: the file's last
   success is the sync named by the stamp the indexer has acknowledged,
-  matched by its completion time, which mbsync writes identically into
-  both. The failed attempt is kept in the row
+  matched by attempt ID, which mbsync writes identically into both
+  (never by completion time — two different attempts can publish the
+  same one across a clock rollback, #1621 thread, 2026-10-13). A stamp
+  with no attempt ID (the legacy shape) is never a match. The failed
+  attempt is kept in the row
   (`unrecovered_failure_attempt_id`) across restarts until then. A
   success that withheld folders keeps the existing criteria and shows
   its count. An `unknown` status leaves `current` to the existing

@@ -141,12 +141,17 @@ readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-$PROTON_DEFAULT_BRIDG
 readonly PROTON_FOLDER_EXCLUSIONS="${PROTON_FOLDER_EXCLUSIONS:-$PROTON_DEFAULT_FOLDER_EXCLUSIONS}"
 readonly BRIDGE_PASS_FILE="/run/secrets/bridge_pass"
 readonly CERT_FILE="${RUNTIME_DIR}/bridge-cert.pem"
-# State directory persists the pinned Bridge cert fingerprint across
-# container restarts. The directory is backed by a named volume so it
-# survives `docker compose down` / rebuilds but is cleared by `make
-# clean`, giving the operator a clean way to start over if needed.
+# State directory persists the pinned Bridge cert fingerprint and the
+# success generation counter across container restarts. The directory
+# is backed by a named volume so it survives `docker compose down` /
+# rebuilds but is cleared by `make clean`, giving the operator a clean
+# way to start over if needed.
 readonly STATE_DIR="/state"
 readonly PIN_FILE="${STATE_DIR}/bridge-cert.fingerprint"
+# The durable, monotonically increasing counter next_success_generation
+# allocates: one per successful sync, in the state volume rather than
+# the index, so no schema change is needed (#1621 thread, 2026-10-13).
+readonly GENERATION_FILE="${STATE_DIR}/sync-generation"
 readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 
 validate_proton_settings() {
@@ -1160,23 +1165,70 @@ run_sync() {
     return "$rc"
 }
 
+# A durable, monotonically increasing counter: the generation
+# record_successful_sync allocates to a success stamp, in the state
+# volume (never SQLite — no schema change). Ordering an acknowledged
+# stamp by this generation, rather than by its wall-clock completion
+# time, closes the identity gap a clock rollback could open: two
+# different attempts could otherwise publish the same completed_at
+# (#1621 thread, 2026-10-13). First boot starts at 0 ("no generation
+# allocated yet") and prints the next one, persisted before anything
+# names it. A corrupt or unwritable counter is a failure, never a
+# reused or skipped number, so the caller must not report the sync as
+# acknowledged.
+next_success_generation() {
+    local current=0 raw next tmp
+
+    if [[ -f "$GENERATION_FILE" ]]; then
+        if ! IFS= read -r raw <"$GENERATION_FILE" || [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+            echo ">>> ERROR: the success generation at ${GENERATION_FILE} is not a non-negative integer — refusing to record this sync as successful." >&2
+            return 1
+        fi
+        current="$raw"
+    elif [[ -e "$GENERATION_FILE" ]]; then
+        echo ">>> ERROR: ${GENERATION_FILE} is not a regular file — refusing to record this sync as successful." >&2
+        return 1
+    fi
+    next=$((current + 1))
+    if ! tmp="$(mktemp "${GENERATION_FILE}.XXXXXX")"; then
+        return 1
+    fi
+    if ! printf '%s\n' "$next" >"$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$GENERATION_FILE"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    printf '%s' "$next"
+}
+
 record_successful_sync() {
     # Written only after relax_new_maildir_perms, so every message this
     # sync delivered is already on disk and readable. The temporary name
-    # carries this sync's time and interval: the indexer acknowledges the
-    # sync named by the rename event it sees, which its watcher handles
-    # only after this sync's delivery events. Replaced atomically via
-    # rename; world-readable because the indexer runs as a different UID.
-    # The completion time is kept in sync_completed_at for
+    # carries this sync's identity: its completion time and interval (as
+    # before), the attempt ID collection_status also names it by, and the
+    # durable generation next_success_generation allocates. The indexer
+    # acknowledges the sync named by the rename event it sees, which its
+    # watcher handles only after this sync's delivery events, orders
+    # acknowledgements by the generation (never wall-clock time, #1621
+    # thread), and proves a later success delivered by the attempt ID
+    # matching — never by a completion time a clock rollback could repeat
+    # across two different attempts. Replaced atomically via rename;
+    # world-readable because the indexer runs as a different UID. The
+    # completion time is kept in sync_completed_at for
     # record_collection_outcome. Called as a condition (errexit is off),
     # so every step is checked: a failure removes the temporary file and
-    # keeps the previous stamp.
-    local completed_at tmp
+    # keeps the previous stamp, and the generation is allocated and
+    # persisted before anything names it, so a failure allocating it
+    # never reports the sync as acknowledged.
+    local completed_at tmp generation
     completed_at="$(collection_now)"
     sync_completed_at="$completed_at"
-    tmp="${MAILDIR_PATH}/.mbsync-last-sync.${completed_at}.${SYNC_INTERVAL}.tmp"
-    if ! printf '{"completed_at": "%s", "sync_interval_secs": %d}\n' \
-        "$completed_at" "$SYNC_INTERVAL" >"$tmp" \
+    if ! generation="$(next_success_generation)"; then
+        echo ">>> ERROR: could not allocate the durable success generation — refusing to record this sync as successful." >&2
+        return 1
+    fi
+    tmp="${MAILDIR_PATH}/.mbsync-last-sync.${completed_at}.${SYNC_INTERVAL}.${collection_attempt_id}.${generation}.tmp"
+    if ! printf '{"completed_at": "%s", "sync_interval_secs": %d, "attempt_id": "%s", "generation": %d}\n' \
+        "$completed_at" "$SYNC_INTERVAL" "$collection_attempt_id" "$generation" >"$tmp" \
         || ! chmod 644 "$tmp" || ! mv -f "$tmp" "$SYNC_STAMP_FILE"; then
         rm -f "$tmp"
         return 1

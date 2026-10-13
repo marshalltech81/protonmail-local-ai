@@ -864,8 +864,10 @@ class _IngestionStateRecorder:
     transaction as ``ingestion_state``. After a failed attempt the
     failure stays unrecovered (and the index not current) until a later
     success is delivered: the last success in the file is the sync named
-    by the acknowledged stamp, compared by its completion time, which
-    mbsync writes identically into both. The file's records are taken in
+    by the acknowledged stamp, matched by attempt ID, which mbsync writes
+    identically into both (never by completion time — two different
+    attempts can publish the same one across a clock rollback, #1621
+    thread, 2026-10-13). The file's records are taken in
     publication order (the file always holds the newest), never ordered
     by their times.
     """
@@ -912,8 +914,9 @@ class _IngestionStateRecorder:
         with self._lock:
             if self._overflows > self._covered:
                 # Keep the last one handled: watchdog dispatches stamps
-                # in sync order, so it is the newest sync even when a
-                # clock rollback makes its time sort earlier.
+                # in sync order, so it is the newest sync — held by a
+                # plain overwrite, never compared, so it is acknowledged
+                # once the walk completes whatever it carries.
                 self._held = stamp
                 return
             self._acknowledge(stamp)
@@ -967,19 +970,19 @@ class _IngestionStateRecorder:
     def _acknowledge(self, stamp: SyncStamp | None) -> None:
         # Called with ``_lock`` held, from the watcher thread and the
         # main thread; keep the newest so a walk that read an older stamp
-        # cannot move it back.
-        # Timestamps share one UTC ISO format, so they compare as strings.
-        # An acknowledged stamp ahead of our clock (the clock rolled back)
-        # yields to any new one; otherwise every later sync would sort
-        # earlier and be dropped until the clock caught up (#332).
+        # cannot move it back. Ordering is the durable success
+        # generation mbsync allocates once per successful sync, never
+        # wall-clock time (#1621 thread, 2026-10-13): two different
+        # attempts could publish the same completed_at across a clock
+        # rollback, which is exactly the identity gap #332's clock-ahead
+        # tolerance papered over without closing. A stamp with no
+        # generation (written before this fix, or any other legacy
+        # shape) proves no ordering and can never move the
+        # acknowledgement forward or back.
         acked = self._acked
-        if stamp is None:
+        if stamp is None or stamp.generation is None:
             return
-        if (
-            acked is None
-            or stamp.completed_at > acked.completed_at
-            or datetime.fromisoformat(acked.completed_at) > datetime.now(UTC)
-        ):
+        if acked is None or acked.generation is None or stamp.generation > acked.generation:
             self._acked = stamp
 
     def read_collection(self) -> None:
@@ -1009,12 +1012,20 @@ class _IngestionStateRecorder:
             self._observe_collection(status)
 
     def _success_delivered(self, status: CollectionStatus) -> bool:
-        # Called with ``_lock`` held.
+        # Called with ``_lock`` held. Delivery is proven by attempt ID
+        # equality, never by comparing completion times: mbsync writes
+        # the same attempt ID into the collection status file's
+        # last_success and the acknowledged stamp for one sync, but two
+        # different attempts can publish the same completed_at across a
+        # clock rollback (#1621 thread, 2026-10-13). A legacy stamp
+        # (``attempt_id`` ``None``) can never prove delivery of a later
+        # attempt, so it is never a match.
         success = status.last_success
         return (
             success is not None
             and self._acked is not None
-            and success.completed_at == self._acked.completed_at
+            and self._acked.attempt_id is not None
+            and success.attempt_id == self._acked.attempt_id
         )
 
     def _observe_collection(self, status: CollectionStatus | Unknown) -> None:

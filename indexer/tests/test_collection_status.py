@@ -438,15 +438,18 @@ def _row(db: Database) -> dict | None:
     return db.get_collection_state()
 
 
-def _stamp(at: str) -> SyncStamp:
-    return SyncStamp(_utc(at), 60)
+def _stamp(at: str, attempt_id: str, generation: int) -> SyncStamp:
+    """An acknowledged success stamp naming the attempt it delivered
+    (2026-10-13, #1621 thread): ``attempt_id`` must match the matching
+    ``_success(n, ...)``'s for ``_success_delivered`` to prove delivery."""
+    return SyncStamp(_utc(at), 60, attempt_id, generation)
 
 
 class TestRecorder:
     def test_records_the_status_with_the_ingestion_state(self, tmp_path, db):
         _write(tmp_path, _succeeded(1, withheld=2))
         recorder = main._IngestionStateRecorder(db, tmp_path)
-        recorder.acknowledge(_stamp("2026-10-12T10:00:00Z"))
+        recorder.acknowledge(_stamp("2026-10-12T10:00:00Z", "0123456789ab-1", 1))
         recorder.maybe_record(now=100.0)
         row = _row(db)
         assert row is not None
@@ -513,7 +516,7 @@ class TestRecorder:
         caplog.set_level(logging.INFO)
         recorder = main._IngestionStateRecorder(db, tmp_path, interval_secs=0)
         _write(tmp_path, _succeeded(1))
-        recorder.acknowledge(_stamp("2026-10-12T10:00:00Z"))
+        recorder.acknowledge(_stamp("2026-10-12T10:00:00Z", "0123456789ab-1", 1))
         recorder.maybe_record(now=1.0)
         assert _row(db)["unrecovered_failure_attempt_id"] is None  # type: ignore[index]
 
@@ -543,7 +546,7 @@ class TestRecorder:
         assert "collection recovered" not in caplog.text
 
         # Its stamp is acknowledged: recovered at the next read.
-        recorder.acknowledge_watched(_stamp("2026-10-12T10:10:00Z"))
+        recorder.acknowledge_watched(_stamp("2026-10-12T10:10:00Z", "0123456789ab-3", 2))
         recorder.maybe_record(now=5.0)
         row = _row(db)
         assert row["unrecovered_failure_attempt_id"] is None  # type: ignore[index]
@@ -553,17 +556,18 @@ class TestRecorder:
         assert len([r for r in caplog.records if "attempt failed" in r.getMessage()]) == 1
 
     def test_a_clock_rollback_does_not_reorder_the_records(self, tmp_path, db):
-        """After a rollback the success's time sorts before the failure's
-        and before the acknowledged stamp; publication order still decides."""
+        """After a rollback the success's time sorts before the failure's;
+        publication order still decides, and delivery is still proven by
+        attempt ID equality, never by comparing times (#1621 thread,
+        2026-10-13)."""
         recorder = main._IngestionStateRecorder(db, tmp_path, interval_secs=0)
         future = (datetime.now(UTC) + timedelta(days=1)).replace(microsecond=0)
-        recorder.acknowledge(SyncStamp(future.isoformat(), 60))
         _write(tmp_path, _failed(1, at=future.strftime("%Y-%m-%dT%H:%M:%SZ")))
         recorder.maybe_record(now=1.0)
         assert _row(db)["unrecovered_failure_attempt_id"] == "0123456789ab-1"  # type: ignore[index]
         earlier = "2026-10-12T08:00:00Z"
         _write(tmp_path, _succeeded(2, at=earlier))
-        recorder.acknowledge_watched(_stamp(earlier))
+        recorder.acknowledge_watched(_stamp(earlier, "0123456789ab-2", 1))
         recorder.maybe_record(now=2.0)
         row = _row(db)
         assert row["terminal_outcome"] == "succeeded"  # type: ignore[index]
