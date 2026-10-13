@@ -72,6 +72,19 @@ LEGACY_ROOT = "/maildir"
 # the MCP bearer token (and the header file an older setup left), read by
 # the client helpers and mounted in mcp-server only.
 RESERVED_SECRET_FILES = (".secrets/mcp_auth_token.txt", ".secrets/mcp_client_headers.txt")
+# AGENTS.md's other sensitive files and this module's own outputs (under
+# the default --out), and private-key files: never a key or password.
+RESERVED_DATA_FILES = (
+    ".env",
+    "config/config.toml",
+    "config/identity.toml",
+    "config/authority.toml",
+    ".generated/compose.env",
+    ".generated/compose.accounts.yml",
+    ".generated/config/identity.toml",
+    ".generated/config/authority.toml",
+)
+PRIVATE_KEY_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 # Each role's conventional file (make init-secrets, docs/setup.md), refused
 # in the other role even when its own role is configured elsewhere.
 PASSWORD_SECRET_FILES = (".secrets/bridge_pass.txt",)
@@ -671,6 +684,16 @@ def _check_not_reserved(path: Path, key: str) -> None:
     if _any_same(_FileKey.of(path), [_FileKey.of(REPO_ROOT / n) for n in RESERVED_SECRET_FILES]):
         raise ConfigError(
             f"{key} is a reserved credential file ({', '.join(RESERVED_SECRET_FILES)}): "
+            "each secret goes only where it belongs."
+        )
+    suffixes = {Path(p).suffix.lower() for p in (path, os.path.realpath(path))}
+    if suffixes & set(PRIVATE_KEY_SUFFIXES) or _any_same(
+        _FileKey.of(path), [_FileKey.of(REPO_ROOT / n) for n in RESERVED_DATA_FILES]
+    ):
+        raise ConfigError(
+            f"{key} is a configuration, data or private-key file "
+            f"({', '.join(RESERVED_DATA_FILES)}, or "
+            f"{', '.join('*' + x for x in PRIVATE_KEY_SUFFIXES)}): "
             "each secret goes only where it belongs."
         )
 

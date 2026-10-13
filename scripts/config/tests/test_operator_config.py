@@ -697,6 +697,40 @@ class Refusals(unittest.TestCase):
         data["global"].setdefault("reranking", {})["api_key_file"] = "../.secrets/embed_api_key.txt"
         checked(data)
 
+    def test_a_data_or_private_key_file_is_not_a_secret(self) -> None:
+        # Review round 5: AGENTS.md's other sensitive files (.env, the
+        # operator's TOML files and their projections) and private-key
+        # files would be mounted and sent as a key or password.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / "link.txt").symlink_to(tmp / "bridge.PEM")
+        paths = [f"../{name}" for name in oc.RESERVED_DATA_FILES] + [
+            "identity.toml",
+            "../mbsync/bridge-cert.pem",
+            "tls.KEY",
+            "store.p12",
+            "store.pfx",
+            str(tmp / "link.txt"),
+        ]
+        self.assertIn(".env", oc.RESERVED_DATA_FILES)
+        self.assertIn("config/authority.toml", oc.RESERVED_DATA_FILES)
+        self.assertIn(".generated/config/identity.toml", oc.RESERVED_DATA_FILES)
+        for value in paths:
+            for key, edit in (
+                ("global.inference.api_key_file", ("global.inference.api_key_file", value)),
+                ("accounts[0].password_file", ("accounts.0.password_file", value)),
+            ):
+                with self.subTest(value=value, key=key):
+                    data = fixture()
+                    data["global"].setdefault("inference", {})
+                    _set(data, *edit)
+                    self.assert_refused(
+                        data,
+                        f"{key} is a configuration, data or private-key file "
+                        f"({', '.join(oc.RESERVED_DATA_FILES)}, or *.pem, *.key, *.p12, *.pfx): "
+                        "each secret goes only where it belongs.",
+                    )
+
     def test_an_enabled_imap_account_is_refused_and_a_disabled_one_accepted(self) -> None:
         imap = second_account(
             provider="imap",

@@ -981,7 +981,10 @@ the accounts:
   conventional file (`.secrets/embed_api_key.txt`,
   `.secrets/inference_api_key.txt`, `.secrets/rerank_api_key.txt`), and
   an `api_key_file` never `.secrets/bridge_pass.txt`, even when that
-  file's own setting points elsewhere.
+  file's own setting points elsewhere. No password or key file is the
+  MCP token's file, `.env`, `config/config.toml`, `config/identity.toml`,
+  `config/authority.toml`, one of the translator's outputs under
+  `.generated/`, or a `*.pem`, `*.key`, `*.p12` or `*.pfx` file.
 - A `proton-bridge` account has a `[accounts.proton_bridge]` table and
   takes exclusions only: a non-empty `sync.mailboxes.include` is
   refused, and `exclude` must keep `All Mail`, `Labels/*` and `Starred`.
