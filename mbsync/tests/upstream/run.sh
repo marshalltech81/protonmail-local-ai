@@ -558,7 +558,7 @@ cmd_execute() {
     # /proc/1/fd/1, which neither of the watchdog's measures counts.
     [[ "$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}} {{.HostConfig.LogConfig.Type}}{{range .HostConfig.Ulimits}} {{.Name}}={{.Soft}}/{{.Hard}}{{end}}' "$RUNC")" == "${cpus}000000000 8589934592 2048 none fsize=$EXEC_MAX_FILE_BYTES/$EXEC_MAX_FILE_BYTES" ]] ||
         die "execution container lacks its CPU, memory, pids or file-size limit, or has a log"
-    local suite
+    local suite start=$SECONDS
     start_watchdog
     : >"$out/run-status.txt"
     # One run_inside.sh step at a time: each suite's result is copied out
@@ -576,7 +576,7 @@ cmd_execute() {
     else
         rc=1
     fi
-    final_measure
+    final_measure "$start"
     stop_watchdog
     docker rm -f "$RUNC" >/dev/null
     cp "$WORK/provenance.txt" "$out/provenance.txt"
@@ -684,11 +684,14 @@ watchdog_term() {
     exit 0
 }
 
-# One last measurement after the suites, before the watchdog stops: a
-# burst written just before the last suite exited would otherwise fall
-# between two samples. Over the cap or unreadable fails the run.
+# One last check after the suites, before the watchdog stops, of the time
+# since <start> and of the bytes written: a run that ends just past the
+# deadline, or a burst written just before the last suite exited, would
+# otherwise fall between two samples. Past the deadline, over the cap or
+# unreadable fails the run.
 final_measure() {
-    local size written
+    local start="$1" size written
+    ((SECONDS - start < EXEC_DEADLINE_SECS)) || die "the execution passed its $EXEC_DEADLINE_SECS s deadline"
     size="$(bounded "$PROBE_TIMEOUT_SECS" docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
     written="$(container_written_bytes)" || written=""
     [[ "$size" =~ ^[0-9]+$ && "$written" =~ ^[0-9]+$ ]] ||
