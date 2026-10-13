@@ -3346,20 +3346,23 @@ and what it holds. Call this when asked which version or build is running.
 | `extra_claimant_files` | Files beyond the first claimant of each conflicting Message-ID (two Message-IDs with 2 and 3 claimants give 3) |
 
 `query_capabilities` has one entry per registered predicate leaf, derived from
-that leaf's coverage rule and the schema fields and evidence actually stored.
+that leaf's coverage rule, matching dependencies, and the schema fields and
+evidence actually stored.
 `index_schema_version` is the stored schema version (null for an unstamped
 index). Each entry reports:
 
 - `supported`: all indexed messages have fully assessed evidence for that leaf;
   an empty population also has this status.
 - `supported after backfill`: `unassessed_messages` are still awaiting evidence
-  assessment. Reparse can assess them; dead-lettered jobs need operator recovery.
+  assessment, including attachments whose occurrence rows have not yet committed.
+  Reparse can assess them; dead-lettered jobs need operator recovery.
   An empty `queue.reparse` does not establish completeness.
 - `supported when present`: assessment is finished, but `missing_messages` lack
   fully usable evidence, for example a missing delivery date, ambiguous sender,
   parse cap or incomplete attachment extraction.
 - `unavailable`: required schema fields are absent. Counts are null and
-  `condition` names the upgrade and reparse required to enable the leaf.
+  `condition` names the upgrade/migration or damaged-index rebuild needed to
+  restore the required schema, and assessment of existing mail.
 
 `available_messages`, `unassessed_messages` and `missing_messages` partition the
 indexed `messages` rows, including Trash. Available means fully usable evidence,

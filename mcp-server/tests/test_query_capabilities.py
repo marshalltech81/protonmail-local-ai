@@ -11,7 +11,7 @@ from tests.test_sqlite import _open_built_db_conn
 
 
 def test_every_registered_leaf_has_a_coverage_rule():
-    assert all(kind.coverage is not None for kind in LEAVES.values())
+    assert all(kind.coverage is not None and kind.schema is not None for kind in LEAVES.values())
 
 
 def test_backfill_transitions_follow_evidence_even_when_queue_is_empty(tmp_path):
@@ -181,7 +181,143 @@ def test_an_unregistered_status_rule_fails_closed(tmp_path, monkeypatch):
     from src.lib.query_capabilities import query_capabilities
 
     conn, _ = _open_built_db_conn(tmp_path, "no-rule.db")
-    monkeypatch.setitem(LEAVES, "subject", replace(LEAVES["subject"], coverage=None))
+    original = LEAVES["subject"]
+    monkeypatch.setitem(LEAVES, "subject", replace(original, coverage=None))
     with pytest.raises(ValueError, match="Registered predicate has no coverage rule"):
         query_capabilities(conn)
+    monkeypatch.setitem(LEAVES, "subject", replace(original, schema=None))
+    with pytest.raises(ValueError, match="Registered predicate has no schema dependency rule"):
+        query_capabilities(conn)
+    conn.close()
+
+
+def test_phase_one_attachment_occurrences_are_unassessed_until_committed(tmp_path):
+    from tests.conftest import _insert_attachment
+
+    conn, path = _open_built_db_conn(tmp_path, "phase-one.db")
+    _insert_message(
+        conn,
+        message_id="phase-one",
+        thread_id="t",
+        sent_at="2024-01-01T00:00:00+00:00",
+        has_attachments=True,
+    )
+    conn.commit()
+    db = Database(str(path))
+    report = db.get_mailbox_status()["query_capabilities"]["attachment_text_words"]
+    assert report["status"] == "supported after backfill"
+    assert report["unassessed_messages"] == 1
+    assert report["missing_messages"] == 0
+    _insert_attachment(
+        conn, message_id="phase-one", thread_id="t", attachment_id="a", filename="synthetic.txt"
+    )
+    conn.execute("UPDATE attachments SET text_complete = 0")
+    conn.commit()
+    assert (
+        db.get_mailbox_status()["query_capabilities"]["attachment_text_words"]["status"]
+        == "supported when present"
+    )
+    conn.execute("UPDATE attachments SET text_complete = 1")
+    conn.commit()
+    assert (
+        db.get_mailbox_status()["query_capabilities"]["attachment_text_words"]["status"]
+        == "supported"
+    )
+    conn.close()
+
+
+def test_match_dependencies_are_required_even_when_coverage_flags_exist(tmp_path):
+    from src.lib.query_capabilities import query_capabilities
+
+    conn, _ = _open_built_db_conn(tmp_path, "match-dependencies.db")
+    conn.execute("ALTER TABLE messages RENAME COLUMN seen TO missing_seen")
+    conn.execute("DROP TABLE message_headers")
+    conn.execute("DROP TABLE message_participants")
+    conn.execute("DROP TABLE message_chunks_fts")
+    report = query_capabilities(conn)
+    for name in ("seen", "header_exists", "sender", "body_words", "attachment_text_words"):
+        assert report[name]["status"] == "unavailable"
+        assert report[name]["available_messages"] is None
+    assert report["subject"]["status"] == "supported"
+    conn.close()
+
+
+def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
+    """Removing any real field must not leave a broken compiler advertised."""
+    import sqlite3
+
+    from src.lib.predicates import DATE_BASES, WHERE_ROLES
+    from src.lib.query_capabilities import query_capabilities
+
+    conn, _ = _open_built_db_conn(tmp_path, "compiler-dependencies.db")
+    conn.create_function("mcp_casefold", 1, lambda value: value.casefold() if value else value)
+    values = {
+        "address": ("synthetic@example.com", "synthetic"),
+        "role, address": tuple((role, "synthetic@example.com") for role in WHERE_ROLES),
+        "role, text": tuple((role, "synthetic") for role in WHERE_ROLES),
+        "role, domain": tuple((role, "example.com") for role in WHERE_ROLES),
+        "header name": ("subject",),
+        "header name, text": (("subject", "synthetic"),),
+        "text": ("synthetic",),
+        "words": (("synthetic",),),
+        "folders": (("INBOX",),),
+        "instant": ("2024-01-01T00:00:00+00:00",),
+        "basis": tuple(DATE_BASES),
+        "bool": (True,),
+        "bytes": (1,),
+        "class": ("unclassified",),
+    }
+    tables = (
+        "messages",
+        "message_participants",
+        "message_participant_names",
+        "message_headers",
+        "message_chunks",
+        "attachments",
+        "entities",
+    )
+    for table in tables:
+        columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+        for column in columns:
+            conn.execute("SAVEPOINT missing_field")
+            conn.execute(f'ALTER TABLE {table} RENAME COLUMN "{column}" TO absent_field')
+            report = query_capabilities(conn)
+            for name, kind in LEAVES.items():
+                for value in values[kind.param]:
+                    params = []
+                    sql = kind.compile(value, params)
+                    try:
+                        conn.execute(f"EXPLAIN SELECT 1 FROM messages m WHERE {sql}", params)
+                    except sqlite3.OperationalError:
+                        assert report[name]["status"] == "unavailable", (table, column, name)
+            conn.execute("ROLLBACK TO missing_field")
+            conn.execute("RELEASE missing_field")
+    conn.close()
+
+
+def test_attachment_coverage_checks_every_retained_occurrence(tmp_path):
+    from tests.conftest import _insert_attachment
+
+    conn, path = _open_built_db_conn(tmp_path, "retained-occurrences.db")
+    _insert_message(
+        conn,
+        message_id="retained",
+        thread_id="t",
+        sent_at="2024-01-01T00:00:00+00:00",
+        has_attachments=False,
+    )
+    _insert_attachment(
+        conn, message_id="retained", thread_id="t", attachment_id="a", filename="synthetic.txt"
+    )
+    conn.commit()
+    db = Database(str(path))
+    entry = db.get_mailbox_status()["query_capabilities"]["attachment_text_words"]
+    assert entry["status"] == "supported after backfill"
+    assert entry["available_messages"] == 0
+    conn.execute("UPDATE attachments SET text_complete = 0")
+    conn.commit()
+    assert (
+        db.get_mailbox_status()["query_capabilities"]["attachment_text_words"]["status"]
+        == "supported when present"
+    )
     conn.close()

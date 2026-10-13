@@ -495,6 +495,8 @@ class LeafKind:
     # evidence, then unassessed evidence. A row with neither is missing.
     # Coverage is conservative across accepted operands, never a match count.
     coverage: tuple[str, str] | None = None
+    # Matching dependencies beyond the message flags in coverage SQL.
+    schema: dict[str, tuple[str, ...]] | None = None
 
 
 # ``messages.sent_at_status`` (#1080): why ``sent_at`` is what it is.
@@ -921,6 +923,24 @@ def _address_coverage(roles: tuple[str, ...], *, names: bool) -> tuple[str, str]
     return complete, unassessed
 
 
+def _address_schema(*, names: bool) -> dict[str, tuple[str, ...]]:
+    schema = {
+        "messages": ("claimant_id",),
+        "message_participants": ("claimant_id", "role", "address"),
+    }
+    if names:
+        schema["message_participant_names"] = ("claimant_id", "role", "address", "name")
+    return schema
+
+
+_WORD_SCHEMA = {
+    "messages": ("claimant_id",),
+    "message_chunks": ("claimant_id", "fts_rowid", "attachment_id"),
+    # The table-name hidden column also establishes an FTS virtual table.
+    "message_chunks_fts": ("text", "message_chunks_fts"),
+}
+
+
 _SENT_COVERAGE = (f"({SENT_CLOCK_SQL}) IS NOT NULL", "m.sent_at_status IS NULL")
 _EFFECTIVE_COVERAGE = (
     f"({EFFECTIVE_EVIDENCE_SQL}) IS NOT NULL",
@@ -928,8 +948,10 @@ _EFFECTIVE_COVERAGE = (
 )
 _ATTACHMENT_COVERAGE = (
     "m.attachments_manifest_complete = 1 AND "
-    "(m.has_attachments = 0 OR (a.n > 0 AND a.incomplete = 0 AND a.unassessed = 0))",
-    "m.attachments_manifest_complete IS NULL OR (m.has_attachments = 1 AND a.unassessed > 0)",
+    "(m.has_attachments = 0 OR a.n > 0) AND "
+    "COALESCE(a.incomplete, 0) = 0 AND COALESCE(a.unassessed, 0) = 0",
+    "m.attachments_manifest_complete IS NULL OR a.unassessed > 0 OR "
+    "(m.has_attachments = 1 AND a.n IS NULL)",
 )
 
 
@@ -945,6 +967,7 @@ LEAVES: dict[str, LeafKind] = {
             Evaluability.UNKNOWN_WHEN_NULL,
             _sender_test,
             coverage=_address_coverage(("from",), names=True),
+            schema=_address_schema(names=True),
         ),
         LeafKind(
             "recipient",
@@ -952,6 +975,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_inferred("recipient"),
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_address_coverage(("to", "cc"), names=True),
+            schema=_address_schema(names=True),
         ),
         LeafKind(
             "participant",
@@ -960,6 +984,7 @@ LEAVES: dict[str, LeafKind] = {
             Evaluability.UNKNOWN_WHEN_NULL,
             _participant_test,
             coverage=_address_coverage(("from", "to", "cc"), names=True),
+            schema=_address_schema(names=True),
         ),
         # The explicit address leaves (#1088): a ``ROLE_SETS`` role and a
         # value.
@@ -970,6 +995,7 @@ LEAVES: dict[str, LeafKind] = {
                 _compile_address(mode),
                 Evaluability.UNKNOWN_WHEN_NULL,
                 coverage=_address_coverage(("from", "to", "cc"), names=_ADDRESS_MODES[mode][1]),
+                schema=_address_schema(names=_ADDRESS_MODES[mode][1]),
             )
             for mode, param in (
                 ("address_is", "role, address"),
@@ -985,6 +1011,10 @@ LEAVES: dict[str, LeafKind] = {
             _compile_header_exists,
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_coverage_flags("headers_complete"),
+            schema={
+                "messages": ("claimant_id",),
+                "message_headers": ("claimant_id", "name_normalized"),
+            },
         ),
         LeafKind(
             "header_contains",
@@ -992,6 +1022,10 @@ LEAVES: dict[str, LeafKind] = {
             _compile_header_contains,
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_coverage_flags("headers_complete"),
+            schema={
+                "messages": ("claimant_id",),
+                "message_headers": ("claimant_id", "name_normalized", "decoded_value", "raw_value"),
+            },
         ),
         LeafKind(
             "subject",
@@ -999,6 +1033,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_subject,
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_coverage_flags("subject_complete"),
+            schema={"messages": ("subject",)},
         ),
         LeafKind(
             "subject_contains",
@@ -1006,6 +1041,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_subject,
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_coverage_flags("subject_complete"),
+            schema={"messages": ("subject",)},
         ),
         LeafKind(
             "attachment_text_words",
@@ -1013,6 +1049,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_attachment_text_words,
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_ATTACHMENT_COVERAGE,
+            schema={**_WORD_SCHEMA, "attachments": ("claimant_id", "text_complete")},
         ),
         # ``text`` is the flat filter's name for ``body_words`` (#1088).
         LeafKind(
@@ -1021,6 +1058,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_body_words,
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_coverage_flags("body_complete"),
+            schema=_WORD_SCHEMA,
         ),
         LeafKind(
             "body_words",
@@ -1028,14 +1066,23 @@ LEAVES: dict[str, LeafKind] = {
             _compile_body_words,
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_coverage_flags("body_complete"),
+            schema=_WORD_SCHEMA,
         ),
-        LeafKind("folder", "folders", _compile_folder, Evaluability.DECIDED, coverage=("1", "0")),
+        LeafKind(
+            "folder",
+            "folders",
+            _compile_folder,
+            Evaluability.DECIDED,
+            coverage=("1", "0"),
+            schema={"messages": ("folder",)},
+        ),
         LeafKind(
             "not_in_folders",
             "folders",
             _compile_not_in_folders,
             Evaluability.DECIDED,
             coverage=("1", "0"),
+            schema={"messages": ("folder",)},
         ),
         # A message with neither a delivery nor a send date is unknown
         # under an effective-time bound, never placed by the time it was
@@ -1047,6 +1094,7 @@ LEAVES: dict[str, LeafKind] = {
             Evaluability.UNKNOWN_WHEN_NULL,
             _effective_from_test,
             coverage=_EFFECTIVE_COVERAGE,
+            schema={},
         ),
         LeafKind(
             "effective_to",
@@ -1055,6 +1103,7 @@ LEAVES: dict[str, LeafKind] = {
             Evaluability.UNKNOWN_WHEN_NULL,
             _effective_to_test,
             coverage=_EFFECTIVE_COVERAGE,
+            schema={},
         ),
         # The other clocks date_basis selects (#1150).
         # Each is NULL without its date (a send date also until it is
@@ -1066,6 +1115,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_bound(SENT_CLOCK_SQL, ">="),
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_SENT_COVERAGE,
+            schema={},
         ),
         LeafKind(
             "sent_to",
@@ -1073,6 +1123,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_bound(SENT_CLOCK_SQL, "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_SENT_COVERAGE,
+            schema={},
         ),
         LeafKind(
             "occurred_from",
@@ -1080,6 +1131,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_bound("m.occurred_at", ">="),
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=("m.occurred_at IS NOT NULL", "0"),
+            schema={},
         ),
         LeafKind(
             "occurred_to",
@@ -1087,6 +1139,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_bound("m.occurred_at", "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=("m.occurred_at IS NOT NULL", "0"),
+            schema={},
         ),
         LeafKind(
             "dated",
@@ -1097,6 +1150,7 @@ LEAVES: dict[str, LeafKind] = {
                 f"({SENT_CLOCK_SQL}) IS NOT NULL AND m.occurred_at IS NOT NULL",
                 "m.sent_at_status IS NULL",
             ),
+            schema={"messages": ("effective_at",)},
         ),
         LeafKind(
             "has_attachments",
@@ -1108,13 +1162,31 @@ LEAVES: dict[str, LeafKind] = {
                 "m.has_attachments = 1 OR m.attachments_manifest_complete = 1",
                 "m.has_attachments = 0 AND m.attachments_manifest_complete IS NULL",
             ),
-        ),
-        LeafKind("seen", "bool", _compile_flag("seen"), Evaluability.DECIDED, coverage=("1", "0")),
-        LeafKind(
-            "flagged", "bool", _compile_flag("flagged"), Evaluability.DECIDED, coverage=("1", "0")
+            schema={},
         ),
         LeafKind(
-            "replied", "bool", _compile_flag("replied"), Evaluability.DECIDED, coverage=("1", "0")
+            "seen",
+            "bool",
+            _compile_flag("seen"),
+            Evaluability.DECIDED,
+            coverage=("1", "0"),
+            schema={"messages": ("seen",)},
+        ),
+        LeafKind(
+            "flagged",
+            "bool",
+            _compile_flag("flagged"),
+            Evaluability.DECIDED,
+            coverage=("1", "0"),
+            schema={"messages": ("flagged",)},
+        ),
+        LeafKind(
+            "replied",
+            "bool",
+            _compile_flag("replied"),
+            Evaluability.DECIDED,
+            coverage=("1", "0"),
+            schema={"messages": ("replied",)},
         ),
         # The local Maildir file's size, NULL when not recorded.
         LeafKind(
@@ -1123,6 +1195,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_bound("m.size_bytes", ">="),
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=("m.size_bytes IS NOT NULL", "m.size_bytes IS NULL"),
+            schema={},
         ),
         LeafKind(
             "size_max",
@@ -1130,6 +1203,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_bound("m.size_bytes", "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=("m.size_bytes IS NOT NULL", "m.size_bytes IS NULL"),
+            schema={},
         ),
         LeafKind(
             "authority_class",
@@ -1140,6 +1214,11 @@ LEAVES: dict[str, LeafKind] = {
                 "m.folder = 'Spam' OR (m.sender_ambiguous = 0 AND m.from_addresses_complete = 1)",
                 "m.folder != 'Spam' AND (m.sender_ambiguous IS NULL OR m.from_addresses_complete IS NULL)",
             ),
+            schema={
+                "messages": ("claimant_id",),
+                "message_participants": ("claimant_id", "address", "role"),
+                "entities": ("canonical_key", "kind", "authority_class"),
+            },
         ),
     )
 }

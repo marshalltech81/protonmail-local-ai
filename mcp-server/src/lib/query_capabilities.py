@@ -7,8 +7,15 @@ from .predicates import LEAVES
 
 
 def query_capabilities(conn: sqlite3.Connection) -> dict:
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
-    attachment_columns = {row[1] for row in conn.execute("PRAGMA table_info(attachments)")}
+    tables = {"messages"}
+    for kind in LEAVES.values():
+        if kind.schema is None:
+            raise ValueError("Registered predicate has no schema dependency rule")
+        tables.update(kind.schema)
+    columns = {
+        table: {row[0] for row in conn.execute("SELECT name FROM pragma_table_xinfo(?)", (table,))}
+        for table in tables
+    }
     rules = {}
     result: dict[str, dict[str, str | int | None]] = {}
     for name, kind in LEAVES.items():
@@ -17,16 +24,17 @@ def query_capabilities(conn: sqlite3.Connection) -> dict:
         complete, unassessed = kind.coverage
         sql = complete + " " + unassessed
         required = set(re.findall(r"\bm\.([a-z_]+)", sql))
-        attachments = "a." in sql
-        if not required <= columns or (
-            attachments and not {"claimant_id", "text_complete"} <= attachment_columns
+        assert kind.schema is not None
+        if not required <= columns["messages"] or any(
+            not set(fields) <= columns[table] for table, fields in kind.schema.items()
         ):
             result[name] = {
                 "status": "unavailable",
                 "available_messages": None,
                 "unassessed_messages": None,
                 "missing_messages": None,
-                "condition": "Upgrade the indexer and apply its schema migrations, then reparse mail.",
+                "condition": "Restore required schema through indexer upgrade and migrations, "
+                "or rebuild a damaged index; reparse existing mail.",
             }
         else:
             rules[name] = (complete, unassessed)
