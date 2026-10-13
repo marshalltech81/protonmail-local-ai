@@ -57,6 +57,9 @@ readonly REPO_INFO_COMMIT=631ff15a31ac5d63781079d695ade706e65708c5
 # Marks a work dir run.sh created; holds that dir's random image tag.
 readonly MARKER=.i1583-work
 readonly IMAGE_REPO=i1583-upstream
+# Fixed text after the digest on provenance.txt's inputs line, which must
+# match exactly.
+readonly INPUTS_NOTE='(provenance lines above, staged trees with harness files, repo/Packages, Go archive, run.sh and its scripts, mbsync/Dockerfile)'
 # Container names carry the work dir's tag (set_names), so runs in other
 # work dirs never share or remove each other's containers.
 ACQ=""
@@ -327,12 +330,13 @@ only_regular_files() {
 
 # assemble and execute both refuse inputs (run.sh included) or acquired
 # provenance lines that changed since acquire recorded them. The inputs
-# line must be the record's only one and its last.
+# line must be the record's only one and its last, exactly as acquire
+# wrote it.
 check_inputs() {
     only_regular_files
     [[ "$(grep -c '^inputs sha256=' "$WORK/provenance.txt")" == 1 ]] ||
         die "provenance.txt must hold exactly one inputs line; run acquire again into a new work dir"
-    [[ "$(tail -n 1 "$WORK/provenance.txt" | sed -n 's/^inputs sha256=\([0-9a-f]\{64\}\) .*/\1/p')" == "$(inputs_digest)" ]] ||
+    [[ "$(tail -n 1 "$WORK/provenance.txt")" == "inputs sha256=$(inputs_digest) $INPUTS_NOTE" ]] ||
         die "inputs changed since acquire; run acquire again into a new work dir"
 }
 
@@ -351,7 +355,7 @@ cmd_acquire() {
     acquire_debs
     stage_harness
     only_regular_files
-    prov "inputs sha256=$(inputs_digest) (provenance lines above, staged trees with harness files, repo/Packages, Go archive, run.sh and its scripts, mbsync/Dockerfile)"
+    prov "inputs sha256=$(inputs_digest) $INPUTS_NOTE"
     printf 'acquire: ok (%s)\n' "$WORK/provenance.txt"
 }
 

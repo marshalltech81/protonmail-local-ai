@@ -32,16 +32,35 @@ verify() {
     fi
 }
 
+# Ends every process the tests left running as this user (kill -1 spares
+# only this shell and PID 1). It fails with "no such process" when none is
+# left, which is the usual case.
+stop_leftovers() {
+    kill -s KILL -1 2>/dev/null || true
+}
+
+# The test code owns /home/h/logs, so the log is never reopened by its
+# path: it is written through a descriptor opened on a new file while no
+# test process runs, and read back through /dev/fd, which reopens that
+# same inode, after every test process has ended. A FIFO or symlink the
+# tests put in its place is never opened.
 run() {
-    local name="$1" mod="$2" pkg="$3" timeout="$4" rc=0
+    local name="$1" mod="$2" pkg="$3" timeout="$4" rc=0 log="/home/h/logs/$1.log" w r output
+    stop_leftovers
+    rm -f "$log"
+    exec {w}>"$log"
     (cd "/home/h/src/$mod" && go test -v -count=1 -p 1 -timeout "$timeout" -run '^TestIssue1583' "$pkg") \
-        >"/home/h/logs/$name.log" 2>&1 || rc=$?
+        >&"$w" 2>&1 || rc=$?
+    stop_leftovers
+    exec {r}<"/dev/fd/$w" {w}>&-
+    output="$(head -c 8388608 <&"$r")"
+    exec {r}<&-
     printf '%s exit=%s\n' "$name" "$rc"
     # Our test names and verdicts only.
-    grep -oE -- '^--- (PASS|FAIL|SKIP): TestIssue1583[A-Za-z0-9]+' "/home/h/logs/$name.log" || true
+    grep -oE -- '^--- (PASS|FAIL|SKIP): TestIssue1583[A-Za-z0-9]+' <<<"$output" || true
     if [[ "$DEBUG" == "debug" ]]; then
         # Diagnostics that point at the harness's own source lines.
-        grep -E 'zz_issue1583_([a-z]+_)?test\.go:[0-9]+' "/home/h/logs/$name.log" | head -40 || true
+        grep -E 'zz_issue1583_([a-z]+_)?test\.go:[0-9]+' <<<"$output" | head -40 || true
     fi
     if [[ "$rc" -ne 0 ]]; then
         status=1
