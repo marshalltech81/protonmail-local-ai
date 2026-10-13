@@ -75,14 +75,15 @@ mkdir -p "$RUNTIME_DIR"
 # 45): the endpoint and expected-fingerprint settings and their
 # validation, the Host and Tunnel isync connects through, certificate
 # extraction over implicit TLS, the expected fingerprint and the
-# persistent pin with its rotation, and Proton's folder exclusions. The
-# transport below calls only validate_bridge_endpoint,
+# persistent pin with its one-run rotation, and Proton's folder
+# exclusions. The transport below calls only validate_bridge_endpoint,
 # expected_fingerprint, bridge_imap_host, bridge_imap_connect,
 # warn_if_pin_rotation_enabled, extract_bridge_cert,
 # validate_proton_settings and provider_exclusion_patterns, and reads
 # constants defined below: the endpoint, the isync names, the folder
-# exclusions, the password file and, for the startup identity line, the
-# source selector and the certificate settings.
+# exclusions, the password file, PIN_ROTATION_RUN (a rotation run stops
+# after the certificate) and, for the startup identity line, the source
+# selector and the certificate settings.
 
 # The defaults and validators of the Proton settings, one implementation
 # shared with scripts/validate-env.sh (PLAN.md decision 46): copied from
@@ -117,8 +118,22 @@ readonly PROTON_CHANNEL_NAME="${PROTON_CHANNEL_NAME:-$PROTON_DEFAULT_CHANNEL_NAM
 # Required: the SHA-256 fingerprint the operator took from the Bridge
 # app; see verify_expected_fingerprint.
 readonly BRIDGE_CERT_FINGERPRINT="${BRIDGE_CERT_FINGERPRINT:-}"
-# Literally true or false (validate_proton_settings).
-readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-$PROTON_DEFAULT_BRIDGE_CERT_PIN_ROTATE}"
+# Pin rotation is one run, never a setting (#1609): `make rotate-bridge-pin`
+# starts a one-shot container (docker compose run --rm mbsync
+# rotate-bridge-pin) whose only argument is rotate-bridge-pin. That run may
+# replace the pin with a certificate that matches BRIDGE_CERT_FINGERPRINT,
+# then exits without syncing. The service itself is started with no
+# argument (Compose sets no command), so every start of it compares the
+# certificate with the pin. Any other argument is refused here, before
+# anything else runs, without repeating it.
+PIN_ROTATION_RUN="false"
+if (($# == 1)) && [[ "$1" == "rotate-bridge-pin" ]]; then
+    PIN_ROTATION_RUN="true"
+elif (($# > 0)); then
+    echo ">>> ERROR: mbsync takes no argument, or only rotate-bridge-pin (make rotate-bridge-pin) — refusing to start." >&2
+    exit 1
+fi
+readonly PIN_ROTATION_RUN
 # Proton provider policy: folder patterns separated by |, rendered as the
 # Patterns exclusions by render_mbsync_config
 # (proton_folder_exclusion_patterns). They always include Bridge's
@@ -139,13 +154,12 @@ readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 validate_proton_settings() {
     # The shared validators (proton-settings.sh), the ones
     # scripts/validate-env.sh runs: SOURCE_MODE first, then the Bridge
-    # host and certificate name must be this Mac's, the port a port, pin
-    # rotation literally true or false, the folder exclusions well formed
-    # and keeping the three protected ones, and the isync names a safe
-    # set of characters. Fixed text: a refused value is never printed.
+    # host and certificate name must be this Mac's, the port a port, the
+    # folder exclusions well formed and keeping the three protected ones,
+    # and the isync names a safe set of characters. Fixed text: a refused value is never printed.
     local problem
     if ! problem="$(proton_settings_problem "$SOURCE_MODE" "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" \
-        "$BRIDGE_CERT_HOST" "$BRIDGE_CERT_PIN_ROTATE" "$PROTON_FOLDER_EXCLUSIONS" \
+        "$BRIDGE_CERT_HOST" "$PROTON_FOLDER_EXCLUSIONS" \
         "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" "$PROTON_LOCAL_STORE_NAME" \
         "$PROTON_CHANNEL_NAME")"; then
         printf '>>> ERROR: %s\n' "$problem" >&2
@@ -277,8 +291,8 @@ write_pin() {
 verify_cert_pin() {
     # Runs after verify_expected_fingerprint has matched the cert.
     # First boot: no pin on disk yet → save fingerprint.
-    # Subsequent boots: fingerprint must match, or the operator must opt
-    # in to rotation via BRIDGE_CERT_PIN_ROTATE=true (used when Bridge is
+    # Subsequent boots: fingerprint must match, unless this is a
+    # `make rotate-bridge-pin` run (PIN_ROTATION_RUN, used when Bridge is
     # upgraded and its TLS cert is deliberately replaced). Only an absent
     # pin is a first boot: one that exists but is empty, malformed,
     # unreadable or a dangling link is refused like a mismatch.
@@ -311,7 +325,7 @@ verify_cert_pin() {
     if ! pinned_fp="$(tr -d '[:space:]' <"$PIN_FILE")"; then
         # Rotation replaces an unreadable file or a dangling link: write_pin
         # renames over the path itself.
-        if [[ "$BRIDGE_CERT_PIN_ROTATE" != "true" ]]; then
+        if [[ "$PIN_ROTATION_RUN" != "true" ]]; then
             echo ">>> ERROR: could not read the Bridge cert pin at ${PIN_FILE} — refusing to sync." >&2
             return 1
         fi
@@ -324,14 +338,14 @@ verify_cert_pin() {
 
     # write_pin stores 64 lowercase hex digits; anything else is damaged
     # state, not a fingerprint to compare against.
-    if [[ ! "$pinned_fp" =~ ^[0-9a-f]{64}$ && "$BRIDGE_CERT_PIN_ROTATE" != "true" ]]; then
+    if [[ ! "$pinned_fp" =~ ^[0-9a-f]{64}$ && "$PIN_ROTATION_RUN" != "true" ]]; then
         echo ">>> ERROR: the Bridge cert pin at ${PIN_FILE} is empty or malformed — refusing to sync." >&2
-        echo ">>> To re-pin the cert Bridge presents now, recreate mbsync once with BRIDGE_CERT_PIN_ROTATE=true." >&2
+        echo ">>> To re-pin the cert Bridge presents now, run make rotate-bridge-pin." >&2
         return 1
     fi
 
-    if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
-        echo ">>> WARNING: Bridge cert fingerprint changed and BRIDGE_CERT_PIN_ROTATE=true — rotating pin." >&2
+    if [[ "$PIN_ROTATION_RUN" == "true" ]]; then
+        echo ">>> WARNING: Bridge cert fingerprint changed — rotating pin in this rotate-bridge-pin run." >&2
         echo ">>>   pinned:  sha256:${pinned_fp}" >&2
         echo ">>>   current: sha256:${current_fp}" >&2
         if ! write_pin "$current_fp"; then
@@ -344,7 +358,7 @@ verify_cert_pin() {
     echo ">>> ERROR: Bridge cert fingerprint does not match pinned value — refusing to sync." >&2
     echo ">>>   pinned:  sha256:${pinned_fp}" >&2
     echo ">>>   current: sha256:${current_fp}" >&2
-    echo ">>> If this rotation is expected (e.g. Bridge upgrade), recreate mbsync once with BRIDGE_CERT_PIN_ROTATE=true." >&2
+    echo ">>> If this rotation is expected (e.g. Bridge upgrade), run make rotate-bridge-pin." >&2
     echo ">>> Otherwise this is a security event — investigate before proceeding." >&2
     return 1
 }
@@ -397,17 +411,12 @@ extract_bridge_cert() {
 }
 
 warn_if_pin_rotation_enabled() {
-    # BRIDGE_CERT_PIN_ROTATE is an opt-in for accepting one legitimate
-    # Bridge cert rotation. It is part of the container's environment, so
-    # it stays true through every restart of this container (manual or by
-    # the restart policy) until the container is recreated with it false;
-    # until then a new cert that matches BRIDGE_CERT_FINGERPRINT replaces
-    # the pin without comparison to it. Surface that on every boot so the
-    # operator notices if they forgot.
-    if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
-        echo ">>> WARNING: BRIDGE_CERT_PIN_ROTATE=true — a Bridge cert fingerprint change this boot will be accepted without comparison to the pin (the cert must still match BRIDGE_CERT_FINGERPRINT)." >&2
-        echo ">>> This is intended only for one boot after a deliberate Bridge cert rotation (e.g. Bridge upgrade); a restart keeps it enabled." >&2
-        echo ">>> Once the rotation succeeds, recreate mbsync with BRIDGE_CERT_PIN_ROTATE=false to re-enable pin enforcement (see docs/troubleshooting.md)." >&2
+    # A rotate-bridge-pin run (PIN_ROTATION_RUN) accepts one legitimate
+    # Bridge cert rotation: a cert that matches BRIDGE_CERT_FINGERPRINT
+    # replaces the pin without comparison to it. Say so before anything
+    # connects.
+    if [[ "$PIN_ROTATION_RUN" == "true" ]]; then
+        echo ">>> WARNING: rotate-bridge-pin run — a Bridge cert that matches BRIDGE_CERT_FINGERPRINT replaces the pin without comparison to it; this run syncs nothing and exits, and the next start enforces the pin again." >&2
     fi
 }
 # --- Proton provider integration: end ---
@@ -447,8 +456,9 @@ log_startup_identity() {
     # over the non-secret settings named below: the source selector, the
     # endpoint, Proton's folder exclusions, isync's
     # account, store and channel names, the sync timing, the expected certificate fingerprint (not secret; in the
-    # form verify_expected_fingerprint compares) and whether pin rotation
-    # is on. BRIDGE_USER and the password are not inputs. It runs before
+    # form verify_expected_fingerprint compares). A rotate-bridge-pin run
+    # is an argument, not a setting, and announces itself with its own
+    # warning. BRIDGE_USER and the password are not inputs. It runs before
     # validation: values are hashed as configured, never parsed or printed,
     # so nothing here can fail on a malformed setting. An endpoint value
     # with an "@" (userinfo, which validation would refuse) is hashed as a
@@ -457,7 +467,7 @@ log_startup_identity() {
     # of patterns, never the patterns: an added one names a folder, which
     # is mailbox content, and a short hash of a low-entropy name could be
     # tested against guesses.
-    local commit="${GIT_COMMIT:-unknown}" boot config rotate="false" exclusions pipes
+    local commit="${GIT_COMMIT:-unknown}" boot config exclusions pipes
     local host="$BRIDGE_HOST" port="$BRIDGE_IMAP_PORT" cert_host="$BRIDGE_CERT_HOST"
     if [[ "$PROTON_FOLDER_EXCLUSIONS" == "$PROTON_DEFAULT_FOLDER_EXCLUSIONS" ]]; then
         exclusions="default"
@@ -468,18 +478,15 @@ log_startup_identity() {
     if [[ ! "$commit" =~ ^[0-9A-Za-z._-]{1,64}$ ]]; then
         commit="unknown"
     fi
-    if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
-        rotate="true"
-    fi
     [[ "$host" != *@* ]] || host="<value-with-credentials>"
     [[ "$port" != *@* ]] || port="<value-with-credentials>"
     [[ "$cert_host" != *@* ]] || cert_host="<value-with-credentials>"
     boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
-    config="$(printf 'SOURCE_MODE=%s\nBRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nPROTON_FOLDER_EXCLUSIONS=%s\nPROTON_IMAP_ACCOUNT_NAME=%s\nPROTON_REMOTE_STORE_NAME=%s\nPROTON_LOCAL_STORE_NAME=%s\nPROTON_CHANNEL_NAME=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nBRIDGE_CERT_PIN_ROTATE=%s\n' \
+    config="$(printf 'SOURCE_MODE=%s\nBRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nPROTON_FOLDER_EXCLUSIONS=%s\nPROTON_IMAP_ACCOUNT_NAME=%s\nPROTON_REMOTE_STORE_NAME=%s\nPROTON_LOCAL_STORE_NAME=%s\nPROTON_CHANNEL_NAME=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\n' \
         "$SOURCE_MODE" "$host" "$port" "$cert_host" "$exclusions" \
         "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" \
         "$PROTON_LOCAL_STORE_NAME" "$PROTON_CHANNEL_NAME" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
-        "$(expected_fingerprint)" "$rotate" | sha256sum)"
+        "$(expected_fingerprint)" | sha256sum)"
     printf '>>> Startup identity: service=mbsync commit=%s boot=%s config=%s\n' \
         "$commit" "$boot" "${config:0:12}"
 }
@@ -992,11 +999,17 @@ install_signal_handlers
 # Before validation, so a refused setting still leaves the line (#887).
 log_startup_identity
 require_prerequisites
-check_maildir_layout || exit 1
+# A rotate-bridge-pin run touches neither the Maildir nor the config: it
+# only checks and pins the certificate.
+if [[ "$PIN_ROTATION_RUN" != "true" ]]; then
+    check_maildir_layout || exit 1
+fi
 
 warn_if_pin_rotation_enabled
 
-render_mbsync_config
+if [[ "$PIN_ROTATION_RUN" != "true" ]]; then
+    render_mbsync_config
+fi
 
 # =============================================================================
 # Wait for ProtonBridge IMAP to be available
@@ -1014,11 +1027,16 @@ wait_for_bridge_imap
 # (verify_expected_fingerprint). On first boot the SHA-256 fingerprint is
 # saved to the persistent state volume ($PIN_FILE). On subsequent boots
 # the fingerprint must match the pinned value — otherwise mbsync refuses
-# to sync. A legitimate rotation (e.g. Bridge upgrade) is accepted by
-# recreating mbsync once with BRIDGE_CERT_PIN_ROTATE=true. `make clean`
-# deletes the state volume and resets the pin.
+# to sync. A legitimate rotation (e.g. Bridge upgrade) is accepted by one
+# `make rotate-bridge-pin` run, which stops here without syncing; the
+# password is never read. `make clean` deletes the state volume and resets
+# the pin.
 # =============================================================================
 extract_bridge_cert
+if [[ "$PIN_ROTATION_RUN" == "true" ]]; then
+    echo ">>> rotate-bridge-pin: done — the pin holds the certificate Bridge presents; start mbsync normally to sync (make rotate-bridge-pin restarts it)."
+    exit 0
+fi
 
 # =============================================================================
 # Initial sync

@@ -90,8 +90,9 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
   `PROTON_IMAP_ACCOUNT_NAME`,
   `PROTON_REMOTE_STORE_NAME`, `PROTON_LOCAL_STORE_NAME`,
   `PROTON_CHANNEL_NAME`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
-  `BRIDGE_CERT_FINGERPRINT` (normalized, and not secret) and
-  `BRIDGE_CERT_PIN_ROTATE` (mbsync). It changes when one of those
+  `BRIDGE_CERT_FINGERPRINT`, normalized and not secret (mbsync; a
+  `make rotate-bridge-pin` run is an argument, not a setting, and leaves
+  the hash unchanged). It changes when one of those
   settings changes and is otherwise stable across restarts. API keys,
   the MCP bearer token, the Bridge user and the Bridge password are not
   inputs, so rotating a secret leaves it unchanged.
@@ -280,7 +281,6 @@ and the connection.
   successfully` and before any login.
 - **`SOURCE_MODE must be proton-bridge`, `BRIDGE_HOST must be one of
   ...`, `BRIDGE_IMAP_PORT must be ...`, `BRIDGE_CERT_HOST must be ...`,
-  `BRIDGE_CERT_PIN_ROTATE must be true or false`,
   `PROTON_FOLDER_EXCLUSIONS must ...` or `PROTON_..._NAME must be ...`**
   (from `make validate-env` or at mbsync's startup, before it renders
   its config or connects). These
@@ -299,9 +299,7 @@ and the connection.
   starting with a letter or digit, and the two store names must differ.
   `SOURCE_MODE` accepts only `proton-bridge`, in any case and without
   surrounding spaces. `BRIDGE_IMAP_PORT` is a port from 1 to 65535
-  without leading zeros or spaces. `BRIDGE_CERT_PIN_ROTATE` is exactly
-  `true` or `false`, in lower case: `TRUE`, `yes` or `1` is refused
-  rather than read as false. `PROTON_FOLDER_EXCLUSIONS` is folder
+  without leading zeros or spaces. `PROTON_FOLDER_EXCLUSIONS` is folder
   patterns separated by `|`, none empty or with a space at either end,
   written with `A-Z a-z 0-9`, spaces, `. / _ * % & + , ( ) @ -` and
   non-ASCII characters (a folder name in UTF-8, as Proton shows it); it
@@ -403,10 +401,10 @@ be recalled. To remove the local copy as well:
      more are past the grace window at once than
      `INDEXER_DELETION_MAX_BATCH_PCT` of the index allows (at least 10
      always are), the mass-delete brake skips the whole reap and the
-     indexer logs `reaper aborted: ... set INDEXER_DELETION_FORCE=true
-     to override`. For this cleanup, set `INDEXER_DELETION_FORCE=true`,
-     run `make up`, wait for the next reap, then set it back to `false`
-     and run `make up` again, so the brake protects later passes.
+     indexer logs `reaper aborted: ... run make force-deletion for one
+     pass past it`. For this cleanup, run `make force-deletion` once
+     (see [Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive));
+     later passes keep the brake.
    - **Archive** (`INDEXER_DELETION_ENABLED=false`): the index never
      removes a message, so its rows stay. Removing them means rebuilding
      the index from the Maildir, as in
@@ -1276,7 +1274,26 @@ docker compose logs indexer | grep reconciler
 You should see one line per sweep/reap. If the reaper ever logs
 `reaper aborted: ... exceed mass-delete threshold`, investigate why mbsync
 marked a large batch as deleted (Bridge vault rebuild, folder rename,
-account re-auth) before setting `INDEXER_DELETION_FORCE=true`.
+account re-auth) before forcing a pass past the brake. For an intentional
+bulk cleanup, run:
+
+```bash
+make force-deletion
+```
+
+It stops the indexer, runs one reconciliation pass in a one-shot indexer
+container with the brake off and the configured grace window (a WARNING
+says so, and the pass logs `maintenance pass=reconcile ... brake=forced`),
+then starts the indexer again and exits with the pass's status. Nothing
+is stored, so the restarted indexer and every later pass have the brake
+on; a pass that stops midway leaves the remaining tombstones for the
+brake or another run. In archive mode (`INDEXER_DELETION_ENABLED=false`)
+it refuses, since nothing is reaped. If the stack was started with an
+overlay (such as `docker-compose.hardened.yml`), run it with the same
+files, for example
+`COMPOSE_FILE=docker-compose.yml:docker-compose.hardened.yml make force-deletion`.
+`INDEXER_DELETION_FORCE` was removed (#1609): `make validate-env`
+refuses it, `false` included, so delete the line from `.env`.
 
 Tombstones and reaper actions can be inspected directly:
 
@@ -1615,8 +1632,8 @@ Queue and maintenance (all INFO unless noted):
   blocked_threads=<n> brake=<ok|tripped|forced>`, after each deletion
   reconciliation pass (mirror mode only). `brake=tripped` means the
   mass-delete brake held this pass's reaps back (see "Deletion
-  reconciliation"); `forced` means `INDEXER_DELETION_FORCE=true`
-  disables the brake.
+  reconciliation"); `forced` means the one pass of `make force-deletion`
+  ran with the brake off.
 - `maintenance pass=watch_refresh ms=<ms> watches=<n>`, after each
   periodic Maildir watch refresh; `watches` is the number of
   directories readable when the watch was last scheduled.
@@ -2536,11 +2553,8 @@ match BRIDGE_CERT_FINGERPRINT` (and, once that is updated,
 `Bridge cert fingerprint does not match pinned value`). That is the pin
 working as intended. Take the new fingerprint
 ([setup](setup.md#4-set-up-the-proton-mail-bridge-app), step 4.3), set
-it in `.env`, and accept the new cert with the two-step rotation in
-[mbsync refuses to sync — Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch):
-recreate `mbsync` once with `BRIDGE_CERT_PIN_ROTATE=true`, check the
-`rotating pin` warning, then recreate it with
-`BRIDGE_CERT_PIN_ROTATE=false` to re-enable pin enforcement.
+it in `.env`, and accept the new cert once with `make rotate-bridge-pin`, as in
+[mbsync refuses to sync — Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch).
 
 Once the pin is rotated, the reset Bridge may number the mailbox's
 messages differently. If mbsync then reports `UIDVALIDITY genuinely
@@ -2567,36 +2581,33 @@ Legitimate cert rotations happen when the Bridge app is reset or
 reinstalled, or an update replaces its certificate. Set
 `BRIDGE_CERT_FINGERPRINT` in `.env` to the new certificate's fingerprint
 first ([setup](setup.md#4-set-up-the-proton-mail-bridge-app), step 4.3):
-a rotation accepts only the certificate matching it. To accept the new
-cert, recreate `mbsync` once with `BRIDGE_CERT_PIN_ROTATE=true`:
+a rotation accepts only the certificate matching it. Then accept the
+new cert once:
 
 ```bash
-BRIDGE_CERT_PIN_ROTATE=true docker compose up -d mbsync
+make rotate-bridge-pin
 ```
 
-The container writes the new fingerprint to the pin file on startup and
-syncing resumes. Check the `rotating pin` warning in `make logs` and
-that its `current:` fingerprint is the one you expect.
+This runs `validate-env`, then a one-shot mbsync container
+(`docker compose run --rm --no-deps mbsync rotate-bridge-pin`) with the
+service's hardening, state volume and secret. It checks the certificate
+against `BRIDGE_CERT_FINGERPRINT` first, writes its fingerprint to the
+pin file (the log shows the `rotating pin` warning with the `pinned:`
+and `current:` fingerprints; check `current:` is the one you expect),
+and exits without syncing, so the password is not sent. On success the
+target restarts the existing `mbsync` container, which compares the
+certificate with the new pin like every later start; a further change
+is refused again. A certificate that does not match
+`BRIDGE_CERT_FINGERPRINT` is refused before the pin is consulted, and
+the pin is kept.
 
-The flag is not consumed by the rotation. It is part of the container's
-environment, so it stays `true` through every later restart of that
-container — `docker compose restart`, or Docker's restart policy after
-a crash — and changing your shell or `.env` does not update a container
-that already exists. While it stays `true`, every cert change that
-still matches `BRIDGE_CERT_FINGERPRINT` is accepted without comparison
-to the pin. As soon as the rotation has succeeded,
-recreate `mbsync` with rotation disabled:
-
-```bash
-BRIDGE_CERT_PIN_ROTATE=false docker compose up -d --no-deps --force-recreate mbsync
-```
-
-The startup log no longer shows the `BRIDGE_CERT_PIN_ROTATE=true`
-warning once enforcement is back. Also make sure `.env` does not set
-`BRIDGE_CERT_PIN_ROTATE=true`, or the next `make up` re-enables it. If
-the stack was started with an overlay (such as
-`docker-compose.hardened.yml`), pass the same `-f` files to both
-commands, or the recreated container drops the overlay.
+Nothing is left set: rotation exists only for that one container, and
+the service is always started without the argument. The pin is written
+to a temporary file and renamed into place, so a run that stops midway
+leaves the old pin or the new one, never a partial one; run the command
+again. The `mbsync` service also needs no `.env` change:
+`BRIDGE_CERT_PIN_ROTATE` was removed (#1609), and `make validate-env`
+refuses it, `false` included, so delete the line from `.env`.
 
 If the pin cannot be saved — first boot or rotation, for example because
 the `mbsync-state` volume is full or not writable — `mbsync` refuses to
@@ -2607,10 +2618,8 @@ keeps the previous pin:
 >>> ERROR: could not save the Bridge cert pin to /state/bridge-cert.fingerprint — refusing to sync.
 ```
 
-Fix the volume and restart `mbsync`. After a successful rotation,
-recreate it with `BRIDGE_CERT_PIN_ROTATE=false` as above; a restart
-alone keeps rotation enabled, and leaving it enabled disables pin
-enforcement.
+Fix the volume, then restart `mbsync` (first boot) or run
+`make rotate-bridge-pin` again (rotation).
 
 Only a missing pin file is treated as a first boot. A pin file that
 exists but is empty, malformed, unreadable or a dangling link is
@@ -2623,9 +2632,9 @@ than silently re-pinning whatever cert Bridge presents:
 
 (An unreadable pin or dangling link logs `could not read the Bridge
 cert pin` instead.) Find out how the pin was damaged first, then accept
-the cert Bridge presents now with the same one-time
-`BRIDGE_CERT_PIN_ROTATE=true` run as for a rotation; it replaces an
-empty, malformed or unreadable pin file and a dangling link.
+the cert Bridge presents now with `make rotate-bridge-pin`, as for a
+rotation; it replaces an empty, malformed or unreadable pin file and a
+dangling link.
 
 A directory, FIFO or device in the pin's place is refused before it is
 read, with or without rotation:

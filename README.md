@@ -323,10 +323,9 @@ IMAP password changes, write the new one to `.secrets/bridge_pass.txt`
 and run `make up`. If the app presents a new TLS cert (after a reset or
 reinstall), `mbsync` refuses to sync until you set
 `BRIDGE_CERT_FINGERPRINT` to the new fingerprint and accept the cert
-with the two-step rotation in
-[docs/troubleshooting.md](docs/troubleshooting.md#mbsync-refuses-to-sync--bridge-cert-pin-mismatch):
-recreate `mbsync` once with `BRIDGE_CERT_PIN_ROTATE=true`, then again
-with `BRIDGE_CERT_PIN_ROTATE=false` so pin enforcement is back on.
+once with `make rotate-bridge-pin`
+([docs/troubleshooting.md](docs/troubleshooting.md#mbsync-refuses-to-sync--bridge-cert-pin-mismatch)).
+The next start of `mbsync` enforces the new pin.
 
 ## Commands
 
@@ -339,6 +338,8 @@ make logs         # Tail all logs
 make status       # Containers, privacy posture (LOCAL or REMOTE per layer) and index currency
 make requeue-dead # Requeue dead-lettered indexing jobs once the cause is fixed
 make reparse      # Re-read every indexed message in place (unchanged chunks are not embedded again; see docs/architecture.md, "Reparse in place")
+make rotate-bridge-pin  # Accept a deliberately rotated Bridge certificate once (it must match BRIDGE_CERT_FINGERPRINT)
+make force-deletion     # One deletion pass past the mass-delete brake, for an intentional bulk cleanup
 make clean        # Remove everything (destructive)
 ```
 

@@ -216,8 +216,7 @@ is back. Freshness is reported by `make status` as usual.
    (`proton-bridge`, the default and the only value accepted);
    `BRIDGE_HOST`, the container's name for this Mac
    (`host.docker.internal` by default; OrbStack's `host.orb.internal`
-   or `host.internal` also work); `BRIDGE_CERT_PIN_ROTATE` (`false`;
-   exactly `true` or `false`); `PROTON_FOLDER_EXCLUSIONS`, folders
+   or `host.internal` also work); `PROTON_FOLDER_EXCLUSIONS`, folders
    mbsync does not sync (`All Mail|Labels/*|Starred`, which must stay in
    the list; you may add more after them, separated by `|`; mail already
    synced from an added folder stays in the Maildir and the index until
@@ -1137,22 +1136,18 @@ backup.
    Bridge's fingerprint (step 4.3). It presents a different
    certificate from the old one, so the first start still refuses to
    sync with `Bridge cert fingerprint does not match pinned value`.
-   Accept the new certificate once and turn enforcement back on (a
-   rotation accepts only the certificate matching
-   `BRIDGE_CERT_FINGERPRINT`):
+   Accept the new certificate once (a rotation accepts only the
+   certificate matching `BRIDGE_CERT_FINGERPRINT`):
 
    ```bash
-   make up                              # refused: pin mismatch
-   BRIDGE_CERT_PIN_ROTATE=true make up  # re-pins, then syncs
-   docker logs mbsync                   # check the "rotating pin" warning
-   make up                              # recreates mbsync with rotation off
+   make up                 # refused: pin mismatch
+   make rotate-bridge-pin  # re-pins in a one-shot container, then restarts mbsync
+   docker logs mbsync      # the restarted mbsync: "fingerprint matches the pinned value"
    ```
 
-   The last command recreates mbsync because its environment changed;
-   `docker logs mbsync` no longer shows the `BRIDGE_CERT_PIN_ROTATE=true`
-   warning. See
-   [troubleshooting](troubleshooting.md#mbsync-refuses-to-sync--bridge-cert-pin-mismatch)
-   for the rotation flag's semantics.
+   The rotation runs in its own container and syncs nothing; the
+   restarted mbsync enforces the new pin. See
+   [troubleshooting](troubleshooting.md#mbsync-refuses-to-sync--bridge-cert-pin-mismatch).
 4. **mbsync's sync state (UIDVALIDITY).** mbsync records each Proton
    folder's IMAP UIDVALIDITY and message UIDs in a `.mbsyncstate` file in
    that folder's Maildir directory. Another Bridge instance usually
