@@ -1014,15 +1014,15 @@ superseded entries keep their number and one line.
     A message is in the default scope when it has an active occurrence
     outside its provider's Trash role, considering only its non-`T`
     active occurrences when any exist, otherwise all its active ones
-    (owner, 2026-10-13, #1568). Two PRs
-    deliver it: PR 1 (#1596, #1566; schema v14) is additive and changes
-    no reader; PR 2 (#1567, #1568, #1569; v15) moves the readers and
-    drops the old columns. The v14 migration binds the account row,
-    seeds one occurrence per message whose stored path still holds its
-    content hash and queues a reparse without re-embedding. Claimant,
-    chunk and thread IDs are unchanged; account selectors and other
-    multi-account behaviour are decision 49. The near-side UID and
-    `.mbsyncstate` stay unread.
+    (owner, 2026-10-13, #1568). Schema v14 (#1596, #1566) is additive
+    and changes no reader; v15 (#1567, #1568, #1569) moves the readers
+    and drops the old columns. The v14 migration binds the account row,
+    seeds one occurrence per message whose `indexed_files` record for
+    its stored path carries the same content hash (stored records only;
+    the file is not re-read) and queues a reparse without re-embedding.
+    Claimant, chunk and thread IDs are unchanged; account selectors and
+    other multi-account behaviour are decision 49. The near-side UID
+    and `.mbsyncstate` stay unread.
 
 48. **Exhaustive thread queries (2026-10-12, #1166):** `query_threads`
     shares the public message filters and evaluates the whole expression on
@@ -1097,7 +1097,7 @@ superseded entries keep their number and one line.
     forms with fixed text; `scripts/validate-env.sh` independently
     checks every account projection with value-free diagnostics, and
     each service still validates what it is given. Every application
-    setting is mapped before the first PR merges. Maintenance overrides
+    setting is mapped before the translator ships. Maintenance overrides
     (certificate pin rotation, forced deletion) become one-run
     commands, not configuration (#1609). One enabled account is allowed
     until #1605.
@@ -1124,7 +1124,7 @@ superseded entries keep their number and one line.
     recovers the state from the file. `get_mailbox_status` gains a
     `collection` block. The declared Bridge address scope is stored per
     account; a changed declaration is reported with when it changed and
-    never refused (#1593, its own PR after #1592).
+    never refused (#1593, after #1592).
 52. **Provider identities and label observations (2026-10-12,
     #1598):** a provider-identity candidate is derived from stored
     header evidence, only from a complete header capture with exactly
