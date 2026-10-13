@@ -67,9 +67,10 @@ from .sources import (
     REPRESENTATIVE_KEY,
     REPRESENTATIVE_ORDER,
     active_sql,
+    authority_excluded_sql,
+    category_of,
     default_scope_sql,
     live_sql,
-    role_sql,
 )
 
 log = logging.getLogger("mcp.sqlite")
@@ -696,9 +697,13 @@ MAX_LISTED_MESSAGE_HEADERS = 10
 
 @dataclass
 class OccurrenceRecord:
-    """One active Maildir copy of a message (#1566, #1568): its account
-    (scope UUID and provider), folder (relative to the account), path
-    relative to the account's Maildir root and Maildir flags."""
+    """One active Maildir copy of a message (#1566, #1568, #1569): its
+    account (scope UUID and provider), folder (relative to the account),
+    path relative to the account's Maildir root, Maildir flags, source
+    category (``sources.category_of``, derived at read time) and
+    provenance: how the copy was first recorded (``parse``, an observed
+    ``rename``, a reconciliation ``scan`` or the ``migration`` seed) and
+    when the indexer first and last saw its file (NULL when unknown)."""
 
     account_scope: str
     provider: str
@@ -708,6 +713,10 @@ class OccurrenceRecord:
     flagged: bool
     replied: bool
     trashed: bool
+    category: str
+    provenance: str
+    first_observed_at: str | None
+    last_observed_at: str | None
 
 
 # Occurrences listed per message; ``MessageRecord.occurrence_count``
@@ -851,7 +860,8 @@ def _attach_occurrences(conn: sqlite3.Connection, records: list[MessageRecord]) 
         f"FROM message_occurrences o WHERE {active_sql()} "
         "AND o.claimant_id IN (SELECT value FROM json_each(?))) "
         "SELECT r.claimant_id, r.total, a.scope_uuid, a.provider, o.folder, o.relative_path, "
-        "o.seen, o.flagged, o.replied, o.trashed FROM ranked r "
+        "o.seen, o.flagged, o.replied, o.trashed, o.provenance, o.first_observed_at, "
+        "o.last_observed_at FROM ranked r "
         "JOIN message_occurrences o ON o.id = r.id JOIN accounts a ON a.id = o.account_id "
         "WHERE r.position <= ? ORDER BY r.claimant_id, r.position",
         (json.dumps(list(by_id)), MAX_LISTED_OCCURRENCES),
@@ -869,6 +879,10 @@ def _attach_occurrences(conn: sqlite3.Connection, records: list[MessageRecord]) 
                 flagged=bool(r["flagged"]),
                 replied=bool(r["replied"]),
                 trashed=bool(r["trashed"]),
+                category=category_of(r["provider"], r["folder"]),
+                provenance=r["provenance"],
+                first_observed_at=r["first_observed_at"],
+                last_observed_at=r["last_observed_at"],
             )
         )
 
@@ -5301,11 +5315,12 @@ class Database:
             "WITH e AS MATERIALIZED (SELECT m.claimant_id AS cid, m.thread_id AS tid, "  # nosec B608
             f"{EFFECTIVE_EVIDENCE_SQL} AS at, m.has_attachments AS att, "
             "m.sender_ambiguous AS sa, m.from_addresses_complete AS fc, "
-            # Whether a matched copy is outside Spam: the class of a
-            # message only copied to Spam is not counted (#463, #1568).
+            # Whether a matched copy is outside Spam and Recovered Messages:
+            # the class of a message only copied there is not counted
+            # (#463, #1568, #1569).
             f"({expr}) AS ok, EXISTS (SELECT 1 FROM message_occurrences o "
             f"WHERE o.claimant_id = m.claimant_id AND {occurrence_sql} "
-            f"AND NOT {role_sql('spam')}) AS ns FROM messages m WHERE ({expr}) IS NOT 0), "
+            f"AND NOT {authority_excluded_sql()}) AS ns FROM messages m WHERE ({expr}) IS NOT 0), "
             f"k AS ({rows_sql}), "
             "g AS MATERIALIZED (SELECT value, TOTAL(ok IS 1) AS n, "
             "COUNT(DISTINCT CASE WHEN ok IS 1 THEN tid END) AS threads, "

@@ -134,6 +134,22 @@ class Occurrence(_Output):
     flagged: bool
     replied: bool
     trashed: bool = Field(description="Maildir T flag: deleted in Proton; not a live copy.")
+    category: str = Field(
+        description="Source category from the folder under the provider's policy: mailbox "
+        "(ordinary mail), unsent (Drafts, Scheduled; the folder does not certify it is still "
+        "unsent), recovered (Bridge-local recovery mail, untrusted: its identity headers are "
+        "the client's), or unknown."
+    )
+    provenance: str = Field(
+        description="How the copy was first recorded: parse, rename (an observed move), "
+        "scan (a reconciliation scan that verified its bytes) or migration (an index upgrade)."
+    )
+    first_observed_at: str | None = Field(
+        description="When the indexer first saw this copy's file (UTC); null when unknown."
+    )
+    last_observed_at: str | None = Field(
+        description="When the indexer last saw this copy's file (UTC); null when unknown."
+    )
 
 
 def occurrence(o: OccurrenceRecord) -> Occurrence:
@@ -146,6 +162,10 @@ def occurrence(o: OccurrenceRecord) -> Occurrence:
         flagged=o.flagged,
         replied=o.replied,
         trashed=o.trashed,
+        category=o.category,
+        provenance=o.provenance,
+        first_observed_at=o.first_observed_at,
+        last_observed_at=o.last_observed_at,
     )
 
 
@@ -788,7 +808,8 @@ class QueryMessagesOutput(_Output):
         description="Messages the filters could neither accept nor reject (a filtered size, "
         "date, subject, body, attachment list, address or display name the index does not "
         "hold, holds cut by a parse limit, or has not checked yet; a sender or participant "
-        "filter, or an authority_class filter on a message outside Spam whose sender is "
+        "filter, or an authority_class filter on a message outside Spam and Recovered "
+        "Messages whose sender is "
         "ambiguous or not yet checked; the prose names the causes the given filters can "
         "have), in neither total_matches nor the pages. 0 when every filter could be "
         "decided for every message; when not 0, report it with any count."
@@ -909,7 +930,8 @@ class AggregateMessagesOutput(_Output):
         "whose stored From list is not known to be complete, each counted once over the "
         "whole result; further sender groups or memberships may be missing for them. It "
         "counts messages, not missing addresses, and includes a message with no stored "
-        "From address (also in the null group). authority_class leaves out Spam.",
+        "From address (also in the null group). authority_class leaves out Spam and "
+        "Recovered Messages.",
     )
     returned: int
     offset: int = Field(description="Groups returned by earlier pages.")
@@ -1064,7 +1086,7 @@ class Contact(_Output):
         "management, vendor, government, personal, other, or unclassified. "
         "Metadata only; it does not affect ranking. It reflects the claimed From "
         "address, not a verified sender; the authority_class search filters skip "
-        "Spam-folder mail."
+        "Spam and Recovered Messages mail."
     )
     authority_rule: str | None = Field(
         description="The rule that assigned authority_class (address:<pattern> or "

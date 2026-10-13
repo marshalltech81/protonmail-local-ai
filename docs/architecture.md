@@ -1333,8 +1333,19 @@ occurrence outside the account provider's Trash role, counting only the
 message's live occurrences when it has one; and a message's single
 folder, flags and `source_file` locator are its representative
 occurrence's (active first, then not `T`-flagged, then outside Trash,
-then the oldest). Folder roles (Trash, Spam) are dispatched by the
-occurrence's account provider (`PROVIDER_POLICIES`).
+then the oldest). Folder roles (Trash, Spam, Recovered Messages) and
+each occurrence's source category are dispatched by the occurrence's
+account provider (`PROVIDER_POLICIES`). The category (`mailbox`,
+`unsent`, `recovered`, or `unknown` for a folder or provider the policy
+does not name) is derived from the folder at read time and never
+stored, so a policy change needs no migration (#1569, decided in
+#1317): Drafts and Scheduled are unsent evidence whose folder does not
+certify that they are still unsent, and Recovered Messages are
+searchable but untrusted, never counting toward an `authority_class`.
+Folder membership records where mbsync last filed a copy, not its
+current state upstream. Each occurrence is returned with its account,
+category and provenance (`provenance`, `first_observed_at`,
+`last_observed_at`).
 
 ### Top-level header evidence
 
@@ -1719,9 +1730,12 @@ index does not authenticate senders, so spoofed mail claiming an
 address or domain from a classified rule is classified too (see #463).
 Treat the class as a description of who the message says it is from,
 not proof. One guard applies: Proton files most spoofed and
-DMARC-failing mail in Spam, so a message in the `Spam` folder never
-counts toward an `authority_class` filter (`AUTHORITY_EXCLUDED_FOLDERS`
-in `mcp-server/src/lib/predicates.py`). Spoofed mail Proton leaves in the
+DMARC-failing mail in Spam, and Bridge-local recovery mail keeps the
+headers its client wrote (#1317), so a copy in the `Spam` or `Recovered
+Messages` folder never counts toward an `authority_class` filter (the
+provider's roles, `authority_excluded_sql` in
+`mcp-server/src/lib/sources.py`; `AUTHORITY_EXCLUDED_FOLDERS` in
+`predicates.py` names them for prose, #1569). Spoofed mail Proton leaves in the
 inbox still matches; gating on DKIM/DMARC verdict headers is deferred
 until Bridge's headers have been checked on real mail (#463).
 
@@ -1734,8 +1748,8 @@ is unsafe, NULL when not yet assessed (rows from before schema v2,
 until the reparse reaches them). Only 0 qualifies for authority
 (`_compile_authority_class`, `mcp-server/src/lib/predicates.py`): 1
 and NULL are "can't tell", an unknown leaf that `query_messages`
-counts as `indeterminate` outside Spam (#1161; Spam stays a decided
-miss), so the `authority_class` filters are empty straight
+counts as `indeterminate` outside those folders (#1161; a message only
+in them stays a decided miss), so the `authority_class` filters are empty straight
 after the v2 upgrade and fill in as the reparse drains, and a message
 whose job is dead-lettered stays out of them until `make requeue-dead`.
 The `from` participant rows are kept, so sender filters and
@@ -1766,9 +1780,9 @@ sender-supplied domain is unclassified without any lookup.
 
 Authority is metadata, never a ranking weight. The MCP server exposes it
 as an `authority_class` filter on `search_emails`, `query_messages`
-and `aggregate_messages` (a message outside Spam matches when one of
-its From senders carries the class; a thread when one of its non-Spam
-messages does), as an `aggregate_messages` grouping dimension with the
+and `aggregate_messages` (a message with a copy outside Spam and
+Recovered Messages matches when one of its From senders carries the
+class; a thread when one of its messages with such a copy does), as an `aggregate_messages` grouping dimension with the
 same rule, and on `find_contact` results, which stay per contact and
 ignore folders.
 Filtering removes results without reordering or rescoring the rest.

@@ -293,7 +293,9 @@ class TestRenames:
             assert after["relative_path"] == "INBOX/cur/f1:2,FRS"
             assert (after["seen"], after["flagged"], after["replied"]) == (1, 1, 1)
             assert after["last_observed_at"] >= before["last_observed_at"]
+            # Provenance survives a flag rename (#1569).
             assert after["provenance"] == "parse"
+            assert after["first_observed_at"] == before["first_observed_at"]
         finally:
             db.close()
 
@@ -340,7 +342,10 @@ class TestRenames:
                 "Archive/cur/f1:2,S",
             )
             assert new["claimant_id"] == before["claimant_id"]
+            # A move is a new observation with its own provenance (#1569).
             assert new["provenance"] == "rename"
+            assert new["first_observed_at"] >= before["first_observed_at"]
+            assert new["id"] != before["id"]
         finally:
             db.close()
 

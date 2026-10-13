@@ -1,12 +1,15 @@
-"""Provider policy for mailbox occurrences (PLAN.md decision 45, #1568).
+"""Provider policy for mailbox occurrences (PLAN.md decision 45, #1568,
+#1569).
 
-Folder names are account-relative, and what a folder means (its role)
-is the provider's: the Trash folder that mailbox-wide retrieval leaves
-out by default (#441) and the Spam folder whose mail never counts toward
-an ``authority_class`` (#463) are dispatched by the provider of the
-occurrence's account (``accounts.provider``), so an account of another
-provider never inherits Proton's names. Today the only provider is
-``proton-bridge`` (``SOURCE_MODE``), so these are today's defaults.
+Folder names are account-relative, and what a folder means (its role
+and its source category) is the provider's: the Trash folder that
+mailbox-wide retrieval leaves out by default (#441), the Spam and
+Recovered Messages folders whose mail never counts toward an
+``authority_class`` (#463, #1317), and each occurrence's source category
+are dispatched by the provider of the occurrence's account
+(``accounts.provider``), so an account of another provider never
+inherits Proton's names. Today the only provider is ``proton-bridge``
+(``SOURCE_MODE``), so these are today's defaults.
 
 The SQL these helpers build reads an occurrence ``o`` and binds only
 constants from this module, inlined as quoted literals so the fragments
@@ -21,14 +24,54 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ProviderPolicy:
     """What a provider's folder names mean: ``roles`` maps a role
-    (``trash``, ``spam``) to the folders holding it, matched exactly."""
+    (``trash``, ``spam``, ``recovered``) to the folders holding it, and
+    ``categories`` a source category to its folders, both matched
+    exactly; ``category_prefixes`` maps a category to folder-name
+    prefixes whose child folders hold it (``Folders/`` for Proton's own
+    folders)."""
 
     roles: dict[str, tuple[str, ...]]
+    categories: dict[str, tuple[str, ...]]
+    category_prefixes: dict[str, tuple[str, ...]]
 
+
+# Source categories (#1317, #1569): ``mailbox`` is ordinary synced mail;
+# ``unsent`` is Drafts and Scheduled, unsent evidence whose folder does
+# not certify that it is still unsent; ``recovered`` is Bridge-local
+# recovery mail, searchable but untrusted (its identity headers are the
+# client's, never authoritative). A folder, or provider, the policy does
+# not name is ``unknown``, never a default.
+CATEGORY_UNKNOWN = "unknown"
+_PROTON_RECOVERED = ("Recovered Messages",)
 
 PROVIDER_POLICIES: dict[str, ProviderPolicy] = {
-    "proton-bridge": ProviderPolicy(roles={"trash": ("Trash",), "spam": ("Spam",)}),
+    "proton-bridge": ProviderPolicy(
+        roles={"trash": ("Trash",), "spam": ("Spam",), "recovered": _PROTON_RECOVERED},
+        categories={
+            "mailbox": ("INBOX", "Sent", "Archive", "Spam", "Trash"),
+            "unsent": ("Drafts", "Scheduled"),
+            "recovered": _PROTON_RECOVERED,
+        },
+        category_prefixes={"mailbox": ("Folders/",)},
+    ),
 }
+
+
+def category_of(provider: str, folder: str) -> str:
+    """The source category of a copy in ``folder`` under an account of
+    ``provider``, derived at read time (nothing is stored, so a policy
+    change needs no migration); ``CATEGORY_UNKNOWN`` when the policy
+    does not name the folder or the provider has no policy."""
+    policy = PROVIDER_POLICIES.get(provider)
+    if policy is None:
+        return CATEGORY_UNKNOWN
+    for category, names in policy.categories.items():
+        if folder in names:
+            return category
+    for category, prefixes in policy.category_prefixes.items():
+        if any(folder.startswith(p) and len(folder) > len(p) for p in prefixes):
+            return category
+    return CATEGORY_UNKNOWN
 
 
 def _literal(value: str) -> str:
@@ -102,3 +145,11 @@ REPRESENTATIVE_KEY = (
     f"(((o.state <> 'active') * 4 + o.trashed * 2 + {role_sql('trash')}) "
     f"* {REPRESENTATIVE_ID_BITS} + o.id)"
 )
+
+
+def authority_excluded_sql(alias: str = "o") -> str:
+    """SQL that is 1 when occurrence ``alias`` is in a folder whose mail
+    never counts toward an ``authority_class``: Spam, where the provider
+    files most spoofed mail (#463), and recovery mail, whose identity
+    headers are the client's (#1317, #1569)."""
+    return f"({role_sql('spam', alias)} OR {role_sql('recovered', alias)})"

@@ -39,7 +39,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .sources import active_sql, default_scope_sql, role_sql
+from .sources import active_sql, authority_excluded_sql, default_scope_sql
 
 
 class InvalidFilterError(ValueError):
@@ -87,12 +87,13 @@ def normalize_authority_class(value: str | None) -> str | None:
 
 
 # Folders whose copies never count toward an ``authority_class``
-# filter (#463). Authority comes from the claimed From address, which is
-# sender-controlled, and Proton files most spoofed or DMARC-failing mail
-# in Spam. The SQL dispatches the Spam role by the occurrence's account
-# provider (``sources.role_sql``, #1568); this is Proton's name, for
-# prose.
-AUTHORITY_EXCLUDED_FOLDERS = ("Spam",)
+# filter. Authority comes from the claimed From address, which is
+# sender-controlled: Proton files most spoofed or DMARC-failing mail in
+# Spam (#463), and Bridge-local recovery mail keeps the client's headers
+# (#1317, #1569). The SQL dispatches these roles by the occurrence's
+# account provider (``sources.authority_excluded_sql``); these are
+# Proton's names, for prose.
+AUTHORITY_EXCLUDED_FOLDERS = ("Spam", "Recovered Messages")
 
 # Claimants (per-message keys) whose From sender's person entity carries
 # the bound class. Driven from ``idx_entities_authority`` into the
@@ -840,7 +841,7 @@ def _occurrence_flag(column: str) -> Callable[[bool, list], str]:
 
 
 def _occurrence_not_spam(_value: str, params: list) -> str:
-    return f"NOT {role_sql('spam')}"
+    return f"NOT {authority_excluded_sql()}"
 
 
 def _standalone(
@@ -897,8 +898,9 @@ def _compile_has_attachments(state: bool, params: list) -> str:
 
 
 def _compile_authority_class(value: str, params: list) -> str:
-    # The message part. A message with no matching copy outside Spam is a
-    # decided "no" whatever its sender flag (#463): the occurrence term
+    # The message part. A message with no matching copy outside Spam and
+    # Recovered Messages is a decided "no" whatever its sender flag (#463,
+    # #1569): the occurrence term
     # (``_occurrence_not_spam``, in the query's one ``occurrence_exists``)
     # makes the conjunction 0. Otherwise the From sender decides
     # the leaf only when its attribution is known safe

@@ -431,14 +431,37 @@ current and is never matched or listed.
   `get_thread`, `query_messages`) carry `occurrences`: the current
   copies, at most 10, with `occurrence_count` the full count, each with
   its account's scope UUID (`account_scope`) and provider, its folder
-  (relative to the account), `locator`, `seen`, `flagged`, `replied`
-  and `trashed` (the `T` flag). The row's own `folder`, `seen`,
+  (relative to the account), `locator`, `seen`, `flagged`, `replied`,
+  `trashed` (the `T` flag), its source `category` and its provenance:
+  `provenance` (how the copy was first recorded: `parse`, an observed
+  move `rename`, a reconciliation `scan` that verified its bytes, or
+  `migration`) and `first_observed_at` / `last_observed_at` (when the
+  indexer first and last saw its file, UTC, null when unknown). A flag
+  rename keeps a copy and its provenance; a move to another folder is a
+  new copy with its own. The row's own `folder`, `seen`,
   `flagged`, `replied` and `source_file` are the **representative**
   copy's: the first current copy, preferring one that is not
   `T`-flagged, then one outside Trash, then the oldest. A message with
   no current copy shows the folder and flags of a former copy, chosen in
-  the same order, and an empty `occurrences`. The prose labels the representative (`Folder: INBOX
-  (representative of 2 copies)`) and lists the copies.
+  the same order, and an empty `occurrences`. The prose labels the
+  representative (`Folder: INBOX (representative of 2 copies)`) and
+  lists the copies.
+- **Source categories** (#1317, #1569). A copy's `category` is derived
+  from its folder when it is read, by its account provider's policy
+  (`PROVIDER_POLICIES` in `mcp-server/src/lib/sources.py`); nothing is
+  stored, so a policy change needs no reindex. For `proton-bridge`:
+  `mailbox` (INBOX, Sent, Archive, Spam, Trash and `Folders/...`),
+  `unsent` (Drafts and Scheduled: unsent evidence; the folder does not
+  certify that the message is still unsent or was never sent),
+  `recovered` (Recovered Messages: Bridge-local copies of mail a client
+  failed to upload, searchable but untrusted, since their identity
+  headers are the client's; they never count toward `authority_class`,
+  as Spam does not) and `unknown` for any other folder, or for an
+  account whose provider has no policy, never a default. Folder
+  membership records where mbsync last filed the copy; it does not
+  certify the message's current state in Proton. The prose adds the
+  representative's category beside its folder when it is not `mailbox`
+  (`Folder: Drafts (unsent)`), and each copy's in the copy list.
 
 ## Reaped sources
 
@@ -508,9 +531,9 @@ the experimental tools) carries it as `sender_ambiguous`:
 Only `false` qualifies for the `authority_class` filters: `true` and
 `null` never match any class, `unclassified` included, because the
 author cannot be told. `query_messages` counts such a message outside
-Spam as `indeterminate`, not as a miss
+Spam and Recovered Messages as `indeterminate`, not as a miss
 ([#1161](https://github.com/marshalltech81/protonmail-local-ai/issues/1161));
-a Spam message stays a decided miss. So right after the upgrade the
+a message only there stays a decided miss. So right after the upgrade the
 `authority_class` filters match fewer messages, and none at first,
 until the reparse drains (`get_mailbox_status` shows the queue). The `from` rows are kept,
 but `query_messages`' `sender` filter cannot decide such a message: it
@@ -584,7 +607,7 @@ different filters"), never read against them.
 | `replied` | bool | `query_messages` `replied` | the answered flag (the Maildir `R` flag) of a copy equals the value |
 | `size_min` | bytes | `query_messages` `size_min` | its local file size is at least the value; unknown without a stored size |
 | `size_max` | bytes | `query_messages` `size_max` | its local file size is at most the value; unknown without a stored size |
-| `authority_class` | class name | `authority_class` | its From sender carries the class, it has a matching copy outside Spam, and its `sender_ambiguous` is `false`; unknown outside Spam when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)), or when no stored From address carries the class and its From addresses are not complete |
+| `authority_class` | class name | `authority_class` | its From sender carries the class, it has a matching copy outside Spam and Recovered Messages, and its `sender_ambiguous` is `false`; unknown outside them when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)), or when no stored From address carries the class and its From addresses are not complete |
 
 **Explicit address leaves
 ([#1088](https://github.com/marshalltech81/protonmail-local-ai/issues/1088)).**
@@ -621,7 +644,7 @@ indexed before the upgrade, until its reparse). So is `sender` (and the From sid
 message whose `sender_ambiguous` is `true` or `null`, whether or not
 its stored From carries the value, since its author cannot be told
 ([#1153](https://github.com/marshalltech81/protonmail-local-ai/issues/1153)),
-and `authority_class` of such a message outside Spam
+and `authority_class` of such a message outside Spam and Recovered Messages
 ([#1161](https://github.com/marshalltech81/protonmail-local-ai/issues/1161)).
 A `sender`, `recipient` or `participant` value matched as a substring
 (a name or fragment, not a full address) that matches none of a
@@ -658,7 +681,7 @@ that added them until its reparse runs, a dead-lettered message until
 chunks are not committed yet. A stored match still decides a leaf; a
 leaf that finds nothing is false only under `1`, and unknown under `0`
 or `null`. So `subject`, `text`, `has_attachments`, `sender`,
-`recipient`, `participant` and `authority_class` (outside Spam) can
+`recipient`, `participant` and `authority_class` (outside Spam and Recovered Messages) can
 leave a message indeterminate, inside the gates above (`sender` and
 the From side of `participant` and `authority_class` are still unknown
 whenever `sender_ambiguous` is not `false`). `has_attachments` is
@@ -1363,8 +1386,9 @@ null for a free-mail provider (see `docs/architecture.md`, Entities);
 it is never inferred from display names. `authority_class` is the
 contact's source-authority class from the operator's rules file
 (`unclassified` when no rule matched), matched against the claimed From
-address rather than a verified sender (Spam-folder mail is excluded
-from the `authority_class` filters, not from this report), and
+address rather than a verified sender (Spam and Recovered Messages
+mail is excluded from the `authority_class` filters, not from this
+report), and
 `authority_rule` the rule
 that set it (`address:<pattern>` or `domain:<pattern>`, null when
 unclassified).
@@ -1576,12 +1600,12 @@ it is the complete count only when `indeterminate` is 0, so report
 `indeterminate` with any count when it is not. A `sender` filter
 decides only messages whose `sender_ambiguous` is `false`, and a
 `participant` filter decides the others only through To or Cc; an
-`authority_class` filter decides the others only when they are in Spam
-([Sender attribution](#sender-attribution)). Right after the upgrade
+`authority_class` filter decides the others only when they are only in
+Spam or Recovered Messages ([Sender attribution](#sender-attribution)). Right after the upgrade
 that added `sender_ambiguous`, mail indexed before it is `null` until
 its queued reparse runs, so every `sender` filter reports those
 matches as `indeterminate` (and `participant` those it finds only in
-From, and `authority_class` all of them outside Spam) until the reparse drains (`get_mailbox_status` `queue.reparse`);
+From, and `authority_class` all of them outside Spam and Recovered Messages) until the reparse drains (`get_mailbox_status` `queue.reparse`);
 a message whose indexing job is dead-lettered stays indeterminate
 until `make requeue-dead`. Likewise, right after the upgrade that added
 `message_participant_names`
@@ -1987,7 +2011,8 @@ The group with value `null` holds the messages with no value on the
 dimension. For the sender dimensions: a message whose
 `sender_ambiguous` is not `false`, or with no stored From address
 ([Sender attribution](#sender-attribution)). For `authority_class`,
-also a message in Spam or one whose From addresses have no class. A
+also a message only in Spam or Recovered Messages, or one whose From
+addresses have no class. A
 message with several From addresses counts in the group of each, so
 those groups can sum to more than `total_matches`; `folder`, `year`
 and `month` have one value per message, so their groups sum to
@@ -2008,8 +2033,8 @@ the groups shown, `total_matches` and `indeterminate` are unchanged,
 and a group's `messages` still equals `query_messages`' count for
 `sender=<value>`. It counts messages, not missing addresses, and
 includes a message with no stored From address, which is also in the
-`null` group. For `authority_class` it leaves out Spam, where no class
-matches. The prose states it when not 0, and the timing line carries
+`null` group. For `authority_class` it leaves out Spam and Recovered
+Messages, where no class matches. The prose states it when not 0, and the timing line carries
 it.
 
 Groups come most messages first, then by value, with the `null` group

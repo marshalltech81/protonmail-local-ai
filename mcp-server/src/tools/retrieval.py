@@ -96,7 +96,9 @@ _MAX_AGGREGATE_GROUPS = 100
 _NO_VALUE_LABELS = {
     "sender_address": "(no attributable sender)",
     "sender_domain": "(no attributable sender)",
-    "authority_class": "(no class: Spam, no attributable sender, or no classified sender)",
+    "authority_class": (
+        "(no class: Spam or Recovered Messages, no attributable sender, or no classified sender)"
+    ),
     # #1080: no delivery date and no parseable Date header, or a send
     # date not yet checked; never grouped by when it was indexed.
     "year": "(no known date)",
@@ -233,15 +235,17 @@ def _header_lines(m: MessageRecord) -> list[str]:
         headers.append(("Delivered", m.occurred_at))
     copies = _copies(m)
     folder = clip(m.folder, HEADER_CHAR_LIMIT)
-    headers.append(
-        ("Folder", f"{folder} (representative of {copies} copies)" if copies > 1 else folder)
-    )
+    notes = _category_words(m)
+    if copies > 1:
+        notes.append(f"representative of {copies} copies")
+    headers.append(("Folder", f"{folder} ({', '.join(notes)})" if notes else folder))
     if copies > 1:
         headers.append(
             (
                 "Copies",
                 "; ".join(
-                    f"{clip(o.folder, HEADER_CHAR_LIMIT)} ({', '.join(_copy_words(o))})"
+                    f"{clip(o.folder, HEADER_CHAR_LIMIT)} "
+                    f"({', '.join(_CATEGORY_WORDS.get(o.category, []) + _copy_words(o))})"
                     for o in m.occurrences
                 )
                 + (
@@ -263,6 +267,20 @@ def _header_lines(m: MessageRecord) -> list[str]:
 def _copies(m: MessageRecord) -> int:
     """How many current Maildir copies ``m`` has (#1568)."""
     return len(m.occurrences) if m.occurrence_count is None else m.occurrence_count
+
+
+# A source category in words (#1569); ordinary mailbox mail gets none.
+_CATEGORY_WORDS = {
+    "unsent": ["unsent"],
+    "recovered": ["recovered, untrusted"],
+    "unknown": ["unknown category"],
+}
+
+
+def _category_words(m: MessageRecord) -> list[str]:
+    """The representative copy's source category in words (its first
+    listed occurrence); none for a message with no current copy."""
+    return list(_CATEGORY_WORDS.get(m.occurrences[0].category, [])) if m.occurrences else []
 
 
 def _copy_words(o: OccurrenceRecord) -> list[str]:
@@ -366,7 +384,10 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
         head.append(f"delivered {m.occurred_at}")
     if shown("folder"):
         copies = _copies(m)
-        head.append(f"{m.folder} (+{copies - 1} copies)" if copies > 1 else m.folder)
+        notes = _category_words(m)
+        if copies > 1:
+            notes.append(f"+{copies - 1} copies")
+        head.append(f"{m.folder} ({', '.join(notes)})" if notes else m.folder)
     for name, word, on in (
         ("seen", "unread", not m.seen),
         ("flagged", "flagged", m.flagged),
@@ -1270,7 +1291,8 @@ def register_retrieval_tools(server, db):
         0. ``indeterminate`` counts messages a filter could not decide
         (a size bound on a message without a stored size; a sender or
         participant filter, or an authority_class filter on a message
-        outside Spam whose sender is ambiguous or not yet checked; a name
+        outside Spam and Recovered Messages whose sender is ambiguous or
+        not yet checked; a name
         or fragment address filter that matches nothing on a message
         whose display names are not all indexed; a subject, text,
         has_attachments or address filter that finds nothing in a
@@ -1404,8 +1426,8 @@ def register_retrieval_tools(server, db):
                              file classes as this: "counsel",
                              "management", "vendor", "government",
                              "personal", "other", or "unclassified"
-                             (no rule matched). Spam-folder messages
-                             never match; any other message whose
+                             (no rule matched). Spam and Recovered
+                             Messages copies never match; any other message whose
                              sender is ambiguous or not yet checked, or
                              whose From address list is incomplete or
                              not yet checked with no classified address
@@ -1465,7 +1487,8 @@ def register_retrieval_tools(server, db):
             nor reject (no stored size under a size bound; a sender whose
             attribution is ambiguous or not yet checked under a sender
             or participant filter, or an authority_class filter on a
-            message outside Spam; stored content a parse limit cut, or
+            message outside Spam and Recovered Messages; stored content a
+            parse limit cut, or
             not checked yet, under a content or address filter); they
             are in neither
             total_matches nor the pages, so a count is complete only
@@ -1892,7 +1915,7 @@ def register_retrieval_tools(server, db):
         0. The group with a null value holds messages with no value on
         the dimension: no attributable sender (ambiguous, not yet
         checked, or no stored From address), and for authority_class
-        also Spam and senders with no class. A message with several
+        also Spam and Recovered Messages and senders with no class. A message with several
         From addresses counts in each of their groups.
 
         Groups are ordered by messages descending, then value. Group
@@ -2430,7 +2453,7 @@ def register_retrieval_tools(server, db):
         Each contact's authority class comes from the operator's rules
         file matched against the claimed From address, not a verified
         sender; the authority_class filters on search_emails and
-        query_messages skip Spam-folder mail.
+        query_messages skip Spam and Recovered Messages mail.
 
         Args:
             query: Name, address, or domain fragment (case-insensitive).

@@ -29,7 +29,7 @@ from src.lib.predicates import (
     search_emails_leaves,
 )
 from src.lib.security import _LOGGABLE_TOOL_PARAMS, log_tool_call
-from src.lib.sources import default_scope_sql, role_sql
+from src.lib.sources import authority_excluded_sql, default_scope_sql
 from src.lib.sqlite import Database, InvalidFilterError, MessageRecord, _record_clock
 
 from tests.conftest import _insert_message, claimant_of, set_authority
@@ -597,11 +597,12 @@ class TestCompilerAndDigest:
                 "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
                 "WHERE e.kind = 'person' AND e.authority_class = ?) THEN 1 "
                 "WHEN m.from_addresses_complete = 1 THEN 0 ELSE NULL END",
-                # The default scope, the flag and the Spam exclusion on one
-                # copy (#1568), Trash and Spam by the account's provider.
+                # The default scope, the flag and the authority exclusion
+                # (Spam, Recovered Messages) on one copy (#1568, #1569), the
+                # roles by the account's provider.
                 "EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id "
                 f"AND o.state = 'active' AND {default_scope_sql()} AND o.flagged = ? "
-                f"AND NOT {role_sql('spam')})",
+                f"AND NOT {authority_excluded_sql()})",
             ]
         )
         assert params == [
