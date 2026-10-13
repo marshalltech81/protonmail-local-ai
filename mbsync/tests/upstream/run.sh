@@ -295,12 +295,15 @@ set_names() {
 # from the module downloads (which go mod verify checks against go.sum
 # inside the container) and the .debs (which apt checks against
 # repo/Packages): the staged source trees with the harness files,
-# repo/Packages, the Go archive, the scripts here (run.sh included) and
-# mbsync/Dockerfile, which pins the base. acquire records it; assemble
-# refuses inputs that changed since.
+# repo/Packages, the Go archive, the scripts here (run.sh included),
+# mbsync/Dockerfile, which pins the base, and every line acquire wrote to
+# provenance.txt before this digest. acquire records it as the last line;
+# assemble and execute refuse inputs or a provenance record that changed
+# since.
 inputs_digest() {
     (
         cd "$WORK"
+        { grep -v '^inputs sha256=' provenance.txt || true; } | "${SHA256_CMD[@]}"
         # Every file rsync_tree copies: all but each tree's top-level .git.
         find src -type f ! -path 'src/gluon/.git/*' ! -path 'src/proton-bridge/.git/*' -print0 |
             LC_ALL=C sort -z | xargs -0 "${SHA256_CMD[@]}"
@@ -322,11 +325,14 @@ only_regular_files() {
     [[ -z "$other" ]] || die "the staged trees contain a symlink or special file"
 }
 
-# assemble and execute both refuse inputs (run.sh included) that changed
-# since acquire recorded them.
+# assemble and execute both refuse inputs (run.sh included) or acquired
+# provenance lines that changed since acquire recorded them. The inputs
+# line must be the record's only one and its last.
 check_inputs() {
     only_regular_files
-    [[ "$(sed -n 's/^inputs sha256=\([0-9a-f]\{64\}\) .*/\1/p' "$WORK/provenance.txt")" == "$(inputs_digest)" ]] ||
+    [[ "$(grep -c '^inputs sha256=' "$WORK/provenance.txt")" == 1 ]] ||
+        die "provenance.txt must hold exactly one inputs line; run acquire again into a new work dir"
+    [[ "$(tail -n 1 "$WORK/provenance.txt" | sed -n 's/^inputs sha256=\([0-9a-f]\{64\}\) .*/\1/p')" == "$(inputs_digest)" ]] ||
         die "inputs changed since acquire; run acquire again into a new work dir"
 }
 
@@ -345,7 +351,7 @@ cmd_acquire() {
     acquire_debs
     stage_harness
     only_regular_files
-    prov "inputs sha256=$(inputs_digest) (staged trees with harness files, repo/Packages, Go archive, run.sh and its scripts, mbsync/Dockerfile)"
+    prov "inputs sha256=$(inputs_digest) (provenance lines above, staged trees with harness files, repo/Packages, Go archive, run.sh and its scripts, mbsync/Dockerfile)"
     printf 'acquire: ok (%s)\n' "$WORK/provenance.txt"
 }
 
@@ -422,17 +428,18 @@ cmd_execute() {
     [[ "$(docker inspect --format '{{json .Mounts}} {{json .NetworkSettings.Ports}} {{.HostConfig.NetworkMode}}' "$RUNC")" == '[] {} none' ]] ||
         die "execution container has mounts, ports or a network"
     local status_text name
-    status_text="$(docker exec "$RUNC" /home/h/run_inside.sh "$debug")" || rc=$?
+    # Capped: the status lines are few and short.
+    status_text="$(docker exec "$RUNC" /home/h/run_inside.sh "$debug" | head -c 65536)" || rc=$?
     printf '%s\n' "$status_text"
     # Everything from the container is untrusted: only fixed-shape status
     # lines are kept, and only the three expected result files are copied
-    # out, as regular files of bounded size whose JSON has the allowlisted
-    # shape (the same one the harness's i1583Rec enforces).
+    # out (fetch_result), as regular files of bounded size whose JSON has
+    # the allowlisted shape (the same one the harness's i1583Rec enforces).
     printf '%s\n' "$status_text" |
         grep -E '^(gluon|proton-bridge) go_mod_verify=(ok|failed)$|^[a-z-]+ exit=[0-9]+$|^--- (PASS|FAIL|SKIP): TestIssue1583[A-Za-z0-9]+$' \
             >"$out/run-status.txt" || true
     for name in gluon.json bridge-builder.json bridge.json; do
-        docker exec "$RUNC" cat "/home/h/out/$name" | head -c 1048576 >"$out/$name.tmp"
+        fetch_result "$name" "$out/$name.tmp"
         jq -e 'type == "object" and all(.[];
                 type == "object" and all(to_entries[];
                     (.key | test("^[a-z0-9_]{1,64}$")) and
@@ -446,6 +453,19 @@ cmd_execute() {
     cp "$WORK/provenance.txt" "$out/provenance.txt"
     printf 'execute: exit=%s\n' "$rc"
     return "$rc"
+}
+
+# Reads one result file out of the execution container into <dest>. The
+# container's code owns /home/h/out, so the entry must be a regular file,
+# is opened without following a symlink and without blocking (a FIFO reads
+# as empty), within 60 seconds, and may hold at most 1 MiB.
+fetch_result() {
+    local name="$1" dest="$2"
+    docker exec "$RUNC" timeout -s KILL 60 sh -c \
+        'f="/home/h/out/$1"; [ -f "$f" ] && [ ! -L "$f" ] &&
+            exec dd if="$f" iflag=nofollow,nonblock,count_bytes bs=65536 count=1048577 status=none' \
+        sh "$name" >"$dest" || die "$name: missing, not a regular file, or not read in time"
+    [[ "$(wc -c <"$dest" | tr -d ' ')" -le 1048576 ]] || die "$name: larger than 1 MiB"
 }
 
 # Removes this work dir's containers (and the assembly stage) when a
