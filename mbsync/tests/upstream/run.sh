@@ -1,4 +1,5 @@
 #!/bin/bash
+set -Eeuo pipefail
 # =============================================================================
 # Issue #1583: run pinned Gluon and Bridge code in an isolated container
 # =============================================================================
@@ -45,7 +46,6 @@
 # arm64 or amd64 engine), git, curl, jq, gpgv, xz, python3 and shasum or
 # sha256sum on the host. Not part of CI or `make test`.
 # =============================================================================
-set -Eeuo pipefail
 
 readonly GLUON_COMMIT=7e800978ab4a9942829eb6116e33ea0278c03e91
 readonly BRIDGE_COMMIT=b9c5dac1651437100c40896dacd778a0518a26f2

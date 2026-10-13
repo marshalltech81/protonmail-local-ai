@@ -1,4 +1,5 @@
 #!/bin/bash
+set -Eeuo pipefail
 # Runs as the non-root harness user inside the execution container
 # (--network none, all capabilities dropped, no-new-privileges). Builds
 # and runs the issue #1583 harness tests with the module cache only
@@ -6,7 +7,6 @@
 # any upstream log text, stays in /home/h/logs inside the container; only
 # fixed tokens are printed and only /home/h/out (allowlisted JSON) is
 # copied out by run.sh.
-set -Eeuo pipefail
 
 export HOME=/home/h
 export PATH=/usr/local/go/bin:/usr/bin:/bin

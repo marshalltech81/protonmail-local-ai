@@ -1,10 +1,10 @@
 #!/bin/bash
+set -Eeuo pipefail
 # Runs as root inside the assembly container, which run.sh creates from
 # the verified Debian base with --network none. Installs the .debs and Go
 # toolchain that run.sh verified on the host, creates the non-root
 # harness user and hands it the upstream trees and module downloads.
 # Nothing here reaches the network.
-set -Eeuo pipefail
 
 readonly IN=/tmp/i1583-in
 readonly HOME_DIR=/home/h
