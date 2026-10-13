@@ -448,6 +448,10 @@ readonly COLLECTION_ATTEMPT_ID_RE='[0-9a-f]{12}-[1-9][0-9]*'
 readonly COLLECTION_TIME_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
 readonly COLLECTION_TERMINAL_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(succeeded|succeeded_with_withheld_folders|failed)\", \"withheld_far_side_folders\": (null|0|[1-9][0-9]*), \"failure_class\": (null|\"(deadline|killed|error|permission_repair|interrupted)\")\\}\$"
 readonly COLLECTION_SUCCESS_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\"\\}\$"
+# The success stamp's shape (record_successful_sync), read back only by
+# stamp_generation below to guard next_success_generation against the
+# state volume regressing behind an already-published generation.
+readonly SYNC_STAMP_RE="^\\{\"completed_at\": \"${COLLECTION_TIME_RE}\", \"sync_interval_secs\": [1-9][0-9]*, \"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"generation\": ([1-9][0-9]*)\\}\$"
 
 account_scope_is_canonical() {
     # A canonical lower-case UUID, compared byte by byte.
@@ -1172,6 +1176,19 @@ run_sync() {
     return "$rc"
 }
 
+# The generation already published in the retained Maildir-volume stamp
+# (read back only to guard next_success_generation below; the stamp and
+# its acknowledgement are otherwise unchanged). Prints nothing on a
+# missing, oversized (>4096 bytes) or unparseable stamp — including the
+# legacy shape with no generation field — and never fails the caller.
+stamp_generation() {
+    local LC_ALL=C line
+    [[ -f "$SYNC_STAMP_FILE" ]] || return 0
+    IFS= read -r -n 4096 line <"$SYNC_STAMP_FILE" || return 0
+    [[ "$line" =~ $SYNC_STAMP_RE ]] || return 0
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
 # A durable, monotonically increasing counter: the generation
 # record_successful_sync allocates to a success stamp, in the state
 # volume (never SQLite — no schema change). Ordering an acknowledged
@@ -1183,8 +1200,23 @@ run_sync() {
 # names it. A corrupt or unwritable counter is a failure, never a
 # reused or skipped number, so the caller must not report the sync as
 # acknowledged.
+#
+# The counter is seeded forward from the retained stamp's own
+# generation when that is higher (review finding, #1612 round 8): the
+# state volume (mbsync-state, documented in docs/architecture.md
+# "Docker Volumes" as unnecessary to back up before this counter
+# existed) can be recreated or restored from an older backup while the
+# Maildir volume keeps a newer stamp. Without this, the counter would
+# restart below a generation already published, and the indexer's
+# forward-only, generation-ordered acknowledgement would never again
+# move past that old stamp — ignoring every later successful sync and
+# leaving an unrecovered collection failure unable to clear. The two
+# durable records can only diverge in this direction (the counter is
+# always allocated and persisted before a stamp names it), so raising
+# the counter to match an already-published generation never regresses
+# or reorders anything the indexer has already acknowledged.
 next_success_generation() {
-    local current=0 raw next tmp
+    local current=0 raw next tmp retained
 
     if [[ -f "$GENERATION_FILE" ]]; then
         if ! IFS= read -r raw <"$GENERATION_FILE" || [[ ! "$raw" =~ ^[0-9]+$ ]]; then
@@ -1195,6 +1227,11 @@ next_success_generation() {
     elif [[ -e "$GENERATION_FILE" ]]; then
         echo ">>> ERROR: ${GENERATION_FILE} is not a regular file — refusing to record this sync as successful." >&2
         return 1
+    fi
+    retained="$(stamp_generation)"
+    if [[ -n "$retained" ]] && ((retained > current)); then
+        echo ">>> WARNING: the success generation counter at ${GENERATION_FILE} (${current}) is behind the retained sync stamp's generation (${retained}); seeding it forward (mbsync-state was likely recreated or restored from an older backup)." >&2
+        current="$retained"
     fi
     next=$((current + 1))
     if ! tmp="$(mktemp "${GENERATION_FILE}.XXXXXX")"; then

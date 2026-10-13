@@ -152,7 +152,7 @@ MCP client (host machine; Claude Desktop via the repo's stdio adapter)
 | Volume | Contents | Back up? |
 |---|---|---|
 | `maildir-volume` | Raw email in Maildir format | Optional for mail still in Proton, which mbsync can re-sync. Mail and folders deleted in Proton are kept only here (`Expunge None`), so back it up if you rely on them, as archive mode does |
-| `mbsync-state` | mbsync's pinned Bridge certificate fingerprint | No — re-pinned from `BRIDGE_CERT_FINGERPRINT` |
+| `mbsync-state` | mbsync's pinned Bridge certificate fingerprint and durable success-generation counter (*Index currency*) | No — the fingerprint is re-pinned from `BRIDGE_CERT_FINGERPRINT`, and the generation counter self-seeds forward from the retained stamp in `maildir-volume` on next use |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
 
 ### Maildir layout
@@ -4214,6 +4214,21 @@ upserts the latest acknowledged sync and its own timestamp into the
 one-row `ingestion_state` table. A missed stamp event
 reads as a stale sync until the next rescan; a missed delivery event
 stays invisible to `current` until the rescan queues it.
+
+`next_success_generation` seeds its counter forward from the
+generation already in the retained stamp when that is higher than the
+counter file (`mbsync/entrypoint.sh` `stamp_generation`, #1612 round 8):
+the `mbsync-state` volume can be recreated or restored from an older
+backup while `maildir-volume` keeps a newer stamp, and without this the
+counter would restart below a generation already published, stranding
+the acknowledgement behind it (and an unrecovered collection failure
+unable to clear, see *Collection status* below) until it caught back
+up on its own. The two durable records can only diverge in this
+direction — the counter is always allocated and persisted before a
+stamp names it — so raising it to match an already-published generation
+never regresses or reorders anything already acknowledged. A missing,
+oversized or unparseable stamp (including the legacy shape) seeds
+nothing, leaving the counter's own value as today.
 
 ### Collection status
 

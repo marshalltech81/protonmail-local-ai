@@ -379,9 +379,20 @@ def _backstop_check(
     key = (str(path), *identity)
     if key in hash_cache:
         return
-    if budget["files"] >= _BACKSTOP_MAX_FILES or budget["bytes"] >= _BACKSTOP_MAX_BYTES:
-        # Over this pass's budget: left for a later pass, which will see
-        # the same cache miss (nothing here has changed its identity).
+    if (
+        budget["files"] >= _BACKSTOP_MAX_FILES
+        or budget["bytes"] + identity[0] > _BACKSTOP_MAX_BYTES
+    ):
+        # Checked against the prospective total, not only bytes already
+        # consumed (#1612 round 8 review): the latter let the very first
+        # held path through untouched whenever it alone exceeded the
+        # whole per-pass budget (0 is never >= a positive cap), hashing
+        # it in full regardless of size. Left for a later pass, which
+        # will see the same cache miss (nothing here has changed its
+        # identity) — including a file whose own size always exceeds the
+        # budget, an accepted gap in this secondary backstop (module
+        # docstring: the watcher's rename verification and the walk's
+        # freshness check are the primary defense).
         return
     try:
         digest = _sha256(path)
@@ -394,12 +405,16 @@ def _backstop_check(
     if digest == occurrence["content_hash"]:
         hash_cache[key] = digest
         return
-    if db.retire_mismatched_occurrence(occurrence["id"], occurrence["relative_path"]):
+    if db.retire_mismatched_occurrence(
+        occurrence["id"], occurrence["relative_path"], identity=identity
+    ):
         counts.stale += 1
         db.queue_enqueue_if_absent(str(path), REASON_STALE_CONTENT)
     else:
         # The occurrence moved or retired since active_occurrences() read
-        # it: not this scan's call to make any more.
+        # it, or the file changed again before the retire's transaction
+        # (the identity captured above no longer matches): not this
+        # scan's call to make any more.
         counts.unreachable += 1
 
 

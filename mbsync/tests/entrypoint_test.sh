@@ -97,8 +97,9 @@ PROTON_FOLDER_EXCLUSIONS="$PROTON_DEFAULT_FOLDER_EXCLUSIONS"
 
 # The account the collection status names (#1592), synthetic.
 ACCOUNT_SCOPE="00000000-0000-4000-8000-000000000001"
-# The collection records' shapes, as the entrypoint defines them.
-eval "$(grep -E '^readonly COLLECTION_(ATTEMPT_ID|TIME|TERMINAL|SUCCESS)_RE=' "$ENTRYPOINT" | sed 's/^readonly //')"
+# The collection records' and success stamp's shapes, as the entrypoint
+# defines them.
+eval "$(grep -E '^readonly (COLLECTION_(ATTEMPT_ID|TIME|TERMINAL|SUCCESS)|SYNC_STAMP)_RE=' "$ENTRYPOINT" | sed 's/^readonly //')"
 # shellcheck disable=SC2034 # read by the loaded publish_collection_status
 COLLECTION_STATUS_FORMAT=1
 
@@ -328,7 +329,9 @@ fifo_pin_is_refused_without_reading() {
 generation_setup() {
     STATE_DIR="$WORK/state-gen-$1"
     GENERATION_FILE="$STATE_DIR/sync-generation"
-    load next_success_generation
+    MAILDIR_PATH="$WORK/maildir-gen-$1"
+    SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
+    load stamp_generation next_success_generation
 }
 
 first_generation_is_1() {
@@ -404,6 +407,82 @@ failed_generation_write_fails_closed_and_keeps_the_old_value() {
     [[ "$(find "$STATE_DIR" -type f | wc -l)" -eq 1 ]] || return 1
 }
 
+# --- generation seeded from a retained stamp (#1612 round 8, P2) -----------
+#
+# mbsync-state can be recreated or restored from an older backup while
+# the Maildir volume (which docs/architecture.md's "Docker Volumes"
+# table documented as not needing one before this counter existed)
+# keeps a newer stamp. The counter must never allocate a generation at
+# or below one the stamp already published, or the indexer's
+# forward-only, generation-ordered acknowledgement (never moves past a
+# stamp whose generation is not greater than the one already
+# acknowledged) would ignore every later sync until the counter caught
+# back up on its own.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+write_stamp_with_generation() {
+    mkdir -p "$MAILDIR_PATH"
+    printf '{"completed_at": "2026-10-01T00:00:00Z", "sync_interval_secs": 60, "attempt_id": "0123456789ab-1", "generation": %d}\n' \
+        "$1" >"$SYNC_STAMP_FILE"
+}
+
+a_missing_counter_is_seeded_from_the_retained_stamp() {
+    local out
+    generation_setup seed-missing
+    # The state volume's mountpoint exists (Docker always provides one)
+    # but holds no counter file, as a freshly recreated or restored
+    # volume would.
+    mkdir -p "$STATE_DIR"
+    write_stamp_with_generation 50
+    out="$(next_success_generation 2>"$WORK/seed-missing-err")" || return 1
+    [[ "$out" == "51" ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == "51" ]] || return 1
+    grep -q "is behind the retained sync stamp's generation (50)" "$WORK/seed-missing-err" || return 1
+}
+
+a_lower_counter_is_seeded_forward_from_the_retained_stamp() {
+    local out
+    generation_setup seed-lower
+    mkdir -p "$STATE_DIR"
+    printf '2\n' >"$GENERATION_FILE"
+    write_stamp_with_generation 50
+    out="$(next_success_generation 2>"$WORK/seed-lower-err")" || return 1
+    [[ "$out" == "51" ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == "51" ]] || return 1
+    grep -q "is behind the retained sync stamp's generation (50)" "$WORK/seed-lower-err" || return 1
+}
+
+a_counter_ahead_of_the_retained_stamp_is_unaffected() {
+    local out
+    generation_setup seed-ahead
+    mkdir -p "$STATE_DIR"
+    printf '5\n' >"$GENERATION_FILE"
+    write_stamp_with_generation 3
+    out="$(next_success_generation 2>"$WORK/seed-ahead-err")" || return 1
+    [[ "$out" == "6" ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == "6" ]] || return 1
+    [[ ! -s "$WORK/seed-ahead-err" ]] || return 1
+}
+
+a_legacy_stamp_does_not_seed_the_counter() {
+    generation_setup seed-legacy
+    mkdir -p "$STATE_DIR" "$MAILDIR_PATH"
+    printf '1\n' >"$GENERATION_FILE"
+    # Written before the 2026-10-13 delivery-identity fix: no attempt_id
+    # or generation field.
+    printf '{"completed_at": "2026-10-01T00:00:00Z", "sync_interval_secs": 60}\n' >"$SYNC_STAMP_FILE"
+    [[ "$(next_success_generation 2>/dev/null)" == "2" ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == "2" ]] || return 1
+}
+
+a_missing_stamp_does_not_seed_the_counter() {
+    generation_setup seed-none
+    mkdir -p "$STATE_DIR"
+    printf '1\n' >"$GENERATION_FILE"
+    # No stamp written at all: the common, non-recovery case.
+    [[ "$(next_success_generation 2>/dev/null)" == "2" ]] || return 1
+}
+
 # --- collection status setup (#1592) ------------------------------------------
 
 # Every case that runs run_sync publishes the collection status, so each
@@ -423,7 +502,7 @@ collection_setup() {
     collection_last_success="null"
     load collection_now load_collection_records \
         publish_collection_status begin_collection_attempt finish_collection_attempt \
-        record_collection_outcome next_success_generation record_successful_sync \
+        record_collection_outcome stamp_generation next_success_generation record_successful_sync \
         stamp_write_failed
     load_collection_records
 }
@@ -1681,7 +1760,7 @@ success_stamp_is_written_by_a_completed_sync() {
     GENERATION_FILE="$STATE_DIR/sync-generation"
     collection_attempt_id="0123456789ab-1"
     mkdir -p "$MAILDIR_PATH" "$STATE_DIR"
-    load collection_now next_success_generation record_successful_sync
+    load collection_now stamp_generation next_success_generation record_successful_sync
     record_successful_sync
     grep -qE '^\{"completed_at": "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z", "sync_interval_secs": 60, '\
 '"attempt_id": "0123456789ab-1", "generation": 1\}$' "$SYNC_STAMP_FILE" || return 1
@@ -2681,6 +2760,16 @@ check "a directory in the success generation's place is refused" \
     directory_generation_is_refused
 check "a failed success generation write fails closed and keeps the old value" \
     failed_generation_write_fails_closed_and_keeps_the_old_value
+check "a missing counter is seeded from the retained stamp" \
+    a_missing_counter_is_seeded_from_the_retained_stamp
+check "a lower counter is seeded forward from the retained stamp" \
+    a_lower_counter_is_seeded_forward_from_the_retained_stamp
+check "a counter ahead of the retained stamp is unaffected" \
+    a_counter_ahead_of_the_retained_stamp_is_unaffected
+check "a legacy stamp does not seed the counter" \
+    a_legacy_stamp_does_not_seed_the_counter
+check "a missing stamp does not seed the counter" \
+    a_missing_stamp_does_not_seed_the_counter
 check "sync succeeds when mbsync and the repair succeed" \
     sync_succeeds_when_mbsync_and_repair_succeed
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync

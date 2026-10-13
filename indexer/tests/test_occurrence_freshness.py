@@ -442,6 +442,57 @@ class TestContentBackstop:
         finally:
             box.close()
 
+    def test_a_single_oversized_file_is_not_hashed_over_the_byte_budget(
+        self, tmp_path, monkeypatch
+    ):
+        """Bound the work per input (AGENTS.md): a file whose own size
+        exceeds the whole per-pass byte budget must not be hashed
+        either. Checking only bytes already consumed
+        (``budget["bytes"] >= cap``) lets the very first, oversized
+        file through untouched, since 0 is never >= a positive cap
+        (#1612 round 8 review) — the check must be against the
+        prospective total."""
+        import src.occurrence_scan as scan_module
+
+        box = Box(tmp_path)
+        try:
+            path = box.put("INBOX/cur/b8:2,S", _eml("oversized@example.test"))
+            box.index(path)
+            # Just under the file's own size: it alone would blow the
+            # budget, whatever else has (or has not) been hashed yet.
+            monkeypatch.setattr(scan_module, "_BACKSTOP_MAX_BYTES", path.stat().st_size - 1)
+            counts = scan_occurrences(box.db, box.root, hash_cache={})
+            assert counts.hashed == 0
+            assert box.db.find_active_occurrence(str(path)) is not None
+        finally:
+            box.close()
+
+    def test_the_byte_budget_bounds_accumulated_held_paths_too(self, tmp_path, monkeypatch):
+        """Two files, neither alone over budget, together are: the
+        prospective-total check defers the second to a later pass
+        exactly as the files-count budget already does."""
+        import src.occurrence_scan as scan_module
+
+        box = Box(tmp_path)
+        try:
+            a = box.put("INBOX/cur/b9:2,S", _eml("accuma@example.test"))
+            b = box.put("INBOX/cur/b10:2,S", _eml("accumb@example.test"))
+            box.index(a, b)
+            size = a.stat().st_size
+            # Room for one of the two same-sized files per pass, not both.
+            monkeypatch.setattr(scan_module, "_BACKSTOP_MAX_BYTES", size + size // 2)
+            cache: dict = {}
+            first = scan_occurrences(box.db, box.root, hash_cache=cache)
+            assert first.hashed == 1
+            second = scan_occurrences(box.db, box.root, hash_cache=cache)
+            assert second.hashed == 1
+            third = scan_occurrences(box.db, box.root, hash_cache=cache)
+            assert third.hashed == 0
+            assert box.db.find_active_occurrence(str(a)) is not None
+            assert box.db.find_active_occurrence(str(b)) is not None
+        finally:
+            box.close()
+
     def test_a_concurrent_retire_leaves_the_path_unreachable_not_stale(self, tmp_path, monkeypatch):
         """The occurrence moved or retired (by the watcher, concurrently)
         between active_occurrences() reading it and the backstop's
@@ -459,6 +510,54 @@ class TestContentBackstop:
             monkeypatch.setattr(box.db, "retire_mismatched_occurrence", lambda *a, **kw: False)
             counts = scan_occurrences(box.db, box.root, hash_cache={})
             assert (counts.stale, counts.unreachable) == (0, 1)
+        finally:
+            box.close()
+
+    def test_a_file_restored_after_hashing_is_not_retired_on_stale_evidence(
+        self, tmp_path, monkeypatch
+    ):
+        """Finding (#1612 round 8 review): if the path changes again
+        after ``_sha256`` returns but before
+        ``retire_mismatched_occurrence``'s transaction, the occurrence
+        must not be retired on now-stale evidence.
+        ``retire_mismatched_occurrence`` rechecks the identity captured
+        before hashing inside its own transaction, the same pattern
+        ``move_verified_occurrence`` and ``bind_found_copy`` already use
+        for their own TOCTOU window (module docstring, final paragraph)."""
+        import src.occurrence_scan as scan_module
+
+        box = Box(tmp_path)
+        try:
+            path = box.put("INBOX/cur/b11:2,S", _eml("racerrrr@example.test", "AAAA"))
+            box.index(path)
+            original = path.read_bytes()
+            before_stat = path.stat()
+
+            intruder = _eml("intruder@example.test", "BBBB")
+            assert len(intruder) == len(original)
+            path.write_bytes(intruder)
+            os.utime(path, ns=(before_stat.st_mtime_ns, before_stat.st_mtime_ns))
+
+            real_sha256 = scan_module._sha256
+
+            def _sha256_then_restore(p):
+                digest = real_sha256(p)
+                if p == path:
+                    # The race: the path is back to its own claimant's
+                    # bytes — via a fresh write, a different inode, as a
+                    # real restore-by-rename would be — by the time
+                    # retire_mismatched_occurrence's transaction runs.
+                    tmp = path.with_name(path.name + ".racetmp")
+                    tmp.write_bytes(original)
+                    os.utime(tmp, ns=(before_stat.st_mtime_ns, before_stat.st_mtime_ns))
+                    os.replace(tmp, path)
+                return digest
+
+            monkeypatch.setattr(scan_module, "_sha256", _sha256_then_restore)
+
+            counts = scan_occurrences(box.db, box.root, hash_cache={})
+            assert (counts.stale, counts.unreachable) == (0, 1)
+            assert box.db.find_active_occurrence(str(path)) is not None
         finally:
             box.close()
 

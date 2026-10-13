@@ -4163,7 +4163,9 @@ class Database:
             return cur.rowcount > 0
 
     @_synchronized
-    def retire_mismatched_occurrence(self, occurrence_id: int, relative_path: str) -> bool:
+    def retire_mismatched_occurrence(
+        self, occurrence_id: int, relative_path: str, *, identity: tuple[int, int, int]
+    ) -> bool:
         """Retire an active occurrence whose file is still there but whose
         bytes a content-hash check proved no longer match its claimant
         (``occurrence_scan``'s periodic backstop, #1612): unlike
@@ -4173,8 +4175,17 @@ class Database:
         Retires only this occurrence; any other occurrence of the same
         claimant is untouched, and the caller enqueues the path for its
         own reparse. Returns False, changing nothing, when the occurrence
-        moved or retired since the check ran."""
+        moved or retired since the check ran, or the file is no longer
+        the one whose bytes were hashed (``identity``, its size, mtime
+        and inode captured before the hash: gone or replaced again — the
+        same TOCTOU recheck ``move_verified_occurrence`` and
+        ``bind_found_copy`` already do for their own write, #1612 round 8
+        review). Without it, a file that changed back between the hash
+        and this transaction could retire the occurrence on transient,
+        already-stale evidence."""
         with self.transaction():
+            if not _same_file(self._absolute(relative_path), identity):
+                return False
             cur = self._conn.execute(
                 "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
                 "WHERE id = ? AND state = 'active' AND relative_path = ?",
