@@ -24,10 +24,11 @@ set -Eeuo pipefail
 #             container from the verified base (root, dpkg -i), create the
 #             non-root user and commit a local image.
 #   execute   With --network none, as the non-root user, all capabilities
-#             dropped, no-new-privileges, memory, pids and CPU limits, a
-#             wall-clock deadline and a cap on bytes written that the host
-#             enforces, no ports, mounts or volumes: build and run the harness tests (Go test
-#             files under gluon/ and bridge/ here) with GOTOOLCHAIN=local,
+#             dropped, no-new-privileges, memory, pids and CPU limits, no
+#             container log, a wall-clock deadline and a cap on bytes
+#             written that the host enforces, no ports, mounts or volumes:
+#             build and run the harness tests (Go test files under gluon/
+#             and bridge/ here) with GOTOOLCHAIN=local,
 #             GOPROXY=off and -mod=readonly. Copies out only the allowlisted
 #             JSON results; upstream logs stay in the container.
 #   clean     Removes the containers, the image and the work directory,
@@ -75,6 +76,9 @@ readonly EXEC_DEADLINE_SECS=7200
 readonly EXEC_MAX_CPUS=4
 readonly EXEC_MAX_WRITE_BYTES=8589934592
 readonly WATCH_INTERVAL_SECS=5
+# Each Docker call the watchdog makes is cut off after this long, and a
+# measurement that times out counts as unreadable.
+readonly PROBE_TIMEOUT_SECS=30
 # Fixed text after the digest on provenance.txt's inputs line, which must
 # match exactly.
 readonly INPUTS_NOTE='(provenance lines above, staged trees with harness files, repo/Packages, Go archive, run.sh and its scripts, mbsync/Dockerfile)'
@@ -84,6 +88,7 @@ ACQ=""
 ASM=""
 RUNC=""
 WATCHDOG=""
+PROBE=""
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HERE
@@ -380,8 +385,16 @@ cmd_acquire() {
     # A new directory only this account can write: no other account can
     # swap or plant files in it between the checks and the copies.
     [[ ! -e "$WORK" && ! -L "$WORK" ]] || die "work dir must not exist yet"
+    local tag
+    tag="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" || die "cannot generate the work dir tag"
+    [[ "$tag" =~ ^[0-9a-f]{16}$ ]] || die "cannot generate the work dir tag"
     mkdir -m 700 "$WORK" || die "cannot create the work dir"
-    od -An -N8 -tx1 /dev/urandom | tr -d ' \n' >"$WORK/$MARKER"
+    # The marker appears whole (rename) or not at all; a work dir without
+    # one is removed here, since neither a retry nor clean would take it.
+    if ! { printf '%s' "$tag" >"$WORK/$MARKER.tmp" && mv "$WORK/$MARKER.tmp" "$WORK/$MARKER"; }; then
+        rm -rf "$WORK"
+        die "cannot write the work dir marker"
+    fi
     set_names
     : >"$WORK/provenance.txt"
     acquire_src
@@ -471,11 +484,14 @@ cmd_execute() {
         --memory 8g --memory-swap 8g \
         --pids-limit 2048 \
         --cpus "$cpus" \
+        --log-driver none \
         "$image" >/dev/null
     [[ "$(docker inspect --format '{{json .Mounts}} {{json .NetworkSettings.Ports}} {{.HostConfig.NetworkMode}}' "$RUNC")" == '[] {} none' ]] ||
         die "execution container has mounts, ports or a network"
-    [[ "$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}' "$RUNC")" == "${cpus}000000000 8589934592 2048" ]] ||
-        die "execution container lacks its CPU, memory or pids limit"
+    # No container log: its code runs as PID 1's user and could write to
+    # /proc/1/fd/1, which neither of the watchdog's measures counts.
+    [[ "$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}} {{.HostConfig.LogConfig.Type}}' "$RUNC")" == "${cpus}000000000 8589934592 2048 none" ]] ||
+        die "execution container lacks its CPU, memory or pids limit, or has a log"
     local status_text name
     start_watchdog
     # Capped: the status lines are few and short.
@@ -517,13 +533,13 @@ cmd_execute() {
 start_watchdog() {
     (
         local s="" start=$SECONDS size written why=""
-        # The sleep may already have ended (TERM during a measurement).
-        trap '[[ -z "$s" ]] || kill "$s" 2>/dev/null || true; exit 0' TERM
+        # The sleep or probe may already have ended.
+        trap '[[ -z "$s" ]] || kill "$s" 2>/dev/null || true; [[ -z "$PROBE" ]] || kill -s KILL "$PROBE" 2>/dev/null || true; exit 0' TERM
         while [[ -z "$why" ]]; do
             sleep "$WATCH_INTERVAL_SECS" &
             s=$!
             wait "$s"
-            size="$(docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
+            size="$(bounded "$PROBE_TIMEOUT_SECS" docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
             written="$(container_written_bytes)" || written=""
             if ((SECONDS - start >= EXEC_DEADLINE_SECS)); then
                 why="passed its $EXEC_DEADLINE_SECS s deadline"
@@ -535,10 +551,30 @@ start_watchdog() {
         done
         trap '' TERM
         printf 'run.sh: the execution container %s; killing it\n' "$why" >&2
-        docker kill "$RUNC" >/dev/null || true
+        bounded "$PROBE_TIMEOUT_SECS" docker kill "$RUNC" >/dev/null || true
         exit 3
     ) &
     WATCHDOG=$!
+}
+
+# Runs a command for at most <secs> seconds, then kills it and fails (the
+# host may have no timeout(1)). Its pid is in PROBE while it runs.
+bounded() {
+    local secs="$1" rc=0 i=0
+    shift
+    "$@" &
+    PROBE=$!
+    while kill -0 "$PROBE" 2>/dev/null; do
+        if ((i >= secs * 10)); then
+            kill -s KILL "$PROBE" 2>/dev/null || true
+            break
+        fi
+        i=$((i + 1))
+        sleep 0.1
+    done
+    wait "$PROBE" || rc=$?
+    PROBE=""
+    return "$rc"
 }
 
 # Bytes the execution container's cgroup wrote to block devices, from
@@ -547,7 +583,7 @@ start_watchdog() {
 # file that was unlinked while open.
 container_written_bytes() {
     local io
-    io="$(docker stats --no-stream --format '{{.BlockIO}}' "$RUNC")" || return 1
+    io="$(bounded "$PROBE_TIMEOUT_SECS" docker stats --no-stream --format '{{.BlockIO}}' "$RUNC")" || return 1
     awk -v w="${io##*/ }" 'BEGIN {
         if (!match(w, /^[0-9]+(\.[0-9]+)?/)) exit 1
         n = substr(w, 1, RLENGTH)
