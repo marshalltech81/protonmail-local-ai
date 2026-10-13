@@ -362,6 +362,11 @@ cmd_assemble() {
     docker exec "$ASM" bash /tmp/i1583-assemble.sh
     docker exec "$ASM" rm -f /tmp/i1583-assemble.sh
     docker stop -t 1 "$ASM" >/dev/null
+    # A re-assembly would move the tag and leave the old image dangling,
+    # out of clean's reach: remove it first.
+    if [[ -n "$(docker image ls -q "$image")" ]]; then
+        docker rmi "$image" >/dev/null || die "cannot remove the earlier image for this work dir"
+    fi
     docker commit \
         --change 'USER 1583:1583' --change 'WORKDIR /home/h' --change 'CMD ["sleep", "infinity"]' \
         --change "LABEL i1583.provenance=$(sha256 "$WORK/provenance.txt")" \
@@ -453,10 +458,18 @@ cmd_clean() {
 resolve_work() {
     local parent base path
     parent="$(cd -P "$(dirname "$1")" 2>/dev/null && pwd)" || die "work dir parent does not exist"
-    # Only this account may write the parent: otherwise another account
-    # could rename the directory and put its own (with symlinks) in place.
+    # The parent must be this account's and writable only by it, and every
+    # ancestor up to / owned by this account or root and not writable by
+    # others unless sticky: otherwise another account could rename a
+    # directory on the path and put its own (with symlinks) in place.
     [[ -n "$(find "$parent" -maxdepth 0 -user "$(id -u)" ! -perm -g+w ! -perm -o+w)" ]] ||
         die "the parent of the work and out dirs must be owned by this account and writable only by it"
+    local dir="$parent"
+    while [[ "$dir" != "/" ]]; do
+        dir="$(dirname "$dir")"
+        [[ -n "$(find "$dir" -maxdepth 0 \( -user "$(id -u)" -o -user 0 \) \( \( ! -perm -g+w ! -perm -o+w \) -o -perm -1000 \))" ]] ||
+            die "an ancestor of the work and out dirs is writable by another account"
+    done
     base="$(basename "$1")"
     [[ "$base" != "." && "$base" != ".." && "$base" != "/" ]] || die "work dir must name a directory"
     path="${parent%/}/$base"

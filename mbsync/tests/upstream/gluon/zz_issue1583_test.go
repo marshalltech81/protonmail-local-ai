@@ -693,6 +693,16 @@ func TestIssue1583Item2RecoveryDedup(t *testing.T) {
 
 			after := c.statusMessages(ids.GluonRecoveryMailboxName)
 			i1583Rec(t, sc, sub.name+"_stored", after > before)
+
+			// The row this APPEND added (the highest UID) against this
+			// submission's own bytes, not against any submission.
+			if after > before {
+				_, rows := c.fetchAll("EXAMINE", ids.GluonRecoveryMailboxName, "BODY.PEEK[]")
+				require.Len(t, rows, after)
+				i1583Rec(t, sc, sub.name+"_stored_bytes_equal_own_submission", bytes.Equal(rows[len(rows)-1].body, sub.lit))
+				_, _ = c.cmd(`UNSELECT`)
+			}
+
 			before = after
 		}
 
