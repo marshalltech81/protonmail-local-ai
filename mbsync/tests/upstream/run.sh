@@ -91,10 +91,10 @@ readonly WATCH_INTERVAL_SECS=5
 # Each Docker call the watchdog makes is cut off after this long, and a
 # measurement that times out counts as unreadable.
 readonly PROBE_TIMEOUT_SECS=30
-# Each network step of acquire that fetch does not cover (git fetch, the
-# host-side go mod download, docker pull) is cut off after this long,
-# with everything it started. Their byte and storage bounds are #1583's
-# open question.
+# Each network step of acquire (each download through fetch, git fetch,
+# the host-side go mod download, docker pull) is cut off after this long,
+# with everything it started. The byte and storage bounds of the steps
+# fetch does not cover are #1583's open question.
 readonly ACQUIRE_TIMEOUT_SECS=1800
 # Fixed text after the digest on provenance.txt's inputs line, which must
 # match exactly.
@@ -139,11 +139,13 @@ prov() {
 
 # Downloads <url> to <dest> through a temp file, refusing more than <max>
 # bytes (curl stops the transfer at the limit; the size is checked again)
-# and taking at most 30 minutes, so no response can fill the disk first.
+# and taking at most ACQUIRE_TIMEOUT_SECS in all, retries included (curl's
+# own --max-time restarts on each retry), so no response can fill the disk
+# or hold acquire first.
 fetch() {
     local max="$1" dest="$2" url="$3"
     [[ "$max" =~ ^[1-9][0-9]*$ ]] || die "no size limit for $url"
-    if ! curl -fsSL --retry 3 --max-filesize "$max" --max-time 1800 -o "$dest.part" "$url" ||
+    if ! bounded "$ACQUIRE_TIMEOUT_SECS" curl -fsSL --retry 3 --max-filesize "$max" --max-time "$ACQUIRE_TIMEOUT_SECS" -o "$dest.part" "$url" ||
         [[ "$(wc -c <"$dest.part" | tr -d ' ')" -gt "$max" ]]; then
         rm -f "$dest.part"
         die "download failed or larger than $max bytes: $url"
@@ -557,14 +559,18 @@ cmd_execute() {
     # One run_inside.sh step at a time: each suite's result is copied out
     # and checked before the next suite starts, so no suite can plant or
     # rewrite another's result.
-    run_step verify "$out" "$debug" || rc=1
-    for suite in gluon bridge-builder bridge; do
-        if run_step "$suite" "$out" "$debug"; then
-            accept_result "$suite" "$out" || rc=1
-        else
-            rc=1
-        fi
-    done
+    # No suite runs on a module cache that failed verification.
+    if run_step verify "$out" "$debug"; then
+        for suite in gluon bridge-builder bridge; do
+            if run_step "$suite" "$out" "$debug"; then
+                accept_result "$suite" "$out" || rc=1
+            else
+                rc=1
+            fi
+        done
+    else
+        rc=1
+    fi
     stop_watchdog
     docker rm -f "$RUNC" >/dev/null
     cp "$WORK/provenance.txt" "$out/provenance.txt"
@@ -583,30 +589,30 @@ cmd_execute() {
 # EXEC_MAX_WRITE_BYTES or cannot be read. Once it fires it ignores TERM
 # and exits 3, whether or not the kill worked, so stop_watchdog can tell.
 start_watchdog() {
-    (
-        local s="" start=$SECONDS size written why=""
-        # The sleep or probe may already have ended.
-        trap '[[ -z "$s" ]] || kill "$s" 2>/dev/null || true; [[ -z "$PROBE" ]] || kill -s KILL -- "-$PROBE" 2>/dev/null || true; exit 0' TERM
-        while [[ -z "$why" ]]; do
-            sleep "$WATCH_INTERVAL_SECS" &
-            s=$!
-            wait "$s"
-            size="$(bounded "$PROBE_TIMEOUT_SECS" docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
-            written="$(container_written_bytes)" || written=""
-            if ((SECONDS - start >= EXEC_DEADLINE_SECS)); then
-                why="passed its $EXEC_DEADLINE_SECS s deadline"
-            elif [[ ! "$size" =~ ^[0-9]+$ || ! "$written" =~ ^[0-9]+$ ]]; then
-                why="has a layer size or bytes-written count that cannot be read"
-            elif ((size > EXEC_MAX_WRITE_BYTES || written > EXEC_MAX_WRITE_BYTES)); then
-                why="wrote more than $EXEC_MAX_WRITE_BYTES bytes"
-            fi
-        done
-        trap '' TERM
-        printf 'run.sh: the execution container %s; killing it\n' "$why" >&2
-        bounded "$PROBE_TIMEOUT_SECS" docker kill "$RUNC" >/dev/null || true
-        exit 3
-    ) &
+    watchdog_loop &
     WATCHDOG=$!
+}
+
+# The watchdog itself, run in the background by start_watchdog. Its
+# locals (s, why) are read by watchdog_term and watchdog_fire.
+watchdog_loop() {
+    local s="" start=$SECONDS size written why=""
+    trap watchdog_term TERM
+    while [[ -z "$why" ]]; do
+        sleep "$WATCH_INTERVAL_SECS" &
+        s=$!
+        wait "$s"
+        size="$(bounded "$PROBE_TIMEOUT_SECS" docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
+        written="$(container_written_bytes)" || written=""
+        if ((SECONDS - start >= EXEC_DEADLINE_SECS)); then
+            why="passed its $EXEC_DEADLINE_SECS s deadline"
+        elif [[ ! "$size" =~ ^[0-9]+$ || ! "$written" =~ ^[0-9]+$ ]]; then
+            why="has a layer size or bytes-written count that cannot be read"
+        elif ((size > EXEC_MAX_WRITE_BYTES || written > EXEC_MAX_WRITE_BYTES)); then
+            why="wrote more than $EXEC_MAX_WRITE_BYTES bytes"
+        fi
+    done
+    watchdog_fire
 }
 
 # Runs a command for at most <secs> seconds, then kills it with every
@@ -649,6 +655,27 @@ container_written_bytes() {
         for (i = 1; i <= 6; i++) if (u == units[i]) { printf "%.0f\n", n * 1000 ^ (i - 1); exit 0 }
         exit 1
     }'
+}
+
+# In the watchdog (s and why are watchdog_loop's locals): reports why,
+# kills the container, ignoring TERM from here on, and exits 3 whether or
+# not the kill worked.
+watchdog_fire() {
+    trap '' TERM
+    printf 'run.sh: the execution container %s; killing it\n' "$why" >&2
+    bounded "$PROBE_TIMEOUT_SECS" docker kill "$RUNC" >/dev/null || true
+    exit 3
+}
+
+# The watchdog's TERM handler. It ends the sleep or probe in progress
+# (either may already have ended); a stop before any violation was
+# observed exits 0, and one that arrives after a violation was observed
+# still fires.
+watchdog_term() {
+    [[ -z "$s" ]] || kill "$s" 2>/dev/null || true
+    [[ -z "$PROBE" ]] || kill -s KILL -- "-$PROBE" 2>/dev/null || true
+    [[ -z "$why" ]] || watchdog_fire
+    exit 0
 }
 
 # Fails when the execution container has stopped (the watchdog fired).
