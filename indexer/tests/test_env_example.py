@@ -30,19 +30,29 @@ with a reason.
   no longer used still fails.
   Keys read only by shell (the mbsync scripts and template) are listed
   in ``_SHELL_ONLY`` with their reader; each entry must still be in its
-  service's resolved environment and in ``--variables``, but no shell
-  is scanned, so deleting the shell read alone is not caught. A shell
-  or YAML text scan drew a new edge case every review round in #925.
+  service's resolved environment and in ``--variables``. No shell is
+  scanned (a shell or YAML text scan drew a new edge case every review
+  round in #925): instead each entry has a behavioural case in
+  ``mbsync/tests/entrypoint_test.sh`` (#1188 option 3), which runs the
+  readers with the key at a sentinel and fails when the sentinel changes
+  nothing, so a deleted shell read is caught there. The list of keys
+  those cases cover must equal ``_SHELL_ONLY``.
+- The operator configuration's mapping (#1607,
+  ``scripts/config/operator_config.py``) must name every ``.env.example``
+  key, and list every name this module excludes as plumbing as
+  runtime-owned.
 
 It lives in the indexer suite because CI has no repo-root pytest job; it
 reads the mcp-server's sources by path."""
 
 import ast
+import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess  # nosec B404 - runs docker compose with a fixed argv
+import sys
 from pathlib import Path
 
 import pytest
@@ -759,3 +769,55 @@ def test_a_read_replaced_by_a_constant_but_still_validated_is_caught(reverse_cop
 def test_every_env_example_key_a_python_service_reads_reaches_it():
     missing = _undelivered_reads(_REPO)
     assert not missing, f"pass the key to the service through Compose: {sorted(missing)}"
+
+
+# --- #1188: each shell-only key has a behavioural case -----------------------
+
+_ENTRYPOINT_TEST = _REPO / "mbsync" / "tests" / "entrypoint_test.sh"
+_BEHAVIOUR_KEYS = re.compile(r"^SHELL_ONLY_BEHAVIOUR_KEYS=\(([A-Z0-9_ ]+)\)$", re.MULTILINE)
+
+
+def _behaviour_keys(path: Path) -> list[str]:
+    """The keys the behavioural cases cover: the one
+    ``SHELL_ONLY_BEHAVIOUR_KEYS=(...)`` line, written on one line."""
+    found = _BEHAVIOUR_KEYS.findall(path.read_text(encoding="utf-8"))
+    assert len(found) == 1, f"{path}: expected one SHELL_ONLY_BEHAVIOUR_KEYS=(...) line"
+    return found[0].split()
+
+
+def test_every_shell_only_key_has_a_behavioural_case():
+    keys = _behaviour_keys(_ENTRYPOINT_TEST)
+    assert len(keys) == len(set(keys))
+    assert set(keys) == set(_SHELL_ONLY)
+
+
+def test_a_shell_only_key_without_a_behavioural_case_is_caught(tmp_path):
+    copy = tmp_path / "entrypoint_test.sh"
+    text = _ENTRYPOINT_TEST.read_text(encoding="utf-8")
+    copy.write_text(text.replace("KEYS=(BRIDGE_USER ", "KEYS=(", 1), encoding="utf-8")
+    assert set(_SHELL_ONLY) - set(_behaviour_keys(copy)) == {"BRIDGE_USER"}
+
+
+# --- #1607: the operator configuration's mapping -----------------------------
+
+
+def _operator_config():
+    path = _REPO / "scripts" / "config" / "operator_config.py"
+    spec = importlib.util.spec_from_file_location("operator_config", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses look the module up by name while the class is built.
+    sys.modules["operator_config"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_every_plumbing_name_is_runtime_owned_in_the_mapping():
+    runtime_owned = {name for name, _ in _operator_config().RUNTIME_OWNED}
+    plumbing = set(_NOT_DOCUMENTED) | {n for names in _NOT_READ_BY_PYTHON.values() for n in names}
+    assert plumbing <= runtime_owned, sorted(plumbing - runtime_owned)
+
+
+def test_the_mapping_names_every_env_example_key():
+    mapped = {s.env for s in _operator_config().MAPPING}
+    assert mapped == _example_keys(_REPO / ".env.example")

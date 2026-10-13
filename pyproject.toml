@@ -5,6 +5,9 @@
 [tool.ruff]
 target-version = "py314"
 line-length = 100
+# The operator configuration translator runs on the host's Python, 3.11
+# or later (#1607), so its syntax must stay 3.11's.
+per-file-target-version = { "scripts/config/**" = "py311" }
 
 [tool.ruff.lint]
 select = [
