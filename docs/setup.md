@@ -977,7 +977,11 @@ the accounts:
   `/accounts/<its scope_uuid>` for any other. An enabled account at
   `/maildir` is required while the indexer reads only that one (#1605).
 - Each account has its own `password_file`, shared with no other
-  account and no model key.
+  account and no model key. A password file is never a model key's
+  conventional file (`.secrets/embed_api_key.txt`,
+  `.secrets/inference_api_key.txt`, `.secrets/rerank_api_key.txt`), and
+  an `api_key_file` never `.secrets/bridge_pass.txt`, even when that
+  file's own setting points elsewhere.
 - A `proton-bridge` account has a `[accounts.proton_bridge]` table and
   takes exclusions only: a non-empty `sync.mailboxes.include` is
   refused, and `exclude` must keep `All Mail`, `Labels/*` and `Starred`.
@@ -1067,7 +1071,7 @@ largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
 | `accounts[].name` | required | text | none: a display name, never an identifier | - |
 | `accounts[].enabled` | true | true or false | which accounts get a collector in compose.accounts.yml; disabling keeps the data | recreate the collector |
 | `accounts[].maildir_root` | required | /maildir (one account at most) or /accounts/<scope_uuid> | /maildir: today's projection (compose.env); /accounts/<scope_uuid>: its collector only, the indexer mount is #1605 | - |
-| `accounts[].password_file` | required | path, relative to config/; no other account's or model key's | the collector's password secret (bridge_pass) | recreate the collector |
+| `accounts[].password_file` | required | path, relative to config/; no other account's or model key's, nor a model key's conventional file | the collector's password secret (bridge_pass) | recreate the collector |
 | `accounts[].sync.mailboxes.include` | unset | list of text; empty for proton-bridge | proton-bridge: must be empty; imap: #1606 | - |
 | `accounts[].identity.addresses` | table absent: unconfigured | list of 1 to 1000 addresses; the indexer checks each | config/identity.toml for the indexer (the account at /maildir) | restart indexer |
 | `accounts[].proton_bridge.declared_address_scope` | unverified | one of combined, split, unverified | none until #1593 | - |
@@ -1075,9 +1079,9 @@ largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
 | `accounts[].imap.folder_roles.sent` | unset | text | none until #1606 | - |
 | `accounts[].imap.folder_roles.drafts` | unset | text | none until #1606 | - |
 | `accounts[].imap.folder_roles.spam` | unset | text | none until #1606 | - |
-| `global.embedding.api_key_file` | ../.secrets/embed_api_key.txt | path, relative to config/ | the embed_api_key secret (indexer, mcp-server) | recreate indexer and mcp-server |
-| `global.inference.api_key_file` | ../.secrets/inference_api_key.txt | path, relative to config/ | the inference_api_key secret (mcp-server) | recreate mcp-server |
-| `global.reranking.api_key_file` | ../.secrets/rerank_api_key.txt | path, relative to config/ | the rerank_api_key secret (mcp-server) | recreate mcp-server |
+| `global.embedding.api_key_file` | ../.secrets/embed_api_key.txt | path, relative to config/; not .secrets/bridge_pass.txt | the embed_api_key secret (indexer, mcp-server) | recreate indexer and mcp-server |
+| `global.inference.api_key_file` | ../.secrets/inference_api_key.txt | path, relative to config/; not .secrets/bridge_pass.txt | the inference_api_key secret (mcp-server) | recreate mcp-server |
+| `global.reranking.api_key_file` | ../.secrets/rerank_api_key.txt | path, relative to config/; not .secrets/bridge_pass.txt | the rerank_api_key secret (mcp-server) | recreate mcp-server |
 | `global.classification.authority.counsel.domains` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
 | `global.classification.authority.counsel.addresses` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |
 | `global.classification.authority.management.domains` | unset | list of text, at most 10000 | config/authority.toml for the indexer | restart indexer |

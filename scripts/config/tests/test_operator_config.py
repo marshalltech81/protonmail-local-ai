@@ -661,6 +661,42 @@ class Refusals(unittest.TestCase):
             "API key file: each account has its own secret.",
         )
 
+    def test_a_conventional_file_of_another_role_is_refused(self) -> None:
+        # Review round 4: the shared-secret check sees only the paths in
+        # use, so with the owner configured elsewhere a key file could be
+        # .secrets/bridge_pass.txt, or a password file a model key's file.
+        for layer in ("embedding", "inference", "reranking"):
+            with self.subTest(layer):
+                data = fixture()
+                data["accounts"][0]["password_file"] = "../.secrets/bridge_pass_elsewhere.txt"
+                data["global"].setdefault(layer, {})["api_key_file"] = "../.secrets/bridge_pass.txt"
+                self.assert_refused(
+                    data,
+                    f"global.{layer}.api_key_file is the Bridge password's file "
+                    "(.secrets/bridge_pass.txt): each secret goes only where it belongs.",
+                )
+        for name in ("embed_api_key", "inference_api_key", "rerank_api_key"):
+            with self.subTest(name):
+                data = fixture()
+                for layer in ("embedding", "inference", "reranking"):
+                    data["global"].setdefault(layer, {})["api_key_file"] = (
+                        f"../.secrets/{layer}_elsewhere.txt"
+                    )
+                data["accounts"][0]["password_file"] = f"../.secrets/{name}.txt"
+                self.assert_refused(
+                    data,
+                    "accounts[0].password_file is a model API key's file "
+                    "(.secrets/embed_api_key.txt, .secrets/inference_api_key.txt, "
+                    ".secrets/rerank_api_key.txt): each secret goes only where it belongs.",
+                )
+        # Within a role the conventional file stays usable: a second
+        # account may use .secrets/bridge_pass.txt, and two layers one key.
+        data = fixture()
+        data["accounts"][0]["password_file"] = "../.secrets/bridge_pass_elsewhere.txt"
+        data["accounts"].append(second_account(password_file="../.secrets/bridge_pass.txt"))
+        data["global"].setdefault("reranking", {})["api_key_file"] = "../.secrets/embed_api_key.txt"
+        checked(data)
+
     def test_an_enabled_imap_account_is_refused_and_a_disabled_one_accepted(self) -> None:
         imap = second_account(
             provider="imap",

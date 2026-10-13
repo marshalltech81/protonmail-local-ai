@@ -72,6 +72,14 @@ LEGACY_ROOT = "/maildir"
 # the MCP bearer token (and the header file an older setup left), read by
 # the client helpers and mounted in mcp-server only.
 RESERVED_SECRET_FILES = (".secrets/mcp_auth_token.txt", ".secrets/mcp_client_headers.txt")
+# Each role's conventional file (make init-secrets, docs/setup.md), refused
+# in the other role even when its own role is configured elsewhere.
+PASSWORD_SECRET_FILES = (".secrets/bridge_pass.txt",)
+MODEL_KEY_SECRET_FILES = (
+    ".secrets/embed_api_key.txt",
+    ".secrets/inference_api_key.txt",
+    ".secrets/rerank_api_key.txt",
+)
 # .env.example's placeholder, which scripts/validate-env.sh refuses too.
 PLACEHOLDER_USERNAME = "your@proton.me"
 PROTON = "proton-bridge"
@@ -581,7 +589,11 @@ def validate(data: dict[str, Any], base: Path) -> dict[str, Any]:
     config_global = _check_table(data["global"], GLOBAL, "global", base)
     _check_model_layers(config_global)
     for layer in ("embedding", "inference", "reranking"):
-        _check_not_reserved(config_global[layer]["api_key_file"], f"global.{layer}.api_key_file")
+        key_file = config_global[layer]["api_key_file"]
+        _check_not_reserved(key_file, f"global.{layer}.api_key_file")
+        _check_not_conventional(
+            key_file, f"global.{layer}.api_key_file", PASSWORD_SECRET_FILES, "the Bridge password's"
+        )
     _check_inference_budget(config_global["inference"])
     _check_chunking(config_global["indexer"]["chunking"])
     _check_authority(config_global["classification"]["authority"])
@@ -660,6 +672,13 @@ def _check_not_reserved(path: Path, key: str) -> None:
         raise ConfigError(
             f"{key} is a reserved credential file ({', '.join(RESERVED_SECRET_FILES)}): "
             "each secret goes only where it belongs."
+        )
+
+
+def _check_not_conventional(path: Path, key: str, names: tuple[str, ...], role: str) -> None:
+    if _any_same(_FileKey.of(path), [_FileKey.of(REPO_ROOT / n) for n in names]):
+        raise ConfigError(
+            f"{key} is {role} file ({', '.join(names)}): each secret goes only where it belongs."
         )
 
 
@@ -802,6 +821,12 @@ def _check_accounts(accounts: list[dict[str, Any]], config_global: dict[str, Any
                 f"{path}.password_file is another account's password file or a model API key file: "
                 "each account has its own secret."
             )
+        _check_not_conventional(
+            account["password_file"],
+            f"{path}.password_file",
+            MODEL_KEY_SECRET_FILES,
+            "a model API key's",
+        )
         password_files.append(password)
         if account["provider"] == IMAP:
             if account["enabled"]:
@@ -1063,7 +1088,13 @@ _DOC_DEFAULTS = {
 }
 _DOC_VALIDATION = {
     "accounts[].maildir_root": f"{LEGACY_ROOT} (one account at most) or /accounts/<scope_uuid>",
-    "accounts[].password_file": "path, relative to config/; no other account's or model key's",
+    "accounts[].password_file": (
+        "path, relative to config/; no other account's or model key's, "
+        "nor a model key's conventional file"
+    ),
+    "global.embedding.api_key_file": "path, relative to config/; not .secrets/bridge_pass.txt",  # pragma: allowlist secret
+    "global.inference.api_key_file": "path, relative to config/; not .secrets/bridge_pass.txt",  # pragma: allowlist secret
+    "global.reranking.api_key_file": "path, relative to config/; not .secrets/bridge_pass.txt",  # pragma: allowlist secret
     "accounts[].scope_uuid": "UUID, canonical lower case; unique",
     "accounts[].provider": "one of proton-bridge, imap (imap cannot be enabled until #1606)",
     "accounts[].sync.mailboxes.include": "list of text; empty for proton-bridge",
