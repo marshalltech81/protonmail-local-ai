@@ -1285,12 +1285,19 @@ to. Relocating the root alone keeps every occurrence.
   hash, so a file binds only to the occurrence of its own bytes; any
   other active row at that path is retired first, and a new file never
   inherits a retired row.
-- **Observed renames.** `update_filepath` carries the occurrence in the
-  same transaction: a flag rename or a `new`/`cur` move keeps it (path,
-  flags and last observation updated); a move to another folder, or any
-  change of uniq, retires it and creates the destination's for the same
-  claimant, so the move is atomic. A remap to a byte-identical copy
-  (#1102) moves no occurrence: the copy is a file with its own.
+- **Observed renames.** A watcher rename event (`on_moved`, through
+  `Reconciler.handle_moved` in mirror mode) carries the occurrence in
+  the same transaction as `update_filepath`: a flag rename or a
+  `new`/`cur` move keeps it (path, flags and last observation updated);
+  a move to another folder, or any change of uniq, retires it and
+  creates the destination's for the same claimant, so the move is
+  atomic. Nothing else moves or retires an occurrence: a sweep that
+  finds a renamed file by its uniq alone has not seen its bytes, a remap
+  to a byte-identical copy (#1102) moves to a file with its own, and a
+  file that vanished is absence a sweep cannot establish (decision 47).
+  Those are missed moves and removals, so an active row can name a path
+  that no longer holds its file until completeness-gated reconciliation
+  (#1567) finds them.
 - **Columns.** `state` (`active` / `retired`) with `retired_at` as the
   retirement mark; a retired row keeps its locator for diagnostics.
   `provenance` records how the row was created (`parse`, an observed

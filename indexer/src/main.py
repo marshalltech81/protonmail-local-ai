@@ -1158,7 +1158,12 @@ class MaildirHandler(FileSystemEventHandler):
                 try:
                     leftover_tombstone = restored and self.db.has_pending_deletion(src_path)
                     self.db.update_filepath(
-                        src_path, dest_path, folder=folder_change, clear_tombstone=restored
+                        src_path,
+                        dest_path,
+                        folder=folder_change,
+                        clear_tombstone=restored,
+                        # An observed rename event: the occurrence follows (#1566).
+                        move_occurrence=True,
                     )
                 except Exception as e:
                     log.error("update_filepath failed on rename: %s", type(e).__name__)

@@ -41,6 +41,7 @@ three-frame TIFF a frame past it.
 """
 
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -83,12 +84,12 @@ BASELINE_ACCOUNT_SCOPE = "00000000-0000-4000-8000-00000000ba5e"
 
 def baseline_account(out_dir: Path) -> AccountConfig:
     """The account of the index ``build`` writes under ``out_dir``, whose
-    Maildir is ``out_dir / "maildir"``, made absolute (occurrence
-    locators need an absolute root)."""
+    Maildir is ``out_dir / "maildir"``, made absolute with parent
+    segments folded (occurrence locators need such a root)."""
     return AccountConfig(
         scope_uuid=BASELINE_ACCOUNT_SCOPE,
         provider=DEFAULT_SOURCE_MODE,
-        maildir_root=out_dir.absolute() / "maildir",
+        maildir_root=Path(os.path.abspath(out_dir)) / "maildir",
     )
 
 
@@ -214,9 +215,10 @@ def build(
     ``RuntimeError`` if any message failed to index, so a broken corpus
     or pipeline fails loudly rather than producing a partial baseline.
     """
-    # Absolute, so the Maildir paths the index stores are too: occurrence
-    # locators refuse relative paths (the CLI may be given a relative one).
-    out_dir = out_dir.absolute()
+    # Absolute with parent segments folded, so the Maildir paths the index
+    # stores are too: occurrence locators refuse relative paths and ``..``
+    # (the CLI may be given either).
+    out_dir = Path(os.path.abspath(out_dir))
     # A leftover index would make ``initial_index`` skip already-indexed
     # files and silently reuse stale state.
     if out_dir.exists() and any(out_dir.iterdir()):

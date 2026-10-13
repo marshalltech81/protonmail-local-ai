@@ -1,5 +1,7 @@
 # Secrets — never commit these
 .env
+# A copy of .env that an interrupted scripts/init-account-scope.sh can leave
+.env.account-scope.*
 .env.eval
 .secrets/
 *.pem

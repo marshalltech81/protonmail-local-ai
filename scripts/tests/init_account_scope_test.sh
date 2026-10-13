@@ -142,6 +142,15 @@ fails_without_env_file() {
     [[ ! -e "$ROOT/.env" ]]
 }
 
+# An interrupted run can leave the temporary copy of .env in the
+# checkout; it must be ignored as .env is (Codex round 3 on #1601).
+the_temporary_copy_is_ignored() {
+    local repo
+    repo="$(dirname "$(dirname "$SCRIPT")")"
+    grep -qF '.env.account-scope.' "$SCRIPT"
+    git -C "$repo" check-ignore -q .env.account-scope.AbC123
+}
+
 generated_value_passes_the_validator_rule() {
     local scope
     setup $'ACCOUNT_SCOPE=\n'
@@ -153,6 +162,7 @@ generated_value_passes_the_validator_rule() {
 }
 
 check "appends a UUID when .env has no ACCOUNT_SCOPE line" appends_a_uuid_when_absent
+check "the temporary copy of .env is ignored" the_temporary_copy_is_ignored
 check "fills the empty line .env.example ships, keeping the file mode" \
     fills_the_empty_line_from_env_example_in_place
 check "never replaces a value, valid or not" never_replaces_a_value

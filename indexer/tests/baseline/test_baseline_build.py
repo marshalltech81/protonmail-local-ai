@@ -306,7 +306,10 @@ class TestBuild:
         and the Maildir paths are, since occurrence locators need absolute
         paths (#1566, Codex round 1 on #1601)."""
         monkeypatch.chdir(tmp_path)
-        out = Path("out")
+        # With a parent segment as well, which the locator also refuses
+        # unless it is folded (Codex round 3 on #1601).
+        (tmp_path / "sub").mkdir()
+        out = Path("sub/../out")
         real_initial_index = main.initial_index
         seen: list[dict | None] = []
 

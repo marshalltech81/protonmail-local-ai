@@ -113,6 +113,11 @@ class TestConfiguration:
         working directory once, so the walk's paths are absolute too."""
         monkeypatch.chdir(tmp_path)
         assert account_mod.maildir_root_from_env({"MAILDIR_PATH": "mail"}) == tmp_path / "mail"
+        # Parent segments are folded too, or every walked path would keep
+        # a ``..`` the locator refuses (Codex round 3 on #1601).
+        root = account_mod.maildir_root_from_env({"MAILDIR_PATH": "../x/./mail"})
+        assert root == tmp_path.parent / "x" / "mail"
+        assert ".." not in root.parts
 
     def test_unset_source_mode_is_the_default(self):
         config = account_config_from_env(

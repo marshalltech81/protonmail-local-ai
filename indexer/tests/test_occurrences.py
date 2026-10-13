@@ -20,6 +20,7 @@ from src.database import EMBEDDING_DIM, SCHEMA_VERSION, Database
 from src.occurrences import OUTSIDE_ROOT, OccurrenceLocatorError, locate
 from src.parser import _derive_folder, parse_email
 from src.queue import REASON_INITIAL_SCAN, REASON_REPARSE, IndexingQueue
+from src.reconciler import Reconciler, ReconcilerConfig, sweep_paths
 from src.threader import Threader
 from src.timings import TimingAggregator
 
@@ -27,6 +28,13 @@ from tests.conftest import TEST_ACCOUNT, make_mock_embedder, make_thread
 from tests.test_database import _v13_from_fresh
 
 MARKER = "SYNTHETIC_OCCURRENCE_MARKER"
+_CONFIG = ReconcilerConfig(
+    enabled=True,
+    grace_days=1,
+    sweep_interval_secs=3600,
+    max_batch_pct=1.0,
+    force=False,
+)
 _VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
 
 
@@ -277,7 +285,7 @@ class TestRenames:
             (before,) = _active(db)
             dest = root / "INBOX/cur/f1:2,FRS"
             path.rename(dest)
-            db.update_filepath(str(path), str(dest))
+            db.update_filepath(str(path), str(dest), move_occurrence=True)
             (after,) = _occurrences(db)
             assert after["id"] == before["id"]
             assert after["relative_path"] == "INBOX/cur/f1:2,FRS"
@@ -294,7 +302,7 @@ class TestRenames:
             dest = root / "INBOX/cur/f1:2,S"
             dest.parent.mkdir(parents=True, exist_ok=True)
             path.rename(dest)
-            db.update_filepath(str(path), str(dest))
+            db.update_filepath(str(path), str(dest), move_occurrence=True)
             (after,) = _occurrences(db)
             assert after["id"] == before["id"]
             assert after["relative_path"] == "INBOX/cur/f1:2,S"
@@ -306,7 +314,7 @@ class TestRenames:
         try:
             dest = root / "INBOX/cur/f1:2,ST"
             path.rename(dest)
-            db.update_filepath(str(path), str(dest))
+            db.update_filepath(str(path), str(dest), move_occurrence=True)
             (after,) = _occurrences(db)
             assert (after["state"], after["trashed"]) == ("active", 1)
         finally:
@@ -318,7 +326,7 @@ class TestRenames:
             (before,) = _active(db)
             dest = _put(root, "Archive/cur/f1:2,S", path.read_bytes())
             path.unlink()
-            db.update_filepath(str(path), str(dest), folder="Archive")
+            db.update_filepath(str(path), str(dest), folder="Archive", move_occurrence=True)
             old, new = _occurrences(db)
             assert (old["id"], old["state"]) == (before["id"], "retired")
             assert old["retired_at"] is not None
@@ -342,7 +350,7 @@ class TestRenames:
             (before,) = _active(db)
             outside = tmp_path / "maildir2" / "Archive" / "cur" / "f1:2,S"
             with pytest.raises(OccurrenceLocatorError):
-                db.update_filepath(str(path), str(outside), folder="Archive")
+                db.update_filepath(str(path), str(outside), folder="Archive", move_occurrence=True)
             assert _occurrences(db) == [before]
             assert db._conn.execute("SELECT filepath FROM message_thread_map").fetchone()[0] == str(
                 path
@@ -355,7 +363,7 @@ class TestRenames:
         try:
             dest = _put(root, "Archive/cur/f1:2,S", path.read_bytes())
             path.unlink()
-            db.update_filepath(str(path), str(dest), folder="Archive")
+            db.update_filepath(str(path), str(dest), folder="Archive", move_occurrence=True)
             (retired,) = [o for o in _occurrences(db) if o["state"] == "retired"]
             # Other bytes arrive at the retired path: a new row for them.
             _put(root, "INBOX/cur/f1:2,S", _eml("other@example.test"))
@@ -378,6 +386,45 @@ class TestRenames:
             assert back[0]["claimant_id"] == retired["claimant_id"]
             assert back[0]["id"] not in {retired["id"], fresh[0]["id"]}
             assert [o for o in _occurrences(db) if o["id"] == retired["id"]] == [retired]
+        finally:
+            db.close()
+
+    def test_an_observed_rename_event_carries_the_occurrence(self, tmp_path):
+        """The watcher's rename event reaches ``update_filepath`` through
+        ``Reconciler.handle_moved`` (mirror mode) as an observed move."""
+        db, root, path = self._one(tmp_path)
+        try:
+            (before,) = _active(db)
+            dest = root / "INBOX/cur/f1:2,FS"
+            path.rename(dest)
+            Reconciler(db, make_mock_embedder(_VECTOR), _CONFIG, maildir_root=root).handle_moved(
+                str(path), str(dest)
+            )
+            (after,) = _occurrences(db)
+            assert (after["id"], after["relative_path"]) == (before["id"], "INBOX/cur/f1:2,FS")
+        finally:
+            db.close()
+
+    @pytest.mark.parametrize("sweep", ["startup", "reconciler"])
+    def test_a_rename_inferred_by_a_sweep_moves_no_occurrence(self, tmp_path, sweep):
+        """A sweep finds a renamed file by its uniq alone, without the
+        bytes: that is a missed move, left to completeness-gated
+        reconciliation (#1567), never bound to the claimant unverified
+        (Codex round 3 on #1601)."""
+        db, root, path = self._one(tmp_path)
+        try:
+            before = _occurrences(db)
+            dest = root / "INBOX/cur/f1:2,FS"
+            path.rename(dest)
+            if sweep == "startup":
+                sweep_paths(db, maildir_root=root)
+            else:
+                Reconciler(db, make_mock_embedder(_VECTOR), _CONFIG, maildir_root=root).sweep()
+            # The old columns follow it as before; the occurrence does not.
+            assert db._conn.execute("SELECT filepath FROM message_thread_map").fetchone()[0] == str(
+                dest
+            )
+            assert _occurrences(db) == before
         finally:
             db.close()
 
@@ -437,7 +484,7 @@ def _v13_index(tmp_path: Path, root: Path) -> tuple[Path, dict]:
     # Trashed after indexing, as mbsync flags a deletion.
     trashed = b.with_name("s2:2,FT")
     b.rename(trashed)
-    db.update_filepath(str(b), str(trashed))
+    db.update_filepath(str(b), str(trashed), move_occurrence=True)
     b = trashed
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     queue.enqueue(str(dead), REASON_INITIAL_SCAN)
@@ -626,7 +673,7 @@ class TestMigrationV14:
             a = before["paths"]["a"]
             dest = a.with_name("s1:2,FS")
             a.rename(dest)
-            db.update_filepath(str(a), str(dest))
+            db.update_filepath(str(a), str(dest), move_occurrence=True)
             assert [o["relative_path"] for o in _occurrences(db)] == [
                 "Folders/.Clients/cur/s2:2,FT"
             ]

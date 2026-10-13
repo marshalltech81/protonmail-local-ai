@@ -4439,7 +4439,7 @@ class Database:
         *,
         folder: str | None = None,
         clear_tombstone: bool = False,
-        move_occurrence: bool = True,
+        move_occurrence: bool = False,
     ) -> None:
         """Update message_thread_map, indexed_files and the queue row after a Maildir rename.
 
@@ -4462,10 +4462,13 @@ class Database:
         ``db.transaction()`` (as ``remap_to_identical_copy`` uses it)
         instead of failing on a nested ``BEGIN``.
 
-        The file's occurrence moves with it (#1566, ``_move_occurrence``)
-        in the same transaction. ``move_occurrence=False`` is for a
-        caller whose ``old_path`` was not renamed to ``new_path``: a remap
-        to a byte-identical copy, which is a file with its own occurrence.
+        ``move_occurrence=True`` is for an observed rename (a watcher
+        event): the file's occurrence moves with it (#1566,
+        ``_move_occurrence``) in the same transaction. Every other caller
+        leaves occurrences alone: a sweep that found the file by its uniq
+        alone has not seen its bytes, and a remap to a byte-identical copy
+        moves to a file with its own occurrence. Those are missed moves,
+        left to completeness-gated reconciliation (#1567).
         """
         if old_path == new_path:
             return

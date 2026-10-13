@@ -20,6 +20,7 @@ the same table, so the two cannot drift.
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from collections.abc import Mapping
@@ -141,10 +142,11 @@ def account_config_from_env(environ: Mapping[str, str], *, maildir_root: Path) -
 
 def maildir_root_from_env(environ: Mapping[str, str]) -> Path:
     """``MAILDIR_PATH``, or the default the indexer uses, made absolute
-    against the working directory: occurrence locators are relative to
-    an absolute root (``occurrences.locate``), and the Maildir walk
-    yields paths under it."""
-    return Path(environ.get("MAILDIR_PATH", DEFAULT_MAILDIR_PATH)).absolute()
+    against the working directory with ``.`` and ``..`` segments folded:
+    occurrence locators are relative to an absolute root with no parent
+    segment (``occurrences.locate``), and the Maildir walk yields paths
+    under it."""
+    return Path(os.path.abspath(environ.get("MAILDIR_PATH", DEFAULT_MAILDIR_PATH)))
 
 
 def register_account_functions(conn: sqlite3.Connection, account: AccountConfig) -> None:
