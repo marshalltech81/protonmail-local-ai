@@ -136,6 +136,56 @@ class TestWalkRequeuesStaleContent:
         finally:
             box.close()
 
+    def test_the_same_content_recreated_after_retirement_rebinds(self, tmp_path):
+        """Round-8 P1 (occurrence_scan.py ~420): a complete scan retires
+        an occurrence whose file vanished, and the same bytes come back
+        later at the same path with a new mtime (mbsync sets it from
+        IMAP's INTERNALDATE, so a redelivery or a restore gets a fresh
+        one). The retired occurrence's stale ``indexed_files`` row must
+        not make the watcher or the walk skip the path forever: the
+        freshness check (not ``_hash_unindexed``, which still only hashes
+        a trashed or dead-lettered file) is what unsticks this, since a
+        metadata mismatch here means the walk's own gate no longer
+        trusts the record."""
+        box = Box(tmp_path)
+        try:
+            raw = _eml("returning@example.test")
+            path = box.put("INBOX/cur/w4:2,S", raw)
+            box.index(path)
+            before_claimant = box.occurrences()[0]["claimant_id"]
+            recorded = box.db.file_identity(str(path))
+            path.unlink()
+            scan_occurrences(box.db, box.root)
+            assert box.db.find_active_occurrence(str(path)) is None
+            # Still indexed (stale): retiring an occurrence never touches
+            # indexed_files.
+            assert box.db.is_indexed(str(path))
+
+            path.write_bytes(raw)
+            # A new mtime, deterministically different from the recorded
+            # one (mbsync sets it from IMAP's INTERNALDATE on a
+            # redelivery or restore, not from "now").
+            os.utime(path, ns=(recorded["mtime_ns"] + 1, recorded["mtime_ns"] + 1))
+
+            queue = IndexingQueue(box.db, max_attempts=3, base_backoff_seconds=0)
+            enqueued = main._enqueue_unindexed_messages(box.db, queue, box.root, "rescan")
+            assert enqueued == 1
+            with patch.object(main, "MAILDIR_PATH", box.root):
+                main._drain_queue_batched(
+                    box.db,
+                    make_mock_embedder(_VECTOR),
+                    Threader(box.db),
+                    queue,
+                    batch_size=8,
+                    timing_aggregator=TimingAggregator(window=4),
+                )
+
+            after = box.db.find_active_occurrence(str(path))
+            assert after is not None
+            assert after["claimant_id"] == before_claimant
+        finally:
+            box.close()
+
 
 class TestWatcherDestinationAdmission:
     """main.py's on_moved Case 2 (~1334): the same freshness check gates
