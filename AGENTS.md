@@ -1118,7 +1118,7 @@ Notes:
 - when coverage drops, add tests rather than lowering the threshold or widening `omit`
 - CI runs `pytest --cov` in `.github/workflows/tests.yml` and uploads `coverage.xml` as an artifact per service
 - CI runs both suites in parallel with `pytest-xdist` (`-n auto`); local
-  runs stay serial unless `-n` is passed. An indexer test whose outcome
+  runs stay serial unless `-n` is passed. A service test whose outcome
   depends on the CPU or wall-clock time it gets (a real extractor child
   reaching one limit before another, a wall-clock bound on bounded work)
   carries `@pytest.mark.serial`: CI runs those after the parallel pass,
