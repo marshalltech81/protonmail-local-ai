@@ -1282,20 +1282,21 @@ match as readily as genuine ones, and a value matches every ID that
 contains it (T9).
 #1313 proposes accepting `X-Pm-Internal-Id` as a logical identity
 under a validated policy; this section is the evidence that proposal
-waits on (#1316). Three kinds of evidence are kept apart, and only the
-second runs anything:
+waits on (#1316). Four kinds of evidence are kept apart:
 
 - **Source review, not executed:** reading Bridge
   `b9c5dac1651437100c40896dacd778a0518a26f2` and its pinned Gluon
   `7e800978ab4a9942829eb6116e33ea0278c03e91` (and the `go-message`
   fork Bridge pins). Says what the code is written to do, not what a
   running Bridge delivers.
+- **Compiled harness:** that upstream code built from source and run on
+  synthetic input in an isolated container (#1583), against Gluon's
+  fake connector or the go-proton-api fake server, never Proton.
 - **Tests of this repository's code**, on synthetic files.
-- **Unresolved:** needs the upstream code run in a local harness
-  (#1583), a live synthetic account (#1584), or a mechanism this
-  repository does not have yet (#1313, #1317, #1566).
+- **Unresolved:** needs a live synthetic account (#1584), or a
+  mechanism this repository does not have yet (#1313, #1317, #1566).
 
-No row describes an actual Bridge binary.
+No row describes an actual Bridge binary or a live account.
 
 **Source review, not executed.**
 
@@ -1305,13 +1306,59 @@ No row describes an actual Bridge binary.
 | S2 | A built message without a Message-ID gets a synthesized one. | `build.go` `setMessageIDIfNeeded` |
 | S3 | Multipart builds use random boundaries, so one Proton message can be built as different bytes. | `build.go` `newBoundary` |
 | S4 | A created message gets one Gluon ID shared by all its mailboxes; `X-Pm-Gluon-Id` is prepended to the literal without removing existing fields of that name. | Gluon `internal/backend/connector_updates.go` `applyMessagesCreated`, `rfc822/header.go` `SetHeaderValue` |
-| S5 | A content update equal to the stored literal, byte for byte or by `CompareLiterals` (a normalized comparison of content and of every part's headers that ignores MIME boundaries and `X-Pm-Gluon-Id`), keeps the Gluon ID and the memberships it stays in (so their UIDs), adding and removing only the mailboxes the update changes; any other gets a new Gluon ID. | `connector_updates.go` (`applyMessageMailboxesOnlyUpdate`), `rfc822/hash.go` |
+| S5 | A content update equal to the stored literal, byte for byte or by `CompareLiterals` (a normalized comparison of content and of every part's headers that ignores MIME boundaries and `X-Pm-Gluon-Id`), keeps the Gluon ID and the memberships it stays in (so their UIDs), adding and removing only the mailboxes the update changes; any other gets a new Gluon ID. The comparison reads the stored literal from Gluon's cache: when it is not cached, any update gets a new Gluon ID (H7). | `connector_updates.go` (`applyMessageUpdated`, `applyMessageMailboxesOnlyUpdate`), `rfc822/hash.go` |
 | S6 | Label and flag events update mailboxes only; draft and sent content events rebuild the literal. A failed build, at initial sync or on an event, publishes nothing. | Bridge `internal/services/imapservice/service_message_events.go`, `internal/services/syncservice/stage_build.go` |
 | S7 | A failed APPEND or import whose literal Gluon can parse is stored unchanged in `Recovered Messages` (listed only when non-empty), with no `X-Pm-Gluon-Id` added, unless a literal with the same `GetMessageHash` is already there; that hash leaves out `Date`, `Message-Id` and `X-Pm-*`. A literal Gluon cannot parse is not stored there: the recovery returns the parse error first. Nor is an APPEND that fails as over the size limit (`ErrMessageSizeExceedsLimits`): `Append` returns before any recovery. | Gluon `internal/state/mailbox.go` `Append`, `internal/state/actions.go` `actionCreateRecoveredMessage`, `internal/utils/message_hashmap.go`, `internal/state/state.go` `List` |
 | S8 | A lost recovery literal is an error (never refetched). Any other lost literal is refetched from Bridge, given `X-Pm-Gluon-Id` (S4) and stored; a failed fetch, header write or store is an error and returns no literal. Moving or copying out of recovery imports it: when Bridge returns a remote ID already known locally, the existing message is used and nothing is stored; otherwise the literal Bridge returns is parsed, given `X-Pm-Gluon-Id` and stored, and a failure at any of those steps is an error that stores nothing. | `state.go` `getLiteral`, `actions.go` `actionImportRecoveredMessage` |
 | S9 | An APPEND outside Drafts carrying an existing, undeleted message's `X-Pm-Gluon-Id` adds that message to the mailbox without comparing bytes; Drafts erases the header and creates a message, and when the erase fails it logs the error and creates the message from the original literal, header included. | Gluon `internal/state/mailbox.go` `AppendRegular` |
 | S10 | Any body-section FETCH, `BODY.PEEK[HEADER.FIELDS ...]` included, loads the full literal; `PEEK` does not set `\Seen`. `EXAMINE` is read-only; `UNSELECT` does not expunge; `CLOSE` expunges unless read-only. | `internal/state/mailbox_fetch.go`, `state.go`, `internal/session/handle_close.go`, `handle_unselect.go` |
 | S11 | A mailbox snapshot takes UID, `\Recent` and `\Deleted` per mailbox, other flags from a table keyed by message. | `internal/db_impl/sqlite3/read_ops.go` |
+
+**Compiled harness, not live.** Run on 2026-10-12 by
+`mbsync/tests/upstream/run.sh` (#1583, owner decision of that date),
+which also records how every input was obtained. Gluon and Bridge are
+built from the commits above with Go 1.26.7, the toolchain both
+`go.mod` files name (linux-arm64 archive SHA-256
+`5a4ec883379d51ee9ce1040d5e87f8d35e20387574dd8c947feb01eabc3c1b37`, as
+go.dev publishes it). Modules are checked against each unchanged
+`go.sum` (SHA-256 Gluon
+`57ec6e6d7201faca75cf616fdd1d691d45065b6d5730c6400fa6af7a9637e76a`,
+Bridge `e41dcc08911ed850cf72a4f5d2f5a754e1e907ac5046a696d35e5a92a3ae8dfd`)
+and by `go mod verify`. The container starts from the
+`debian:trixie-slim` digest `mbsync/Dockerfile` pins
+(`sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f`;
+arm64 image ID
+`sha256:c3f38b5c1e1e5b416d5b48fb6b3edd3f6ed640b56f1dbf956548df03e66b4c95`;
+both as docker-library/repo-info commit
+`631ff15a31ac5d63781079d695ade706e65708c5` records them) and adds 89
+Debian packages from snapshot `20261005T000000Z`, among them isync
+1.5.1-1 (SHA-256
+`a6a579e7a72831c6c22344d31d37bb1657f25b2f7c92ebd215297b65305940d3`, the
+version the mbsync image installs). Each package is checked against an
+index whose `InRelease` signature gpgv verified with the base image's
+archive keyring. Builds
+and runs have no network (`GOPROXY=off`, `-mod=readonly`,
+`GOTOOLCHAIN=local`) and run as a non-root user with all capabilities
+dropped. Gluon runs its own test server with its fake (`Dummy`)
+connector, wrapped to count connector calls and store reads; Bridge runs
+its message builder and its integration setup against the go-proton-api
+fake server, delivering to isync over TLS. Inputs are synthetic and
+results are counts, byte comparisons, timings and fixed tokens. Limits:
+the fake connector is not Bridge's connector, the fake server is not
+Proton, and the results hold for these commits, not a released binary.
+
+| # | Item (#1583) | Result | Rows |
+|---|---|---|---|
+| H1 | 1, builder | Bridge's builder with the sync's job options, given `X-Pm-Internal-Id` fields in the parsed headers: none, one equal to the Proton ID, one or two other values, or two fields with the other value topmost all give one field equal to the ID; two fields with the ID topmost keep both, so a different value stays below it. | S1 |
+| H2 | 1, fake API | Five imported literals (no identity header, one or two `X-Pm-Internal-Id` fields with other values, an `X-Pm-Gluon-Id` field, both): each of the 5 files isync wrote has one `X-Pm-Internal-Id` equal to its Proton ID and one `X-Pm-Gluon-Id`, the topmost field, and none of the imported values. The fake server keeps only an import's standard fields, so this path cannot reach H1's keep branch or show whether Proton keeps sender-supplied `X-Pm-*` fields (U2). | S1, S4 |
+| H3 | 1, delivery | Each file differs from the literal Bridge served over IMAP: isync wrote LF line endings and added one `X-TUID` field; with both undone the 5 files equal the served literals. A second sync of the same unchanged messages into an empty Maildir gave 0 of 5 byte-identical files, 5 of 5 identical without `X-TUID`. A file's bytes, and so its claimant ID, are not the served bytes and change when a message is synced again. | U3 |
+| H4 | 2 | Eight APPENDs the connector refused, all answered `NO`: a literal with an `X-Pm-Internal-Id` field, an exact repeat, and copies differing only in `Date`, `Message-Id`, `X-Pm-Internal-Id`, an added `X-Pm-Gluon-Id`, `Subject` or body. `Recovered Messages` stored 3 (the first, the `Subject` and the body variant), each byte-equal to what was submitted, the first with its `X-Pm-Internal-Id` field and no `X-Pm-Gluon-Id`. The target mailbox stayed empty. | S7 |
+| H5 | 3 | A recovery literal removed from the store: `FETCH` answers `NO` with 0 connector fetches, and the message stays listed. `COPY` out of recovery: 1 connector create, recovery keeps its copy (still byte-equal to the submission), the target gets the submitted bytes with one `X-Pm-Gluon-Id` prepended. `MOVE`: the same, and recovery is left empty. | S8 |
+| H6 | 4 | APPEND to an ordinary mailbox of a different literal carrying an existing message's `X-Pm-Gluon-Id`: 0 connector creates, 1 add, and the mailbox serves the existing message's bytes, not the appended ones. To a `\Drafts` mailbox: 1 create and a new Gluon ID. An unknown, well-formed Gluon ID: 1 create, and the served literal has 2 `X-Pm-Gluon-Id` fields. | S9, S4 |
+| H7 | 5 | Cache refill (stored literal removed, 1 connector fetch each): when the connector returns the same bytes, the UID and bytes are unchanged; when it returns a rebuild with another MIME boundary (S3), the UID and Gluon ID stay and the served bytes change. An update equivalent by `CompareLiterals` keeps UID, Gluon ID and the stored bytes when the literal is cached, and gets a new Gluon ID and UID when it is not; a byte-identical update (cached) changes nothing; a content change gets a new Gluon ID and UID. | S5, S8 |
+| H8 | 6 | One message in two mailboxes, `\Seen \Flagged \Deleted` stored in the first: the second shows `\Seen` and `\Flagged`, not `\Deleted`. isync wrote one file each under `cur`, flags `FST` and `FS`. | S11 |
+| H9 | 7 | `EXAMINE` answers `[READ-ONLY]`; `UID FETCH ... BODY.PEEK[HEADER.FIELDS (X-Pm-Internal-Id)]` leaves `\Seen` on 0 of 3 messages; `STORE` answers `NO`; `UNSELECT` keeps all 3 (one `\Deleted`), with 0 connector mutation calls and 0 connector fetches. `CLOSE` after `EXAMINE` keeps 3 with 0 mutations; `CLOSE` after `SELECT` leaves 2, with 1 connector remove call. | S10 |
+| H10 | 8 | 200 messages of about 256 KiB (52,457,470 bytes from the connector); one pass is `EXAMINE`, `UID FETCH 1:* (UID BODY.PEEK[HEADER.FIELDS (X-Pm-Internal-Id)])`, `UNSELECT`. Every pass: 200 responses, 20,518 bytes to the client (6,890 of them header literals), 200 full-literal store reads, 0 connector mutations, `\Seen` on 0. Warm (literals cached): 52,468,070 bytes read from the store, 0 connector fetches. Cold (store emptied): 200 connector fetches and 200 store writes of 52,468,070 bytes. Warm again: as warm. `FETCH` time in two runs: warm 23.8 and 28.7 ms, cold 22.3 and 20.3 ms, warm again 20.8 and 22.4 ms. Peak RSS of the test process (server and client together) in the second run: 296,920 KiB warm (from 197,112), 285,400 cold, 293,160 warm again; the first run's peaks were 22–55 MiB lower. The fake connector serves from memory, so cold time leaves out Bridge's API fetch and build. | S10 |
 
 **Tests of this repository's code.** Test files are under
 `indexer/tests/` unless named otherwise.
@@ -1332,17 +1379,21 @@ No row describes an actual Bridge binary.
 the rows above; they bind #1313's policy, which does not exist yet.
 
 - `X-Pm-Gluon-Id` as a logical identity: it is Gluon-local, changes on
-  unequal content updates and on recovery imports Bridge does not map
-  to a known message (S4, S5, S8), and a client can use it to
-  file an existing message without a byte check (S9).
+  unequal content updates, on equivalent ones whose literal is not
+  cached, and on recovery imports Bridge does not map to a known
+  message (S4, S5, S8, H5, H7), and a client can use it to file an
+  existing message without a byte check (S9, H6).
 - Any identity header in a `Recovered Messages` file, which keeps the
-  submitted bytes (S7); recovery is an untrusted category (#1317).
+  submitted bytes (S7, H4); recovery is an untrusted category (#1317).
+- A file's bytes, or its claimant ID, as the bytes Bridge served or as
+  stable across syncs: isync writes LF line endings and adds an
+  `X-TUID` field whose value differs on each sync (H3).
 - A header's presence in a file whose provenance is not established,
   and a folder name as provenance.
 - Equal bytes or an equal Message-ID as proof of one logical message
   (PLAN.md decision 45).
 - Several `X-Pm-Internal-Id` fields in one file are ambiguous, not
-  accepted. S1 means a Bridge-built file can carry them when the
+  accepted. S1 and H1 mean a Bridge-built file can carry them when the
   topmost matches, so duplication alone does not prove forgery either.
 - A `header_exists` or `header_contains` match on an identity header,
   or its count, as a logical identity or a count of logical messages:
@@ -1353,9 +1404,9 @@ the rows above; they bind #1313's policy, which does not exist yet.
 
 | # | Question | Needs |
 |---|---|---|
-| U1 | Which header shapes (S1, S4) reach mbsync; recovery deduplication counts and bytes, recovery cache loss and COPY versus MOVE out of recovery (S7, S8); the APPEND hint (S9); whether a refill or equivalent update changes bytes under an existing UID (S5, S8); flag scope as mbsync writes it (S11); read-only command behaviour and header-only fetch cost (S10). | #1583 |
+| U1 | The compiled-harness rows (H1–H10) with Bridge's own connector and Proton in place of the fakes: whether Proton keeps sender-supplied `X-Pm-*` fields (H2), what a real cache refill or event rebuild serves under an existing UID (H7), header-only cost when reads miss Gluon's cache and go to Proton (H10), and whether a released Bridge binary behaves as these commits do. | #1584 |
 | U2 | Proton ID stability across moves, labels, draft replacement, send and imports; whether Proton keeps sender-supplied `X-Pm-*` headers; cache rebuild, resync, account re-add, split or combined address mode and primary-address changes; header-only reads of a real label set and races with moves. | #1584 (owner-approved plan first) |
-| U3 | Account namespace, the acceptance rule, binding an observation to the exact retained bytes through the mbsync handoff, logical lookup and counts (header predicates match stored text only, T9), membership generations and partial scans. | #1313, #1317 |
+| U3 | Account namespace, the acceptance rule, binding an observation to the exact retained bytes through the mbsync handoff (the file is not the served literal, H3), logical lookup and counts (header predicates match stored text only, T9), membership generations and partial scans. | #1313, #1317 |
 | U4 | Independent occurrences of equal bytes (own folder and flags); stored flags still come from the file name. | #1566, #1485 |
 
 ## Message time

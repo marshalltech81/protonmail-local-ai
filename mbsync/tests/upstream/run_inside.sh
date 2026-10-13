@@ -1,0 +1,56 @@
+#!/bin/bash
+# Runs as the non-root harness user inside the execution container
+# (--network none, all capabilities dropped, no-new-privileges). Builds
+# and runs the issue #1583 harness tests with the module cache only
+# (GOPROXY=off, -mod=readonly, GOTOOLCHAIN=local). Test output, including
+# any upstream log text, stays in /home/h/logs inside the container; only
+# fixed tokens are printed and only /home/h/out (allowlisted JSON) is
+# copied out by run.sh.
+set -Eeuo pipefail
+
+export HOME=/home/h
+export PATH=/usr/local/go/bin:/usr/bin:/bin
+export GOTOOLCHAIN=local GOPROXY=off GOFLAGS=-mod=readonly GOSUMDB=off GOTELEMETRY=off
+export GOMODCACHE=/home/h/gomodcache GOCACHE=/home/h/gocache CGO_ENABLED=1
+export ISSUE1583_OUT=/home/h/out ISSUE1583_LOGS=/home/h/logs
+readonly DEBUG="${1:-}"
+
+if [[ "$(go env GOVERSION)" != "go1.26.7" ]]; then
+    printf 'inside: unexpected Go version\n' >&2
+    exit 1
+fi
+
+status=0
+
+verify() {
+    local mod="$1"
+    if (cd "/home/h/src/$mod" && go mod download && go mod verify) >"/home/h/logs/$mod-verify.log" 2>&1; then
+        printf '%s go_mod_verify=ok\n' "$mod"
+    else
+        printf '%s go_mod_verify=failed\n' "$mod"
+        status=1
+    fi
+}
+
+run() {
+    local name="$1" mod="$2" pkg="$3" timeout="$4" rc=0
+    (cd "/home/h/src/$mod" && go test -v -count=1 -p 1 -timeout "$timeout" -run '^TestIssue1583' "$pkg") \
+        >"/home/h/logs/$name.log" 2>&1 || rc=$?
+    printf '%s exit=%s\n' "$name" "$rc"
+    # Our test names and verdicts only.
+    grep -oE -- '^--- (PASS|FAIL|SKIP): TestIssue1583[A-Za-z0-9]+' "/home/h/logs/$name.log" || true
+    if [[ "$DEBUG" == "debug" ]]; then
+        # Diagnostics that point at the harness's own source lines.
+        grep -E 'zz_issue1583_([a-z]+_)?test\.go:[0-9]+' "/home/h/logs/$name.log" | head -40 || true
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+        status=1
+    fi
+}
+
+verify gluon
+verify proton-bridge
+run gluon gluon ./tests 30m
+run bridge-builder proton-bridge ./internal/services/imapservice 20m
+run bridge proton-bridge ./internal/bridge 30m
+exit "$status"
