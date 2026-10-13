@@ -53,9 +53,11 @@ UNKNOWN_REASONS = frozenset(
     {"missing", "legacy", "malformed", "unsupported", "account_mismatch", "unreadable"}
 )
 
-_ATTEMPT_ID_RE = re.compile(r"[0-9a-f]{12}-[1-9][0-9]{0,9}", re.ASCII)
+_ATTEMPT_ID_RE = re.compile(r"[0-9a-f]{12}-[1-9][0-9]*", re.ASCII)
 _TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.ASCII)
-_MAX_COUNT = 999_999_999
+# mbsync bounds no interval, count or attempt number below Bash's own
+# 64-bit integers, and SQLite stores no larger one, so that is the bound.
+_MAX_INT = 2**63 - 1
 
 _TOP_KEYS = frozenset(
     {
@@ -129,7 +131,7 @@ def _attempt_id(value: object) -> str:
 
 
 def _positive(value: object) -> int:
-    if type(value) is not int or not 1 <= value <= _MAX_COUNT:
+    if type(value) is not int or not 1 <= value <= _MAX_INT:
         raise _Malformed("positive integer")
     return value
 
@@ -149,7 +151,7 @@ def _terminal(value: object) -> Terminal | None:
     failure_class = record["failure_class"]
     if outcome not in TERMINAL_OUTCOMES:
         raise _Malformed("outcome")
-    if withheld is not None and (type(withheld) is not int or not 0 <= withheld <= _MAX_COUNT):
+    if withheld is not None and (type(withheld) is not int or not 0 <= withheld <= _MAX_INT):
         raise _Malformed("count")
     if outcome == "failed":
         if failure_class not in FAILURE_CLASSES:

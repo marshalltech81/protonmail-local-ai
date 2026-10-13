@@ -130,6 +130,32 @@ class TestParse:
         assert parsed.last_terminal is not None
         assert parsed.last_terminal.withheld_far_side_folders is None
 
+    def test_every_number_mbsync_can_write_is_read(self):
+        """mbsync bounds no interval, count or attempt number below Bash's
+        64-bit integers, so neither does the reader (review round 2): a
+        long SYNC_INTERVAL must not make every publication unknown. Past
+        64 bits, which SQLite cannot store, is malformed."""
+        top = 2**63 - 1
+        data = _failed(2)
+        data["sync_interval_secs"] = 1_000_000_000
+        data["last_terminal"]["withheld_far_side_folders"] = 10**10
+        data["attempt"]["id"] = data["last_terminal"]["attempt_id"] = "0123456789ab-12345678901"
+        status = parse_collection_status(json.dumps(data).encode(), SCOPE)
+        assert isinstance(status, CollectionStatus)
+        assert status.sync_interval_secs == 1_000_000_000
+        assert status.last_terminal is not None
+        assert status.last_terminal.withheld_far_side_folders == 10**10
+        for field in ("sync_interval_secs", "run_deadline_secs"):
+            assert isinstance(
+                parse_collection_status(json.dumps(data | {field: top}).encode(), SCOPE),
+                CollectionStatus,
+            )
+            assert parse_collection_status(
+                json.dumps(data | {field: top + 1}).encode(), SCOPE
+            ) == Unknown("malformed")
+        data["last_terminal"]["withheld_far_side_folders"] = top + 1
+        assert parse_collection_status(json.dumps(data).encode(), SCOPE) == Unknown("malformed")
+
     def test_a_stamp_format_file_is_legacy(self):
         legacy = {"completed_at": "2026-10-12T10:00:00Z", "sync_interval_secs": 60}
         assert parse_collection_status(json.dumps(legacy).encode(), SCOPE) == Unknown("legacy")
@@ -312,7 +338,9 @@ class TestEntrypointAgreement:
     """What mbsync's own functions publish is what the indexer reads: one
     format, written and read by two implementations, cannot drift."""
 
-    def _publish(self, tmp_path: Path, steps: str) -> CollectionStatus | Unknown:
+    def _publish(
+        self, tmp_path: Path, steps: str, interval: int = 60
+    ) -> CollectionStatus | Unknown:
         constants = "\n".join(
             line.removeprefix("readonly ")
             for line in ENTRYPOINT.read_text().splitlines()
@@ -326,7 +354,7 @@ class TestEntrypointAgreement:
                 f'COLLECTION_STATUS_FILE="{tmp_path}/{COLLECTION_STATUS_NAME}"',
                 f'ACCOUNT_SCOPE="{SCOPE}"',
                 "SYNC_DEADLINE_SECONDS=86400",
-                "SYNC_INTERVAL=60",
+                f"SYNC_INTERVAL={interval}",
                 'collection_count=0 collection_attempt_id="" collection_attempt_started_at=""',
                 "collection_last_terminal=null collection_last_success=null",
                 _bash_functions(
@@ -340,8 +368,24 @@ class TestEntrypointAgreement:
                 steps,
             ]
         )
-        subprocess.run(["bash", "-c", script], check=True, capture_output=True, timeout=30)
+        run = subprocess.run(
+            ["bash", "-c", script], check=True, capture_output=True, text=True, timeout=30
+        )
+        assert "WARNING" not in run.stderr
         return read_collection_status(tmp_path, SCOPE)
+
+    def test_long_intervals_and_large_counts_are_read_and_carried(self, tmp_path):
+        """Review round 2: every value mbsync accepts is read back, by the
+        indexer and by mbsync's own restart (no warning, records kept)."""
+        steps = 'begin_collection_attempt\nfinish_collection_attempt failed 10000000000 error "$(collection_now)"'
+        status = self._publish(tmp_path, steps, interval=1_000_000_000)
+        assert isinstance(status, CollectionStatus)
+        assert status.sync_interval_secs == 1_000_000_000
+        assert status.last_terminal is not None
+        assert status.last_terminal.withheld_far_side_folders == 10**10
+        restarted = self._publish(tmp_path, "begin_collection_attempt", interval=1_000_000_000)
+        assert isinstance(restarted, CollectionStatus)
+        assert restarted.last_terminal == status.last_terminal
 
     def test_each_publication_is_read(self, tmp_path):
         status = self._publish(tmp_path, "begin_collection_attempt")

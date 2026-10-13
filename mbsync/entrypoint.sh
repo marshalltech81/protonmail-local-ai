@@ -428,10 +428,11 @@ warn_if_pin_rotation_enabled() {
 # The exact shapes publish_collection_status and finish_collection_attempt
 # write; load_collection_records carries the records of a status file in
 # these shapes only. An attempt ID is its start's boot token and attempt
-# count.
-readonly COLLECTION_ATTEMPT_ID_RE='[0-9a-f]{12}-[1-9][0-9]{0,9}'
+# count. Numbers are not bounded here: the indexer reads any value up to
+# Bash's 64-bit limit, as this start may write it.
+readonly COLLECTION_ATTEMPT_ID_RE='[0-9a-f]{12}-[1-9][0-9]*'
 readonly COLLECTION_TIME_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
-readonly COLLECTION_TERMINAL_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(succeeded|succeeded_with_withheld_folders|failed)\", \"withheld_far_side_folders\": (null|0|[1-9][0-9]{0,8}), \"failure_class\": (null|\"(deadline|killed|error|permission_repair|interrupted)\")\\}\$"
+readonly COLLECTION_TERMINAL_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(succeeded|succeeded_with_withheld_folders|failed)\", \"withheld_far_side_folders\": (null|0|[1-9][0-9]*), \"failure_class\": (null|\"(deadline|killed|error|permission_repair|interrupted)\")\\}\$"
 readonly COLLECTION_SUCCESS_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\"\\}\$"
 
 account_scope_is_canonical() {
@@ -971,7 +972,7 @@ load_collection_records() {
     success="${COLLECTION_SUCCESS_RE#^}"
     success="${success%\$}"
     attempt="\\{\"id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"started_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(in_progress|succeeded|succeeded_with_withheld_folders|failed)\"\\}"
-    re="^\\{\"format\": ${COLLECTION_STATUS_FORMAT}, \"scope_uuid\": \"${ACCOUNT_SCOPE}\", \"run_deadline_secs\": [1-9][0-9]{0,8}, \"sync_interval_secs\": [1-9][0-9]{0,9}, \"attempt\": ${attempt}, \"last_terminal\": (null|${terminal}), \"last_success\": (null|${success})\\}\$"
+    re="^\\{\"format\": ${COLLECTION_STATUS_FORMAT}, \"scope_uuid\": \"${ACCOUNT_SCOPE}\", \"run_deadline_secs\": [1-9][0-9]*, \"sync_interval_secs\": [1-9][0-9]*, \"attempt\": ${attempt}, \"last_terminal\": (null|${terminal}), \"last_success\": (null|${success})\\}\$"
     if [[ -f "$COLLECTION_STATUS_FILE" ]] \
         && IFS= read -r -n 4096 line <"$COLLECTION_STATUS_FILE" \
         && [[ "$line" =~ $re ]]; then
