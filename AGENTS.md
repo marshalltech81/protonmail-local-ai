@@ -1069,11 +1069,15 @@ Notes:
 - for Docker Compose or shell script changes, run the Semgrep job from
   `.github/workflows/security.yml` locally:
   `uvx --from semgrep==1.180.0 semgrep test .semgrep`,
-  `uvx --from semgrep==1.180.0 bash scripts/tests/semgrep_paths_test.sh` and
-  `uvx --from semgrep==1.180.0 semgrep scan --metrics=off --strict --error --config .semgrep/compose.yaml --config .semgrep/shell.yaml .`.
+  `uvx --from semgrep==1.180.0 bash scripts/tests/semgrep_paths_test.sh`,
+  `uvx --from semgrep==1.180.0 semgrep scan --metrics=off --strict --error --config .semgrep/compose.yaml --config .semgrep/shell.yaml .` and
+  `uvx --from semgrep==1.180.0 bash scripts/tests/semgrep_generated_test.sh`.
   The rules in `.semgrep/` encode the hardening and exposure rules
   above and cover every `docker-compose*.yml` and `compose*.yml`
-  overlay (`.yaml` too) and `*.sh` file.
+  overlay (`.yaml` too) and `*.sh` file. The repository scan reads
+  tracked files only, so the last command scans the translator's
+  gitignored `compose.accounts.yml`, generated from synthetic
+  configurations, by explicit path (#1608).
   Fix a finding; allow-list one only with owner approval, as a
   `# nosemgrep: <rule-id>` comment on the reported line with the reason
   beside it. A rule change gets matching cases in its fixture
@@ -1159,7 +1163,7 @@ Notes:
 - a base-image digest bump in `indexer/Dockerfile` or `mcp-server/Dockerfile` (Dependabot's or by hand) moves `PYTHON_IMAGE` in `mbsync/tests/tls_check.sh` with it; `scripts/tests/image_pin_test.sh` (`make test-image-pins`, also in CI) fails while the three differ, since Dependabot does not update the script. The same test fails while `.github/workflows/docker.yml` and `.github/workflows/tests.yml` pass `docker/setup-buildx-action` different `driver-opts: image=moby/buildkit:...` references (#1122): Dependabot does not track a driver option, so a BuildKit bump moves both by hand, together
 - a change to `indexer/java/pom.xml` (Dependabot's or by hand) rewrites `indexer/java/checksums/checksums.sha256` with `make ppt-checksums` in the same PR: the indexer build and the Trivy dependency job check every Maven artifact against it and fail while it lags (#1117). `scripts/tests/maven_checksums_test.sh` (`make test-maven-checksums`, also in CI) fails while the file lacks a line for a pinned artifact or the Maven flags in `indexer/Dockerfile` and `.github/workflows/security.yml` differ from the required set. Never edit a line by hand to make a build pass
 - a `.env.example` setting added, removed or renamed updates `MAPPING` in `scripts/config/operator_config.py` (its TOML key, or a maintenance or runtime-owned entry) and the tables in `docs/setup.md` ("Operator configuration file"); `make test-config` fails until both match `.env.example` (#1607). A new setting only shell reads gets a `_SHELL_ONLY` entry in `indexer/tests/test_env_example.py` and a behavioural case in `mbsync/tests/entrypoint_test.sh` showing its sentinel changes what mbsync does (#1188)
-- Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list
+- Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list. It checks the translator's generated collectors the same way, on synthetic configurations (`scripts/config/tests/synthetic_compose.py`), allowing a declared account's collector only its own password secret, Maildir and state volumes and network (#1608); a change to what `render_compose` writes keeps it passing
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - a PR that adds or removes baseline-corpus messages also regenerates the parser pin (`cd indexer && PARSER_PIN_UPDATE=1 uv run pytest tests/test_parser_pin.py`); its diff must be only the added or removed records, plus the corpus messages after the change renumbered under new file names with no other field changed, since corpus files are numbered in sequence (#1124)
 - `ask_mailbox`, `summarize_thread`, `extract_from_emails` or experimental `brief_issue` / `check_conclusion` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)

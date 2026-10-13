@@ -55,6 +55,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The generated Compose cases run the operator configuration
+      # translator (#1608), on the oldest Python it supports.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
       - name: Run Compose rendering tests
         run: bash scripts/tests/compose_test.sh
 

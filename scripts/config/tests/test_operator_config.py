@@ -1562,6 +1562,15 @@ class Compose(unittest.TestCase):
             self.assertEqual(service["security_opt"], ["no-new-privileges:true"], name)
             self.assertEqual(service["pids_limit"], 128, name)
             self.assertNotIn("ports", service, name)
+        # A collector Compose does not define in docker-compose.yml names
+        # its non-root user, mbsync's UID and GID (mbsync/Dockerfile), as
+        # compose_test.sh requires of every new service (#1608); the
+        # legacy collector stays today's mbsync service.
+        self.assertEqual(services[f"mbsync-{UUID_B}"]["user"], "1001:1001")
+        self.assertNotIn("user", services["mbsync"])
+        dockerfile = (REPO / "mbsync" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertRegex(dockerfile, r"groupadd --gid 1001 mbsync")
+        self.assertRegex(dockerfile, r"useradd --uid 1001 \\\s+--gid 1001")
         self.assertNotEqual(
             generated["secrets"]["bridge_pass"]["file"],
             generated["secrets"][f"bridge_pass_{UUID_B}"]["file"],

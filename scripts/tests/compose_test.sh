@@ -7,8 +7,11 @@ set -Eeuo pipefail
 # The hardening is also checked on the merged config of every overlay
 # combination the Makefile and docs use (#580): Semgrep reads each file on
 # its own, so it cannot see an overlay's ``!reset`` or ``!override``.
+# The same check covers the operator configuration translator's
+# compose.accounts.yml from synthetic configurations (#1608).
 # Uses ``docker compose config``, which needs the Compose CLI but no
-# daemon, images or secret files.
+# daemon, images or secret files, and Python 3.11 or later for the
+# translator.
 #
 # Run: bash scripts/tests/compose_test.sh
 
@@ -107,6 +110,16 @@ def bounded_logging:
         or (.driver == "json-file"
             and ((.options["max-size"] // "") | tostring | test("^[1-9][0-9]*[kmgKMG]?$"))));
 . as $m
+# Generated collectors (#1608): $collectors lists the enabled accounts a
+# configuration declares (scripts/config/tests/synthetic_compose.py),
+# and is empty for the files in the repository. Each account other than
+# the one at /maildir (whose collector is the base mbsync, held to the
+# base below) gets a collector named by its scope UUID, which may use
+# exactly its own password secret, Maildir and state volumes and network.
+| ($collectors[0] | map(select(.maildir_root != "/maildir") | .scope_uuid as $u
+    | {service: "mbsync-\($u)", secret: "bridge_pass_\($u)", # pragma: allowlist secret
+       volumes: {"/maildir": "maildir-\($u)", "/state": "mbsync-state-\($u)"},
+       network: "bridge-net-\($u)", password_file})) as $own
 # Every service and network the base defines is still there; a network
 # keeps its engine name, and no two networks share one, since services
 # join networks by key and the name picks the engine network.
@@ -148,6 +161,53 @@ def bounded_logging:
     | select($base[0].secrets | has($k))
     | select($m.secrets[$k] != $base[0].secrets[$k])
     | "secret \($k): differs from the base"),
+  # Each declared collector is there, starts with no profile active, and
+  # uses only its own secret, volumes (at /maildir and /state) and
+  # network. The new-service checks below still apply to it, except that
+  # it may use its own secret.
+  ($own[] | . as $c | $m.services[$c.service] as $s
+    | if $s == null then "\($c.service): declared collector missing from the merged config"
+      else
+        ($active[0].services[$c.service] as $a
+            | select($a == null or $a.scale == 0 or $a.deploy.replicas == 0)
+            | "\($c.service): declared collector not started by a plain up"),
+        ($s | list("secrets")[] | select(.source != $c.secret)
+            | "\($c.service): uses secret \(.source), not its own"),
+        ($s | list("volumes")[] | select(.type != "volume" or $c.volumes[.target] != .source)
+            | "\($c.service): mounts \(.source // .type) at \(.target), not its own Maildir or state volume"),
+        ($s.networks // {} | keys[] | select(. != $c.network)
+            | "\($c.service): joins network \(.), not its own")
+      end),
+  # Its secret is the password file the account declares, and its network
+  # and volumes are defined as bridge-net and the base volumes are.
+  ($own[] | . as $c
+    | (if ($m.secrets[$c.secret] // {} | del(.name)) != {file: $c.password_file}
+        then "secret \($c.secret): is not the declared password file of \($c.service)" else empty end),
+      (if ($m.networks[$c.network] // {} | {driver, driver_opts, ipam, external})
+            != ($base[0].networks["bridge-net"] | {driver, driver_opts, ipam, external})
+        then "network \($c.network): driver settings differ from bridge-net or it is external"
+        else empty end),
+      ($c.volumes[] | select(($m.volumes[.] // {} | {driver, driver_opts, external})
+            != ($base[0].volumes["maildir-volume"] | {driver, driver_opts, external}))
+        | "volume \(.): driver settings differ from the base volumes or it is external")),
+  # No other service gets the secret, volumes or network of a collector.
+  ($own[] | . as $c | $m.services | to_entries[] | select(.key != $c.service)
+    | .key as $svc | .value
+    | (list("secrets")[] | select(.source == $c.secret)
+        | "\($svc): uses the secret \(.source) of \($c.service)"),
+      (list("volumes")[] | select(.source as $v | $c.volumes | any(.[]; . == $v))
+        | "\($svc): mounts the volume \(.source) of \($c.service)"),
+      (if (.networks // {} | has($c.network)) then "\($svc): joins the network of \($c.service)"
+        else empty end)),
+  # A declared account whose provider is not Proton (imap, #1606) gets
+  # neither the Bridge password nor bridge-net, wherever its Maildir is.
+  ($collectors[0][] | select(.provider != "proton-bridge")
+    | (if .maildir_root == "/maildir" then "mbsync" else "mbsync-\(.scope_uuid)" end) as $svc
+    | $m.services[$svc] // {}
+    | (list("secrets")[] | select(.source == "bridge_pass")
+        | "\($svc): an imap collector uses the Bridge password secret bridge_pass"),
+      (if (.networks // {} | has("bridge-net")) then "\($svc): an imap collector joins bridge-net"
+        else empty end)),
   ($base[0].services as $b
 | $m.services | to_entries[] | .key as $svc | .value as $s | $b[$svc] as $bs
 | (
@@ -184,9 +244,11 @@ def bounded_logging:
         then "joins bridge-net" else empty end),
     # A service the base does not define must name its non-root user (an
     # unset user is the image default, possibly root) and gets no secrets or base volumes.
+    # A declared collector may use its own secret, checked above, and no other.
     (if $bs == null then
         (if $s.user == null then "sets no user" else empty end),
-        (if ($s | list("secrets")) != [] then "uses a secret" else empty end),
+        (if ($s | list("secrets")) != [] and ($own | any(.[]; .service == $svc) | not)
+            then "uses a secret" else empty end),
         ($s | list("volumes")[] | .source // "" | select(. as $v | $base[0].volumes | has($v))
             | "mounts the base volume \(.)")
     else
@@ -231,6 +293,7 @@ expect_merged_hardening() {
     cp "$WORK/config.json" "$WORK/active.json"
     ALL_PROFILES=1 render "$@" || return 1
     jq -r --slurpfile base "$WORK/base.json" --slurpfile active "$WORK/active.json" \
+        --slurpfile collectors "${COLLECTORS:-$WORK/no-collectors.json}" \
         "$HARDENING_VIOLATIONS" "$WORK/config.json" >"$WORK/violations" || return 1
     if [[ -s "$WORK/violations" ]]; then
         cat "$WORK/violations"
@@ -602,6 +665,212 @@ include:
 EOF
 }
 
+# Generated Compose (#1608): the translator's compose.accounts.yml for
+# each synthetic configuration of scripts/config/tests/synthetic_compose.py,
+# with the accounts it declares. #1603's launcher replaces the base
+# mbsync service with the generated collectors: Compose cannot overlay a
+# service defined in full (list fields append and then collide), so the
+# base mbsync is removed first ($WORK/replace-mbsync.yml) and the
+# generated one is held to the base's like any other base service.
+readonly GENERATED_CASES=(one-proton two-proton three-proton)
+UUID_B="00000000-0000-4000-8000-00000000000b"
+UUID_C="00000000-0000-4000-8000-00000000000c"
+readonly UUID_B UUID_C
+
+# The merged hardening check on the generated file of case $1, after the
+# compose files that follow it, with the accounts that case declares.
+expect_generated_hardening() {
+    local case="$1"
+    shift
+    COLLECTORS="$WORK/generated/$case/collectors.json" expect_merged_hardening \
+        "$BASE" "$@" "$WORK/replace-mbsync.yml" "$WORK/generated/$case/compose.accounts.yml"
+}
+
+generated_collectors_keep_the_hardening() {
+    local case
+    for case in "${GENERATED_CASES[@]}"; do
+        expect_generated_hardening "$case" || return 1
+        expect_generated_hardening "$case" "$HARDENED" || return 1
+    done
+    # Every declared collector is in the render: the check saw them all.
+    expect "(.services | keys) == [\"indexer\", \"mbsync\", \"mbsync-$UUID_B\", \"mbsync-$UUID_C\", \"mcp-server\"]"
+}
+
+# Negative fixtures for generated Compose: the overlay on stdin is merged
+# after case $1's generated file, checked with the accounts in the JSON
+# file $2 (empty: the case's own), and passes only if the hardening check
+# fails with each expected violation among those it lists.
+expect_generated_rejected() {
+    local case="$1" collectors="$2" expected
+    shift 2
+    cat >"$WORK/mutation-$case.yml"
+    if COLLECTORS="${collectors:-$WORK/generated/$case/collectors.json}" expect_merged_hardening \
+        "$BASE" "$WORK/replace-mbsync.yml" "$WORK/generated/$case/compose.accounts.yml" \
+        "$WORK/mutation-$case.yml" >"$WORK/rejected" 2>&1; then
+        printf 'generated case %s with the mutation passed the hardening check\n' "$case"
+        return 1
+    fi
+    for expected in "$@"; do
+        if ! grep -qxF "$expected" "$WORK/rejected"; then
+            printf 'expected violation: %s\ngot:\n' "$expected"
+            cat "$WORK/rejected"
+            return 1
+        fi
+    done
+}
+
+generated_collectors_reject_another_accounts_secret() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: uses secret bridge_pass, not its own" \
+        "mbsync-$UUID_B: uses secret bridge_pass_$UUID_C, not its own" \
+        "mbsync: gains secret bridge_pass_$UUID_B" <<EOF || return 1
+services:
+  mbsync-$UUID_B:
+    secrets: [bridge_pass, bridge_pass_$UUID_C]
+  mbsync:
+    secrets: [bridge_pass_$UUID_B]
+EOF
+    # The secret's definition picks the file: another account's file under
+    # the collector's own secret name is another account's secret.
+    expect_generated_rejected two-proton "" \
+        "secret bridge_pass_$UUID_B: is not the declared password file of mbsync-$UUID_B" <<EOF
+secrets:
+  bridge_pass_$UUID_B: !override
+    file: ./.secrets/bridge_pass.txt
+EOF
+}
+
+generated_collectors_reject_a_wrong_network() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: joins network app-net, not its own" \
+        "mbsync-$UUID_B: joins network bridge-net, not its own" \
+        "mbsync-$UUID_B: joins bridge-net" \
+        "mbsync-$UUID_B: joins network bridge-net-$UUID_C, not its own" \
+        "mbsync: joins network bridge-net-$UUID_B, which the base does not give it" <<EOF || return 1
+services:
+  mbsync-$UUID_B:
+    networks: [app-net, bridge-net, bridge-net-$UUID_C]
+  mbsync:
+    networks: [bridge-net-$UUID_B]
+EOF
+    # A collector's network keeps bridge-net's driver settings: a macvlan
+    # or an external network puts the collector on another network.
+    expect_generated_rejected three-proton "" \
+        "network bridge-net-$UUID_B: driver settings differ from bridge-net or it is external" \
+        "network bridge-net-$UUID_C: driver settings differ from bridge-net or it is external" <<EOF
+networks:
+  bridge-net-$UUID_B:
+    driver: macvlan
+    driver_opts:
+      parent: en0
+  bridge-net-$UUID_C:
+    external: true
+EOF
+}
+
+generated_collectors_reject_an_extra_mount() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: mounts maildir-volume at /extra, not its own Maildir or state volume" \
+        "mbsync-$UUID_B: mounts the base volume maildir-volume" \
+        "mbsync-$UUID_B: mounts maildir-$UUID_C at /other, not its own Maildir or state volume" \
+        "mbsync-$UUID_B: mounts maildir-$UUID_B at /state2, not its own Maildir or state volume" \
+        "mbsync-$UUID_B: mounts the volume maildir-$UUID_C of mbsync-$UUID_C" \
+        "mbsync-$UUID_B: mounts /srv at /srv, not its own Maildir or state volume" <<EOF || return 1
+services:
+  mbsync-$UUID_B:
+    volumes:
+      - maildir-volume:/extra:ro
+      - maildir-$UUID_C:/other
+      - maildir-$UUID_B:/state2
+      - /srv:/srv:ro
+EOF
+    # A collector's volumes keep the base volumes' driver settings: local
+    # driver_opts can back one with a host path.
+    expect_generated_rejected two-proton "" \
+        "volume maildir-$UUID_B: driver settings differ from the base volumes or it is external" \
+        "volume mbsync-state-$UUID_B: driver settings differ from the base volumes or it is external" <<EOF
+volumes:
+  maildir-$UUID_B:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/data
+  mbsync-state-$UUID_B:
+    external: true
+EOF
+}
+
+# No other service, base or new, gets a collector's secret, volumes or
+# network.
+generated_collectors_resources_stay_their_own() {
+    expect_generated_rejected two-proton "" \
+        "extra: uses a secret" \
+        "extra: uses the secret bridge_pass_$UUID_B of mbsync-$UUID_B" \
+        "extra: mounts the volume maildir-$UUID_B of mbsync-$UUID_B" \
+        "extra: joins the network of mbsync-$UUID_B" \
+        "indexer: mounts the volume mbsync-state-$UUID_B of mbsync-$UUID_B" <<EOF
+services:
+  indexer:
+    volumes:
+      - mbsync-state-$UUID_B:/extra:ro
+  extra:
+    image: example.invalid/extra:1
+    user: "1234:1234"
+    init: true
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 16
+    logging:
+      driver: none
+    secrets: [bridge_pass_$UUID_B]
+    volumes:
+      - maildir-$UUID_B:/maildir:ro
+    networks: [bridge-net-$UUID_B]
+EOF
+}
+
+# The exception covers declared accounts only: an undeclared collector is
+# a new service like any other, and a declared one must be there and
+# start, and keep the rest of the new-service checks (its user).
+generated_collectors_are_declared_present_and_checked() {
+    printf '[{"scope_uuid": "%s", "provider": "proton-bridge", "maildir_root": "/maildir", "password_file": "%s"}]\n' \
+        "00000000-0000-4000-8000-000000000001" "$ROOT_DIR/.secrets/bridge_pass.txt" \
+        >"$WORK/legacy-only.json"
+    expect_generated_rejected two-proton "$WORK/legacy-only.json" \
+        "mbsync-$UUID_B: uses a secret" </dev/null || return 1
+    jq --arg c "$UUID_C" '. + [{scope_uuid: $c, provider: "proton-bridge",
+        maildir_root: "/accounts/\($c)", password_file: "/nonexistent"}]' \
+        "$WORK/generated/two-proton/collectors.json" >"$WORK/missing-c.json"
+    expect_generated_rejected two-proton "$WORK/missing-c.json" \
+        "mbsync-$UUID_C: declared collector missing from the merged config" </dev/null || return 1
+    expect_generated_rejected two-proton "" \
+        "mbsync-$UUID_B: declared collector not started by a plain up" \
+        "mbsync-$UUID_B: sets no user" <<EOF
+services:
+  mbsync-$UUID_B:
+    user: !reset null
+    profiles: [manual]
+EOF
+}
+
+# An imap collector (#1606) gets neither the Bridge password nor
+# bridge-net, wherever its Maildir is.
+generated_imap_collectors_get_no_bridge_secret_or_network() {
+    jq 'map(.provider = "imap")' "$WORK/generated/two-proton/collectors.json" >"$WORK/imap.json"
+    expect_generated_rejected two-proton "$WORK/imap.json" \
+        "mbsync: an imap collector uses the Bridge password secret bridge_pass" \
+        "mbsync: an imap collector joins bridge-net" \
+        "mbsync-$UUID_B: an imap collector uses the Bridge password secret bridge_pass" \
+        "mbsync-$UUID_B: an imap collector joins bridge-net" <<EOF
+services:
+  mbsync-$UUID_B:
+    secrets: [bridge_pass]
+    networks: [bridge-net]
+EOF
+}
+
 the_base_runs_mbsync_indexer_and_mcp_server() {
     render "$BASE"
     expect '.services | keys == ["indexer", "mbsync", "mcp-server"]' || return 1
@@ -798,6 +1067,13 @@ the_base_composes_with_the_hardened_overlay() {
 # hardening check holds each service to.
 ALL_PROFILES=1 render "$BASE"
 cp "$WORK/config.json" "$WORK/base.json"
+# The repository's own files declare no generated collector, so they get
+# no exception.
+printf '[]\n' >"$WORK/no-collectors.json"
+# The generated Compose files and the removal of the base mbsync service
+# that the launcher's replacement stands for.
+python3 "$ROOT_DIR/scripts/config/tests/synthetic_compose.py" "$WORK/generated"
+printf 'services:\n  mbsync: !reset null\n' >"$WORK/replace-mbsync.yml"
 
 check "the base runs mbsync, indexer and mcp-server, with no Bridge dependency" \
     the_base_runs_mbsync_indexer_and_mcp_server
@@ -846,6 +1122,17 @@ check "merged hardening rejects new users, secrets, hooks and devices" \
     merged_hardening_rejects_new_grants
 check "merged hardening rejects a service a top-level include brings in" \
     merged_hardening_rejects_an_included_service
+check "generated collectors keep the hardening" generated_collectors_keep_the_hardening
+check "generated collectors reject another account's secret" \
+    generated_collectors_reject_another_accounts_secret
+check "generated collectors reject a wrong network" generated_collectors_reject_a_wrong_network
+check "generated collectors reject an extra mount" generated_collectors_reject_an_extra_mount
+check "generated collectors' secret, volumes and network stay their own" \
+    generated_collectors_resources_stay_their_own
+check "generated collectors are declared, present and checked as new services" \
+    generated_collectors_are_declared_present_and_checked
+check "generated imap collectors get no Bridge secret or bridge-net" \
+    generated_imap_collectors_get_no_bridge_secret_or_network
 check "omitted rerank and inference settings render without a warning" \
     omitted_rerank_and_inference_settings_render_without_a_warning
 check "ACCOUNT_SCOPE is required and reaches the indexer and mcp-server" \

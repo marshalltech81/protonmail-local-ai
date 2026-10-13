@@ -20,6 +20,8 @@ NAMES=(
     compose.yaml
     compose.yml
     compose.override.yml
+    # The operator configuration translator's output (#1608).
+    compose.accounts.yml
 )
 
 mkdir "$WORK/target"
