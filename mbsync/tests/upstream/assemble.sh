@@ -2,9 +2,9 @@
 set -Eeuo pipefail
 # Runs as root inside the assembly container, which run.sh creates from
 # the verified Debian base with --network none. Installs the .debs and Go
-# toolchain that run.sh verified on the host, creates the non-root
-# harness user and hands it the upstream trees and module downloads.
-# Nothing here reaches the network.
+# toolchain that run.sh verified on the host, extracts the module
+# downloads and creates the non-root harness user. Nothing here reaches
+# the network.
 
 readonly IN=/tmp/i1583-in
 readonly HOME_DIR=/home/h
@@ -36,11 +36,29 @@ fi
 tar -xzf "$IN/go.tar.gz" -C /usr/local
 
 groupadd --gid 1583 h
-useradd --uid 1583 --gid 1583 --home-dir "$HOME_DIR" --create-home --shell /usr/sbin/nologin h
-mkdir -p "$HOME_DIR/gomodcache/cache" "$HOME_DIR/out" "$HOME_DIR/logs" "$HOME_DIR/gocache"
+useradd --uid 1583 --gid 1583 --home-dir "$HOME_DIR" --no-create-home --shell /usr/sbin/nologin h
+# Root owns the home directory and every authenticated input in it (the
+# trees with the harness files, the module cache and run_inside.sh), so
+# code under test, which runs as h, cannot change them before or between
+# the test runs. h owns only its build cache, logs and results.
+install -d -m 0755 -o 0 -g 0 "$HOME_DIR" "$HOME_DIR/gomodcache" "$HOME_DIR/gomodcache/cache"
+install -d -m 0700 -o 1583 -g 1583 "$HOME_DIR/out" "$HOME_DIR/logs" "$HOME_DIR/gocache"
 mv "$IN/src" "$HOME_DIR/src"
 mv "$IN/download" "$HOME_DIR/gomodcache/cache/download"
-install -m 0755 "$IN/run_inside.sh" "$HOME_DIR/run_inside.sh"
-chown -R 1583:1583 "$HOME_DIR"
-rm -rf "$IN" /tmp/i1583-dpkg.log
+install -m 0755 -o 0 -g 0 "$IN/run_inside.sh" "$HOME_DIR/run_inside.sh"
+chown -R 0:0 "$HOME_DIR/src" "$HOME_DIR/gomodcache"
+chmod -R go-w "$HOME_DIR/src" "$HOME_DIR/gomodcache"
+# Extract every module from the verified downloads now, offline, so the
+# cache is complete before any code runs (go checks each zip against
+# go.sum; extracted modules are read-only).
+for mod in gluon proton-bridge; do
+    if ! (cd "$HOME_DIR/src/$mod" &&
+        env HOME=/tmp GOTOOLCHAIN=local GOPROXY=off GOFLAGS=-mod=readonly GOSUMDB=off GOTELEMETRY=off \
+            GOMODCACHE="$HOME_DIR/gomodcache" GOCACHE=/tmp/i1583-gocache \
+            /usr/local/go/bin/go mod download) >/tmp/i1583-mod.log 2>&1; then
+        printf 'assemble: %s: module extraction failed\n' "$mod" >&2
+        exit 1
+    fi
+done
+rm -rf "$IN" /tmp/i1583-dpkg.log /tmp/i1583-mod.log /tmp/i1583-gocache
 printf 'assemble: ok\n'

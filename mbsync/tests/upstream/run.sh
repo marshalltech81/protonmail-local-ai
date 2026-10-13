@@ -21,8 +21,10 @@ set -Eeuo pipefail
 #             apt sources and dpkg status are copied out of a created,
 #             never-started container.
 #   assemble  With --network none: install the verified inputs into a
-#             container from the verified base (root, dpkg -i), create the
-#             non-root user and commit a local image.
+#             container from the verified base (root, dpkg -i), extract
+#             the modules, create the non-root user (who owns only its
+#             build cache, logs and results; root owns every input) and
+#             commit a local image.
 #   execute   With --network none, as the non-root user, all capabilities
 #             dropped, no-new-privileges, memory, pids and CPU limits, no
 #             container log, a wall-clock deadline and a cap on bytes
@@ -90,6 +92,9 @@ ASM=""
 RUNC=""
 WATCHDOG=""
 PROBE=""
+# The out dir while execute is still filling it; the cleanup paths remove
+# it, so a failed run leaves no partial results behind.
+OUT_PENDING=""
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HERE
@@ -474,6 +479,7 @@ cmd_execute() {
     # A new directory only this account can write, so nothing planted in
     # it (a symlink named like an output file) is followed.
     mkdir -m 700 "$out" || die "out dir must not exist yet"
+    OUT_PENDING="$out"
     local cpus
     cpus="$(docker info --format '{{.NCPU}}')" || die "cannot read the engine's CPU count"
     [[ "$cpus" =~ ^[1-9][0-9]*$ ]] || die "unexpected engine CPU count"
@@ -498,16 +504,23 @@ cmd_execute() {
     local status_text name
     start_watchdog
     # Capped: the status lines are few and short.
-    status_text="$(docker exec "$RUNC" /home/h/run_inside.sh "$debug" | head -c 65536)" || rc=$?
+    # Both streams: the tests run as the same user as run_inside.sh and can
+    # write to its stderr too.
+    status_text="$(docker exec "$RUNC" /home/h/run_inside.sh "$debug" 2>&1 | head -c 65536)" || rc=$?
     require_running
-    printf '%s\n' "$status_text"
     # Everything from the container is untrusted: only fixed-shape status
-    # lines are kept, and only the three expected result files are copied
-    # out (fetch_result), as regular files of bounded size whose JSON has
-    # the allowlisted shape (the same one the harness's i1583Rec enforces).
+    # lines are shown and kept (with debug, also the harness's own
+    # diagnostic lines, printable characters only), and only the three
+    # expected result files are copied out (fetch_result), as regular files
+    # of bounded size whose JSON has the allowlisted shape (the same one
+    # the harness's i1583Rec enforces).
     printf '%s\n' "$status_text" |
-        grep -E '^(gluon|proton-bridge) go_mod_verify=(ok|failed)$|^[a-z-]+ exit=[0-9]+$|^--- (PASS|FAIL|SKIP): TestIssue1583[A-Za-z0-9]+$' \
+        grep -E '^(gluon|proton-bridge) go_mod_verify=(ok|failed)$|^[a-z-]+ exit=[0-9]+$|^--- (PASS|FAIL|SKIP): TestIssue1583[A-Za-z0-9]+$|^inside: [a-z ]+$' \
             >"$out/run-status.txt" || true
+    cat "$out/run-status.txt"
+    if [[ "$debug" == debug ]]; then
+        printf '%s\n' "$status_text" | grep -E 'zz_issue1583_([a-z]+_)?test\.go:[0-9]+' | LC_ALL=C tr -cd '[:print:]\n' || true
+    fi
     for name in gluon.json bridge-builder.json bridge.json; do
         fetch_result "$name" "$out/$name.tmp"
         jq -e 'type == "object" and all(.[];
@@ -522,6 +535,7 @@ cmd_execute() {
     stop_watchdog
     docker rm -f "$RUNC" >/dev/null
     cp "$WORK/provenance.txt" "$out/provenance.txt"
+    OUT_PENDING=""
     printf 'execute: exit=%s\n' "$rc"
     return "$rc"
 }
@@ -629,13 +643,14 @@ fetch_result() {
     [[ "$(wc -c <"$dest" | tr -d ' ')" -le 1048576 ]] || die "$name: larger than 1 MiB"
 }
 
-# Removes this work dir's containers (and the assembly stage) when a
-# standalone acquire, assemble or execute fails, keeping the failure
-# status.
+# Removes this work dir's containers, the assembly stage and a partial
+# out dir when a standalone acquire, assemble or execute fails, keeping
+# the failure status.
 phase_cleanup() {
     local rc=$?
     trap - EXIT
     [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true
+    [[ -z "$OUT_PENDING" ]] || rm -rf "$OUT_PENDING"
     if [[ -n "$ASM" ]]; then
         docker rm -f "$ACQ" "$ASM" "$RUNC" >/dev/null 2>&1 || true
     fi
@@ -750,7 +765,7 @@ main() {
             # Clean up at exit. An earlier failure keeps its status; a
             # failed cleanup after a success exits 1. cmd_clean runs in a
             # subshell so its die cannot replace the earlier status.
-            trap 'rc=$?; trap - EXIT; [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true; (cmd_clean) || { [[ "$rc" -ne 0 ]] || rc=1; }; exit "$rc"' EXIT
+            trap 'rc=$?; trap - EXIT; [[ -z "$WATCHDOG" ]] || kill "$WATCHDOG" 2>/dev/null || true; [[ -z "$OUT_PENDING" ]] || rm -rf "$OUT_PENDING"; (cmd_clean) || { [[ "$rc" -ne 0 ]] || rc=1; }; exit "$rc"' EXIT
             cmd_acquire
             cmd_assemble
             cmd_execute "$out"
