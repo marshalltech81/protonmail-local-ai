@@ -30,9 +30,13 @@ with a reason.
   no longer used still fails.
   Keys read only by shell (the mbsync scripts and template) are listed
   in ``_SHELL_ONLY`` with their reader; each entry must still be in its
-  service's resolved environment and in ``--variables``, but no shell
-  is scanned, so deleting the shell read alone is not caught. A shell
-  or YAML text scan drew a new edge case every review round in #925.
+  service's resolved environment and in ``--variables``. No shell is
+  scanned (a shell or YAML text scan drew a new edge case every review
+  round in #925): instead each entry has a behavioural case in
+  ``mbsync/tests/entrypoint_test.sh`` (#1188 option 3), which runs the
+  readers with the key at a sentinel and fails when the sentinel changes
+  nothing, so a deleted shell read is caught there. The list of keys
+  those cases cover must equal ``_SHELL_ONLY``.
 
 It lives in the indexer suite because CI has no repo-root pytest job; it
 reads the mcp-server's sources by path."""
@@ -759,3 +763,30 @@ def test_a_read_replaced_by_a_constant_but_still_validated_is_caught(reverse_cop
 def test_every_env_example_key_a_python_service_reads_reaches_it():
     missing = _undelivered_reads(_REPO)
     assert not missing, f"pass the key to the service through Compose: {sorted(missing)}"
+
+
+# --- #1188: each shell-only key has a behavioural case -----------------------
+
+_ENTRYPOINT_TEST = _REPO / "mbsync" / "tests" / "entrypoint_test.sh"
+_BEHAVIOUR_KEYS = re.compile(r"^SHELL_ONLY_BEHAVIOUR_KEYS=\(([A-Z0-9_ ]+)\)$", re.MULTILINE)
+
+
+def _behaviour_keys(path: Path) -> list[str]:
+    """The keys the behavioural cases cover: the one
+    ``SHELL_ONLY_BEHAVIOUR_KEYS=(...)`` line, written on one line."""
+    found = _BEHAVIOUR_KEYS.findall(path.read_text(encoding="utf-8"))
+    assert len(found) == 1, f"{path}: expected one SHELL_ONLY_BEHAVIOUR_KEYS=(...) line"
+    return found[0].split()
+
+
+def test_every_shell_only_key_has_a_behavioural_case():
+    keys = _behaviour_keys(_ENTRYPOINT_TEST)
+    assert len(keys) == len(set(keys))
+    assert set(keys) == set(_SHELL_ONLY)
+
+
+def test_a_shell_only_key_without_a_behavioural_case_is_caught(tmp_path):
+    copy = tmp_path / "entrypoint_test.sh"
+    text = _ENTRYPOINT_TEST.read_text(encoding="utf-8")
+    copy.write_text(text.replace("KEYS=(BRIDGE_USER ", "KEYS=(", 1), encoding="utf-8")
+    assert set(_SHELL_ONLY) - set(_behaviour_keys(copy)) == {"BRIDGE_USER"}

@@ -2457,8 +2457,13 @@ check "the exclusion sets ignore the environment" exclusions_ignore_the_environm
 # certificate), and the sleep between syncs stops the entrypoint with TERM
 # after the first sync.
 
+# ORDER_MUTATION, when set, is one more sed expression that must change
+# exactly one other line of the copy, and ORDER_TEMPLATE another template
+# to render: the behavioural cases below (#1188) use them to show that a
+# deleted read fails.
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 order_setup() {
+    local changed=6
     ORDER_DIR="$WORK/order-$1"
     ORDER_LOG="$ORDER_DIR/log"
     ORDER_ENTRYPOINT="$ORDER_DIR/entrypoint.sh"
@@ -2467,15 +2472,20 @@ order_setup() {
     printf 'synthetic-order-marker-pass\n' >"$ORDER_DIR/secrets/bridge_pass"
     : >"$ORDER_LOG"
     sed -e "s|^readonly RUNTIME_DIR=\"/tmp/mbsync\"\$|readonly RUNTIME_DIR=\"$ORDER_DIR/runtime\"|" \
-        -e "s|^readonly TEMPLATE_FILE=\"/etc/mbsyncrc.template\"\$|readonly TEMPLATE_FILE=\"$TEMPLATE\"|" \
+        -e "s|^readonly TEMPLATE_FILE=\"/etc/mbsyncrc.template\"\$|readonly TEMPLATE_FILE=\"${ORDER_TEMPLATE:-$TEMPLATE}\"|" \
         -e "s|^readonly BRIDGE_PASS_FILE=\"/run/secrets/bridge_pass\"\$|readonly BRIDGE_PASS_FILE=\"$ORDER_DIR/secrets/bridge_pass\"|" \
         -e "s|^readonly STATE_DIR=\"/state\"\$|readonly STATE_DIR=\"$ORDER_DIR/state\"|" \
         -e "s|^readonly MAILDIR_PATH=\"/maildir\"\$|readonly MAILDIR_PATH=\"$ORDER_DIR/maildir\"|" \
         -e "s|^readonly PROTON_SETTINGS_FILE=\"/usr/local/lib/proton-settings.sh\"\$|readonly PROTON_SETTINGS_FILE=\"$PROTON_SETTINGS\"|" \
+        -e "${ORDER_MUTATION:-}" \
         "$ENTRYPOINT" >"$ORDER_ENTRYPOINT"
-    # The six paths moved and nothing else changed; otherwise a run could
-    # touch the real paths.
-    if [[ "$(diff "$ENTRYPOINT" "$ORDER_ENTRYPOINT" | grep -c '^>')" != 6 ]]; then
+    if [[ -n "${ORDER_MUTATION:-}" ]]; then
+        changed=7
+    fi
+    # The six paths moved (and the mutation, if any, changed one more
+    # line) and nothing else changed; otherwise a run could touch the
+    # real paths.
+    if [[ "$(diff "$ENTRYPOINT" "$ORDER_ENTRYPOINT" | grep -c '^>')" != "$changed" ]]; then
         echo "the entrypoint's fixed paths changed; update order_setup"
         return 1
     fi
@@ -3431,6 +3441,217 @@ policy_outside_the_provider_section_is_reported() {
 check "the Bridge policy is one provider section" bridge_policy_is_one_provider_section
 check "policy outside the provider section is reported" \
     policy_outside_the_provider_section_is_reported
+
+# --- every shell-only setting changes what mbsync does (#1188) ---------------
+#
+# indexer/tests/test_env_example.py lists the .env.example settings only
+# shell reads (_SHELL_ONLY) and checks that this list is exactly them. For
+# each one, the whole entrypoint (the order_run copy) runs with the
+# setting at a sentinel value, and the sentinel must change the rendered
+# mbsyncrc, the log, the success stamp or the start's outcome; the two
+# settings the healthcheck also reads change its verdict too. A shell read
+# that is deleted, while Compose still passes the setting, fails here
+# (the mutation cases below show it for each reader file).
+SHELL_ONLY_BEHAVIOUR_KEYS=(BRIDGE_USER BRIDGE_CERT_FINGERPRINT BRIDGE_IMAP_PORT BRIDGE_CERT_PIN_ROTATE PROTON_FOLDER_EXCLUSIONS BRIDGE_HOST BRIDGE_CERT_HOST PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME SYNC_INTERVAL SYNC_DEADLINE_SECONDS)
+readonly SHELL_ONLY_BEHAVIOUR_KEYS
+
+# The order of a start that syncs, then stops at the sleep between syncs.
+readonly SYNCED_START="identity render wait probe cert-fetch pin-first-boot cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped"
+
+# Succeeds when the rendered mbsyncrc holds the line $1 exactly.
+rendered_has() {
+    grep -qxF "$1" "$ORDER_DIR/seen/mbsyncrc" || {
+        printf 'the rendered config lacks: %s\n' "$1"
+        return 1
+    }
+}
+
+# Runs the entrypoint with setting $1 at its sentinel and checks that the
+# sentinel reached mbsync's behaviour. $2 names the run.
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+setting_changes_behaviour() {
+    local key="$1" fp_a fp_b
+    order_setup "behaviour-$2"
+    fp_a="$(cert_fingerprint "$WORK/cert-a.pem")"
+    fp_b="$(cert_fingerprint "$WORK/cert-b.pem")"
+    printf '%s\n' "$WORK/cert-a.pem" >"$ORDER_DIR/served"
+    case "$key" in
+        BRIDGE_USER)
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" BRIDGE_USER=sentinel-1188@example.com
+            order_is "$SYNCED_START" 143 && rendered_has 'User sentinel-1188@example.com'
+            ;;
+        BRIDGE_CERT_FINGERPRINT)
+            # Another certificate's fingerprint refuses the one served.
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_b"
+            order_is "identity render wait probe cert-fetch expected-mismatch" 1
+            ;;
+        BRIDGE_IMAP_PORT)
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" BRIDGE_IMAP_PORT=2993
+            order_is "$SYNCED_START" 143 && rendered_has 'Tunnel "exec socat - TCP:host.docker.internal:2993"'
+            ;;
+        BRIDGE_CERT_PIN_ROTATE)
+            # A pinned certificate a, the expected and served certificate
+            # b: refused as a pin mismatch unless rotation is on.
+            printf '%s\n' "$fp_a" >"$ORDER_DIR/state/bridge-cert.fingerprint"
+            printf '%s\n' "$WORK/cert-b.pem" >"$ORDER_DIR/served"
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_b" BRIDGE_CERT_PIN_ROTATE=true
+            order_is "identity rotation-on render wait probe cert-fetch pin-rotated cert-accepted initial-sync mbsync sync-ok sync-loop sleep stopped" 143
+            ;;
+        PROTON_FOLDER_EXCLUSIONS)
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" \
+                'PROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|Folders/Sentinel'
+            order_is "$SYNCED_START" 143 && grep -q '^Patterns \* .*!"Folders/Sentinel"' "$ORDER_DIR/seen/mbsyncrc"
+            ;;
+        BRIDGE_HOST)
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" BRIDGE_HOST=host.orb.internal
+            order_is "$SYNCED_START" 143 && rendered_has 'Tunnel "exec socat - TCP:host.orb.internal:1143"'
+            ;;
+        BRIDGE_CERT_HOST)
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" BRIDGE_CERT_HOST=localhost
+            order_is "$SYNCED_START" 143 && rendered_has 'Host localhost'
+            ;;
+        PROTON_IMAP_ACCOUNT_NAME)
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" PROTON_IMAP_ACCOUNT_NAME=sentinel-account
+            order_is "$SYNCED_START" 143 && rendered_has 'IMAPAccount sentinel-account'
+            ;;
+        PROTON_REMOTE_STORE_NAME)
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" PROTON_REMOTE_STORE_NAME=sentinel-far
+            order_is "$SYNCED_START" 143 && rendered_has 'IMAPStore sentinel-far'
+            ;;
+        PROTON_LOCAL_STORE_NAME)
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" PROTON_LOCAL_STORE_NAME=sentinel-near
+            order_is "$SYNCED_START" 143 && rendered_has 'MaildirStore sentinel-near'
+            ;;
+        PROTON_CHANNEL_NAME)
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" PROTON_CHANNEL_NAME=sentinel-chan
+            order_is "$SYNCED_START" 143 && rendered_has 'Channel sentinel-chan'
+            ;;
+        SYNC_INTERVAL)
+            # The loop sleeps it (the mock sleep stops the run only on this
+            # value) and the success stamp records it.
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" SYNC_INTERVAL=4321
+            order_is "$SYNCED_START" 143 \
+                && grep -qF '>>> Starting sync loop (interval: 4321s)...' "$ORDER_LOG" \
+                && grep -qF '"sync_interval_secs": 4321}' "$ORDER_DIR/maildir/.mbsync-last-sync.json" \
+                && health_verdict_changes SYNC_INTERVAL "$2"
+            ;;
+        SYNC_DEADLINE_SECONDS)
+            order_run BRIDGE_CERT_FINGERPRINT="$fp_a" SYNC_DEADLINE_SECONDS=4322
+            order_is "$SYNCED_START" 143 \
+                && grep -qE '^>>> Sync ok in [0-9]+s \(deadline 4322s\)$' "$ORDER_LOG" \
+                && health_verdict_changes SYNC_DEADLINE_SECONDS "$2"
+            ;;
+        *)
+            printf 'no behavioural case for %s\n' "$key"
+            return 1
+            ;;
+    esac
+}
+
+# Runs a copy of the whole healthcheck (its runtime and /proc paths moved
+# into $WORK, stat mocked to report a heartbeat AGE seconds old) and
+# prints healthy or unhealthy. HEALTH_MUTATION, when set, is one more sed
+# expression that must change one other line. $1 names the run, $2 is the
+# age, $3 a process name in the fake /proc (or ""), then NAME=VALUE.
+health_run() {
+    local dir="$WORK/health-run-$1" age="$2" process="$3" changed=2
+    shift 3
+    mkdir -p "$dir/runtime" "$dir/proc/1" "$dir/bin"
+    sed -e "s|^readonly RUNTIME_DIR=\"/tmp/mbsync\"\$|readonly RUNTIME_DIR=\"$dir/runtime\"|" \
+        -e "s|^readonly PROC_DIR=\"/proc\"\$|readonly PROC_DIR=\"$dir/proc\"|" \
+        -e "${HEALTH_MUTATION:-}" "$HEALTHCHECK" >"$dir/healthcheck.sh"
+    if [[ -n "${HEALTH_MUTATION:-}" ]]; then
+        changed=3
+    fi
+    if [[ "$(diff "$HEALTHCHECK" "$dir/healthcheck.sh" | grep -c '^>')" != "$changed" ]]; then
+        echo "the healthcheck's fixed paths changed; update health_run" >&2
+        return 1
+    fi
+    printf 'synthetic-config\n' >"$dir/runtime/mbsyncrc"
+    printf 'synthetic-cert\n' >"$dir/runtime/bridge-cert.pem"
+    : >"$dir/runtime/last-sync-activity"
+    printf 'docker-init\n' >"$dir/proc/1/comm"
+    if [[ -n "$process" ]]; then
+        mkdir -p "$dir/proc/42"
+        printf '%s\n' "$process" >"$dir/proc/42/comm"
+    fi
+    # shellcheck disable=SC2016 # the mock's own expansions
+    printf '#!/bin/bash\nprintf "%%s\\n" "$(($(date +%%s) - MOCK_AGE))"\n' >"$dir/bin/stat"
+    chmod 755 "$dir/bin/stat"
+    if env -i PATH="$dir/bin:$PATH" MOCK_AGE="$age" "$@" "$BASH" "$dir/healthcheck.sh" 2>/dev/null; then
+        echo healthy
+    else
+        echo unhealthy
+    fi
+}
+
+# The healthcheck reads SYNC_INTERVAL (the heartbeat's age limit) and
+# SYNC_DEADLINE_SECONDS (how long a running sync may last): with an hour-old
+# heartbeat, each sentinel flips the verdict the default gives.
+health_verdict_changes() {
+    local default sentinel
+    case "$1" in
+        SYNC_INTERVAL)
+            default="$(health_run "$2-default" 3600 "")"
+            sentinel="$(health_run "$2-sentinel" 3600 "" SYNC_INTERVAL=7200)"
+            [[ "$default" == unhealthy && "$sentinel" == healthy ]]
+            ;;
+        SYNC_DEADLINE_SECONDS)
+            default="$(health_run "$2-default" 3600 mbsync)"
+            sentinel="$(health_run "$2-sentinel" 3600 mbsync SYNC_DEADLINE_SECONDS=600)"
+            [[ "$default" == healthy && "$sentinel" == unhealthy ]]
+            ;;
+    esac || {
+        printf 'the healthcheck verdict did not follow %s (default %s, sentinel %s)\n' "$1" "$default" "$sentinel"
+        return 1
+    }
+}
+
+every_shell_only_setting_changes_behaviour() {
+    local key
+    for key in "${SHELL_ONLY_BEHAVIOUR_KEYS[@]}"; do
+        setting_changes_behaviour "$key" "$key" || {
+            printf 'the sentinel for %s changed nothing\n' "$key"
+            return 1
+        }
+    done
+    ((${#SHELL_ONLY_BEHAVIOUR_KEYS[@]} == 13)) || return 1
+}
+
+# A read deleted from each reader file, the setting still passed: its
+# behavioural case fails.
+a_deleted_read_fails_its_behavioural_case() {
+    local template_copy="$WORK/template-without-user"
+    # The entrypoint: the deadline read replaced by its default.
+    # shellcheck disable=SC2016 # the line as the script writes it
+    if ORDER_MUTATION='s|^readonly SYNC_DEADLINE_SECONDS="${SYNC_DEADLINE_SECONDS:-86400}"$|readonly SYNC_DEADLINE_SECONDS="86400"|' \
+        setting_changes_behaviour SYNC_DEADLINE_SECONDS mutated-entrypoint >/dev/null 2>&1; then
+        echo "a deleted entrypoint read of SYNC_DEADLINE_SECONDS passed"
+        return 1
+    fi
+    # The template: User no longer substituted.
+    # shellcheck disable=SC2016 # the line as the template writes it
+    sed 's|^User ${BRIDGE_USER}$|User fixed@example.com|' "$TEMPLATE" >"$template_copy"
+    [[ "$(diff "$TEMPLATE" "$template_copy" | grep -c '^>')" == 1 ]] || return 1
+    if ORDER_TEMPLATE="$template_copy" setting_changes_behaviour BRIDGE_USER mutated-template >/dev/null 2>&1; then
+        echo "a deleted template read of BRIDGE_USER passed"
+        return 1
+    fi
+    # The healthcheck: the interval read replaced by its default.
+    # shellcheck disable=SC2016 # the line as the script writes it
+    if HEALTH_MUTATION='s|^readonly SYNC_INTERVAL="${SYNC_INTERVAL:-60}"$|readonly SYNC_INTERVAL="60"|' \
+        health_verdict_changes SYNC_INTERVAL mutated-healthcheck >/dev/null 2>&1; then
+        echo "a deleted healthcheck read of SYNC_INTERVAL passed"
+        return 1
+    fi
+    # Unmutated, each of the three passes.
+    setting_changes_behaviour SYNC_DEADLINE_SECONDS unmutated-entrypoint >/dev/null 2>&1 || return 1
+    setting_changes_behaviour BRIDGE_USER unmutated-template >/dev/null 2>&1 || return 1
+    health_verdict_changes SYNC_INTERVAL unmutated-healthcheck || return 1
+}
+
+check "every shell-only setting changes what mbsync does" every_shell_only_setting_changes_behaviour
+check "a deleted read fails its behavioural case" a_deleted_read_fails_its_behavioural_case
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
