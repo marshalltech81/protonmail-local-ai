@@ -19,9 +19,11 @@ from ..lib import timings
 from ..lib.predicates import (
     ADDRESS_LEAF_READS_NAMES,
     ADDRESS_ROLES,
+    DEFAULT_DATE_BASIS,
     MAX_SIZE_BYTES,
     Where,
     WhereLeaf,
+    normalize_date_basis,
     normalize_where,
     validate_date_range,
 )
@@ -60,6 +62,7 @@ from .outputs import (
     MessageGroupRow,
     QueriedThreadRow,
     QueryAttachmentsOutput,
+    QueryDateBounds,
     QueryMessagesOutput,
     QueryThreadsOutput,
     ReapedMessage,
@@ -131,6 +134,11 @@ SizeBound = Annotated[
         }
     ),
 ]
+
+# Pass raw values to the timed handler so invalid clocks are rejected
+# through ArgumentRejections, with fixed text and no content-bearing value.
+DateBasisArgument = Annotated[Any, WithJsonSchema({"type": "string"})]
+
 
 # Seconds per window of the rate-limited ``fields`` rejection warning:
 # a client can repeat a rejected projection as fast as it likes.
@@ -448,23 +456,40 @@ def _where_cause_keys(where: list[WhereLeaf]) -> set[str]:
 
 
 def _indeterminate_cause_entries(
-    uses: list[FilterUse], where: list[WhereLeaf] | None = None
+    uses: list[FilterUse],
+    where: list[WhereLeaf] | None = None,
+    date_basis: str = DEFAULT_DATE_BASIS,
 ) -> list[tuple[str, str]]:
     """The ``(key, text)`` causes the given filters and ``where`` leaves
     can have, in order."""
     given = {u.filter for u in uses}
     substring = {u.filter for u in uses if u.match == "substring"}
     explicit = _where_cause_keys(where or [])
-    return [
+    entries = [
         (key, cause)
         for key, names, cause in _INDETERMINATE_CAUSES
         if key in explicit or (substring if key == _NAMES_CAUSE else given).intersection(names)
     ]
+    if date_basis != DEFAULT_DATE_BASIS:
+        entries = [(key, cause) for key, cause in entries if key != "date"]
+        entries.append(
+            (
+                "date",
+                "no parseable Date header, or not yet checked"
+                if date_basis == "sent"
+                else "no delivery date",
+            )
+        )
+    return entries
 
 
-def _indeterminate_causes(uses: list[FilterUse], where: list[WhereLeaf] | None = None) -> list[str]:
+def _indeterminate_causes(
+    uses: list[FilterUse],
+    where: list[WhereLeaf] | None = None,
+    date_basis: str = DEFAULT_DATE_BASIS,
+) -> list[str]:
     """The fixed-text causes the given filters can have, in order."""
-    return [cause for _, cause in _indeterminate_cause_entries(uses, where)]
+    return [cause for _, cause in _indeterminate_cause_entries(uses, where, date_basis)]
 
 
 def _describe_where(where: list[WhereLeaf]) -> list[str]:
@@ -1216,6 +1241,7 @@ def register_retrieval_tools(server, db):
         folder: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        date_basis: DateBasisArgument = DEFAULT_DATE_BASIS,
         has_attachments: bool | None = None,
         authority_class: str | None = None,
         seen: bool | None = None,
@@ -1255,9 +1281,16 @@ def register_retrieval_tools(server, db):
         the top threads, so it cannot answer "all" or "how many";
         this tool can.
 
+        ``date_basis`` chooses the clock for bounds, ordering and cursors:
+        effective (default: delivery, else send date), sent (Date
+        header), or occurred (topmost Received header). Missing sent or
+        occurred clocks are indeterminate even without date bounds;
+        effective uses first-indexed time for ordering undated mail only.
+        Keep the same date_basis on every page. internal is unavailable.
+
         All given filters must match (AND). Omitted or blank filters
-        are ignored; with none, every indexed message outside Trash is
-        enumerated. Messages in Trash are counted only by a separate
+        are ignored; with none and the default clock, every indexed message
+        outside Trash is enumerated. Messages in Trash are counted only by a separate
         call with ``folder="Trash"``.
 
         Start with narrow filters and ``limit=1`` to obtain the count.
@@ -1351,15 +1384,19 @@ def register_retrieval_tools(server, db):
             folder: Exact folder name (see list_folders). Without it,
                     messages filed in Trash are left out; pass "Trash"
                     to list them.
-            date_from: ISO 8601 lower bound, inclusive, on the
-                       message's time: its delivery date (occurred_at),
-                       else its send date (sent_at). A message with
-                       neither is indeterminate.
-            date_to: ISO 8601 upper bound, inclusive; a date-only value
+            date_from: ISO 8601 lower bound, inclusive, on the clock
+                       date_basis selects. A missing clock is indeterminate.
+            date_to: ISO 8601 upper bound on date_basis, inclusive; a date-only value
                      covers the whole day (UTC). For either bound in
                      the user's time zone, give an offset
                      ("2026-01-01T00:00:00-05:00"). The response's
-                     ``date_bounds`` echoes the UTC instants applied.
+                     ``date_bounds`` echoes the clock and UTC instants applied.
+            date_basis: Clock for bounds, newest-first ordering and cursors:
+                        effective (default: delivery, else send date),
+                        sent (Date header), or occurred (topmost Received header).
+                        Under sent or occurred a missing clock is indeterminate,
+                        even without bounds. internal is unavailable. Omission
+                        or blank means effective; explicit null is rejected.
             has_attachments: True for messages with attachments, False
                              for messages without. A message with no
                              stored attachment whose attachment list is
@@ -1414,7 +1451,8 @@ def register_retrieval_tools(server, db):
                    rejected, and the addresses it is itself true of on
                    returned messages; a negated leaf lists none.
             limit: Messages per page (default 25, clamped to [1, 100]).
-            cursor: ``next_cursor`` from the previous page of the same query.
+            cursor: ``next_cursor`` from the previous page of the same query;
+                    keep date_basis unchanged between pages.
             fields: Row fields to return; claimant_id and thread_id are
                     always kept. Omit for every field.
 
@@ -1455,6 +1493,7 @@ def register_retrieval_tools(server, db):
             "query_messages",
             {
                 **args,
+                "date_basis": date_basis,
                 "where": where,
                 "limit": limit,
                 "cursor": cursor,
@@ -1481,22 +1520,31 @@ def register_retrieval_tools(server, db):
             projection = frozenset(fields) | {"claimant_id", "thread_id"}
         # Reject a bad date range before any retrieval work.
         try:
-            bounds = date_bounds(*validate_date_range(date_from, date_to))
+            if date_basis is None:
+                raise InvalidFilterError("date_basis", "date_basis must be a string")
+            date_basis = normalize_date_basis(date_basis)
+            lower, upper = validate_date_range(date_from, date_to)
+            bounds = (
+                QueryDateBounds(date_from=lower, date_to=upper, date_basis=date_basis)
+                if lower is not None or upper is not None
+                else None
+            )
         except InvalidFilterError as e:
             rejections.reject("query_messages", e.field_name)
             raise ToolError(f"Error: {e}") from e
 
-        # No date_basis: the Database clock machinery (lib/predicates
-        # DATE_BASES, the cursor clock) stays fixed to effective time
-        # here; serving another clock was split out of #1085 (owner,
-        # 2026-10-08) and waits for #1150 (with #1087).
         try:
             # where is normalized before any query, inside this boundary:
             # tokenizing body_words can raise on text SQLite cannot
             # encode, answered by type below (Codex round 1).
             where_leaves = normalize_where(where) if where is not None else []
             page = await asyncio.to_thread(
-                db.query_messages, **args, where=where_leaves, limit=limit, cursor=cursor
+                db.query_messages,
+                **args,
+                date_basis=date_basis,
+                where=where_leaves,
+                limit=limit,
+                cursor=cursor,
             )
         except InvalidFilterError as e:
             # Validation messages quote the offending input (an invalid
@@ -1519,9 +1567,10 @@ def register_retrieval_tools(server, db):
         if page.indeterminate:
             # Why, by fixed key, so the line alone tells a reader which
             # stored state left messages undecided (#1086).
-            for key, _ in _indeterminate_cause_entries(uses, where_leaves):
+            for key, _ in _indeterminate_cause_entries(uses, where_leaves, date_basis):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = QueryMessagesOutput(
+            date_basis=date_basis,
             filters=uses,
             address_matches=[
                 AddressFilterMatch(
@@ -1559,7 +1608,13 @@ def register_retrieval_tools(server, db):
             messages=[listed_message(m) for m in page.messages],
         )
         parts = [_describe_filters(uses, none=""), *_describe_where(where_leaves)]
-        lines = [f"Query: {', '.join(p for p in parts if p) or _describe_filters([])}"]
+        none = (
+            _describe_filters([])
+            if date_basis == DEFAULT_DATE_BASIS
+            else "no other filters (outside Trash; missing selected dates are indeterminate)"
+        )
+        lines = [f"Query: {', '.join(p for p in parts if p) or none}"]
+        lines.append(f"date_basis: {date_basis}")
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}")
@@ -1567,7 +1622,7 @@ def register_retrieval_tools(server, db):
             # Stated whenever non-zero, so a count is never read as
             # complete when some messages could not be decided. Fixed
             # text naming the causes the given filters can have.
-            causes = _indeterminate_causes(uses, where_leaves)
+            causes = _indeterminate_causes(uses, where_leaves, date_basis)
             lines.append(
                 f"indeterminate: {page.indeterminate} (messages the filters could neither "
                 f"accept nor reject: {'; '.join(causes)}; in neither total_matches nor "
@@ -1642,8 +1697,9 @@ def register_retrieval_tools(server, db):
         cursor: str | None = None,
     ) -> CallToolResult:
         """Enumerate threads containing at least one definite matching message,
-        using exactly query_messages' filters. Each complete expression is
-        evaluated per claimant before grouping, never across different messages.
+        using query_messages' filters except date_basis (effective time only).
+        Each complete expression is evaluated per claimant before grouping,
+        never across different messages.
         Duplicate Message-ID claimants count separately. Trash is excluded
         from matches unless folder="Trash".
 
@@ -1842,7 +1898,8 @@ def register_retrieval_tools(server, db):
         for volume questions ("top senders", "mail per month", "which
         folders") instead of paging query_messages and counting.
 
-        Takes exactly query_messages' filters, with the same meaning,
+        Takes query_messages' filters except date_basis (effective time
+        only), with the same meaning under that clock,
         so a group's ``messages`` equals query_messages' total_matches
         for the same filters plus the group's own (sender address or
         domain as a where address_is / domain_is leaf on from, folder,
@@ -2038,6 +2095,7 @@ def register_retrieval_tools(server, db):
         folder: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        date_basis: DateBasisArgument = DEFAULT_DATE_BASIS,
         filename: str | None = None,
         content_type: str | None = None,
         extraction_status: ExtractionStatusFilter | None = None,
@@ -2054,6 +2112,13 @@ def register_retrieval_tools(server, db):
         "list every attachment" or "how many PDFs" questions;
         ``search_attachments`` ranks by filename and extracted text and
         caps at 50 results, so it cannot answer "all" or "how many".
+
+        ``date_basis`` chooses the clock for bounds, ordering and cursors:
+        effective (default: delivery, else send date), sent (Date
+        header), or occurred (topmost Received header). Missing sent or
+        occurred clocks are indeterminate even without date bounds;
+        effective uses first-indexed time for ordering undated mail only.
+        Keep the same date_basis on every page. internal is unavailable.
 
         All given filters must match (AND); blank filters are ignored.
         Message filters (sender, recipient, participant, folder, dates)
@@ -2110,11 +2175,16 @@ def register_retrieval_tools(server, db):
             folder: Exact folder name of the carrying message (see
                     list_folders); pass "Trash" to list Trash.
             date_from: ISO 8601 lower bound, inclusive, on the carrying
-                       message's delivery date (occurred_at), else its
-                       send date (sent_at); indeterminate without either.
-            date_to: ISO 8601 upper bound, inclusive; a date-only value
+                       message clock date_basis selects; indeterminate without it.
+            date_to: ISO 8601 upper bound on date_basis, inclusive; a date-only value
                      covers the whole UTC day. ``date_bounds`` echoes the
-                     UTC instants applied.
+                     clock and UTC instants applied.
+            date_basis: Clock for bounds, newest-first ordering and cursors:
+                        effective (default: delivery, else send date),
+                        sent (Date header), or occurred (topmost Received header).
+                        Under sent or occurred a missing clock is indeterminate,
+                        even without bounds. internal is unavailable. Omission
+                        or blank means effective; explicit null is rejected.
             filename: Case-insensitive substring of the filename, taken
                       literally (no wildcards).
             content_type: Exact MIME type, e.g. "application/pdf".
@@ -2126,7 +2196,8 @@ def register_retrieval_tools(server, db):
             claimant_id: Exact claimant ID of the carrying message.
             thread_id: Exact thread ID.
             limit: Attachments per page (default 20, clamped to [1, 50]).
-            cursor: ``next_cursor`` from the previous page of the same query.
+            cursor: ``next_cursor`` from the previous page of the same query;
+                    keep date_basis unchanged between pages.
 
         Returns:
             The filter interpretation, total_matches, indeterminate,
@@ -2149,11 +2220,25 @@ def register_retrieval_tools(server, db):
             "claimant_id": claimant_id,
             "thread_id": thread_id,
         }
-        log_tool_call(log, "query_attachments", {**args, "limit": limit, "cursor": cursor})
+        log_tool_call(
+            log,
+            "query_attachments",
+            {**args, "date_basis": date_basis, "limit": limit, "cursor": cursor},
+        )
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_ATTACHMENT_QUERY_LIMIT)
         try:
-            bounds = date_bounds(*validate_date_range(date_from, date_to))
-            page = await asyncio.to_thread(db.query_attachments, **args, limit=limit, cursor=cursor)
+            if date_basis is None:
+                raise InvalidFilterError("date_basis", "date_basis must be a string")
+            date_basis = normalize_date_basis(date_basis)
+            lower, upper = validate_date_range(date_from, date_to)
+            bounds = (
+                QueryDateBounds(date_from=lower, date_to=upper, date_basis=date_basis)
+                if lower is not None or upper is not None
+                else None
+            )
+            page = await asyncio.to_thread(
+                db.query_attachments, **args, date_basis=date_basis, limit=limit, cursor=cursor
+            )
         except InvalidFilterError as e:
             # The message can quote the rejected value; return it to the
             # caller and log only the field (#257).
@@ -2169,9 +2254,10 @@ def register_retrieval_tools(server, db):
         uses = _filter_uses(args)
         if page.indeterminate:
             # Why, by fixed key, as query_messages does (#1086).
-            for key, _ in _indeterminate_cause_entries(uses):
+            for key, _ in _indeterminate_cause_entries(uses, date_basis=date_basis):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = QueryAttachmentsOutput(
+            date_basis=date_basis,
             filters=uses,
             date_bounds=bounds,
             total_matches=page.total_matches,
@@ -2183,16 +2269,19 @@ def register_retrieval_tools(server, db):
             next_cursor=page.next_cursor,
             attachments=[_listed_attachment(a) for a in page.attachments],
         )
-        lines = [
-            "Query: "
-            + _describe_filters(uses, "no filters (every indexed attachment outside Trash)")
-        ]
+        none = (
+            "no filters (every indexed attachment outside Trash)"
+            if date_basis == DEFAULT_DATE_BASIS
+            else "no other filters (outside Trash; missing selected dates are indeterminate)"
+        )
+        lines = ["Query: " + _describe_filters(uses, none)]
+        lines.append(f"date_basis: {date_basis}")
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}")
         if page.indeterminate:
             # Fixed text naming the causes the given filters can have.
-            causes = _indeterminate_causes(uses)
+            causes = _indeterminate_causes(uses, date_basis=date_basis)
             if (extraction_status or "").strip() not in ("", "none", "deferred"):
                 causes.append("no extraction recorded yet")
             lines.append(

@@ -165,13 +165,14 @@ def test_every_typed_parameter_of_every_tool_is_rejected_through_the_limiter(
     [summary] = [w for w in _warnings(caplog) if w.startswith("rejected invalid arguments")]
     assert summary.startswith("rejected invalid arguments in the last 61s: ")
     counts = dict(item.split("=") for item in summary.split(": ", 1)[1].split())
-    # Handler-checked parameters (``size_min`` / ``size_max``) are
+    # Handler-checked parameters (size bounds and date_basis) are
     # counted by the handler's own limiter, not this one.
     handler_checked = {
         f"{tool}.{name}"
         for tool in ("query_messages", "aggregate_messages", "query_threads")
         for name in ("size_min", "size_max")
     }
+    handler_checked |= {"query_messages.date_basis", "query_attachments.date_basis"}
     assert counts == {key: "3" for key in keys - handler_checked}
     assert MARKER not in caplog.text
 

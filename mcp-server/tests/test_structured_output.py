@@ -242,6 +242,7 @@ class TestQueryMessagesFields:
         result = _wire(server, "query_messages", {"subject": "Re: Budget"})
         assert result.content[0].text == (
             "Query: subject='Re: Budget' (case-insensitive substring)\n"
+            "date_basis: effective\n"
             "total_matches: 1\n"
             "returned: 1 (matches 1-1)\n"
             "has_more: false\n"
@@ -411,6 +412,7 @@ class TestDateBoundsEcho:
     def test_query_messages_date_only_bound_is_the_utc_day(self, messages_db):
         page = _call(_server(messages_db), "query_messages", date_from="2024-01-10")
         assert page["date_bounds"] == {
+            "date_basis": "effective",
             "date_from": "2024-01-10T00:00:00+00:00",
             "date_to": None,
         }
@@ -421,6 +423,7 @@ class TestDateBoundsEcho:
         args = {"date_from": "2024-01-10T05:00:00-05:00", "date_to": "2024-01-31"}
         page = _call(server, "query_messages", **args)
         assert page["date_bounds"] == {
+            "date_basis": "effective",
             "date_from": "2024-01-10T10:00:00+00:00",
             "date_to": "2024-01-31T23:59:59.999999+00:00",
         }
@@ -540,23 +543,6 @@ class TestQueryMessagesServedContract:
             "the complete count only when ``indeterminate`` is 0" in desc
         )
         assert "report ``indeterminate`` with any count" in desc
-
-    def test_date_basis_is_not_served(self, messages_db):
-        # date_basis was split out of #1085 (owner, 2026-10-08); the
-        # internal clock machinery stays fixed to effective time (#1087).
-        tool = _tools(_server(messages_db))["query_messages"]
-        assert "date_basis" not in tool.input_schema["properties"]
-        for text in (
-            tool.description,
-            json.dumps(tool.input_schema),
-            json.dumps(tool.output_schema),
-        ):
-            assert "date_basis" not in text
-            assert "basis" not in text
-
-    def test_date_basis_argument_is_refused(self, messages_db):
-        result = _wire(_server(messages_db), "query_messages", {"date_basis": "sent"})
-        assert result.is_error
 
 
 @pytest.mark.parametrize(
