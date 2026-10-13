@@ -182,7 +182,34 @@ def bounded_logging:
         ($s | list("volumes")[] | select(.type != "volume" or $c.volumes[.target] != .source)
             | "\($c.service): mounts \(.source // .type) at \(.target), not its own Maildir or state volume"),
         ($s.networks // {} | keys[] | select(. != $c.network)
-            | "\($c.service): joins network \(.), not its own")
+            | "\($c.service): joins network \(.), not its own"),
+        # A declared collector has no entry of its own in $base, so the
+        # existing-service checks below never run for it: held only to
+        # the shape checks above, an overlay could reset its init or
+        # raise its pids_limit past 128 while the same mutation on the
+        # legacy mbsync is rejected (review round 2, finding 1), and the
+        # secret/volume/network exception above would be granted to any
+        # service merely named mbsync-<uuid>, whatever image or
+        # entrypoint it runs (review round 2, finding 2). Compare it
+        # against base mbsync directly for both.
+        ($base[0].services["mbsync"] as $bbase
+            | (if $bbase.init == true and $s.init != true
+                then "\($c.service): init is not true" else empty end),
+              ($bbase | list("cap_drop")[]
+                | select(. as $cd | $s | list("cap_drop") | index($cd) == null)
+                | "\($c.service): cap_drop lost \(.)"),
+              ($bbase | list("security_opt")[]
+                | select(. as $o | $s | list("security_opt") | index($o) == null)
+                | "\($c.service): security_opt lost \(.)"),
+              (if ($s.pids_limit | type) == "number" and $s.pids_limit > $bbase.pids_limit
+                then "\($c.service): pids_limit is above the base" else empty end),
+              (if $bbase.mem_limit != null
+                    and ($s.mem_limit == null or ($s.mem_limit | tonumber) > ($bbase.mem_limit | tonumber))
+                then "\($c.service): mem_limit is missing or above the base" else empty end),
+              (if $s.image != $bbase.image or $s.build != $bbase.build
+                then "\($c.service): image or build differs from mbsync" else empty end),
+              (if ($s | set("entrypoint")) then "\($c.service): sets an entrypoint override" else empty end),
+              (if ($s | set("command")) then "\($c.service): sets a command override" else empty end))
       end),
   # A declared collector keeps its own secret (mounted as bridge_pass),
   # both volumes and its network: an overlay with !reset cannot take them.
@@ -933,6 +960,47 @@ services:
 EOF
 }
 
+# A declared collector has no entry of its own in $base, so it kept none
+# of the resource-retention hardening the legacy collector is held to
+# (review round 2, finding 1): an overlay could reset its init or raise
+# its pids_limit or mem_limit past the base's, or drop a cap_drop or
+# security_opt entry, while the same mutation on mbsync itself is
+# rejected.
+generated_collectors_keep_the_mbsync_baseline_hardening() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: init is not true" \
+        "mbsync-$UUID_B: cap_drop lost ALL" \
+        "mbsync-$UUID_B: security_opt lost no-new-privileges:true" \
+        "mbsync-$UUID_B: pids_limit is above the base" <<EOF
+services:
+  mbsync-$UUID_B:
+    init: !reset null
+    cap_drop: !reset []
+    security_opt: !reset []
+    pids_limit: 256
+EOF
+}
+
+# The collector secret/volume/network exception above is granted to any
+# service named mbsync-<uuid>; nothing verified it still runs mbsync's
+# own build or image, or that it set no entrypoint/command override
+# (review round 2, finding 2: a substituted but otherwise hardened image
+# would still receive the account password, Maildir/state volumes and
+# network).
+generated_collectors_keep_the_mbsync_implementation() {
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: image or build differs from mbsync" \
+        "mbsync-$UUID_B: sets an entrypoint override" \
+        "mbsync-$UUID_B: sets a command override" <<EOF
+services:
+  mbsync-$UUID_B:
+    build: !reset null
+    image: example.invalid/rootful:1
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["true"]
+EOF
+}
+
 the_base_runs_mbsync_indexer_and_mcp_server() {
     render "$BASE"
     expect '.services | keys == ["indexer", "mbsync", "mcp-server"]' || return 1
@@ -1197,6 +1265,10 @@ check "generated collectors keep their own secret, volumes, network and names" \
     generated_collectors_keep_their_own_resources
 check "generated imap collectors get no Bridge secret or bridge-net" \
     generated_imap_collectors_get_no_bridge_secret_or_network
+check "generated collectors keep the mbsync baseline hardening" \
+    generated_collectors_keep_the_mbsync_baseline_hardening
+check "generated collectors keep the mbsync implementation" \
+    generated_collectors_keep_the_mbsync_implementation
 check "omitted rerank and inference settings render without a warning" \
     omitted_rerank_and_inference_settings_render_without_a_warning
 check "ACCOUNT_SCOPE is required and reaches the indexer and mcp-server" \
