@@ -92,13 +92,6 @@ services:
       SYNC_INTERVAL: ${SYNC_INTERVAL:-60}
       # Per-run mbsync deadline (#282); see .env.example.
       SYNC_DEADLINE_SECONDS: ${SYNC_DEADLINE_SECONDS:-86400}
-      # Set to true for one container creation when the app's TLS cert is
-      # deliberately rotated (and BRIDGE_CERT_FINGERPRINT updated to it),
-      # then recreate mbsync with it false: the value survives restarts of
-      # the same container. mbsync refuses to sync on a fingerprint
-      # mismatch otherwise. See docs/troubleshooting.md. Only true or false,
-      # in lower case, is accepted.
-      BRIDGE_CERT_PIN_ROTATE: ${BRIDGE_CERT_PIN_ROTATE:-false}
     volumes:
       - maildir-volume:/maildir
       - mbsync-state:/state
@@ -241,7 +234,6 @@ services:
       INDEXER_DELETION_GRACE_DAYS: ${INDEXER_DELETION_GRACE_DAYS:-7}
       INDEXER_DELETION_SWEEP_INTERVAL_SECS: ${INDEXER_DELETION_SWEEP_INTERVAL_SECS:-3600}
       INDEXER_DELETION_MAX_BATCH_PCT: ${INDEXER_DELETION_MAX_BATCH_PCT:-0.05}
-      INDEXER_DELETION_FORCE: ${INDEXER_DELETION_FORCE:-false}
       # Attachment extraction knobs. Code defaults already match these
       # values; explicit wiring is here so operator overrides in .env
       # actually reach the container env (otherwise compose interpolates

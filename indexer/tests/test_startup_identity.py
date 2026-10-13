@@ -167,7 +167,6 @@ def test_config_hash_covers_only_the_named_non_secret_settings():
         "INDEXER_DELETION_GRACE_DAYS",
         "INDEXER_DELETION_SWEEP_INTERVAL_SECS",
         "INDEXER_DELETION_MAX_BATCH_PCT",
-        "INDEXER_DELETION_FORCE",
     }
     assert not [n for n in names if re.search(r"KEY|TOKEN\b|TOKEN$|PASS|SECRET", n)]
 
@@ -180,8 +179,8 @@ def test_config_hash_covers_only_the_named_non_secret_settings():
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{2,}")
 # The service's own env helpers, which take the variable name as a literal
 # argument (``main._int_env``, ``queue._int_env``, the reconciler's
-# ``_int`` / ``_pct`` / ``_bool`` / ``_mode``, ``embedder._float_env``).
-_ENV_HELPERS = {"getenv", "_int", "_pct", "_bool", "_mode", "_float"}
+# ``_int`` / ``_pct`` / ``_mode``, ``embedder._float_env``).
+_ENV_HELPERS = {"getenv", "_int", "_pct", "_mode", "_float"}
 
 
 def _env_names_read_by_src() -> set[str]:
@@ -231,7 +230,7 @@ def test_the_scan_finds_reads_in_every_module():
         "INDEXER_PARSE_MAX_BYTES",  # parser.py
         "EMBED_WARMUP_TIMEOUT_SECS",  # embedder.py
         "INDEXER_MAX_ATTEMPTS",  # queue.py
-        "INDEXER_DELETION_FORCE",  # reconciler.py
+        "INDEXER_DELETION_MAX_BATCH_PCT",  # reconciler.py
     } <= _env_names_read_by_src()
 
 

@@ -229,7 +229,9 @@ or `supported after backfill` while any indexed message's header flag is
 NULL, plus `unassessed_messages` and `incomplete_messages` counts over
 all indexed message rows, including Trash. Incomplete messages (a cap or header parse loss) still
 permit positive header matches but cannot certify absence. This is the
-header slice of the capability report tracked by #1093.
+legacy header summary; `query_capabilities` below covers every registered leaf.
+When the schema lacks header evidence, its status is `unavailable` and both
+counts are null.
 
 ## Stage timings in the server log
 
@@ -514,11 +516,11 @@ different filters"), never read against them.
 | `not_in_folders` | folder names | the default scope, when no folder is named | it is filed in none of them (`Trash`; [Trash](#trash-is-left-out-by-default)) |
 | `effective_from` | UTC instant | `date_from` | its effective time is at or after the instant; unknown without a delivery date or a parsed send date |
 | `effective_to` | UTC instant | `date_to` | its effective time is at or before the instant; unknown likewise |
-| `sent_from` | UTC instant | no tool yet ([#1150](https://github.com/marshalltech81/protonmail-local-ai/issues/1150)) | its send date (`sent_at`) is at or after the instant; unknown without a parsed one |
-| `sent_to` | UTC instant | no tool yet (#1150) | its send date is at or before the instant; unknown without a parsed one |
-| `occurred_from` | UTC instant | no tool yet (#1150) | its delivery date (`occurred_at`) is at or after the instant; unknown without one |
-| `occurred_to` | UTC instant | no tool yet (#1150) | its delivery date is at or before the instant; unknown without one |
-| `dated` | clock name | no tool yet (#1150) | it has that clock (a delivery date, or a parsed send date), so it has a place in a page ordered by it; unknown without one |
+| `sent_from` | UTC instant | `date_from` with `date_basis="sent"` | its send date (`sent_at`) is at or after the instant; unknown without a parsed one |
+| `sent_to` | UTC instant | `date_to` with `date_basis="sent"` | its send date is at or before the instant; unknown without a parsed one |
+| `occurred_from` | UTC instant | `date_from` with `date_basis="occurred"` | its delivery date (`occurred_at`) is at or after the instant; unknown without one |
+| `occurred_to` | UTC instant | `date_to` with `date_basis="occurred"` | its delivery date is at or before the instant; unknown without one |
+| `dated` | clock name | `date_basis="sent"` or `"occurred"`, even without bounds | it has that clock (a delivery date, or a parsed send date), so it has a place in a page ordered by it; unknown without one |
 | `has_attachments` | bool | `has_attachments` | its own attachment flag equals the value; unknown when it stores no attachment and its attachment list is not complete |
 | `seen` | bool | `query_messages` `seen` | its read flag equals the value |
 | `flagged` | bool | `query_messages` `flagged` | its flagged flag equals the value |
@@ -1308,9 +1310,8 @@ unclassified).
 Enumerate **every** message matching exact criteria, with a total
 count. Unlike `search_emails`, which ranks threads by relevance and
 returns the top `limit`, this returns every individual message the
-filters definitely match, newest effective time (`occurred_at`, else
-`sent_at`, else the time it was first indexed) first (claimant ID
-breaks ties),
+filters definitely match, newest first by the clock `date_basis` selects
+(claimant ID breaks ties),
 and pages through it with a cursor. Use it for "all" and "how many"
 questions.
 
@@ -1322,8 +1323,9 @@ questions.
 | `subject` | string | none | Unicode caseless substring of the message's own subject (casefolded, so `STRASSE` matches `Straße`); a message whose stored subject was cut or is not checked yet and does not contain it is `indeterminate` |
 | `text` | string | none | Every word must appear in the message's indexed body (FTS word match with stemming; words may be in different chunks). Attachment text and stripped quoted replies are not searched; at most 16 words. A message whose indexed body is not complete and lacks a word is `indeterminate` |
 | `folder` | string | none | Exact folder name. Without it, messages filed in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
-| `date_from` | string | none | Inclusive ISO 8601 lower bound on the message's effective time (`occurred_at`, else `sent_at`) |
-| `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. Give an offset for a local-time bound; `date_bounds` echoes the UTC instants applied ([date bounds](#search_emails)) |
+| `date_from` | string | none | Inclusive ISO 8601 lower bound on the clock `date_basis` selects |
+| `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. Give an offset for a local-time bound; `date_bounds` echoes the clock and UTC instants applied ([date bounds](#search_emails)) |
+| `date_basis` | string | `effective` | Clock for bounds, order and cursors: `effective` (delivery, else send date), `sent` (Date header), or `occurred` (topmost Received header). Blank uses the default; explicit null and unknown values are errors; `internal` is unavailable |
 | `has_attachments` | bool | none | The message's own attachment flag, either way; a message with no stored attachment whose attachment list is not complete is `indeterminate` either way |
 | `seen` | bool | none | `true` for messages read in Proton, `false` for unread ([read state](#read-state)) |
 | `flagged` | bool | none | `true` for flagged (starred) messages, `false` for the rest |
@@ -1336,8 +1338,18 @@ questions.
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
 | `fields` | list of strings | none (every field) | Row fields to return; see Field projection below |
 
-All given filters must match; blank filters are ignored. With none,
-every indexed message outside Trash is enumerated, so a count from an
+The response always reports `date_basis`; when bounds are given,
+`date_bounds.date_basis` echoes it too. A missing or not-yet-checked
+send date under `sent`, or a missing delivery date under `occurred`,
+is `indeterminate` even without bounds, excluded from matches and pages.
+Under `effective`, undated mail uses `first_indexed_at` for ordering only;
+a date bound is unknown for it. Pending reparse, effective ordering
+keeps the legacy stored send date, but bounds treat it as unknown
+without a delivery date. `sent` is the sender's claimed date,
+and `occurred` is the parsed topmost Received date, not IMAP INTERNALDATE.
+
+All given filters must match; blank filters are ignored. With none and
+the default clock, every indexed message outside Trash is enumerated, so a count from an
 unfiltered query is not a mailbox-wide total: Trash takes a separate
 `folder="Trash"` query. A `date_from` later than
 `date_to` is rejected, as in `search_emails`.
@@ -1557,7 +1569,7 @@ fields to return, by their structured-output names (`message_id`,
 minimal set is `["subject", "sent_at", "from", "has_attachments"]`.
 The text form shows only the projected fields it lists (the claimant
 and thread IDs always). The envelope (`filters`, `address_matches`,
-`date_bounds`, `total_matches`, `returned`, `offset`, `has_more`,
+`date_basis`, `date_bounds`, `total_matches`, `returned`, `offset`, `has_more`,
 `next_cursor`) is unchanged, and so is the cursor: it is built from the
 page's messages before projection, so a projected and an unprojected
 page continue each other. An unknown name is an error that names it,
@@ -1568,11 +1580,16 @@ the repeats. Omitting `fields`
 returns every field, as before. Because rows can be projected, the
 output schema requires only `claimant_id` and `thread_id` in a row.
 
-**Paging.** Keyset pagination on `(effective_at, claimant_id)`: messages
+**Paging.** Keyset pagination on `(selected_clock, claimant_id)`: messages
 indexed while a caller pages never shift or duplicate later pages. A
-cursor is bound to the filters it was issued for; a cursor from
+cursor is bound to the filters and date_basis it was issued for; a cursor from
 another query, or a malformed one, is rejected with an error rather
 than silently restarting.
+
+Existing effective-time cursors remain valid. Keep the same `date_basis`
+on every page; changing it rejects the cursor. Sent and delivery clocks retain
+keyset paging with scan-and-sort under the current schema; index
+optimization is tracked in #1123.
 
 To examine every match, follow `next_cursor` until `has_more` is false.
 Each page uses a fresh index snapshot, so the matching set can change
@@ -1812,9 +1829,10 @@ host's CPU and disk and inflates every timing.
 ### `query_threads`
 
 Enumerates every indexed thread containing at least one message that
-**definitely matches the complete filter expression**. It accepts exactly
-`query_messages`' filters, including `where` (`all` / `any` / `negate`),
-with the same validation and three-valued semantics. Different messages
+**definitely matches the complete filter expression**. It accepts
+`query_messages`' filters except `date_basis`, including `where`
+(`all` / `any` / `negate`), with the same validation and three-valued
+semantics. Date bounds use effective time. Different messages
 cannot satisfy different AND leaves for one thread. Duplicate claimants
 of one Message-ID count separately. Matching messages in Trash are excluded
 unless `folder="Trash"`; this does not exclude Trash from whole-thread context.
@@ -1886,14 +1904,15 @@ folder) instead of paging `query_messages` and counting on the client.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `group_by` | string | required | `sender_address`, `sender_domain`, `folder`, `year`, `month` or `authority_class` |
-| every `query_messages` filter | | none | `sender`, `recipient`, `participant`, `subject`, `text`, `folder`, `date_from`, `date_to`, `has_attachments`, `authority_class`, `seen`, `flagged`, `replied`, `size_min`, `size_max` and `where`, with the same schema and meaning; Trash is left out unless `folder="Trash"` ([Trash](#trash-is-left-out-by-default)) |
+| `query_messages` filters except `date_basis` | | none | `sender`, `recipient`, `participant`, `subject`, `text`, `folder`, `date_from`, `date_to`, `has_attachments`, `authority_class`, `seen`, `flagged`, `replied`, `size_min`, `size_max` and `where`, with the same schema and meaning; Trash is left out unless `folder="Trash"` ([Trash](#trash-is-left-out-by-default)) |
 | `limit` | int | `25` | Groups per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same call |
 
 The filters compile to the same expression as `query_messages`
 ([Filter predicates](#filter-predicates)), so `total_matches` and
 `indeterminate` are the counts `query_messages` returns for the same
-filters, and a group's `messages` is the `total_matches` of
+filters with `date_basis="effective"`, and a group's `messages` is the
+`total_matches` of
 `query_messages` for the same filters plus the group's own:
 
 | `group_by` | Group value | The group's own filter |
@@ -1968,8 +1987,8 @@ a total count
 An occurrence is one attachment on one message: the same bytes attached
 to two messages, or twice to one, are separate rows that share an
 `attachment_id`. Rows are not ranked; the newest carrying message comes
-first by effective time (`occurred_at`, else `sent_at`, else the time
-it was first indexed), and claimant ID then occurrence ID break ties. Use it for "list every attachment" and
+first by the clock `date_basis` selects, and claimant ID then occurrence
+ID break ties. Use it for "list every attachment" and
 "how many" questions; [`search_attachments`](#search_attachments) ranks
 by filename and extracted text and stops at 50 results.
 
@@ -1979,8 +1998,9 @@ by filename and extracted text and stops at 50 results.
 | `recipient` | string | none | To or Cc of the carrying message, likewise |
 | `participant` | string | none | Any role of the carrying message, likewise |
 | `folder` | string | none | Exact folder name of the carrying message. Without it, attachments on messages in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
-| `date_from` | string | none | Inclusive ISO 8601 lower bound on the carrying message's effective time |
-| `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. `date_bounds` echoes the UTC instants applied |
+| `date_from` | string | none | Inclusive ISO 8601 lower bound on the carrying message clock `date_basis` selects |
+| `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. `date_bounds` echoes the clock and UTC instants applied |
+| `date_basis` | string | `effective` | Clock for bounds, order and cursors, with the same choices and validation as `query_messages` |
 | `filename` | string | none | Unicode caseless substring of the filename, taken literally (`%` and `_` are ordinary characters) |
 | `content_type` | string | none | Exact MIME type, e.g. `application/pdf` |
 | `extraction_status` | string | none | `success`, `empty`, `unsupported`, `too_large`, `failed`, `deferred` (extraction waits for a later indexer pass, #1236), or `none` (no extraction recorded); blank is ignored, any other value is an error |
@@ -1993,9 +2013,13 @@ All given filters must match; blank filters are ignored. The message
 filters (`sender`, `recipient`, `participant`, `folder`, the dates) are
 the [predicate leaves](#filter-predicates) `query_messages` builds,
 decided on the message carrying each attachment, so they match the same
-messages. The date bounds use effective time, as in `query_messages`;
-neither tool can bound by another date yet
-([#1150](https://github.com/marshalltech81/protonmail-local-ai/issues/1150)).
+messages under the same `date_basis`. The response always reports the
+selected clock, also in `date_bounds` when bounds are given. Missing
+sent or delivery clocks are indeterminate even without bounds: counted
+once per stored occurrence, never as matches. Existing effective-time
+cursors remain valid; keep the same basis on every page. Sent and delivery
+clocks retain keyset paging with scan-and-sort under the current schema;
+index optimization is tracked in #1123.
 
 **Unknown values.** A filter can leave an occurrence undecided: a
 message filter for the reasons it leaves a message undecided in
@@ -3320,6 +3344,41 @@ and what it holds. Call this when asked which version or build is running.
 | `total_threads`, `total_messages`, `oldest_message`, `newest_message` | What the index holds |
 | `conflicting_message_ids` | How many Message-IDs more than one indexed file claims (see "Message-ID and claimant ID" above); 0 when none |
 | `extra_claimant_files` | Files beyond the first claimant of each conflicting Message-ID (two Message-IDs with 2 and 3 claimants give 3) |
+
+`query_capabilities` has one entry per registered predicate leaf, derived from
+that leaf's coverage rule, matching dependencies, and the schema fields and
+evidence actually stored.
+`index_schema_version` is the stored schema version (null for an unstamped
+index). Each entry reports:
+
+- `supported`: all indexed messages have fully assessed evidence for that leaf;
+  an empty population also has this status.
+- `supported after backfill`: `unassessed_messages` are still awaiting evidence
+  assessment, including attachments whose occurrence rows have not yet committed.
+  Reparse can assess them; dead-lettered jobs need operator recovery.
+  An empty `queue.reparse` does not establish completeness.
+- `supported when present`: assessment is finished, but `missing_messages` lack
+  fully usable evidence, for example a missing delivery date, ambiguous sender,
+  parse cap or incomplete attachment extraction.
+- `unavailable`: required schema fields are absent. Counts are null and
+  `condition` names the upgrade/migration or damaged-index rebuild needed to
+  restore the required schema, and assessment of existing mail.
+
+`available_messages`, `unassessed_messages` and `missing_messages` partition the
+indexed `messages` rows, including Trash. Available means fully usable evidence,
+not a match. Unassessed takes precedence over missing when both affect one row,
+except that already usable evidence remains available. These are conservative
+coverage counts across the leaf's accepted operands: explicit address leaves
+cover all public roles, inferred address leaves also cover name matching, and
+`dated` covers both nullable clocks. A To-only query can therefore decide more
+messages than an address leaf's coverage suggests. Retained positive evidence
+can match even on an incomplete row. Always use the actual query's
+`indeterminate` count to assess that result.
+
+The report reads flags and counts only, never addresses, headers, bodies or
+attachment text. It describes registered leaves; unsupported operands such as
+`date_basis=internal` (#1092) and Bcc-inclusive roles (#1090) remain rejected by
+validation and are not advertised as registered leaves.
 
 Message-ID conflicts are reported as counts only, with a fixed hint
 in the text output (`get_message` on such a Message-ID lists its

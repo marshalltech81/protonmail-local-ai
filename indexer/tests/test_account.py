@@ -60,7 +60,7 @@ def _shell_accepts(value: str) -> bool:
     ``value``: the shared helper's normalization and check, run by bash."""
     script = (
         'source "$1"; v="$(proton_normalize_source_mode "${2:-$PROTON_DEFAULT_SOURCE_MODE}")"; '
-        'proton_settings_problem "$v" host.docker.internal 1143 127.0.0.1 false '
+        'proton_settings_problem "$v" host.docker.internal 1143 127.0.0.1 '
         '"$PROTON_DEFAULT_FOLDER_EXCLUSIONS" protonmail protonmail-remote protonmail-local '
         "protonmail"
     )

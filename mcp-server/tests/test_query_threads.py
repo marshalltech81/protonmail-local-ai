@@ -191,7 +191,10 @@ def test_empty_population_preserves_unknown_counts(thread_db):
 
 def test_public_filters_match_existing_message_tool_and_logs_withhold_content(thread_db, caplog):
     handlers = _handlers(FakeMCPServer(), thread_db)
-    message_args = set(inspect.signature(handlers["query_messages"]).parameters) - {"fields"}
+    message_args = set(inspect.signature(handlers["query_messages"]).parameters) - {
+        "fields",
+        "date_basis",
+    }
     assert set(inspect.signature(handlers["query_threads"]).parameters) == message_args
     caplog.set_level(logging.INFO)
     result = asyncio.run(handlers["query_threads"](subject="SYNTHETIC_THREAD_MARKER"))

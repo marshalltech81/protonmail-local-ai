@@ -41,8 +41,9 @@ mbsync container
     refuses to start on a Maildir synced with the earlier layout
   - Requires Bridge's TLS cert to match BRIDGE_CERT_FINGERPRINT on every
     start, then pins it (SHA-256 fingerprint stored in mbsync-state
-    volume); refuses to sync on mismatch unless the operator sets
-    BRIDGE_CERT_PIN_ROTATE=true for a legitimate rotation
+    volume); refuses to sync on mismatch. A legitimate rotation is one
+    `make rotate-bridge-pin` run, a one-shot container that may replace
+    the pin and syncs nothing (#1609)
   - Fails closed if cert extraction or repeated sync attempts fail
   - After each successful sync, writes a last-sync stamp
     (`.mbsync-last-sync.json`) at the Maildir root. A sync whose only
@@ -279,7 +280,7 @@ loopback the app binds, so this setup is not supported there (see
 
 The Bridge stays on this Mac (PLAN.md decision 46). `SOURCE_MODE`,
 `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`, `BRIDGE_CERT_HOST`,
-`BRIDGE_CERT_PIN_ROTATE`, `PROTON_FOLDER_EXCLUSIONS` and isync's
+`PROTON_FOLDER_EXCLUSIONS` and isync's
 account, store and channel names are settings, each defaulting to the
 value mbsync used before it was one, checked by one implementation,
 `mbsync/proton-settings.sh`,
@@ -333,9 +334,6 @@ the value.
 - `BRIDGE_IMAP_PORT` (Compose's default `1143`) must be a port from 1 to
   65535 without leading zeros; `validate_bridge_endpoint` keeps its own
   check of it as well.
-- `BRIDGE_CERT_PIN_ROTATE` (Compose's default `false`) must be exactly
-  `true` or `false`; any other spelling is refused rather than read as
-  false.
 - `PROTON_FOLDER_EXCLUSIONS` (empty means `All Mail|Labels/*|Starred`)
   is a list of folder patterns separated by `|`. The whole value is
   checked first: of ASCII, only `A-Z a-z 0-9`, spaces,
@@ -1368,20 +1366,21 @@ match as readily as genuine ones, and a value matches every ID that
 contains it (T9).
 #1313 proposes accepting `X-Pm-Internal-Id` as a logical identity
 under a validated policy; this section is the evidence that proposal
-waits on (#1316). Three kinds of evidence are kept apart, and only the
-second runs anything:
+waits on (#1316). Four kinds of evidence are kept apart:
 
 - **Source review, not executed:** reading Bridge
   `b9c5dac1651437100c40896dacd778a0518a26f2` and its pinned Gluon
   `7e800978ab4a9942829eb6116e33ea0278c03e91` (and the `go-message`
   fork Bridge pins). Says what the code is written to do, not what a
   running Bridge delivers.
+- **Compiled harness:** that upstream code built from source and run on
+  synthetic input in an isolated container (#1583), against Gluon's
+  fake connector or the go-proton-api fake server, never Proton.
 - **Tests of this repository's code**, on synthetic files.
-- **Unresolved:** needs the upstream code run in a local harness
-  (#1583), a live synthetic account (#1584), or a mechanism this
-  repository does not have yet (#1313, #1317, #1566).
+- **Unresolved:** needs a live synthetic account (#1584), or a
+  mechanism this repository does not have yet (#1313, #1317, #1566).
 
-No row describes an actual Bridge binary.
+No row describes an actual Bridge binary or a live account.
 
 **Source review, not executed.**
 
@@ -1391,13 +1390,65 @@ No row describes an actual Bridge binary.
 | S2 | A built message without a Message-ID gets a synthesized one. | `build.go` `setMessageIDIfNeeded` |
 | S3 | Multipart builds use random boundaries, so one Proton message can be built as different bytes. | `build.go` `newBoundary` |
 | S4 | A created message gets one Gluon ID shared by all its mailboxes; `X-Pm-Gluon-Id` is prepended to the literal without removing existing fields of that name. | Gluon `internal/backend/connector_updates.go` `applyMessagesCreated`, `rfc822/header.go` `SetHeaderValue` |
-| S5 | A content update equal to the stored literal, byte for byte or by `CompareLiterals` (a normalized comparison of content and of every part's headers that ignores MIME boundaries and `X-Pm-Gluon-Id`), keeps the Gluon ID and the memberships it stays in (so their UIDs), adding and removing only the mailboxes the update changes; any other gets a new Gluon ID. | `connector_updates.go` (`applyMessageMailboxesOnlyUpdate`), `rfc822/hash.go` |
+| S5 | A content update equal to the stored literal, byte for byte or by `CompareLiterals` (a normalized comparison of content and of every part's headers that ignores MIME boundaries and `X-Pm-Gluon-Id`), keeps the Gluon ID and the memberships it stays in (so their UIDs), adding and removing only the mailboxes the update changes; any other gets a new Gluon ID. The comparison reads the stored literal from Gluon's cache: when it is not cached, any update gets a new Gluon ID (H7). | `connector_updates.go` (`applyMessageUpdated`, `applyMessageMailboxesOnlyUpdate`), `rfc822/hash.go` |
 | S6 | Label and flag events update mailboxes only; draft and sent content events rebuild the literal. A failed build, at initial sync or on an event, publishes nothing. | Bridge `internal/services/imapservice/service_message_events.go`, `internal/services/syncservice/stage_build.go` |
 | S7 | A failed APPEND or import whose literal Gluon can parse is stored unchanged in `Recovered Messages` (listed only when non-empty), with no `X-Pm-Gluon-Id` added, unless a literal with the same `GetMessageHash` is already there; that hash leaves out `Date`, `Message-Id` and `X-Pm-*`. A literal Gluon cannot parse is not stored there: the recovery returns the parse error first. Nor is an APPEND that fails as over the size limit (`ErrMessageSizeExceedsLimits`): `Append` returns before any recovery. | Gluon `internal/state/mailbox.go` `Append`, `internal/state/actions.go` `actionCreateRecoveredMessage`, `internal/utils/message_hashmap.go`, `internal/state/state.go` `List` |
 | S8 | A lost recovery literal is an error (never refetched). Any other lost literal is refetched from Bridge, given `X-Pm-Gluon-Id` (S4) and stored; a failed fetch, header write or store is an error and returns no literal. Moving or copying out of recovery imports it: when Bridge returns a remote ID already known locally, the existing message is used and nothing is stored; otherwise the literal Bridge returns is parsed, given `X-Pm-Gluon-Id` and stored, and a failure at any of those steps is an error that stores nothing. | `state.go` `getLiteral`, `actions.go` `actionImportRecoveredMessage` |
 | S9 | An APPEND outside Drafts carrying an existing, undeleted message's `X-Pm-Gluon-Id` adds that message to the mailbox without comparing bytes; Drafts erases the header and creates a message, and when the erase fails it logs the error and creates the message from the original literal, header included. | Gluon `internal/state/mailbox.go` `AppendRegular` |
 | S10 | Any body-section FETCH, `BODY.PEEK[HEADER.FIELDS ...]` included, loads the full literal; `PEEK` does not set `\Seen`. `EXAMINE` is read-only; `UNSELECT` does not expunge; `CLOSE` expunges unless read-only. | `internal/state/mailbox_fetch.go`, `state.go`, `internal/session/handle_close.go`, `handle_unselect.go` |
 | S11 | A mailbox snapshot takes UID, `\Recent` and `\Deleted` per mailbox, other flags from a table keyed by message. | `internal/db_impl/sqlite3/read_ops.go` |
+
+**Compiled harness, not live.** Run on 2026-10-12 by
+`mbsync/tests/upstream/run.sh` (#1583, owner decision of that date),
+which also records how every input was obtained. Gluon and Bridge are
+built from the commits above with Go 1.26.7, the toolchain both
+`go.mod` files name (linux-arm64 archive SHA-256
+`5a4ec883379d51ee9ce1040d5e87f8d35e20387574dd8c947feb01eabc3c1b37`,
+pinned in `run.sh` and matching go.dev's published record). Modules are
+checked against each unchanged `go.sum` (SHA-256 Gluon
+`57ec6e6d7201faca75cf616fdd1d691d45065b6d5730c6400fa6af7a9637e76a`,
+Bridge `e41dcc08911ed850cf72a4f5d2f5a754e1e907ac5046a696d35e5a92a3ae8dfd`)
+and by `go mod verify`. The container starts from the
+`debian:trixie-slim` digest `mbsync/Dockerfile` pins
+(`sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f`;
+arm64 image ID
+`sha256:c3f38b5c1e1e5b416d5b48fb6b3edd3f6ed640b56f1dbf956548df03e66b4c95`;
+both as docker-library/repo-info commit
+`631ff15a31ac5d63781079d695ade706e65708c5` records them) and adds 89
+Debian packages from snapshot `20261005T000000Z`, among them isync
+1.5.1-1 (SHA-256
+`a6a579e7a72831c6c22344d31d37bb1657f25b2f7c92ebd215297b65305940d3`, the
+version the mbsync image installs). Each package is checked against an
+index whose `InRelease` signature gpgv verified with the base image's
+archive keyring. Builds
+and runs have no network (`GOPROXY=off`, `-mod=readonly`,
+`GOTOOLCHAIN=local`) and run as a non-root user with all capabilities
+dropped. Gluon runs its own test server with its fake (`Dummy`)
+connector, wrapped to count connector calls and store reads; Bridge runs
+its message builder and its integration setup against the go-proton-api
+fake server, delivering to isync over TLS. Inputs are synthetic and
+results are counts, byte comparisons, timings and fixed tokens. Limits:
+the fake connector is not Bridge's connector, the fake server is not
+Proton, and the results hold for these commits, not a released binary.
+A result's match against the harness's committed `manifest.json` is an
+in-process observation, not an attestation: code running inside the
+harness's own locked-down process could in principle forge or empty
+its own results, and no check running in that process can rule that
+out by construction (owner decision 2026-10-13, accepted as a residual
+risk rather than further in-process mitigation).
+
+| # | Item (#1583) | Result | Rows |
+|---|---|---|---|
+| H1 | 1, builder | Bridge's builder with the sync's job options, given `X-Pm-Internal-Id` fields in the parsed headers: none, one equal to the Proton ID, one or two other values, or two fields with the other value topmost all give one field equal to the ID; two fields with the ID topmost keep both, so a different value stays below it. | S1 |
+| H2 | 1, fake API | Five imported literals (no identity header, one or two `X-Pm-Internal-Id` fields with other values, an `X-Pm-Gluon-Id` field, both): each of the 5 files isync wrote has one `X-Pm-Internal-Id` equal to its Proton ID and one `X-Pm-Gluon-Id`, the topmost field, and none of the imported values. The fake server keeps only an import's standard fields, so this path cannot reach H1's keep branch or show whether Proton keeps sender-supplied `X-Pm-*` fields (U2). | S1, S4 |
+| H3 | 1, delivery | Each file differs from the literal Bridge served over IMAP: isync wrote LF line endings and added one `X-TUID` field; with both undone the 5 files equal the served literals. A second sync of the same unchanged messages into a new, empty Maildir (new sync state) gave 0 of 5 byte-identical files, 5 of 5 identical without `X-TUID`. A file's bytes, and so its claimant ID, are not the served bytes, and a message isync writes again into an empty Maildir gets different bytes. An incremental sync into the same Maildir was not measured. | U3 |
+| H4 | 2 | Eight APPENDs the connector refused, all answered `NO`: a literal with an `X-Pm-Internal-Id` field, an exact repeat, and copies differing only in `Date`, `Message-Id`, `X-Pm-Internal-Id`, an added `X-Pm-Gluon-Id`, `Subject` or body. `Recovered Messages` stored 3 (the first, the `Subject` and the body variant), each row the APPEND added byte-equal to that APPEND's own literal, the first with its `X-Pm-Internal-Id` field and no `X-Pm-Gluon-Id`. The target mailbox stayed empty. | S7 |
+| H5 | 3 | A recovery literal removed from the store: `FETCH` answers `NO` with 0 connector fetches, and the message stays listed. `COPY` out of recovery: 1 connector create, recovery keeps its copy (still byte-equal to the submission), the target gets the submitted bytes with one `X-Pm-Gluon-Id` prepended. `MOVE`: the same, and recovery is left empty. | S8 |
+| H6 | 4 | APPEND to an ordinary mailbox of a different literal carrying an existing message's `X-Pm-Gluon-Id`: 0 connector creates, 1 add, and the mailbox serves the existing message's bytes, not the appended ones. To a `\Drafts` mailbox: 1 create and a new Gluon ID. An unknown, well-formed Gluon ID: 1 create, and the served literal has 2 `X-Pm-Gluon-Id` fields. | S9, S4 |
+| H7 | 5 | Cache refill (stored literal removed, 1 connector fetch each): when the connector returns the same bytes, the UID and bytes are unchanged; when it returns a rebuild with another MIME boundary (S3), the UID and Gluon ID stay and the served bytes change. An update equivalent by `CompareLiterals` keeps UID, Gluon ID and the stored bytes when the literal is cached, and gets a new Gluon ID and UID when it is not; an update with exactly the stored bytes (Gluon's `X-Pm-Gluon-Id` included, literal cached) keeps UID, Gluon ID and bytes, and so does the connector repeating the bytes it last sent (without that field, which Gluon adds before comparing); a content change gets a new Gluon ID and UID. | S5, S8 |
+| H8 | 6 | One message in two mailboxes, `\Seen \Flagged \Deleted` stored in the first: the second shows `\Seen` and `\Flagged`, not `\Deleted`. isync wrote one file each under `cur`, flags `FST` and `FS`. | S11 |
+| H9 | 7 | `EXAMINE` answers `[READ-ONLY]`; `UID FETCH ... BODY.PEEK[HEADER.FIELDS (X-Pm-Internal-Id)]` leaves `\Seen` on 0 of 3 messages; `STORE` answers `NO`; `UNSELECT` keeps all 3 (one `\Deleted`), with 0 connector mutation calls and 0 connector fetches. `CLOSE` after `EXAMINE` keeps 3 with 0 mutations; `CLOSE` after `SELECT` leaves 2, with 1 connector remove call. | S10 |
+| H10 | 8 | 200 messages of about 256 KiB (52,457,470 bytes from the connector); one pass is `EXAMINE`, `UID FETCH 1:* (UID BODY.PEEK[HEADER.FIELDS (X-Pm-Internal-Id)])`, `UNSELECT`. The figures below cover the `UID FETCH` alone (counters start after `EXAMINE` and are read before `UNSELECT`; H9 covers those two commands). Every `FETCH`: 200 responses, 20,518 bytes to the client, or 20,517 when the command takes under 10 ms (6,890 of them header literals; the count includes Gluon's tagged `OK` line, which states the elapsed time in microseconds), 200 full-literal loads, 0 connector mutations, `\Seen` on 0. Warm (literals cached): 200 store reads of 52,468,070 bytes, 0 connector fetches. Cold (store emptied): 200 store misses, then 200 connector fetches and 200 store writes of 52,468,070 bytes. Warm again: as warm. `FETCH` time over two runs: warm 28.8 and 32.1 ms, cold 18.6 and 22.0 ms, warm again 26.7 and 27.6 ms. Peak RSS of the test process (server and client together) over the same runs: warm 203,992 and 193,312 KiB (from 139,772 and 150,596 before the pass), cold 190,880 and 222,728, warm again 221,568 and 276,416. The probe counts store reads and writes without buffering them. The fake connector serves from memory, so cold time leaves out Bridge's API fetch and build. | S10 |
 
 **Tests of this repository's code.** Test files are under
 `indexer/tests/` unless named otherwise.
@@ -1418,17 +1469,22 @@ No row describes an actual Bridge binary.
 the rows above; they bind #1313's policy, which does not exist yet.
 
 - `X-Pm-Gluon-Id` as a logical identity: it is Gluon-local, changes on
-  unequal content updates and on recovery imports Bridge does not map
-  to a known message (S4, S5, S8), and a client can use it to
-  file an existing message without a byte check (S9).
+  unequal content updates, on equivalent ones whose literal is not
+  cached, and on recovery imports Bridge does not map to a known
+  message (S4, S5, S8, H5, H7), and a client can use it to file an
+  existing message without a byte check (S9, H6).
 - Any identity header in a `Recovered Messages` file, which keeps the
-  submitted bytes (S7); recovery is an untrusted category (#1317).
+  submitted bytes (S7, H4); recovery is an untrusted category (#1317).
+- A file's bytes, or its claimant ID, as the bytes Bridge served or as
+  stable when a message is written again (for example into a rebuilt,
+  empty Maildir): isync writes LF line endings and adds an `X-TUID`
+  field whose value differed between two such writes (H3).
 - A header's presence in a file whose provenance is not established,
   and a folder name as provenance.
 - Equal bytes or an equal Message-ID as proof of one logical message
   (PLAN.md decision 45).
 - Several `X-Pm-Internal-Id` fields in one file are ambiguous, not
-  accepted. S1 means a Bridge-built file can carry them when the
+  accepted. S1 and H1 mean a Bridge-built file can carry them when the
   topmost matches, so duplication alone does not prove forgery either.
 - A `header_exists` or `header_contains` match on an identity header,
   or its count, as a logical identity or a count of logical messages:
@@ -1439,17 +1495,21 @@ the rows above; they bind #1313's policy, which does not exist yet.
 
 | # | Question | Needs |
 |---|---|---|
-| U1 | Which header shapes (S1, S4) reach mbsync; recovery deduplication counts and bytes, recovery cache loss and COPY versus MOVE out of recovery (S7, S8); the APPEND hint (S9); whether a refill or equivalent update changes bytes under an existing UID (S5, S8); flag scope as mbsync writes it (S11); read-only command behaviour and header-only fetch cost (S10). | #1583 |
+| U1 | The compiled-harness rows (H1–H10) with Bridge's own connector and Proton in place of the fakes: whether Proton keeps sender-supplied `X-Pm-*` fields (H2), what a real cache refill or event rebuild serves under an existing UID (H7), header-only cost when reads miss Gluon's cache and go to Proton (H10), and whether a released Bridge binary behaves as these commits do. | #1584 |
 | U2 | Proton ID stability across moves, labels, draft replacement, send and imports; whether Proton keeps sender-supplied `X-Pm-*` headers; cache rebuild, resync, account re-add, split or combined address mode and primary-address changes; header-only reads of a real label set and races with moves. | #1584 (owner-approved plan first) |
-| U3 | Account namespace, the acceptance rule, binding an observation to the exact retained bytes through the mbsync handoff, logical lookup and counts (header predicates match stored text only, T9), membership generations and partial scans. | #1313, #1317 |
+| U3 | Account namespace, the acceptance rule, binding an observation to the exact retained bytes through the mbsync handoff (the file is not the served literal, H3), logical lookup and counts (header predicates match stored text only, T9), membership generations and partial scans. | #1313, #1317 |
 | U4 | Independent occurrences of equal bytes (own folder and flags); stored flags still come from the file name. | #1566, #1485 |
 
 ## Message time
 
 The index records two times per message, `sent_at` and `occurred_at`,
-and derives one effective time from them. Every date the MCP tools
-filter on or sort by is the effective time; outputs return both stored
-fields.
+and derives one effective time from them. `query_messages` and
+`query_attachments` let `date_basis` select effective (the default),
+sent or occurred time for bounds, ordering and cursors. A missing
+selected sent or occurred clock is indeterminate even without bounds;
+changing clocks rejects the cursor. Other tools use effective time.
+Outputs return both stored fields. Sent and delivery clocks have no
+paging index yet (#1123); their pages scan and sort.
 
 **`sent_at`** is the message's `Date:` header as parsed by
 `parsedate_to_datetime` (`indexer/src/parser.py` `_parse_date`),
@@ -3400,8 +3460,15 @@ stops the reaper from acting, while still recording tombstones that will
 clear themselves if mbsync reverts the flags. Up to 10
 tombstones per pass are always allowed regardless of the percentage so
 that routine cleanup on small mailboxes is not gated by the 5% default.
-`INDEXER_DELETION_FORCE=true` overrides the brake for intentional bulk
-cleanups.
+For an intentional bulk cleanup, `make force-deletion` (#1609) runs one
+pass past the brake: it stops the indexer, runs `src/force_deletion.py`
+in a one-shot indexer container (the indexer's own sweep and reap, with
+the configured grace window and `force` set in memory, logged as
+`brake=forced`, then the WAL scrub), and starts the indexer again.
+Nothing is stored, so every later pass has the brake on; each thread's
+reap is its own transaction, so a pass that stops midway leaves the rest
+tombstoned. The persistent `INDEXER_DELETION_FORCE` setting was removed,
+and `scripts/validate-env.sh` refuses it.
 
 `mbsync` keeps `Expunge None` regardless — the reaper cleans up the local
 index; it does not change mbsync's pull-only, no-destructive-delete posture
@@ -4270,7 +4337,7 @@ covers is docs only.
 | **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools, the `xls`, `docx`, `pptx`, `xlsx`, `eml`, `image`, `pdf` and `html` extractors, container identification and the HTML conversion of message bodies run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. One pass of one message may start at most a budget of extraction processes and seconds on attachments the cache cannot serve; the rest are deferred to later passes, between other mail (`indexer/src/attachment_indexing.py` `ExtractionBudget`, #1236). Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | Every extractor but `text` runs in a child; `text` stays in-process by decision 42, and the CI test that is to lock its implementation is not written yet (#1295). The dispatcher's OOXML ZIP-size guard reads the central directory in the indexer process until #1438. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_image_child.py`; `indexer/tests/test_html_child.py`; `indexer/tests/test_pdf_child.py`; `indexer/tests/test_extraction_budget.py`; `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
 | **Secrets.** The Bridge password, provider API keys or the MCP token reach the repository, `docker inspect`, a log, or another local account. | Each secret is a Docker secret read from `.secrets/` (the `secrets` section of `docker-compose.yml`). `scripts/validate-env.sh`, which `make up` runs first, requires mode 600 on every secret file (`require_mode_600`) and rejects the API keys and `MCP_AUTH_TOKEN` in `.env` (`reject_secret_in_env`). `.gitignore` excludes `.env`, `.secrets/` and `*.pem`; the `detect-secrets` pre-commit hook also runs in CI (`lint.yml`). Clients get the token from a file, never an argument (`scripts/mcp-auth-headers.sh`; `mcp-server/src/stdio_adapter.py` refuses a group- or other-readable file). | Every secret rests on the operator's account and mode 600 on the host's disk: processes running as the operator are trusted (see [Endpoint authentication](#endpoint-authentication)). | Secrets are stored unencrypted on the host's disk. A plain `docker compose up` skips `validate-env.sh`. | `scripts/tests/validate_env_test.sh` (`loose_secret_mode_fails`, `loose_mcp_token_mode_fails`, `api_key_in_env_fails`, `mcp_token_in_env_fails`); `mcp-server/tests/test_stdio_adapter.py` `test_group_or_other_access_fails_closed`; `mcp-server/tests/test_http_transport.py` `test_tokens_stay_out_of_the_log`; Semgrep `shell-xtrace-enabled`. The `.gitignore` entries and the `detect-secrets` hook are docs only. <!-- pragma: allowlist secret --> |
 | **Network exposure.** Another machine, another local account or a web page reaches the MCP endpoint, or a container other than mbsync logs in to Bridge. | Only `mcp-server` publishes a port, `127.0.0.1:${MCP_PORT:-3000}` (`docker-compose.yml`). mbsync alone joins `bridge-net` and alone mounts the `bridge_pass` secret. No service shares the host's network namespace. `mcp-server/src/main.py`: `_HostOriginGuard` rejects a bad Host (421) or Origin (403), and `_StaticBearerTokenVerifier` checks the bearer token with `hmac.compare_digest` before any session exists. `docker-compose.hardened.yml` makes `app-net` internal. mbsync reaches the Bridge app only through a name for this Mac's `127.0.0.1`: `BRIDGE_HOST` must be exactly one of `host.docker.internal`, `host.orb.internal`, `host.internal` (each with a recorded forwarding test, `mbsync/tests/host_alias_check.sh`), and `BRIDGE_CERT_HOST` a loopback name, checked by `mbsync/proton-settings.sh` in `scripts/validate-env.sh` and in the entrypoint's `require_prerequisites` before any render or connection; mbsync has no `extra_hosts`. | The loopback bind keeps other machines out; the token is what stops other local accounts. The container engine and its resolver send the `BRIDGE_HOST` names to this Mac's loopback: the name is not resolved to check it. | The bearer token is the only caller-authentication control against another local account, and it does not separate code running as the operator. `app-net` is not internal by default, so the indexer and mcp-server can reach remote providers. No network control limits Bridge's port to mbsync: on macOS `host.docker.internal` reaches the host's loopback from any container, so only the Bridge password, which mbsync alone mounts, keeps the others from logging in. Decision 46 (owner, 2026-10-11, #1497) replaced the fixed `BRIDGE_HOST` and `BRIDGE_CERT_HOST` in `docker-compose.yml` with this exact-value validation; decision 43 stands, with the caveat that the two sites share one implementation, so a fault in `proton-settings.sh` reaches both. The forwarding test runs on the Mac, not in CI. A Bridge on another machine waits on #1499. | `scripts/tests/compose_test.sh` (ports and `bridge-net` membership on every overlay combination); Semgrep `compose-port-on-other-service`, `compose-port-not-loopback`, `compose-bridge-net-member`, `compose-host-namespace`; `mbsync/tests/entrypoint_test.sh` `every_setting_row_agrees_at_both_sites` (each accepted and refused value at both sites, refused before any render or connection); `mbsync/tests/tls_check.sh` check 7; `scripts/tests/compose_test.sh` (no `extra_hosts` on mbsync); `mbsync/tests/host_alias_check.sh` (on the Mac only); `mcp-server/tests/test_http_transport.py` (`test_missing_token_is_unauthorized`, `test_wrong_token_is_unauthorized`, `test_empty_token_fails_closed`, `test_compare_is_constant_time`, `test_streamable_http_rejects_other_host`, `test_streamable_http_rejects_other_origin`). |
-| **Bridge TLS.** Another listener on the Bridge app's loopback port (another local account while the app is down) receives the Bridge password, or the connection falls back to plaintext. | `mbsync/entrypoint.sh` `extract_bridge_cert` connects over implicit TLS only, with no STARTTLS or plaintext fallback, and checks the certificate against the required `BRIDGE_CERT_FINGERPRINT` (`verify_expected_fingerprint`) and then the pin in `mbsync-state` (`verify_cert_pin`) on every start, before the first sync sends the password. With `BRIDGE_CERT_PIN_ROTATE=true` a changed certificate that matches the fingerprint replaces the pin instead of failing; `mbsync/proton-settings.sh` accepts that setting only as `true` or `false`, at `validate-env.sh` and before the entrypoint renders or connects. The certificate lives on tmpfs at `/tmp/mbsync/bridge-cert.pem`, which isync uses as `CertificateFile` with `TLSType IMAPS` (`mbsync/mbsyncrc.template`). `validate-env.sh` refuses a missing or malformed fingerprint. isync checks the certificate's name against `BRIDGE_CERT_HOST`, which both sites limit to loopback names (`127.0.0.1` by default, the only name in the app's own certificate); extraction itself does no name check. The template is pull-only: `Sync Pull`, `Expunge None`. | The fingerprint check, the pin and isync's `CertificateFile` all check the certificate extracted at start. On first boot or during a rotation the pin is written from that certificate, so a fingerprint taken from the wrong certificate passes all three; after that, the pin also refuses a certificate other than the pinned one. | Pull-only sync is one configuration control, the template's settings. isync's own validity and host name checks run on each sync, not at startup. `BRIDGE_CERT_PIN_ROTATE=true` stays in effect until mbsync is recreated with it false, and while it does the pin check does not stop a certificate change; the fingerprint check still does. | `mbsync/tests/entrypoint_test.sh` (`mismatch_is_refused_without_rotation`, `first_boot_with_another_expected_fingerprint_is_refused_unpinned`, `missing_expected_fingerprint_is_refused_at_startup`, `config_keeps_sync_safety`, `rendered_config_matches_the_golden_file`, `every_setting_row_agrees_at_both_sites` for `BRIDGE_CERT_PIN_ROTATE`, and the whole-entrypoint startup order cases such as `expected_fingerprint_mismatch_stops_before_the_pin`); `mbsync/tests/tls_check.sh` (check 6: a certificate for another name is refused before `LOGIN` under each accepted `BRIDGE_CERT_HOST`); `mbsync/tests/layout_check.sh`; `scripts/tests/validate_env_test.sh` `missing_bridge_cert_fingerprint_fails`; Semgrep `shell-tls-verification-disabled`. |
+| **Bridge TLS.** Another listener on the Bridge app's loopback port (another local account while the app is down) receives the Bridge password, or the connection falls back to plaintext. | `mbsync/entrypoint.sh` `extract_bridge_cert` connects over implicit TLS only, with no STARTTLS or plaintext fallback, and checks the certificate against the required `BRIDGE_CERT_FINGERPRINT` (`verify_expected_fingerprint`) and then the pin in `mbsync-state` (`verify_cert_pin`) on every start, before the first sync sends the password. Only a `make rotate-bridge-pin` run (a one-shot `docker compose run --rm mbsync rotate-bridge-pin`, #1609) may replace the pin with a changed certificate that matches the fingerprint; that run exits without rendering a config or syncing, the entrypoint refuses any other argument before anything runs, and Compose sets no `command` or `entrypoint` for mbsync, so every start of the service enforces the pin. `scripts/validate-env.sh` refuses the removed `BRIDGE_CERT_PIN_ROTATE` setting. The certificate lives on tmpfs at `/tmp/mbsync/bridge-cert.pem`, which isync uses as `CertificateFile` with `TLSType IMAPS` (`mbsync/mbsyncrc.template`). `validate-env.sh` refuses a missing or malformed fingerprint. isync checks the certificate's name against `BRIDGE_CERT_HOST`, which both sites limit to loopback names (`127.0.0.1` by default, the only name in the app's own certificate); extraction itself does no name check. The template is pull-only: `Sync Pull`, `Expunge None`. | The fingerprint check, the pin and isync's `CertificateFile` all check the certificate extracted at start. On first boot or during a rotation the pin is written from that certificate, so a fingerprint taken from the wrong certificate passes all three; after that, the pin also refuses a certificate other than the pinned one. | Pull-only sync is one configuration control, the template's settings. isync's own validity and host name checks run on each sync, not at startup. During a `make rotate-bridge-pin` run the pin check does not stop a certificate change; the fingerprint check still does. | `mbsync/tests/entrypoint_test.sh` (`mismatch_is_refused_without_rotation`, `first_boot_with_another_expected_fingerprint_is_refused_unpinned`, `missing_expected_fingerprint_is_refused_at_startup`, `config_keeps_sync_safety`, `rendered_config_matches_the_golden_file`, the whole-entrypoint startup order cases such as `expected_fingerprint_mismatch_stops_before_the_pin`, `rotation_stops_at_an_expected_fingerprint_mismatch`, `rotation_run_replaces_the_pin_once`, `removed_rotation_setting_does_not_rotate` and `unknown_arguments_are_refused_before_anything_runs`); `scripts/tests/compose_test.sh` (`merged_hardening_rejects_a_command_or_entrypoint`); `scripts/tests/validate_env_test.sh` `removed_maintenance_overrides_fail`; `mbsync/tests/tls_check.sh` (check 6: a certificate for another name is refused before `LOGIN` under each accepted `BRIDGE_CERT_HOST`); `mbsync/tests/layout_check.sh`; `scripts/tests/validate_env_test.sh` `missing_bridge_cert_fingerprint_fails`; Semgrep `shell-tls-verification-disabled`. |
 
 ## Privacy Model
 

@@ -314,7 +314,6 @@ _SHELL_ONLY = {
     # also read by the indexer and mcp-server since #1596, so it is not
     # shell-only.
     "BRIDGE_IMAP_PORT": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
-    "BRIDGE_CERT_PIN_ROTATE": ("mbsync", "mbsync/entrypoint.sh and mbsync/proton-settings.sh"),
     "PROTON_FOLDER_EXCLUSIONS": (
         "mbsync",
         "mbsync/entrypoint.sh and mbsync/proton-settings.sh, rendered into mbsync/mbsyncrc.template",
@@ -446,7 +445,7 @@ def test_the_scan_finds_reads_from_every_source():
         "INDEXER_PARSE_MAX_BYTES",  # parser.py
         "EMBED_WARMUP_TIMEOUT_SECS",  # embedder._float_env
         "INDEXER_MAX_ATTEMPTS",  # queue._int_env on an env mapping
-        "INDEXER_DELETION_FORCE",  # reconciler nested helper
+        "INDEXER_DELETION_MAX_BATCH_PCT",  # reconciler nested helper
         "INFERENCE_MAX_TOKENS",  # mcp-server _int_env
         "INFERENCE_STRUCTURED_OUTPUT",  # mcp-server _flag_env
         "INFERENCE_API_KEY",  # mcp-server _read_secret
@@ -639,10 +638,10 @@ def test_a_value_less_environment_entry_is_seen(reverse_copy):
 def test_a_shell_only_entry_dropped_from_compose_is_stale(reverse_copy):
     compose = reverse_copy / "docker-compose.yml"
     text = compose.read_text(encoding="utf-8")
-    line = "      BRIDGE_CERT_PIN_ROTATE: ${BRIDGE_CERT_PIN_ROTATE:-false}\n"
+    line = "      BRIDGE_IMAP_PORT: ${BRIDGE_IMAP_PORT:-1143}\n"
     assert text.count(line) == 1
     compose.write_text(text.replace(line, ""), encoding="utf-8")
-    assert _stale_shell_only(reverse_copy) == {"BRIDGE_CERT_PIN_ROTATE"}
+    assert _stale_shell_only(reverse_copy) == {"BRIDGE_IMAP_PORT"}
 
 
 def test_a_not_read_by_python_entry_dropped_from_compose_is_stale(reverse_copy):

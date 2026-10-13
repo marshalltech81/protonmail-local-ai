@@ -863,7 +863,6 @@ class Refusals(unittest.TestCase):
             "host.docker.internal",
             "1143",
             "127.0.0.1",
-            "false",
             f"All Mail|Labels/*|Starred|{MARKER} folder",
             "protonmail",
             "protonmail-remote",
@@ -872,7 +871,7 @@ class Refusals(unittest.TestCase):
         ]
         with unittest.mock.patch("subprocess.run", recording):
             self.assertIsNone(oc.proton_settings_problem(values))
-            problem = oc.proton_settings_problem([*values[:5], f"{MARKER} folder", *values[6:]])
+            problem = oc.proton_settings_problem([*values[:4], f"{MARKER} folder", *values[5:]])
         self.assertIsNotNone(problem)
         self.assertEqual(len(calls), 2)
         for argv, given in calls:
@@ -1146,15 +1145,10 @@ class Mapping(unittest.TestCase):
         by_kind: dict[str, set[str]] = {}
         for s in oc.MAPPING:
             by_kind.setdefault(s.kind, set()).add(s.env)
-            self.assertEqual(s.toml is None, s.kind in ("maintenance", "runtime"), s.env)
+            self.assertEqual(s.toml is None, s.kind == "runtime", s.env)
             self.assertTrue(s.consumer and s.restart, s.env)
-        self.assertEqual(
-            by_kind["maintenance"], {"BRIDGE_CERT_PIN_ROTATE", "INDEXER_DELETION_FORCE"}
-        )
+        self.assertEqual(set(by_kind), {"global", "account", "runtime"})
         self.assertEqual(by_kind["runtime"], {"MCP_TRANSPORT"})
-        for s in oc.MAPPING:
-            if s.kind == "maintenance":
-                self.assertIn("#1609", s.note)
         self.assertIn("MCP_TRANSPORT", {name for name, _ in oc.RUNTIME_OWNED})
 
     def test_negative_zero_projects_as_zero(self) -> None:
@@ -1224,7 +1218,7 @@ class Mapping(unittest.TestCase):
         projected = {s.env for s in oc.MAPPING if s.toml is not None}
         self.assertEqual(
             set(legacy) - projected,
-            {"BRIDGE_CERT_PIN_ROTATE", "INDEXER_DELETION_FORCE", "MCP_TRANSPORT"},
+            {"MCP_TRANSPORT"},
         )
         # An unset INFERENCE_MODEL takes Compose's default, so legacy.env's
         # explicit value and the projection's empty one are the same.
