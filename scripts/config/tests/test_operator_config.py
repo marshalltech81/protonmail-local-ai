@@ -654,7 +654,7 @@ class Refusals(unittest.TestCase):
                 self.assert_refused(data, shared)
         data = fixture()
         data["global"].setdefault("reranking", {})["api_key_file"] = str(tmp / "pass.txt")
-        data["accounts"][0]["password_file"] = str(tmp / "LINKED.txt")
+        data["accounts"][0]["password_file"] = str(tmp / "linked.txt")
         self.assert_refused(
             data,
             "accounts[0].password_file is another account's password file or a model "
