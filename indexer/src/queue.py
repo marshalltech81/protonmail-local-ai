@@ -105,10 +105,12 @@ REASON_REEXTRACT = "reextract"
 # Re-read an already indexed message so a parser change that keeps chunk
 # IDs fills its per-message rows (#1078). Queued by ``REPARSE_ENQUEUE_SQL``.
 REASON_REPARSE = "reparse"
-# A path whose bytes a freshness or content-hash check (the Maildir walk,
-# the watcher's new-mail gate, or occurrence_scan's periodic backstop)
-# found changed under an occurrence or indexed_files record that still
-# named it (#1612). Queued by ``STALE_ENQUEUE_SQL``.
+# A path whose content occurrence_scan's periodic content backstop
+# found no longer matched the occurrence that still named it, requesting
+# a reparse (#1612). The Maildir walk and the watcher's new-mail gate
+# re-discover a stale path through their own existing reasons (an
+# unindexed-or-stale file looks the same to them as new mail); only the
+# backstop's own detection uses this one. Queued by ``STALE_ENQUEUE_SQL``.
 REASON_STALE_CONTENT = "stale_content"
 
 # Queue every indexed source file for a reparse, in one statement. A
