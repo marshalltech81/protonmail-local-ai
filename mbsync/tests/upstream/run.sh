@@ -28,7 +28,12 @@
 #             GOPROXY=off and -mod=readonly. Copies out only the allowlisted
 #             JSON results; upstream logs stay in the container.
 #   clean     Removes the containers, the image and the work directory,
-#             and asserts they are gone.
+#             and asserts they are gone. `all` runs it on any failure too.
+#
+# acquire writes a random tag into the work dir; the image is named by it
+# and labelled with the SHA-256 of provenance.txt, and execute refuses an
+# image that does not match the work dir. clean deletes only a work dir
+# that carries that tag.
 #
 # Usage: run.sh all <work-dir> <out-dir>
 #        run.sh acquire|assemble <work-dir>
@@ -45,7 +50,12 @@ readonly GLUON_COMMIT=7e800978ab4a9942829eb6116e33ea0278c03e91
 readonly BRIDGE_COMMIT=b9c5dac1651437100c40896dacd778a0518a26f2
 readonly GO_VERSION=go1.26.7
 readonly DEBS_WANTED=(gcc libc6-dev pkgconf libsecret-1-dev isync)
-readonly IMAGE=i1583-upstream:local
+# The docker-library/repo-info commit whose debian record lists the base
+# digest mbsync/Dockerfile pins (an immutable publisher record).
+readonly REPO_INFO_COMMIT=631ff15a31ac5d63781079d695ade706e65708c5
+# Marks a work dir run.sh created; holds that dir's random image tag.
+readonly MARKER=.i1583-work
+readonly IMAGE_REPO=i1583-upstream
 readonly ASM=i1583-assemble
 readonly RUNC=i1583-execute
 
@@ -162,22 +172,16 @@ acquire_mods() {
 # Images) recorded for the tag, and the pulled image's ID must be the one
 # the publisher lists for this architecture.
 verify_base() {
-    local ref digest tag commits c md want_id got_id platform found=""
+    local ref digest tag md want_id got_id platform found="$REPO_INFO_COMMIT"
     ref="$(base_ref)"
     digest="${ref##*@}"
     tag="${ref%@*}"
     tag="${tag#debian:}"
     mkdir -p "$WORK/base"
-    commits="$(curl -fsSL "https://api.github.com/repos/docker-library/repo-info/commits?path=repos/debian/remote/$tag.md&per_page=30" | jq -r '.[].sha')"
-    for c in $commits; do
-        md="$WORK/base/repo-info-$tag.md"
-        curl -fsSL -o "$md" "https://raw.githubusercontent.com/docker-library/repo-info/$c/repos/debian/remote/$tag.md"
-        if grep -qF "debian@$digest" "$md"; then
-            found="$c"
-            break
-        fi
-    done
-    [[ -n "$found" ]] || die "pinned base digest not in the publisher's recent records"
+    md="$WORK/base/repo-info-$tag.md"
+    curl -fsSL -o "$md" "https://raw.githubusercontent.com/docker-library/repo-info/$REPO_INFO_COMMIT/repos/debian/remote/$tag.md"
+    grep -qF "debian@$digest" "$md" ||
+        die "the pinned base digest is not in repo-info $REPO_INFO_COMMIT; update REPO_INFO_COMMIT to a publisher commit that records it"
     case "$ARCH" in
         arm64) platform='linux; arm64 variant v8' ;;
         amd64) platform='linux; amd64' ;;
@@ -259,9 +263,22 @@ stage_harness() {
     done
 }
 
+
+# The work dir's random tag: names its image, so an execution can only use
+# the image assembled from this work dir's inputs.
+work_tag() {
+    local tag
+    [[ -f "$WORK/$MARKER" ]] || die "not a run.sh work dir (no $MARKER)"
+    tag="$(cat "$WORK/$MARKER")"
+    [[ "$tag" =~ ^[0-9a-f]{16}$ ]] || die "malformed $MARKER"
+    printf '%s' "$tag"
+}
+
 cmd_acquire() {
     [[ ! -e "$WORK" || -z "$(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit)" ]] || die "work dir not empty"
     mkdir -p "$WORK"
+    od -An -N8 -tx1 /dev/urandom | tr -d ' \n' >"$WORK/$MARKER"
+    work_tag >/dev/null
     : >"$WORK/provenance.txt"
     acquire_src
     acquire_go
@@ -274,7 +291,8 @@ cmd_acquire() {
 
 # --------------------------------------------------------------------------
 cmd_assemble() {
-    local stage="$WORK/stage"
+    local stage="$WORK/stage" image
+    image="$IMAGE_REPO:$(work_tag)"
     rm -rf "$stage"
     mkdir -p "$stage"
     cp -R "$WORK/repo" "$stage/repo"
@@ -293,10 +311,13 @@ cmd_assemble() {
     docker exec "$ASM" bash /tmp/i1583-assemble.sh
     docker exec "$ASM" rm -f /tmp/i1583-assemble.sh
     docker stop -t 1 "$ASM" >/dev/null
-    docker commit --change 'USER 1583:1583' --change 'WORKDIR /home/h' --change 'CMD ["sleep", "infinity"]' "$ASM" "$IMAGE" >/dev/null
+    docker commit \
+        --change 'USER 1583:1583' --change 'WORKDIR /home/h' --change 'CMD ["sleep", "infinity"]' \
+        --change "LABEL i1583.provenance=$(sha256 "$WORK/provenance.txt")" \
+        "$ASM" "$image" >/dev/null
     docker rm "$ASM" >/dev/null
     rm -rf "$stage"
-    [[ "$(docker image inspect --format '{{json .Config.Volumes}}' "$IMAGE")" == "null" ]] || die "image declares volumes"
+    [[ "$(docker image inspect --format '{{json .Config.Volumes}}' "$image")" == "null" ]] || die "image declares volumes"
     printf 'assemble: ok\n'
 }
 
@@ -307,8 +328,13 @@ rsync_tree() {
 }
 
 # --------------------------------------------------------------------------
+# Returns the harness's status; every other failure exits (errexit stays
+# active: callers must not run this on the left of || or &&).
 cmd_execute() {
-    local out="$1" debug="${2:-}" rc=0
+    local out="$1" debug="${2:-}" rc=0 image
+    image="$IMAGE_REPO:$(work_tag)"
+    [[ "$(docker image inspect --format '{{index .Config.Labels "i1583.provenance"}}' "$image")" == "$(sha256 "$WORK/provenance.txt")" ]] ||
+        die "image $image was not assembled from this work dir's provenance"
     mkdir -p "$out"
     docker rm -f "$RUNC" >/dev/null 2>&1 || true
     docker run -d --name "$RUNC" \
@@ -318,7 +344,7 @@ cmd_execute() {
         --security-opt no-new-privileges:true \
         --memory 8g --memory-swap 8g \
         --pids-limit 2048 \
-        "$IMAGE" >/dev/null
+        "$image" >/dev/null
     [[ "$(docker inspect --format '{{json .Mounts}} {{json .NetworkSettings.Ports}} {{.HostConfig.NetworkMode}}' "$RUNC")" == '[] {} none' ]] ||
         die "execution container has mounts, ports or a network"
     docker exec "$RUNC" /home/h/run_inside.sh "$debug" | tee "$out/run-status.txt" || rc=$?
@@ -330,27 +356,48 @@ cmd_execute() {
 }
 
 # --------------------------------------------------------------------------
+# Deletes only a work dir run.sh created (it holds the marker) and the
+# image named by its tag.
 cmd_clean() {
+    local tag=""
     docker rm -f "$ASM" "$RUNC" >/dev/null 2>&1 || true
-    docker rmi "$IMAGE" >/dev/null 2>&1 || true
-    if [[ -d "$WORK" ]]; then
+    if [[ -e "$WORK" ]]; then
+        tag="$(work_tag)"
+        docker rmi "$IMAGE_REPO:$tag" >/dev/null 2>&1 || true
         chmod -R u+w "$WORK"
         rm -rf "$WORK"
     fi
     [[ -z "$(docker ps -a --filter "name=^i1583-" --format '{{.Names}}')" ]] || die "containers remain"
-    [[ -z "$(docker image ls -q "$IMAGE")" ]] || die "image remains"
+    [[ -z "$tag" || -z "$(docker image ls -q "$IMAGE_REPO:$tag")" ]] || die "image remains"
     [[ ! -e "$WORK" ]] || die "work dir remains"
     printf 'clean: containers, image and work dir removed\n'
+}
+
+# Canonical absolute path of the work dir (its parent must exist), kept
+# away from the repository, its ancestors, / and $HOME.
+resolve_work() {
+    local parent base path
+    parent="$(cd -P "$(dirname "$1")" 2>/dev/null && pwd)" || die "work dir parent does not exist"
+    base="$(basename "$1")"
+    [[ "$base" != "." && "$base" != ".." && "$base" != "/" ]] || die "work dir must name a directory"
+    path="${parent%/}/$base"
+    if [[ -e "$path" ]]; then
+        path="$(cd -P "$path" && pwd)"
+    fi
+    case "$path" in
+        / | "$HOME" | "$REPO" | "$REPO"/*) die "work dir must be outside the repository, / and \$HOME" ;;
+    esac
+    case "$REPO/" in
+        "$path"/*) die "work dir must not contain the repository" ;;
+    esac
+    printf '%s' "$path"
 }
 
 # --------------------------------------------------------------------------
 main() {
     local verb="${1:-}"
-    WORK="${2:-}"
-    [[ -n "$verb" && -n "$WORK" ]] || die "usage: run.sh all|acquire|assemble|execute|clean <work-dir> [out-dir]"
-    case "$WORK" in
-        "$REPO" | "$REPO"/*) die "work dir must be outside the repository" ;;
-    esac
+    [[ -n "$verb" && -n "${2:-}" ]] || die "usage: run.sh all|acquire|assemble|execute|clean <work-dir> [out-dir]"
+    WORK="$(resolve_work "$2")"
     need_tools
     ARCH="$(engine_arch)"
     readonly WORK ARCH
@@ -360,12 +407,12 @@ main() {
         execute) cmd_execute "${3:?out dir}" "${4:-}" ;;
         clean) cmd_clean ;;
         all)
-            local rc=0
+            [[ -n "${3:-}" ]] || die "all needs an out dir"
+            # Clean up after any failure from here on, keeping its status.
+            trap 'rc=$?; trap - EXIT; cmd_clean || true; exit "$rc"' EXIT
             cmd_acquire
             cmd_assemble
-            cmd_execute "${3:?out dir}" || rc=$?
-            cmd_clean
-            return "$rc"
+            cmd_execute "$3"
             ;;
         *) die "unknown command" ;;
     esac

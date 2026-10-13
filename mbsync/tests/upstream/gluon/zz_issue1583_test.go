@@ -1116,6 +1116,8 @@ func i1583RunMbsync(t *testing.T, sc string, s *testSession, certPEM []byte, mai
 
 	err = cmd.Run()
 	i1583Rec(t, sc, "mbsync_exit_zero", err == nil)
+	// No Maildir evidence is recorded from a failed sync.
+	require.NoError(t, err, "mbsync failed")
 
 	return maildir
 }

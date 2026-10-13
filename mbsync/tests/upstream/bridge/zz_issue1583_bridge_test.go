@@ -175,19 +175,20 @@ func TestIssue1583Item1FakeAPIDelivery(t *testing.T) {
 	}
 
 	withEnv(t, func(ctx context.Context, s *server.Server, netCtl *proton.NetCtl, locator bridge.Locator, storeKey []byte) {
+		// Each case is imported on its own, so its Proton ID is known and a
+		// file is compared with its own message's ID, not any imported one.
+		idBySubject := map[string]string{}
 		protonIDs := map[string]bool{}
 
 		withClient(ctx, t, s, username, password, func(ctx context.Context, c *proton.Client) {
 			addrs, err := c.GetAddresses(ctx)
 			require.NoError(t, err)
 
-			literals := make([][]byte, 0, len(cases))
-			for _, l := range cases {
-				literals = append(literals, l)
-			}
-
-			for _, id := range createMessages(ctx, t, c, addrs[0].ID, proton.InboxLabel, literals...) {
-				protonIDs[id] = true
+			for subject, l := range cases {
+				ids := createMessages(ctx, t, c, addrs[0].ID, proton.InboxLabel, l)
+				require.Len(t, ids, 1)
+				idBySubject[subject] = ids[0]
+				protonIDs[ids[0]] = true
 			}
 		})
 
@@ -260,7 +261,8 @@ func TestIssue1583Item1FakeAPIDelivery(t *testing.T) {
 
 					files++
 
-					shape, subject := i1583ShapeOf(t, data, protonIDs)
+					_, subject := i1583ShapeOf(t, data, nil)
+					shape, _ := i1583ShapeOf(t, data, map[string]bool{idBySubject[subject]: true})
 					orig, ok := cases[subject]
 					if !ok {
 						i1583Rec(t, sc, "file_without_known_case", true)
@@ -392,6 +394,8 @@ CopyArrivalDate yes
 
 	err = cmd.Run()
 	i1583Rec(t, sc, "mbsync_exit_zero", err == nil)
+	// No Maildir evidence is recorded from a failed sync.
+	require.NoError(t, err, "mbsync failed")
 
 	return maildir
 }
