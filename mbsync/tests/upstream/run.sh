@@ -776,6 +776,13 @@ bounded() {
         sleep 0.1
     done
     wait "$PROBE" || rc=$?
+    # The child can exit on its own in the gap between one poll's kill -0
+    # (still alive) and the next (gone), after the deadline but before
+    # this loop's own kill ever runs: the while condition then ends the
+    # loop before the deadline check in its body does, and wait reports
+    # the child's own, possibly successful, status. Recheck the deadline
+    # here so a child that finishes late is never read as on time.
+    ((SECONDS < end)) || rc=1
     PROBE=""
     return "$rc"
 }
