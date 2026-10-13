@@ -56,6 +56,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90 --ignore=tests/eval"
 markers = [
+    "serial: bounded-work timing checks run alone after the parallel suite",
     "eval: opt-in retrieval-quality eval against a real mailbox (skipped by default; run with `pytest -o addopts= -m eval tests/eval -s`)",
     "baseline: retrieval regression baseline over the synthetic mailbox (skipped unless BASELINE_DIR is set; run with `make baseline`)",
 ]

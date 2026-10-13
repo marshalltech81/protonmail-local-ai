@@ -93,7 +93,8 @@ def _measure(db, leaf, monkeypatch):
     return page, work, [r[3] for r in plan]
 
 
-@pytest.mark.parametrize("body_chunks", [1, 10])
+@pytest.mark.serial
+@pytest.mark.parametrize("body_chunks", [1, 10, 19])
 @pytest.mark.parametrize("analyze", [False, True])
 @pytest.mark.parametrize("leaf", ["text", "body_words", "attachment_text_words"])
 def test_common_word_queries_do_not_reopen_fts_for_every_chunk(
@@ -117,14 +118,15 @@ def test_common_word_queries_do_not_reopen_fts_for_every_chunk(
         ]
         assert len(fts) == len(chunks) == len(_TERMS), (plan, work)
         assert all("=" not in p.split("INDEX", 1)[1] for p in fts), (plan, work)
-        # A generous bound on actual FTS shadow reads catches the repeated probes,
-        # including native work the outer VM's progress counter cannot see.
+        # A generous bound on observed FTS shadow SQL statements catches the repeated probes,
+        # a proxy for native work the outer VM's progress counter cannot see.
         assert work["shadow_reads"] < 100 * len(_TERMS), work
         assert work["elapsed"] < 30, work
         measured.append(work)
     small, large = measured
     assert large["connections"] == small["connections"]
     assert large["instructions"] < 8 * small["instructions"] + 50_000, measured
+    assert large["shadow_reads"] < 8 * small["shadow_reads"] + 100, measured
 
 
 @pytest.mark.parametrize("complete", [1, 0, None])
@@ -208,6 +210,7 @@ def test_original_join_is_a_semantic_oracle_and_exposes_repeated_fts_work(tmp_pa
                 "EXPLAIN QUERY PLAN SELECT m.claimant_id FROM messages m WHERE " + old_match, params
             )
         ]
+        reads.clear()
         current, current_params = compile_leaves([Leaf(leaf, _TERMS)])
         new = {
             r[0]
@@ -215,6 +218,7 @@ def test_original_join_is_a_semantic_oracle_and_exposes_repeated_fts_work(tmp_pa
                 "SELECT m.claimant_id FROM messages m WHERE " + current, current_params
             )
         }
+        new_reads = len(reads)
     assert old == new == {claimant_of(f"m{i}") for i in range(40)}
     if leaf == "body_words":
         if sqlite3.sqlite_version != "3.46.1":
@@ -224,6 +228,7 @@ def test_original_join_is_a_semantic_oracle_and_exposes_repeated_fts_work(tmp_pa
         assert any("idx_message_chunks_attachment" in line for line in old_plan), old_plan
     if any("idx_message_chunks_attachment" in line for line in old_plan):
         assert shadow_reads >= 100 * len(_TERMS), (old_plan, shadow_reads)
+        assert shadow_reads > 8 * new_reads, (shadow_reads, new_reads)
 
 
 @pytest.mark.parametrize("leaf", ["text", "body_words", "attachment_text_words"])
