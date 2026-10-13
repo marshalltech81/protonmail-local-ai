@@ -1015,7 +1015,6 @@ def _check_proton_account(account: dict[str, Any], path: str) -> None:
             account["connection"]["host"].strip().lower(),
             str(account["connection"]["port"]),
             proton["certificate_host"],
-            "false",
             "|".join(sync["mailboxes"]["exclude"]),
             sync["imap_account_name"],
             sync["remote_store_name"],
@@ -1035,9 +1034,8 @@ def _check_proton_account(account: dict[str, Any], path: str) -> None:
 @dataclasses.dataclass(frozen=True)
 class Setting:
     """One ``.env.example`` setting. ``kind`` is ``global`` or
-    ``account`` (a TOML key projects it), ``maintenance`` (a one-run
-    command under #1609, never configuration) or ``runtime`` (fixed by
-    the project)."""
+    ``account`` (a TOML key projects it) or ``runtime`` (fixed by the
+    project)."""
 
     env: str
     kind: str
@@ -1070,7 +1068,6 @@ MAPPING: tuple[Setting, ...] = (
     Setting("PROTON_LOCAL_STORE_NAME", "account", "accounts[].sync.local_store_name", "mbsync (mbsyncrc)", _RECREATE_MBSYNC, "proton-settings.sh names"),
     Setting("PROTON_CHANNEL_NAME", "account", "accounts[].sync.channel_name", "mbsync (mbsyncrc, output filter)", _RECREATE_MBSYNC, "proton-settings.sh names"),
     Setting("PROTON_FOLDER_EXCLUSIONS", "account", "accounts[].sync.mailboxes.exclude", "mbsync (mbsyncrc Patterns)", "recreate mbsync; mail already synced stays", "joined with |; must keep All Mail, Labels/*, Starred"),
-    Setting("BRIDGE_CERT_PIN_ROTATE", "maintenance", None, "mbsync (pin check)", "one-run command", "maintenance command (#1609)"),
     Setting("SYNC_INTERVAL", "account", "accounts[].sync.interval_seconds", "mbsync (entrypoint, healthcheck)", _RECREATE_MBSYNC),
     Setting("SYNC_DEADLINE_SECONDS", "account", "accounts[].sync.deadline_seconds", "mbsync (entrypoint, healthcheck)", _RECREATE_MBSYNC),
     Setting("EMBED_BASE_URL", "global", "global.embedding.base_url", "indexer, mcp-server", _EMBEDDER, "URL or default"),
@@ -1100,7 +1097,6 @@ MAPPING: tuple[Setting, ...] = (
     Setting("INDEXER_DELETION_GRACE_DAYS", "global", "global.indexer.deletion.grace_days", "indexer (reconciler)", _RECREATE_INDEXER),
     Setting("INDEXER_DELETION_SWEEP_INTERVAL_SECS", "global", "global.indexer.deletion.sweep_interval_seconds", "indexer (reconciler)", _RECREATE_INDEXER),
     Setting("INDEXER_DELETION_MAX_BATCH_PCT", "global", "global.indexer.deletion.max_batch_fraction", "indexer (reconciler)", _RECREATE_INDEXER),
-    Setting("INDEXER_DELETION_FORCE", "maintenance", None, "indexer (reconciler)", "one-run command", "maintenance command (#1609)"),
     Setting("INDEXER_MAX_ATTEMPTS", "global", "global.indexer.retry.max_attempts", "indexer (queue)", _RECREATE_INDEXER),
     Setting("INDEXER_RETRY_BASE_SECONDS", "global", "global.indexer.retry.base_seconds", "indexer (queue)", _RECREATE_INDEXER),
     Setting("INDEXER_MESSAGE_TIMEOUT_SECONDS", "global", "global.indexer.message_timeout_seconds", "indexer", _RECREATE_INDEXER, "0 disables"),
@@ -1422,14 +1418,13 @@ class Collector:
 
 def collector_env(account: dict[str, Any]) -> dict[str, str]:
     """The environment of an account's collector: today's mbsync settings,
-    from that account only. Pin rotation is not configuration (#1609)."""
-    env = {
+    from that account only. Pin rotation is a one-run command, not
+    configuration (#1609)."""
+    return {
         s.env: _format(_lookup({}, s.toml, account))
         for s in MAPPING
         if s.kind == "account" and s.toml is not None and s.env != "ACCOUNT_SCOPE"
     }
-    env["BRIDGE_CERT_PIN_ROTATE"] = "false"
-    return env
 
 
 def render_compose(config: dict[str, Any]) -> str:

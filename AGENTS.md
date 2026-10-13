@@ -318,6 +318,17 @@ Important facts:
   make it work by relaxing the check. Details: `docs/architecture.md`
   "Bridge"; checked by `mbsync/tests/entrypoint_test.sh`,
   `mbsync/tests/tls_check.sh` and `scripts/tests/compose_test.sh`.
+- pin rotation is one run, never a setting (#1609, #1353's owner
+  decision of 2026-10-12): `make rotate-bridge-pin` starts a one-shot
+  `docker compose run --rm mbsync rotate-bridge-pin`, which checks the
+  certificate against `BRIDGE_CERT_FINGERPRINT` first, may then replace
+  the pin, and exits without syncing; the service starts with no
+  argument and always enforces the pin. Do not reintroduce a rotation
+  setting, a persistent rotation marker, or a Compose `command` or
+  `entrypoint` for mbsync (`compose_test.sh` rejects one).
+  `INDEXER_DELETION_FORCE` went the same way: `make force-deletion` runs
+  one pass past the mass-delete brake. `scripts/validate-env.sh` refuses
+  both removed settings.
 - Platforms: tested on macOS (OrbStack, Docker Desktop), where
   `host.docker.internal` forwards to the host's loopback; Windows Docker
   Desktop is expected to work the same way but is untested; Linux is
@@ -975,7 +986,7 @@ Notes:
   name) are validated before they reach `mbsyncrc` or the tunnel's
   shell command
 - the Proton settings (`SOURCE_MODE`, `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
-  `BRIDGE_CERT_HOST`, `BRIDGE_CERT_PIN_ROTATE`, `PROTON_FOLDER_EXCLUSIONS`
+  `BRIDGE_CERT_HOST`, `PROTON_FOLDER_EXCLUSIONS`
   and the `PROTON_*_NAME` isync names) have one implementation of their
   defaults and validators, `mbsync/proton-settings.sh` (Bash 3.2
   compatible), run by `scripts/validate-env.sh` and by the entrypoint's

@@ -599,7 +599,7 @@ BRIDGE_CERT_FINGERPRINT_HEX="$(printf '%s' "${BRIDGE_CERT_FINGERPRINT_HEX//:/}" 
 # env_value resolves them, except that a value exported in the calling
 # shell is kept as it is: a command substitution would drop its trailing
 # newlines, which the entrypoint refuses.
-for name in SOURCE_MODE BRIDGE_HOST BRIDGE_IMAP_PORT BRIDGE_CERT_HOST BRIDGE_CERT_PIN_ROTATE \
+for name in SOURCE_MODE BRIDGE_HOST BRIDGE_IMAP_PORT BRIDGE_CERT_HOST \
     PROTON_FOLDER_EXCLUSIONS PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME \
     PROTON_LOCAL_STORE_NAME PROTON_CHANNEL_NAME; do
     if [[ -z "${!name+set}" ]]; then
@@ -611,7 +611,6 @@ BRIDGE_HOST="$(proton_normalize_bridge_host "${BRIDGE_HOST:-$PROTON_DEFAULT_BRID
 if ! proton_problem="$(proton_settings_problem "$SOURCE_MODE" "$BRIDGE_HOST" \
     "${BRIDGE_IMAP_PORT:-$PROTON_DEFAULT_BRIDGE_IMAP_PORT}" \
     "${BRIDGE_CERT_HOST:-$PROTON_DEFAULT_BRIDGE_CERT_HOST}" \
-    "${BRIDGE_CERT_PIN_ROTATE:-$PROTON_DEFAULT_BRIDGE_CERT_PIN_ROTATE}" \
     "${PROTON_FOLDER_EXCLUSIONS:-$PROTON_DEFAULT_FOLDER_EXCLUSIONS}" \
     "${PROTON_IMAP_ACCOUNT_NAME:-$PROTON_DEFAULT_IMAP_ACCOUNT_NAME}" \
     "${PROTON_REMOTE_STORE_NAME:-$PROTON_DEFAULT_REMOTE_STORE_NAME}" \
@@ -884,13 +883,26 @@ chunk_overlap="${chunk_overlap:-150}"
 for name in \
     INDEXER_DELETION_ENABLED \
     INDEXER_ATTACHMENT_EXTRACTION_ENABLED \
-    INDEXER_OCR_ENABLED \
-    INDEXER_DELETION_FORCE; do
+    INDEXER_OCR_ENABLED; do
     value="$(env_value_stripped "$name")"
     if [[ -n "$value" ]]; then
         require_bool "$name" "$value"
     fi
 done
+
+# The persistent maintenance overrides were removed (#1609): pin rotation
+# and forced deletion are one-run commands, so a value left in .env or
+# exported in the shell (the old documented form), false included, is
+# rejected rather than silently ignored. Fixed text: the value is never
+# printed.
+if [[ -n "$(env_value BRIDGE_CERT_PIN_ROTATE)" ]]; then
+    echo "ERROR: BRIDGE_CERT_PIN_ROTATE was removed (#1609): replace the Bridge certificate pin once with make rotate-bridge-pin. Delete the line from .env and unset it in the shell." >&2
+    exit 1
+fi
+if [[ -n "$(env_value INDEXER_DELETION_FORCE)" ]]; then
+    echo "ERROR: INDEXER_DELETION_FORCE was removed (#1609): run one deletion pass past the mass-delete brake with make force-deletion. Delete the line from .env and unset it in the shell." >&2
+    exit 1
+fi
 
 # INDEXER_UNLINK_ON_REAP was removed (#721): the indexer only reads the
 # Maildir, which mbsync owns, so a leftover value from .env.example

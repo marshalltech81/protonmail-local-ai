@@ -417,7 +417,6 @@ proton_settings_from_env_file() {
         'PROTON_REMOTE_STORE_NAME=zq9marker:far' 'PROTON_LOCAL_STORE_NAME=-zq9marker' \
         'PROTON_REMOTE_STORE_NAME=protonmail-local' 'SOURCE_MODE=zq9marker' \
         'SOURCE_MODE=" "' 'BRIDGE_IMAP_PORT=0' 'BRIDGE_IMAP_PORT=zq9marker' \
-        'BRIDGE_CERT_PIN_ROTATE=TRUE' 'BRIDGE_CERT_PIN_ROTATE=zq9marker' \
         'PROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*' \
         "PROTON_FOLDER_EXCLUSIONS=\"All Mail|Labels/*|Starred|zq9\$marker\"" \
         "PROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|zq9marker #comment"; do
@@ -433,11 +432,11 @@ proton_settings_from_env_file() {
     done
     setup 'BRIDGE_HOST=" HOST.ORB.INTERNAL "' 'BRIDGE_CERT_HOST=::1' 'PROTON_CHANNEL_NAME=Chan_2-x' \
         'PROTON_IMAP_ACCOUNT_NAME=' 'PROTON_REMOTE_STORE_NAME=far' 'PROTON_LOCAL_STORE_NAME=near' \
-        'SOURCE_MODE=" Proton-Bridge "' 'BRIDGE_IMAP_PORT= 993 ' 'BRIDGE_CERT_PIN_ROTATE=true' \
+        'SOURCE_MODE=" Proton-Bridge "' 'BRIDGE_IMAP_PORT= 993 ' \
         "PROTON_FOLDER_EXCLUSIONS='All Mail|Labels/*|Starred|Folders/Old *'"
     passes
     # Empty values take the defaults, as Compose passes them.
-    setup 'SOURCE_MODE=' 'BRIDGE_IMAP_PORT=' 'BRIDGE_CERT_PIN_ROTATE=' 'PROTON_FOLDER_EXCLUSIONS='
+    setup 'SOURCE_MODE=' 'BRIDGE_IMAP_PORT=' 'PROTON_FOLDER_EXCLUSIONS='
     passes
 }
 
@@ -586,6 +585,35 @@ loose_mcp_token_mode_fails() {
 mcp_token_in_env_fails() {
     setup 'MCP_AUTH_TOKEN=placeholder'
     fails_with 'MCP_AUTH_TOKEN must be stored in'
+}
+
+# The persistent maintenance overrides were removed (#1609): pin rotation
+# and forced deletion are one-run commands. Any value, false included,
+# in .env or exported in the shell (the old documented form), stops the
+# run with fixed text naming the command and never the value; an empty
+# one passes, as an unset one does.
+removed_maintenance_overrides_fail() {
+    local name command value
+    for name in BRIDGE_CERT_PIN_ROTATE INDEXER_DELETION_FORCE; do
+        if [[ "$name" == BRIDGE_CERT_PIN_ROTATE ]]; then
+            command='make rotate-bridge-pin'
+        else
+            command='make force-deletion'
+        fi
+        for value in true false zq9marker; do
+            setup "$name=$value"
+            fails_with "$name was removed (#1609)" || return 1
+            grep -F -- "$command" "$WORK/output" >/dev/null || return 1
+            if grep -q zq9marker "$WORK/output"; then
+                printf 'the value reached the output: %s\n' "$name"
+                return 1
+            fi
+            setup
+            fails_with "$name was removed (#1609)" "$name=$value" || return 1
+        done
+        setup "$name="
+        passes || return 1
+    done
 }
 
 # INDEXER_UNLINK_ON_REAP was removed (#721): the indexer never deletes
@@ -1070,7 +1098,7 @@ restart_indexer_validates_first() {
 # itself trims whitespace around an unquoted .env value.
 
 padded_quoted_values_pass() {
-    setup 'INDEXER_OCR_ENABLED=" On "' "INDEXER_DELETION_FORCE=' no '" \
+    setup 'INDEXER_OCR_ENABLED=" On "' "INDEXER_DELETION_ENABLED=' yes '" \
         'INDEXER_OCR_MAX_PAGES=" 8 "' 'INFERENCE_MAX_TOKENS=" 2048 "' \
         'INFERENCE_CONTEXT_TOKENS=" 32768 "' 'RERANK_CANDIDATES=" 5 "' \
         'INDEXER_MAX_ATTEMPTS=" 3 "' 'INDEXER_PARSE_MAX_BYTES=" 0 "' \
@@ -1211,6 +1239,8 @@ check "a usable MCP token passes" usable_mcp_token_passes
 check "an MCP token file not 600 fails" loose_mcp_token_mode_fails
 check "an MCP token in .env fails" mcp_token_in_env_fails
 check "a removed INDEXER_UNLINK_ON_REAP fails" removed_unlink_on_reap_fails
+check "the removed maintenance overrides fail, naming their commands" \
+    removed_maintenance_overrides_fail
 check "an MCP token failure does not echo the token" mcp_token_failure_does_not_echo_the_value
 check "an absent authority file passes" absent_authority_file_passes
 check "a private authority file passes" private_authority_file_passes
