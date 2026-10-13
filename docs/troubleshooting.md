@@ -1284,7 +1284,8 @@ make force-deletion
 It stops the indexer, runs one reconciliation pass in a one-shot indexer
 container with the brake off and the configured grace window (a WARNING
 says so, and the pass logs `maintenance pass=reconcile ... brake=forced`),
-then starts the indexer again and exits with the pass's status. Nothing
+then starts the indexer again (`docker compose up -d --no-deps indexer`,
+as `make up` would) and fails if the pass or that start failed. Nothing
 is stored, so the restarted indexer and every later pass have the brake
 on; a pass that stops midway leaves the remaining tombstones for the
 brake or another run. In archive mode (`INDEXER_DELETION_ENABLED=false`)
@@ -2595,9 +2596,13 @@ against `BRIDGE_CERT_FINGERPRINT` first, writes its fingerprint to the
 pin file (the log shows the `rotating pin` warning with the `pinned:`
 and `current:` fingerprints; check `current:` is the one you expect),
 and exits without syncing, so the password is not sent. On success the
-target restarts the existing `mbsync` container, which compares the
-certificate with the new pin like every later start; a further change
-is refused again. A certificate that does not match
+target recreates `mbsync` (`docker compose up -d --no-deps
+--force-recreate mbsync`), so the service picks up the updated
+`BRIDGE_CERT_FINGERPRINT` and compares the certificate with the new pin
+like every later start; a further change
+is refused again. If the stack was started with overlay files, run it
+with the same files (`COMPOSE_FILE=docker-compose.yml:<overlay> make
+rotate-bridge-pin`), as for `make up`. A certificate that does not match
 `BRIDGE_CERT_FINGERPRINT` is refused before the pin is consulted, and
 the pin is kept.
 

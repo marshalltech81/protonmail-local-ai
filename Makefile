@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead reparse rotate-bridge-pin force-deletion clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-make-status test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead reparse rotate-bridge-pin force-deletion clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-make-status test-maintenance-commands test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -29,10 +29,10 @@ help:
 	@echo "  restore-index Replace the index with BACKUP=<file from backup-index> (asks first; stops indexer and mcp-server, restarts mcp-server once the indexer verifies the index)"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  reparse      Queue every indexed message to be parsed again in place; unchanged chunks are not embedded again (docs/architecture.md, Reparse in place)"
-	@echo "  rotate-bridge-pin  Replace the Bridge certificate pin once with the certificate the app presents, which must match BRIDGE_CERT_FINGERPRINT, then restart mbsync (docs/troubleshooting.md)"
+	@echo "  rotate-bridge-pin  Replace the Bridge certificate pin once with the certificate the app presents, which must match BRIDGE_CERT_FINGERPRINT, then recreate mbsync (docs/troubleshooting.md)"
 	@echo "  force-deletion  Stop the indexer, run one deletion pass past the mass-delete brake (same grace window), then start the indexer again"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
-	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status, index backup, image pin, Trivy flag and Maven checksum script tests locally"
+	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status, maintenance command, index backup, image pin, Trivy flag and Maven checksum script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
@@ -44,6 +44,7 @@ help:
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
 	@echo "  test-index-backup  Run backup-index and restore-index tests against a fake docker (no daemon)"
 	@echo "  test-make-status  Run make status tests against a fake docker (no daemon)"
+	@echo "  test-maintenance-commands  Run rotate-bridge-pin and force-deletion tests against a fake docker (no daemon)"
 	@echo "  test-image-pins  Check tls_check.sh pins the python image the indexer and mcp-server Dockerfiles build from, and docker.yml and tests.yml the same BuildKit image"
 	@echo "  test-trivy-flags  Check that make trivy and the Trivy jobs in .github/workflows/security.yml and docker.yml agree (no Trivy install)"
 	@echo "  test-maven-checksums  Check the indexer build and security.yml verify every Maven artifact against the committed checksums, which cover indexer/java/pom.xml (no Maven)"
@@ -251,23 +252,25 @@ reparse:
 # the new one. A one-shot mbsync container, with the service's hardening,
 # state volume and secret, gets the only argument the entrypoint accepts:
 # it checks the certificate against BRIDGE_CERT_FINGERPRINT, then may
-# replace the pin, then exits without syncing. On success the existing
-# mbsync container restarts (keeping the overlays it was started with)
-# and compares with the new pin, like every later start.
+# replace the pin, then exits without syncing. On success mbsync is
+# recreated, as `make up` creates it: a restart would keep the old
+# container's environment, whose BRIDGE_CERT_FINGERPRINT may predate the
+# rotation. The recreated service starts with no argument and compares
+# with the new pin, like every later start.
 rotate-bridge-pin: validate-env
 	docker compose run --rm --no-deps mbsync rotate-bridge-pin
-	docker compose restart mbsync
+	docker compose up -d --no-deps --force-recreate mbsync
 
 # One deletion-reconciliation pass past the mass-delete brake (#1609),
 # with the configured grace window, for an intentional bulk cleanup. The
 # indexer is stopped so the one-shot is the index's only writer, and
-# started again whatever the outcome (keeping its overlays); the target
-# exits with the pass's status. Nothing is stored: every later pass has
-# the brake on.
+# started again (as `make up` starts it) whatever the outcome; the target
+# fails when the pass or that start fails. Nothing is stored: every later
+# pass has the brake on.
 force-deletion: validate-env
 	docker compose stop indexer
 	status=0; docker compose run --rm --no-deps indexer python -m src.force_deletion || status=$$?; \
-		docker compose start indexer; exit $$status
+		docker compose up -d --no-deps indexer || status=$$?; exit $$status
 
 # Copy the live index while the stack runs (#1005), for example before
 # deploying a schema change. The copy holds the whole mailbox, so it goes
@@ -285,7 +288,7 @@ restore-index:
 	BACKUP="$(BACKUP)" ./scripts/restore-index.sh
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status test-index-backup test-image-pins test-trivy-flags test-maven-checksums
+test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status test-maintenance-commands test-index-backup test-image-pins test-trivy-flags test-maven-checksums
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -315,6 +318,9 @@ test-validate-env:
 
 test-make-status:
 	bash scripts/tests/make_status_test.sh
+
+test-maintenance-commands:
+	bash scripts/tests/maintenance_commands_test.sh
 
 test-index-backup:
 	bash scripts/tests/index_backup_test.sh

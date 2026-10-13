@@ -3,7 +3,7 @@
 The one-run ``make force-deletion`` command (#1609), which replaced the
 persistent ``INDEXER_DELETION_FORCE`` setting. The Makefile stops the
 indexer, so this process is the index's only writer, runs this module in
-a one-shot container, then starts the indexer again:
+a one-shot container, then starts the indexer again (``up -d``):
 
     docker compose run --rm --no-deps indexer python -m src.force_deletion
 

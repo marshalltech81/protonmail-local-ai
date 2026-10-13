@@ -1034,7 +1034,7 @@ wait_for_bridge_imap
 # =============================================================================
 extract_bridge_cert
 if [[ "$PIN_ROTATION_RUN" == "true" ]]; then
-    echo ">>> rotate-bridge-pin: done — the pin holds the certificate Bridge presents; start mbsync normally to sync (make rotate-bridge-pin restarts it)."
+    echo ">>> rotate-bridge-pin: done — the pin holds the certificate Bridge presents; start mbsync normally to sync (make rotate-bridge-pin recreates it)."
     exit 0
 fi
 

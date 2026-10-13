@@ -1141,12 +1141,12 @@ backup.
 
    ```bash
    make up                 # refused: pin mismatch
-   make rotate-bridge-pin  # re-pins in a one-shot container, then restarts mbsync
-   docker logs mbsync      # the restarted mbsync: "fingerprint matches the pinned value"
+   make rotate-bridge-pin  # re-pins in a one-shot container, then recreates mbsync
+   docker logs mbsync      # the recreated mbsync: "fingerprint matches the pinned value"
    ```
 
    The rotation runs in its own container and syncs nothing; the
-   restarted mbsync enforces the new pin. See
+   recreated mbsync enforces the new pin. See
    [troubleshooting](troubleshooting.md#mbsync-refuses-to-sync--bridge-cert-pin-mismatch).
 4. **mbsync's sync state (UIDVALIDITY).** mbsync records each Proton
    folder's IMAP UIDVALIDITY and message UIDs in a `.mbsyncstate` file in
