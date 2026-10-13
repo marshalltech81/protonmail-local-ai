@@ -24,9 +24,9 @@ set -Eeuo pipefail
 #             container from the verified base (root, dpkg -i), create the
 #             non-root user and commit a local image.
 #   execute   With --network none, as the non-root user, all capabilities
-#             dropped, no-new-privileges, memory and pids limits, a
-#             wall-clock deadline the host enforces, no ports, mounts or
-#             volumes: build and run the harness tests (Go test
+#             dropped, no-new-privileges, memory, pids and CPU limits, a
+#             wall-clock deadline and a cap on bytes written that the host
+#             enforces, no ports, mounts or volumes: build and run the harness tests (Go test
 #             files under gluon/ and bridge/ here) with GOTOOLCHAIN=local,
 #             GOPROXY=off and -mod=readonly. Copies out only the allowlisted
 #             JSON results; upstream logs stay in the container.
@@ -63,6 +63,15 @@ readonly IMAGE_REPO=i1583-upstream
 # (the three go test runs take at most 80 minutes by their own -timeout,
 # which the code under test can defeat). Enforced from the host.
 readonly EXEC_DEADLINE_SECS=7200
+# Resource caps for the execution container, measured on a full run
+# (2026-10-13: at most 3.2 cores and 1.5 GB written to its writable layer).
+# No engine-side quota for that layer exists without a mount (OrbStack's
+# overlay2 on btrfs refuses --storage-opt size), so the watchdog measures
+# it from the host every WATCH_INTERVAL_SECS and kills the container
+# beyond the cap.
+readonly EXEC_MAX_CPUS=4
+readonly EXEC_MAX_WRITE_BYTES=8589934592
+readonly WATCH_INTERVAL_SECS=5
 # Fixed text after the digest on provenance.txt's inputs line, which must
 # match exactly.
 readonly INPUTS_NOTE='(provenance lines above, staged trees with harness files, repo/Packages, Go archive, run.sh and its scripts, mbsync/Dockerfile)'
@@ -446,6 +455,10 @@ cmd_execute() {
     # A new directory only this account can write, so nothing planted in
     # it (a symlink named like an output file) is followed.
     mkdir -m 700 "$out" || die "out dir must not exist yet"
+    local cpus
+    cpus="$(docker info --format '{{.NCPU}}')" || die "cannot read the engine's CPU count"
+    [[ "$cpus" =~ ^[1-9][0-9]*$ ]] || die "unexpected engine CPU count"
+    ((cpus <= EXEC_MAX_CPUS)) || cpus="$EXEC_MAX_CPUS"
     docker rm -f "$RUNC" >/dev/null 2>&1 || true
     docker run -d --pull=never --name "$RUNC" \
         --network none \
@@ -454,9 +467,12 @@ cmd_execute() {
         --security-opt no-new-privileges:true \
         --memory 8g --memory-swap 8g \
         --pids-limit 2048 \
+        --cpus "$cpus" \
         "$image" >/dev/null
     [[ "$(docker inspect --format '{{json .Mounts}} {{json .NetworkSettings.Ports}} {{.HostConfig.NetworkMode}}' "$RUNC")" == '[] {} none' ]] ||
         die "execution container has mounts, ports or a network"
+    [[ "$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}' "$RUNC")" == "${cpus}000000000 8589934592 2048" ]] ||
+        die "execution container lacks its CPU, memory or pids limit"
     local status_text name
     start_watchdog
     # Capped: the status lines are few and short.
@@ -490,14 +506,27 @@ cmd_execute() {
 
 # Kills the execution container from the host once EXEC_DEADLINE_SECS
 # have passed, so a hang inside it (go test's own -timeout runs in the
-# code under test) ends every docker exec into it.
+# code under test) ends every docker exec into it. Every
+# WATCH_INTERVAL_SECS it also measures the container's writable layer and
+# kills it beyond EXEC_MAX_WRITE_BYTES, or when the size cannot be read.
 start_watchdog() {
     (
         trap 'kill "$s" 2>/dev/null; exit 0' TERM
-        sleep "$EXEC_DEADLINE_SECS" &
-        s=$!
-        wait "$s"
-        printf 'run.sh: execution passed its %s s deadline; killing the container\n' "$EXEC_DEADLINE_SECS" >&2
+        local start=$SECONDS size why=""
+        while [[ -z "$why" ]]; do
+            sleep "$WATCH_INTERVAL_SECS" &
+            s=$!
+            wait "$s"
+            size="$(docker container inspect --size --format '{{.SizeRw}}' "$RUNC")" || size=""
+            if ((SECONDS - start >= EXEC_DEADLINE_SECS)); then
+                why="passed its $EXEC_DEADLINE_SECS s deadline"
+            elif [[ ! "$size" =~ ^[0-9]+$ ]]; then
+                why="has a writable layer whose size cannot be read"
+            elif ((size > EXEC_MAX_WRITE_BYTES)); then
+                why="wrote more than $EXEC_MAX_WRITE_BYTES bytes"
+            fi
+        done
+        printf 'run.sh: the execution container %s; killing it\n' "$why" >&2
         docker kill "$RUNC" >/dev/null
     ) &
     WATCHDOG=$!
@@ -506,7 +535,7 @@ start_watchdog() {
 # Fails when the execution container has stopped (the watchdog fired).
 require_running() {
     [[ "$(docker inspect --format '{{.State.Running}}' "$RUNC")" == true ]] ||
-        die "the execution container stopped (deadline of $EXEC_DEADLINE_SECS s passed?)"
+        die "the execution container stopped (killed by the watchdog?)"
 }
 
 # Stops the watchdog (and its sleep; a kill it already started finishes
