@@ -755,11 +755,12 @@ def _compile_body_words(terms: tuple[str, ...], params: list) -> str:
     # keeps a quote inside a token, but doubling any (FTS5 string
     # escaping) keeps FTS syntax out regardless. The body chunks hold
     # the whole body only under ``body_complete`` 1, written with them
-    # (#1086).
+    # (#1086). CROSS JOIN keeps FTS hits outermost: an ordinary join
+    # can instead repeat MATCH for every metadata chunk (#1610).
     params.extend('"' + term.replace('"', '""') + '"' for term in terms)
     match = " AND ".join(
         "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
-        "JOIN message_chunks c ON c.fts_rowid = f.rowid "
+        "CROSS JOIN message_chunks c ON c.fts_rowid = f.rowid "
         "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)"
         for _ in terms
     )
@@ -769,10 +770,11 @@ def _compile_body_words(terms: tuple[str, ...], params: list) -> str:
 def _compile_attachment_text_words(terms: tuple[str, ...], params: list) -> str:
     # Same token semantics and one FTS subquery per word as body_words,
     # across the message's attachment chunks, never its body chunks.
+    # CROSS JOIN keeps the same FTS-first plan as body_words (#1610).
     params.extend('"' + term.replace('"', '""') + '"' for term in terms)
     match = " AND ".join(
         "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
-        "JOIN message_chunks c ON c.fts_rowid = f.rowid "
+        "CROSS JOIN message_chunks c ON c.fts_rowid = f.rowid "
         "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NOT NULL)"
         for _ in terms
     )

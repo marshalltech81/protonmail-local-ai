@@ -242,7 +242,8 @@ cannot reach it. Other accounts on this machine can, which is why every
 the Maildir, the search index and mbsync's sync state are then ordinary
 files in Docker volumes; Proton's protections do not cover them. The
 credentials in `.secrets/`, and the addresses in `config/authority.toml`,
-`config/identity.toml` and `.env`, are plaintext files too. Mail you delete in
+`config/identity.toml`, `.env` and, if you create it, `config/config.toml`
+(and the `.generated/` files written from it), are plaintext files too. Mail you delete in
 Proton stays in the Maildir (#728). Turn on full-disk encryption
 (FileVault), and encrypt any backup of the volumes or the checkout.
 FileVault protects a powered-off machine, not a logged-in session,

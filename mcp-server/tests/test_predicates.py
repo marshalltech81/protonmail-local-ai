@@ -574,7 +574,7 @@ class TestCompilerAndDigest:
         # its completeness flag (#1086).
         body_word = (
             "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
-            "JOIN message_chunks c ON c.fts_rowid = f.rowid "
+            "CROSS JOIN message_chunks c ON c.fts_rowid = f.rowid "
             "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)"
         )
         assert sql == " AND ".join(

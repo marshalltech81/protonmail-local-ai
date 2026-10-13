@@ -364,6 +364,9 @@ Secrets are a hard boundary.
   `.example` domains is tracked)
 - `config/identity.toml` (the operator's own addresses; only
   `config/identity.toml.example` with `.example` domains is tracked)
+- `config/config.toml` (the operator configuration, #1607: addresses and
+  the Bridge username; only `config/config.toml.example` is tracked) and
+  everything under `.generated/`, which the translator writes from it
 - any ad hoc export containing credentials, tokens, or private keys
 
 ### Credential-specific rules
@@ -1115,7 +1118,7 @@ Notes:
 - when coverage drops, add tests rather than lowering the threshold or widening `omit`
 - CI runs `pytest --cov` in `.github/workflows/tests.yml` and uploads `coverage.xml` as an artifact per service
 - CI runs both suites in parallel with `pytest-xdist` (`-n auto`); local
-  runs stay serial unless `-n` is passed. An indexer test whose outcome
+  runs stay serial unless `-n` is passed. A service test whose outcome
   depends on the CPU or wall-clock time it gets (a real extractor child
   reaching one limit before another, a wall-clock bound on bounded work)
   carries `@pytest.mark.serial`: CI runs those after the parallel pass,
@@ -1155,6 +1158,7 @@ Notes:
 - changes to `mbsync/mbsyncrc.template`, or to the Patterns exclusion sets (`PROTON_FOLDER_EXCLUSIONS`, Proton provider policy, with its default and renderer in `mbsync/proton-settings.sh`; `ISYNC_LAYOUT_EXCLUSIONS` in `mbsync/entrypoint.sh`, isync transport; #1481), should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery), and a deliberate change to the template or to what `render_mbsync_config` writes updates `mbsync/tests/mbsyncrc.golden`, which `make test-mbsync` compares byte for byte with the rendered file (#1480)
 - a base-image digest bump in `indexer/Dockerfile` or `mcp-server/Dockerfile` (Dependabot's or by hand) moves `PYTHON_IMAGE` in `mbsync/tests/tls_check.sh` with it; `scripts/tests/image_pin_test.sh` (`make test-image-pins`, also in CI) fails while the three differ, since Dependabot does not update the script. The same test fails while `.github/workflows/docker.yml` and `.github/workflows/tests.yml` pass `docker/setup-buildx-action` different `driver-opts: image=moby/buildkit:...` references (#1122): Dependabot does not track a driver option, so a BuildKit bump moves both by hand, together
 - a change to `indexer/java/pom.xml` (Dependabot's or by hand) rewrites `indexer/java/checksums/checksums.sha256` with `make ppt-checksums` in the same PR: the indexer build and the Trivy dependency job check every Maven artifact against it and fail while it lags (#1117). `scripts/tests/maven_checksums_test.sh` (`make test-maven-checksums`, also in CI) fails while the file lacks a line for a pinned artifact or the Maven flags in `indexer/Dockerfile` and `.github/workflows/security.yml` differ from the required set. Never edit a line by hand to make a build pass
+- a `.env.example` setting added, removed or renamed updates `MAPPING` in `scripts/config/operator_config.py` (its TOML key, or a maintenance or runtime-owned entry) and the tables in `docs/setup.md` ("Operator configuration file"); `make test-config` fails until both match `.env.example` (#1607). A new setting only shell reads gets a `_SHELL_ONLY` entry in `indexer/tests/test_env_example.py` and a behavioural case in `mbsync/tests/entrypoint_test.sh` showing its sentinel changes what mbsync does (#1188)
 - Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - a PR that adds or removes baseline-corpus messages also regenerates the parser pin (`cd indexer && PARSER_PIN_UPDATE=1 uv run pytest tests/test_parser_pin.py`); its diff must be only the added or removed records, plus the corpus messages after the change renumbered under new file names with no other field changed, since corpus files are numbered in sequence (#1124)
@@ -1170,6 +1174,7 @@ make test-mbsync
 make test-mbsync-tls
 make test-mbsync-layout
 make test-compose
+make test-config
 make baseline
 make typecheck
 ```
