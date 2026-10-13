@@ -333,8 +333,11 @@ schema change needs a numbered migration.
    #1373) (`docs/architecture.md`,
    "Message time"). **Done** for the effective time; a missing `Date:`
    stays unknown (#1080). Per decision 35 the effective time stays the
-   default; a `date_basis` letting a caller choose `sent`, `occurred` or
-   `internal` is still open (#1150, #1092; item 5). Bitemporal claims
+   default; `date_basis` chooses `sent` or `occurred` for message and
+   attachment listings (#1150). Keyset paging is retained; sent and delivery
+   clock pages scan and sort under the current schema. Index optimization
+   remains #1123.
+   `internal` still waits on #1092 (item 5). Bitemporal claims
    wait for Phase 5.
 4. **Deletion/retention semantics.** Mirror is the default, archive
    (`INDEXER_DELETION_ENABLED=false`) the opt-in, Trash indexed but
@@ -364,9 +367,9 @@ schema change needs a numbered migration.
    unassessed and incomplete messages (#1093 header slice). **Open, in order:**
    the rest of #823 (selectable clocks,
    further dimensions and identity counts); the
-   selectable clock `date_basis` (#1150, depending on #1080 for
-   `sent`; updated 2026-10-11: #1080 is done), counting its own NULL clocks the same way so no basis ever
-   drops unknown rows silently; leaves
+   index optimization for selected clocks (#1123; #1150 serves
+   `date_basis` for both listings, retaining keyset paging with scan-and-sort
+   under the current schema and counting missing clocks as indeterminate); leaves
    that wait on the evidence model (#1090 Bcc, #1092 internal date);
    a capability report in
    `get_mailbox_status` (#1093). Omitted by decision: IMAP UID,
@@ -878,7 +881,10 @@ superseded entries keep their number and one line.
     #1354). Attachments are enumerated exhaustively by
     `query_attachments` and their stored text read by `get_attachment`, whose
     streaming reader reports an exact `total_chars` on every page;
-    `date_basis` for both listing tools comes with #1150 (#796).
+    `date_basis` for both listing tools selects effective, sent or
+    delivery time and reports missing selected clocks as indeterminate
+    (#1150, #796). Keyset paging is retained with scan-and-sort for
+    sent and delivery clocks under the current schema; index optimization is #1123.
     Per-message completeness flags keep a leaf from answering a
     confident "no" on incomplete data: a stored match still answers
     yes, and finding nothing answers "can't tell" unless the relevant

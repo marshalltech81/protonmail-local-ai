@@ -1445,9 +1445,13 @@ the rows above; they bind #1313's policy, which does not exist yet.
 ## Message time
 
 The index records two times per message, `sent_at` and `occurred_at`,
-and derives one effective time from them. Every date the MCP tools
-filter on or sort by is the effective time; outputs return both stored
-fields.
+and derives one effective time from them. `query_messages` and
+`query_attachments` let `date_basis` select effective (the default),
+sent or occurred time for bounds, ordering and cursors. A missing
+selected sent or occurred clock is indeterminate even without bounds;
+changing clocks rejects the cursor. Other tools use effective time.
+Outputs return both stored fields. Sent and delivery clocks have no
+paging index yet (#1123); their pages scan and sort.
 
 **`sent_at`** is the message's `Date:` header as parsed by
 `parsedate_to_datetime` (`indexer/src/parser.py` `_parse_date`),

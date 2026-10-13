@@ -565,8 +565,8 @@ def normalize_date_basis(value: Any) -> str:
     """The ``date_basis`` to apply: ``DEFAULT_DATE_BASIS`` for a missing
     or blank value, otherwise the stripped name of a ``DATE_BASES``
     entry. Raises ``InvalidFilterError`` (fixed text) for a non-string or
-    an unavailable or unknown basis. No tool takes ``date_basis`` yet
-    (#1150): ``query_messages`` always uses the default."""
+    an unavailable or unknown basis. Tool handlers reject explicit null
+    before calling this; database callers keep None meaning the default."""
     if value is not None and not isinstance(value, str):
         raise InvalidFilterError("date_basis", "date_basis must be a string")
     if value is None or not value.strip():
@@ -971,8 +971,7 @@ LEAVES: dict[str, LeafKind] = {
             Evaluability.UNKNOWN_WHEN_NULL,
             _effective_to_test,
         ),
-        # The other clocks a ``date_basis`` names (#1085; no tool takes it
-        # yet, #1150).
+        # The other clocks date_basis selects (#1150).
         # Each is NULL without its date (a send date also until it is
         # assessed, #1080), so the ``dated`` leaf keeps such rows out of
         # a page ordered by it.
