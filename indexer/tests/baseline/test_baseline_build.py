@@ -301,8 +301,12 @@ class TestBuild:
         """Also #1268: before ``initial_index`` runs, the index records
         the loopback hash-embedding service as its embedder (provider,
         the allocated endpoint, model, calibration vector), and the
-        service is stopped once the build returns."""
-        out = tmp_path / "out"
+        service is stopped once the build returns. The documented CLI
+        takes a relative ``<out_dir>``: it is resolved before the account
+        and the Maildir paths are, since occurrence locators need absolute
+        paths (#1566, Codex round 1 on #1601)."""
+        monkeypatch.chdir(tmp_path)
+        out = Path("out")
         real_initial_index = main.initial_index
         seen: list[dict | None] = []
 

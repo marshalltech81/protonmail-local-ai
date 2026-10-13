@@ -100,6 +100,20 @@ class TestConfiguration:
         outcomes = {_shell_accepts(v) for v in _SOURCE_MODES}
         assert outcomes == {True, False}
 
+    @pytest.mark.parametrize(
+        ("env", "expected"),
+        [({}, Path("/maildir")), ({"MAILDIR_PATH": "/data/mail"}, Path("/data/mail"))],
+    )
+    def test_maildir_root_is_read_as_given_when_absolute(self, env, expected):
+        assert account_mod.maildir_root_from_env(env) == expected
+
+    def test_a_relative_maildir_root_is_made_absolute(self, tmp_path, monkeypatch):
+        """Occurrence locators need absolute paths (#1566): a relative
+        ``MAILDIR_PATH`` (a run outside Compose) is resolved against the
+        working directory once, so the walk's paths are absolute too."""
+        monkeypatch.chdir(tmp_path)
+        assert account_mod.maildir_root_from_env({"MAILDIR_PATH": "mail"}) == tmp_path / "mail"
+
     def test_unset_source_mode_is_the_default(self):
         config = account_config_from_env(
             {"ACCOUNT_SCOPE": TEST_ACCOUNT.scope_uuid}, maildir_root=Path("/m")

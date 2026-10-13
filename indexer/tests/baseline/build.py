@@ -83,11 +83,12 @@ BASELINE_ACCOUNT_SCOPE = "00000000-0000-4000-8000-00000000ba5e"
 
 def baseline_account(out_dir: Path) -> AccountConfig:
     """The account of the index ``build`` writes under ``out_dir``, whose
-    Maildir is ``out_dir / "maildir"``."""
+    Maildir is ``out_dir / "maildir"``, made absolute (occurrence
+    locators need an absolute root)."""
     return AccountConfig(
         scope_uuid=BASELINE_ACCOUNT_SCOPE,
         provider=DEFAULT_SOURCE_MODE,
-        maildir_root=out_dir / "maildir",
+        maildir_root=out_dir.absolute() / "maildir",
     )
 
 
@@ -213,6 +214,9 @@ def build(
     ``RuntimeError`` if any message failed to index, so a broken corpus
     or pipeline fails loudly rather than producing a partial baseline.
     """
+    # Absolute, so the Maildir paths the index stores are too: occurrence
+    # locators refuse relative paths (the CLI may be given a relative one).
+    out_dir = out_dir.absolute()
     # A leftover index would make ``initial_index`` skip already-indexed
     # files and silently reuse stale state.
     if out_dir.exists() and any(out_dir.iterdir()):

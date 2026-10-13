@@ -140,8 +140,11 @@ def account_config_from_env(environ: Mapping[str, str], *, maildir_root: Path) -
 
 
 def maildir_root_from_env(environ: Mapping[str, str]) -> Path:
-    """``MAILDIR_PATH``, or the default the indexer uses."""
-    return Path(environ.get("MAILDIR_PATH", DEFAULT_MAILDIR_PATH))
+    """``MAILDIR_PATH``, or the default the indexer uses, made absolute
+    against the working directory: occurrence locators are relative to
+    an absolute root (``occurrences.locate``), and the Maildir walk
+    yields paths under it."""
+    return Path(environ.get("MAILDIR_PATH", DEFAULT_MAILDIR_PATH)).absolute()
 
 
 def register_account_functions(conn: sqlite3.Connection, account: AccountConfig) -> None:
