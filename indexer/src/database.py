@@ -4541,12 +4541,23 @@ class Database:
         now = datetime.now(UTC).isoformat()
         if row is None:
             prior = cur.execute(
-                "SELECT m.claimant_id FROM indexed_files f "
+                "SELECT m.claimant_id, f.size, f.mtime_ns FROM indexed_files f "
                 "JOIN messages m ON m.content_hash = f.content_hash "
                 "WHERE f.filepath = ? ORDER BY m.claimant_id LIMIT 1",
                 (old_path,),
             ).fetchone()
             if prior is None:
+                return None
+            # The record may be stale: a retired path reused by another
+            # file whose creation was missed. Bind only a destination with
+            # the size and mtime recorded for it (the file identity the
+            # Maildir walk trusts; a rename keeps both), else leave it to
+            # the parse, which binds it to its own claimant.
+            try:
+                st = os.stat(new_path)
+            except OSError:
+                return None
+            if (st.st_size, st.st_mtime_ns) != (prior["size"], prior["mtime_ns"]):
                 return None
             self._bind_occurrence(cur, prior["claimant_id"], new_path, provenance="rename")
             return str(prior["claimant_id"])

@@ -374,6 +374,24 @@ class TestMissedRenames:
         finally:
             box.close()
 
+    def test_a_reused_path_with_other_bytes_is_not_bound_on_rename(self, box):
+        """A retired path whose stale ``indexed_files`` record names an
+        indexed message, reused by a different file whose creation was
+        missed: a flag rename binds nothing, so the parse binds the new
+        file to its own claimant."""
+        old = box.put("INBOX/cur/r1:2,S", _eml("old@example.test"))
+        box.index(old)
+        box.db._conn.execute(
+            "UPDATE message_occurrences SET state = 'retired', retired_at = '2026-01-01' "
+            "WHERE relative_path = 'INBOX/cur/r1:2,S'"
+        )
+        box.db._conn.commit()
+        old.write_bytes(_eml("new@example.test", body="a different, longer body"))
+        dest = box.root / "INBOX/cur/r1:2,FS"
+        old.rename(dest)
+        box.reconciler.handle_moved(str(old), str(dest))
+        assert box.active() == []
+
     def test_an_unmapped_copy_moved_in_archive_mode_keeps_its_occurrence(self, box):
         raw = _eml("archived@example.test")
         inbox = box.put("INBOX/cur/o1:2,S", raw)
@@ -383,8 +401,9 @@ class TestMissedRenames:
             "DELETE FROM message_occurrences WHERE relative_path = 'Archive/cur/o2:2,S'"
         )
         box.db._conn.commit()
-        dest = box.put("Clients/cur/o2:2,S", raw)
-        copy.unlink()
+        dest = box.root / "Clients" / "cur" / "o2:2,S"
+        dest.parent.mkdir(parents=True)
+        copy.rename(dest)
         handler = main.MaildirHandler(box.db, IndexingQueue(box.db, max_attempts=3))
         handler.on_moved(_moved(copy, dest))
         assert ("Clients/cur/o2:2,S", 0) in box.active()
