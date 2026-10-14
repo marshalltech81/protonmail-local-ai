@@ -230,7 +230,9 @@ def test_match_dependencies_are_required_even_when_coverage_flags_exist(tmp_path
     from src.lib.query_capabilities import query_capabilities
 
     conn, _ = _open_built_db_conn(tmp_path, "match-dependencies.db")
-    conn.execute("ALTER TABLE messages RENAME COLUMN seen TO missing_seen")
+    # ``seen`` moved from ``messages`` to ``message_occurrences`` under
+    # mailbox occurrences (#1568/#1612/#1627 panel).
+    conn.execute("ALTER TABLE message_occurrences RENAME COLUMN seen TO missing_seen")
     conn.execute("DROP TABLE message_headers")
     conn.execute("DROP TABLE message_participants")
     conn.execute("DROP TABLE message_chunks_fts")
@@ -266,6 +268,7 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
         "bool": (True,),
         "bytes": (1,),
         "class": ("unclassified",),
+        "none": (None,),
     }
     tables = (
         "messages",
@@ -275,6 +278,10 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
         "message_chunks",
         "attachments",
         "entities",
+        # Folder, flag, Trash and Spam terms correlate on one mailbox
+        # occurrence and its account (#1568/#1612/#1627 panel).
+        "message_occurrences",
+        "accounts",
     )
     for table in tables:
         columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]

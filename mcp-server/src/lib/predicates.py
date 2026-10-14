@@ -850,7 +850,7 @@ def _occurrence_flag(column: str) -> Callable[[bool, list], str]:
     return compile
 
 
-def _occurrence_not_spam(_value: str, params: list) -> str:
+def _occurrence_not_spam(_value: str | None, params: list) -> str:
     return f"NOT {authority_excluded_sql()}"
 
 
@@ -966,8 +966,8 @@ def _has_attachments_test(state: bool) -> Callable[[Any], bool]:
 def _coverage_flags(*columns: str) -> tuple[str, str]:
     """Full evidence and unassessed evidence, independent of a query value."""
     return (
-        " AND ".join(f"m.{column} = 1" for column in columns),
-        " OR ".join(f"m.{column} IS NULL" for column in columns),
+        " AND ".join(f"m.{flag} = 1" for flag in columns),
+        " OR ".join(f"m.{flag} IS NULL" for flag in columns),
     )
 
 

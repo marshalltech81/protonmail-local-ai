@@ -44,6 +44,7 @@ DROPPED = {
 _INTERPOLATED_ALLOWED = {
     "m.{ROLE_COMPLETE_COLUMNS[role]}",  # predicates: per-role address completeness flag
     "m.{complete}",  # predicates: a ``*_complete`` flag named by its caller
+    "m.{flag}",  # predicates: _coverage_flags, always a *_complete flag (#1627)
 }
 
 _TABLE_REF = re.compile(r"\b(?:FROM|JOIN|INTO|UPDATE)\s+(\w+)\b(?:\s+(?:AS\s+)?(\w+))?", re.I)
