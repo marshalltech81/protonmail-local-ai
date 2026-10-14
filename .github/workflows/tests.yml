@@ -275,6 +275,13 @@ jobs:
             --mount type=bind,src="$PWD/mcp-server/scripts",dst=/app/scripts,readonly \
             --entrypoint python clock-index-runtime - < mcp-server/tests/runtime_aggregate_samples.py
 
+      - name: Verify normalized list metadata on runtime SQLite
+        run: |
+          docker run --rm -i --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --memory 512m --pids-limit 32 \
+            --mount type=bind,src="$PWD/mcp-server/scripts",dst=/app/scripts,readonly \
+            --entrypoint python clock-index-runtime - < mcp-server/tests/runtime_list_metadata.py
+
   retrieval-baseline:
     # Step 1 indexes the synthetic mailbox with the real indexer and a
     # hashed embedder; step 2 checks the golden questions and the rank

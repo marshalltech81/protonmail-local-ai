@@ -99,6 +99,8 @@ _MAX_AGGREGATE_GROUPS = 100
 # and month have a value for every message.
 _NO_VALUE_LABELS = {
     "direction": "unknown direction",
+    "list_id": "no List-ID (known absence)",
+    "precedence": "no Precedence (known absence)",
     "sender_address": "(no attributable sender)",
     "sender_domain": "(no attributable sender)",
     "recipient_domain": "(no observed recipient domain)",
@@ -360,6 +362,11 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
             head.append(word)
     if shown("direction"):
         head.append(f"direction {m.direction}")
+    for name, (value, status) in m.list_metadata.items():
+        if shown(name):
+            head.append(f"{name}={value if value is not None else 'null'}")
+        if shown(name + "_status"):
+            head.append(f"{name}_status={status}")
     lines = [f"{i}. " + " | ".join(head) if head else f"{i}."]
     if shown("subject"):
         lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
@@ -429,6 +436,11 @@ _INDETERMINATE_CAUSES: tuple[tuple[str, frozenset[str], str], ...] = (
         frozenset({"direction"}),
         "identity unconfigured, sender evidence incomplete or ambiguous, or own sender without known external visible recipients",
     ),
+    (
+        "list_metadata",
+        frozenset(),
+        "normalized header evidence malformed, conflicting, incomplete, unassessed or over budget",
+    ),
     ("headers", frozenset(), "header evidence incomplete or not yet assessed"),
     ("attachment_text", frozenset(), "attachment text incomplete, unavailable, or not yet indexed"),
     ("size", frozenset({"size_min", "size_max"}), "no stored size"),
@@ -447,6 +459,9 @@ def _where_cause_keys(where: list[WhereLeaf]) -> set[str]:
     incomplete display names when it reads them."""
     keys = set()
     for w in where:
+        if w.leaf.name in {"list_id_is", "precedence_is"}:
+            keys.add("list_metadata")
+            continue
         if w.leaf.name == "direction_is":
             keys.add("direction")
             continue
@@ -525,7 +540,13 @@ def _describe_where(where: list[WhereLeaf]) -> list[str]:
         elif w.leaf.name == "header_contains":
             name, value = w.leaf.value
             parts.append(f"{prefix}header_contains({name!r}, {value!r})")
-        elif w.leaf.name in {"subject_contains", "attachment_content_type_is", "direction_is"}:
+        elif w.leaf.name in {
+            "subject_contains",
+            "attachment_content_type_is",
+            "direction_is",
+            "list_id_is",
+            "precedence_is",
+        }:
             parts.append(f"{prefix}{w.leaf.name}({w.leaf.value!r})")
         else:
             role, value = w.leaf.value
@@ -644,6 +665,18 @@ _UNAVAILABLE_REASONS = {
     "per-message extraction budget was reached); its text is not indexed yet",
 }
 _OCR_DISABLED_REASON = "the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)"
+
+
+def _metadata_lines(diagnostics: dict[str, dict[str, int]]) -> list[str]:
+    lines = []
+    for name, reasons in diagnostics.items():
+        for reason, count in sorted(reasons.items()):
+            timings.count(f"{name}_{reason}", count)
+        lines.append(
+            f"{name} normalization (all evaluated indexed claimants, including Trash): "
+            + ", ".join(f"{reason}={count}" for reason, count in sorted(reasons.items()))
+        )
+    return lines
 
 
 def _aggregate_result(text: str, output: AggregateMessagesOutput) -> CallToolResult:
@@ -1529,7 +1562,12 @@ def register_retrieval_tools(server, db):
             },
         )
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
-        projection = None
+        projection = frozenset(QUERY_MESSAGE_FIELDS) - {
+            "list_id",
+            "list_id_status",
+            "precedence",
+            "precedence_status",
+        }
         if fields is not None:
             if len(fields) > len(QUERY_MESSAGE_FIELDS):
                 # Repeats add nothing: refuse the list before checking
@@ -1545,7 +1583,11 @@ def register_retrieval_tools(server, db):
                     f"Error: unknown field {clip(unknown[0], 100)!r} in fields; "
                     f"valid: {', '.join(QUERY_MESSAGE_FIELDS)}"
                 )
-            projection = frozenset(fields) | {"claimant_id", "thread_id"}
+            projection = (
+                frozenset(fields)
+                | {"claimant_id", "thread_id"}
+                | {name + "_status" for name in ("list_id", "precedence") if name in fields}
+            )
         # Reject a bad date range before any retrieval work.
         try:
             if date_basis is None:
@@ -1568,6 +1610,7 @@ def register_retrieval_tools(server, db):
             where_leaves = normalize_where(where) if where is not None else []
             page = await asyncio.to_thread(
                 db.query_messages,
+                metadata_fields=tuple(projection),
                 **args,
                 date_basis=date_basis,
                 where=where_leaves,
@@ -1598,6 +1641,7 @@ def register_retrieval_tools(server, db):
             for key, _ in _indeterminate_cause_entries(uses, where_leaves, date_basis):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = QueryMessagesOutput(
+            metadata_diagnostics=page.metadata_diagnostics,
             date_basis=date_basis,
             filters=uses,
             address_matches=[
@@ -1643,6 +1687,7 @@ def register_retrieval_tools(server, db):
         )
         lines = [f"Query: {', '.join(p for p in parts if p) or none}"]
         lines.append(f"date_basis: {date_basis}")
+        lines.extend(_metadata_lines(page.metadata_diagnostics))
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}")
@@ -1834,6 +1879,7 @@ def register_retrieval_tools(server, db):
             for key, _ in _indeterminate_cause_entries(uses, where_leaves):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = QueryThreadsOutput(
+            metadata_diagnostics=page.metadata_diagnostics,
             filters=uses,
             date_bounds=bounds,
             total_threads=page.total_threads,
@@ -1862,6 +1908,7 @@ def register_retrieval_tools(server, db):
         )
         parts = [_describe_filters(uses, none=""), *_describe_where(where_leaves)]
         lines = [f"Query: {', '.join(p for p in parts if p) or _describe_filters([])}"]
+        lines.extend(_metadata_lines(page.metadata_diagnostics))
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.extend(
@@ -1903,6 +1950,8 @@ def register_retrieval_tools(server, db):
             "sender_domain",
             "recipient_domain",
             "direction",
+            "list_id",
+            "precedence",
             "attachment_content_type",
             "folder",
             "year",
@@ -2129,6 +2178,9 @@ def register_retrieval_tools(server, db):
             for key, _ in _indeterminate_cause_entries(uses, where_leaves, date_basis):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = AggregateMessagesOutput(
+            metadata_diagnostics=page.metadata_diagnostics,
+            unknown_group_messages=page.unknown_group_messages,
+            unknown_group_indeterminate_messages=page.unknown_group_indeterminate_messages,
             sample_per_group=page.sample_per_group,
             samples_returned=page.samples_returned,
             group_by=page.group_by,
@@ -2199,6 +2251,15 @@ def register_retrieval_tools(server, db):
             )
             lines.append(
                 "Samples show chronological-order metadata evidence, not statistical representation, series classification or exhaustive reading."
+            )
+        lines.extend(_metadata_lines(page.metadata_diagnostics))
+        if page.unknown_group_messages is not None:
+            timings.count("unknown_group_messages", page.unknown_group_messages)
+            timings.count(
+                "unknown_group_indeterminate_messages", page.unknown_group_indeterminate_messages
+            )
+            lines.append(
+                f"Unknown group membership excluded: {page.unknown_group_messages} definite matches; {page.unknown_group_indeterminate_messages} filter-indeterminate messages. Null group means known absence only."
             )
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)

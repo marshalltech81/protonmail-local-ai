@@ -39,6 +39,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .list_metadata import canonical_list_id, metadata_known_sql, metadata_value_sql
+
 
 class InvalidFilterError(ValueError):
     """A filter or query argument the caller supplied was rejected (a
@@ -499,6 +501,9 @@ class LeafKind:
     schema: dict[str, tuple[str, ...]] | None = None
     identity_dependent: bool = False
 
+    normalized_metadata: str | None = None
+    coverage_unmeasured: bool = False
+
 
 # ``messages.sent_at_status`` (#1080): why ``sent_at`` is what it is.
 SentAtStatus = Literal["parsed", "missing", "invalid"]
@@ -936,6 +941,14 @@ def _compile_direction(value: str, params: list) -> str:
     )
 
 
+def _compile_metadata(name: str) -> Callable[[Any, list], str]:
+    def compile(value: str | None, params: list) -> str:
+        params.append(value)
+        return f"CASE WHEN {metadata_known_sql(name)} THEN {metadata_value_sql(name)} IS ? END"
+
+    return compile
+
+
 def _compile_authority_class(value: str, params: list) -> str:
     # A message in ``AUTHORITY_EXCLUDED_FOLDERS`` is a decided "no"
     # whatever its sender flag (#463). Otherwise the From sender decides
@@ -1061,6 +1074,22 @@ LEAVES: dict[str, LeafKind] = {
                 "operator_addresses": ("address",),
             },
             identity_dependent=True,
+        ),
+        *(
+            LeafKind(
+                name + "_is",
+                name,
+                _compile_metadata(name),
+                Evaluability.UNKNOWN_WHEN_NULL,
+                coverage=("0", "0"),
+                schema={
+                    "messages": ("claimant_id", "headers_complete"),
+                    "message_headers": ("claimant_id", "name_normalized", "raw_value"),
+                },
+                normalized_metadata=name,
+                coverage_unmeasured=True,
+            )
+            for name in ("list_id", "precedence")
         ),
         # The flat address filters, in their inferred mode
         # (``inferred_address_leaf``).
@@ -1411,6 +1440,8 @@ WHERE_LEAVES = (
     "header_exists",
     "header_contains",
     "direction_is",
+    "list_id_is",
+    "precedence_is",
 )
 # The ``ROLE_SETS`` roles a caller names. ``visible_participant`` stays
 # internal (the flat ``participant``); the Bcc-inclusive ``recipient``
@@ -1432,6 +1463,8 @@ MAX_WHERE_VALUE_CHARS = {
     "attachment_content_type_is": 1000,
     "header_contains": 500,
     "direction_is": 8,
+    "list_id_is": 255,
+    "precedence_is": 11,
 }
 MAX_WHERE_ID_CHARS = 64
 
@@ -1452,6 +1485,8 @@ WhereLeafName = Literal[
     "header_exists",
     "header_contains",
     "direction_is",
+    "list_id_is",
+    "precedence_is",
 ]
 WhereRole = Literal["from", "to", "cc", "visible_recipient"]
 
@@ -1487,6 +1522,9 @@ class WhereLeafItem(BaseModel):
         if self.leaf == "header_exists":
             if "value" in self.model_fields_set:
                 raise ValueError("value is not accepted on header_exists")
+        elif self.leaf in {"list_id_is", "precedence_is"}:
+            if "value" not in self.model_fields_set:
+                raise ValueError("value is required on this leaf")
         elif self.value is None:
             raise ValueError("value is required on this leaf")
         return self
@@ -1572,6 +1610,8 @@ def _where_value(path: str, item: WhereLeafItem) -> Any:
         if name == "header_exists":
             return header_name
     if value is None:
+        if name in {"list_id_is", "precedence_is"}:
+            return None
         raise InvalidFilterError("where", f"{path}: value is required")
     limit = MAX_WHERE_VALUE_CHARS[name]
     if len(value) > limit:
@@ -1590,6 +1630,20 @@ def _where_value(path: str, item: WhereLeafItem) -> Any:
         return tuple(terms)
     if name == "direction_is":
         return normalize_direction(value)
+
+    if name == "list_id_is":
+        canonical = canonical_list_id(value)
+        if canonical is None:
+            raise InvalidFilterError(
+                "where", f"{path}: list_id_is takes a bracketless ASCII list identifier or null"
+            )
+        return canonical
+    if name == "precedence_is":
+        if value not in ("bulk", "list", "junk", "unsupported"):
+            raise InvalidFilterError(
+                "where", f"{path}: precedence_is takes bulk, list, junk, unsupported or null"
+            )
+        return value
     if name == "header_contains":
         return (header_name, value)
     if name == "subject_contains":

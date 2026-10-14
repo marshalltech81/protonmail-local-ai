@@ -345,6 +345,8 @@ _DOCS = Path(__file__).resolve().parents[2] / "docs" / "mcp-tools.md"
 # One sample value per declared parameter shape. A leaf declaring a new
 # shape must add its sample here, so its compiler gets exercised.
 _SAMPLES: dict[str, object] = {
+    "list_id": "series.example",
+    "precedence": "bulk",
     "direction": "inbound",
     "header name": "list-id",
     "header name, text": ("list-id", "synthetic"),
@@ -380,6 +382,8 @@ _NOT_BUILT: dict[str, str] = {
         "attachment_content_type_is",
         "header_exists",
         "header_contains",
+        "list_id_is",
+        "precedence_is",
     )
 }
 
@@ -481,7 +485,7 @@ class TestLeafRegistry:
 
     def test_registry_is_keyed_by_leaf_name(self):
         assert all(name == kind.name for name, kind in LEAVES.items())
-        assert len(LEAVES) == 33
+        assert len(LEAVES) == 35
 
     @pytest.mark.parametrize("name", sorted(LEAVES))
     def test_leaf_compiles_with_a_rule_and_a_docs_entry(self, name, mixed_db):
@@ -503,7 +507,12 @@ class TestLeafRegistry:
         assert sql.count("?") == len(params)
         # The fragment runs as written against the schema.
         with closing(mixed_db._connect()) as conn:
-            conn.execute(f"SELECT COUNT(*) FROM messages m WHERE {sql}", params).fetchone()
+            from src.lib.list_metadata import with_metadata
+
+            metadata = (kind.normalized_metadata,) if kind.normalized_metadata else ()
+            conn.execute(
+                with_metadata(f"SELECT COUNT(*) FROM messages m WHERE {sql}", metadata), params
+            ).fetchone()
         assert isinstance(kind.evaluability, Evaluability)
         if name in _UNDOCUMENTED:
             assert _UNDOCUMENTED[name]
@@ -1021,6 +1030,8 @@ class TestClockSizeAndRepliedLeaves:
             "sent_from",
             "sent_to",
             "direction_is",
+            "list_id_is",
+            "precedence_is",
             "sender",
             "recipient",
             "participant",

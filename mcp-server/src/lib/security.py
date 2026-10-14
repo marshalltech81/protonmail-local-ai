@@ -157,6 +157,10 @@ QUERY_MESSAGE_FIELDS = (
     "thread_id",
     "pending_deletion",
     "direction",
+    "list_id",
+    "list_id_status",
+    "precedence",
+    "precedence_status",
 )
 
 
@@ -220,6 +224,8 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
         "sender_domain",
         "recipient_domain",
         "direction",
+        "list_id",
+        "precedence",
         "attachment_content_type",
         "folder",
         "year",
