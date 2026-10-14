@@ -1514,8 +1514,7 @@ def register_retrieval_tools(server, db):
                    Header names hold 1 to 128 ASCII token characters and
                    values at most 500 characters. attachment_text_words: the same words over
                    attachment chunks; absence needs a complete manifest
-                   and complete text for every occurrence. Roles: from, to,
-                   cc, visible_recipient (To or Cc). ``role`` is
+                   and complete text for every occurrence. ``role`` is
                    required on the five address leaves and refused,
                    null included, on non-address leaves. An ``all`` item
                    may be {"any": [leaf, ...]}, true when one leaf is;

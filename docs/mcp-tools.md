@@ -1405,7 +1405,8 @@ through the flat parameters' inferred mode:
 
 - **Leaves:** `address_is`, `address_contains`,
   `display_name_contains`, `address_or_name_contains` and `domain_is`
-  take a `role` (`from`, `to`, `cc` or `visible_recipient`);
+  take a `role` (`from`, `to`, `cc`, `bcc`, `visible_recipient`,
+  `recipient` or `any`);
   `body_words`, `subject_contains`, `attachment_text_words` and
   `attachment_content_type_is` take none.
   `header_exists` takes a `name` and no `value`; `header_contains` takes
