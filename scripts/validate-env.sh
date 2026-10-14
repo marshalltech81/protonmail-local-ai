@@ -482,6 +482,66 @@ if [[ "${1:-}" == "--get" ]]; then
     exit 0
 fi
 
+# config/mode selects .env (legacy, today's only form) or
+# config/config.toml (toml, #1603, PLAN.md decision 50). Checked before
+# any of the legacy checks below, which assume .env is the active
+# configuration.
+readonly CONFIG_MODE_FILE="${ROOT_DIR}/config/mode"
+readonly CONFIG_TOML_FILE="${ROOT_DIR}/config/config.toml"
+# shellcheck source=scripts/config-mode.sh disable=SC1091 # linted on its own
+source "${ROOT_DIR}/scripts/config-mode.sh"
+CONFIG_MODE_PROBLEM="$(config_mode_problem "$CONFIG_MODE_FILE" "$CONFIG_TOML_FILE")"
+if [[ -n "$CONFIG_MODE_PROBLEM" ]]; then
+    printf 'ERROR: %s\n' "$CONFIG_MODE_PROBLEM" >&2
+    exit 1
+fi
+
+if [[ "$(read_config_mode "$CONFIG_MODE_FILE")" == "$CONFIG_MODE_TOML" ]]; then
+    # TOML mode: .env, ACCOUNT_SCOPE, BRIDGE_* and the model secrets'
+    # fixed paths are not read here; config/config.toml and its own
+    # secret paths are checked instead (operator_config.py, #1603). The
+    # MCP bearer token stays at its fixed path in both modes: it is not
+    # part of the TOML schema. This mirrors the legacy-mode check below
+    # rather than sharing it, since the legacy body is skipped entirely
+    # in this branch.
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR: python3 (3.11+) is required to check config/config.toml in TOML mode.\n' >&2
+        exit 1
+    }
+    if [[ ! -f "$MCP_TOKEN_FILE" ]] || ! grep -q '[^[:space:]]' "$MCP_TOKEN_FILE"; then
+        printf 'ERROR: MCP bearer token is missing or empty at %s. Create it with: (umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)\n' \
+            "$MCP_TOKEN_FILE" >&2
+        exit 1
+    fi
+    require_mode_600 "$MCP_TOKEN_FILE"
+    # The indexer still mounts these two at their fixed path regardless
+    # of config/mode (#1603 does not yet wire the TOML-generated
+    # config/identity.toml and config/authority.toml into it; see
+    # docs/setup.md), so they are still what is live and are still
+    # checked here.
+    require_private_optional_file "$AUTHORITY_FILE"
+    require_private_optional_file "$IDENTITY_FILE"
+
+    if ! TRANSLATE_OUTPUT="$(python3 "${ROOT_DIR}/scripts/config/operator_config.py" translate 2>&1)"; then
+        printf '%s\n' "$TRANSLATE_OUTPUT" >&2
+        exit 1
+    fi
+    if ! SECRETS_OUTPUT="$(python3 "${ROOT_DIR}/scripts/config/operator_config.py" check-secrets 2>&1)"; then
+        printf '%s\n' "$SECRETS_OUTPUT" >&2
+        exit 1
+    fi
+    while IFS=$'\t' read -r secret_requirement secret_path; do
+        [[ -n "$secret_path" ]] || continue
+        require_file "$secret_path" "account or model layer secret"
+        require_mode_600 "$secret_path"
+        if [[ "$secret_requirement" == "REQUIRED" ]]; then  # pragma: allowlist secret
+            require_nonempty_file "$secret_path" "account or model layer secret"
+        fi
+    done <<<"$SECRETS_OUTPUT"
+    printf 'Environment validation passed (TOML mode).\n'
+    exit 0
+fi
+
 require_file "$ENV_FILE" ".env"
 require_file "$BRIDGE_PASS_FILE" "Bridge password secret"
 

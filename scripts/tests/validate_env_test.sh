@@ -12,6 +12,9 @@ set -Eeuo pipefail
 
 SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/validate-env.sh"
 PROTON_SETTINGS="$(dirname "$(dirname "$SCRIPT")")/mbsync/proton-settings.sh"
+CONFIG_MODE_SCRIPT="$(dirname "$SCRIPT")/config-mode.sh"
+OPERATOR_CONFIG_PY="$(dirname "$SCRIPT")/config/operator_config.py"
+TOML_FIXTURE="$(dirname "$SCRIPT")/config/tests/fixtures/legacy.toml"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 FAILURES=0
@@ -31,9 +34,14 @@ INFERENCE_BASE_URL=default'
 # (later assignments win), and secret files with placeholder contents.
 setup() {
     ROOT="$(mktemp -d "$WORK/root.XXXXXX")"
-    mkdir -p "$ROOT/scripts" "$ROOT/mbsync" "$ROOT/.secrets"
+    mkdir -p "$ROOT/scripts" "$ROOT/mbsync" "$ROOT/.secrets" "$ROOT/config"
     cp "$SCRIPT" "$ROOT/scripts/validate-env.sh"
     cp "$PROTON_SETTINGS" "$ROOT/mbsync/proton-settings.sh"
+    cp "$CONFIG_MODE_SCRIPT" "$ROOT/scripts/config-mode.sh"
+    # Legacy mode (today's only form): config/mode exists, as make
+    # init-config writes it, so the legacy checks below run (#1603).
+    printf 'legacy\n' >"$ROOT/config/mode"
+    chmod 600 "$ROOT/config/mode"
     printf '%s\n' "$BASE_ENV" "$@" >"$ROOT/.env"
     printf 'placeholder-bridge-pass\n' >"$ROOT/.secrets/bridge_pass.txt"
     printf 'placeholder\n' >"$ROOT/.secrets/inference_api_key.txt"
@@ -768,6 +776,19 @@ write_authority() {
     chmod "$1" "$ROOT/config/authority.toml"
 }
 
+# config/mode=toml with a valid, synthetic config/config.toml (#1603):
+# the same fixture scripts/config/tests/test_operator_config.py uses.
+# .env (from setup) is present but ignored in this mode.
+setup_toml() {
+    setup
+    mkdir -p "$ROOT/scripts/config"
+    cp "$OPERATOR_CONFIG_PY" "$ROOT/scripts/config/operator_config.py"
+    cp "$TOML_FIXTURE" "$ROOT/config/config.toml"
+    chmod 600 "$ROOT/config/config.toml"
+    printf 'toml\n' >"$ROOT/config/mode"
+    chmod 600 "$ROOT/config/mode"
+}
+
 absent_authority_file_passes() {
     stub_host Darwin
     setup
@@ -1294,6 +1315,95 @@ check "chunk budgets follow the chunker's rules" chunk_budget_table
 check "ACCOUNT_SCOPE is required and canonical" account_scope_is_required_and_canonical
 check "an exported chunk budget overrides .env" exported_chunk_budget_overrides_env
 check "padded chunk budgets are stripped" padded_chunk_budgets_are_stripped
+
+# --- config/mode (#1603, PLAN.md decision 50) -----------------------------
+
+missing_config_mode_fails() {
+    setup_toml
+    rm -f "$ROOT/config/mode"
+    fails_with 'config/mode is missing'
+}
+
+garbage_config_mode_fails() {
+    setup_toml
+    printf 'bogus\n' >"$ROOT/config/mode"
+    fails_with "config/mode must be exactly 'legacy' or 'toml'"
+}
+
+loose_config_mode_file_fails() {
+    setup_toml
+    chmod 644 "$ROOT/config/mode"
+    fails_with 'config/mode must have mode 600'
+}
+
+legacy_mode_with_a_stray_config_toml_fails() {
+    setup_toml
+    printf 'legacy\n' >"$ROOT/config/mode"
+    fails_with 'config/mode is legacy but config/config.toml exists'
+}
+
+toml_mode_without_config_toml_fails() {
+    setup_toml
+    rm -f "$ROOT/config/config.toml"
+    fails_with 'config/mode is toml but config/config.toml does not exist'
+}
+
+toml_mode_with_a_valid_config_passes() {
+    setup_toml
+    run_validator
+    [[ "$STATUS" -eq 0 ]] || return 1
+    grep -F 'Environment validation passed (TOML mode).' "$WORK/output" >/dev/null
+}
+
+toml_mode_does_not_require_env_and_allows_disabled_layers_empty() {
+    setup_toml
+    # inference and reranking default to mode=none in the fixture, so
+    # their key files may be empty (AGENTS.md's required-vars
+    # contract); .env is not read in this mode.
+    rm -f "$ROOT/.env"
+    printf '' >"$ROOT/.secrets/inference_api_key.txt"
+    run_validator
+    [[ "$STATUS" -eq 0 ]] || return 1
+}
+
+toml_mode_missing_account_secret_file_fails() {
+    setup_toml
+    rm -f "$ROOT/.secrets/bridge_pass.txt"
+    fails_with 'account or model layer secret not found at'
+}
+
+toml_mode_empty_account_secret_fails() {
+    setup_toml
+    printf '' >"$ROOT/.secrets/bridge_pass.txt"
+    fails_with 'is missing or empty'
+}
+
+toml_mode_loose_account_secret_fails() {
+    setup_toml
+    chmod 644 "$ROOT/.secrets/bridge_pass.txt"
+    fails_with 'must have mode 600'
+}
+
+toml_mode_invalid_config_toml_is_refused_with_fixed_text() {
+    setup_toml
+    printf 'schema_version = 1\n' >"$ROOT/config/config.toml"
+    fails_with 'global is required.'
+}
+
+check "a missing config/mode fails" missing_config_mode_fails
+check "an unrecognized config/mode fails" garbage_config_mode_fails
+check "a config/mode not 600 fails" loose_config_mode_file_fails
+check "legacy mode with a stray config/config.toml fails" \
+    legacy_mode_with_a_stray_config_toml_fails
+check "TOML mode without config/config.toml fails" toml_mode_without_config_toml_fails
+check "TOML mode with a valid config passes" toml_mode_with_a_valid_config_passes
+check "TOML mode does not require .env and allows a disabled layer's key empty" \
+    toml_mode_does_not_require_env_and_allows_disabled_layers_empty
+check "TOML mode: a missing account secret file fails" toml_mode_missing_account_secret_file_fails
+check "TOML mode: an empty account secret fails" toml_mode_empty_account_secret_fails
+check "TOML mode: an account secret not 600 fails" toml_mode_loose_account_secret_fails
+check "TOML mode: an invalid config.toml is refused with fixed text" \
+    toml_mode_invalid_config_toml_is_refused_with_fixed_text
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

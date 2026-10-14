@@ -1,12 +1,16 @@
-# Operator configuration, schema version 1 (#1353, #1607). NOT YET ACTIVE:
-# `make up` still reads .env. The launcher that selects this file is #1603.
+# Operator configuration, schema version 1 (#1353, #1607, #1603).
+# `make validate-env` checks this file (and its secret paths) once
+# config/mode is toml (make migrate-config, or write config/mode by
+# hand). docker compose up itself still reads .env and the fixed
+# secret paths in docker-compose.yml either way, until a follow-up
+# issue wires compose.env into it with --env-file.
 #
 # Copy to config/config.toml (gitignored: it holds addresses and your
 # Bridge username) at mode 600. Check it, and see what it would produce,
 # with:
 #   python3 scripts/config/operator_config.py translate
-# which writes .generated/ (mode 700, files 600, gitignored). Nothing reads
-# .generated/ yet. Every value below is a synthetic example.
+# which writes .generated/ (mode 700, files 600, gitignored). Every
+# value below is a synthetic example.
 #
 # Each key, its default, its validation and its .env.example setting are
 # listed in docs/setup.md ("Operator configuration file"). Keys left out
