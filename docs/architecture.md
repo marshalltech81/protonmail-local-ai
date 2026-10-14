@@ -4455,6 +4455,28 @@ the carry on whether `_move_occurrence` found an actual mismatch, not
 merely on whether it found nothing to say) — and `on_moved` falls
 through to Case 2 as if the destination were new mail.
 
+Falling through leaves the stale occurrence active at the now-missing
+source path for the general case: the reconciliation scan is the
+eventual backstop (it reads the newly-indexed destination created once
+Case 2 enqueues it, on a later pass). In mirror mode, when the same
+rename also added the `T` flag, Case 2's trashed-destination skip means
+nothing ever enqueues the destination, so the scan never gets that
+second occurrence to notice the collision against either — and the
+scan's own "missed renames" check only retires an occurrence whose
+uniq resolves to no file at all under its folder, never one whose uniq
+still resolves to *some* file, however mismatched (`scan_occurrences`,
+module docstring "Missed renames"). `on_moved` closes this one case
+itself: when the active occurrence's verification failed **and** the
+destination is about to be skipped as already trashed, it retires the
+occurrence directly (`Database.retire_mismatched_rename`, #1612 round
+13) rather than leaving it dangling with no path to ever notice. Unlike
+`retire_mismatched_occurrence` (the content backstop's case, where the
+mismatched file is still at the same recorded path) there is nothing
+left to re-check about the destination — `verify_rename_bytes` already
+hashed it — so the only guard is the usual `state = 'active' AND
+relative_path = ?` check against a concurrent move or retire of the
+same occurrence.
+
 ### The content backstop
 
 Metadata agreeing is a fast admission shortcut, not proof: mbsync sets

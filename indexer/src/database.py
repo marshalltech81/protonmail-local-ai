@@ -4213,6 +4213,39 @@ class Database:
             return cur.rowcount > 0
 
     @_synchronized
+    def retire_mismatched_rename(self, occurrence_id: int, filepath: str) -> bool:
+        """Retire an active occurrence whose rename destination the
+        watcher directly verified does not hold its bytes
+        (``occurrence_scan.verify_rename_bytes``, #1612 round 13).
+        ``filepath`` is the occurrence's absolute source path (as
+        ``find_active_occurrence`` takes it), converted to a locator the
+        same way ``_active_at`` does. Unlike ``retire_vanished_occurrence``
+        (no file with the occurrence's uniq anywhere in its folder) and
+        ``retire_mismatched_occurrence`` (the file is still at the same
+        path), this is for an observed rename whose destination's
+        content was already hashed and found not to be this claimant's:
+        the watcher's own ``on_moved`` handler, not a periodic scan.
+        Whatever the destination's bytes are now, they already were not
+        this occurrence's at verification time, so nothing about the
+        destination needs re-checking here — only that the occurrence
+        itself has not moved or retired since it was read (the same
+        ``state = 'active' AND relative_path = ?`` guard every other
+        occurrence write uses). Returns False, changing nothing, when it
+        has, or when ``filepath`` lies outside the account's Maildir
+        root."""
+        with self.transaction():
+            try:
+                where = locate(filepath, self.account.maildir_root)
+            except OccurrenceLocatorError:
+                return False
+            cur = self._conn.execute(
+                "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
+                "WHERE id = ? AND state = 'active' AND relative_path = ?",
+                (datetime.now(UTC).isoformat(), occurrence_id, where.relative_path),
+            )
+            return cur.rowcount > 0
+
+    @_synchronized
     def bind_found_copy(
         self, claimant_id: str, filepath: str, *, identity: tuple[int, int, int]
     ) -> bool:

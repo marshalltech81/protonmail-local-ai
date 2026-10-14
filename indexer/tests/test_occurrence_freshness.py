@@ -410,6 +410,45 @@ class TestWatcherRenameVerification:
         finally:
             box.close()
 
+    def test_a_mismatch_onto_an_already_trashed_destination_retires_the_source(
+        self, tmp_path, caplog
+    ):
+        """#1612 round 13: when mirror retention is enabled and the
+        rename that exposes the mismatch also adds the ``T`` flag, Case
+        2 skips the destination entirely (``_is_reaped_or_deleted``), so
+        nothing else ever revisits this rename — the periodic
+        reconciliation scan only retires an occurrence whose uniq
+        resolves to no file at all, never one whose uniq still resolves
+        to *some* file, however mismatched. Without an explicit retire
+        here, the stale occurrence would stay active at a path that no
+        longer exists, keeping the old message searchable forever."""
+        box = Box(tmp_path)
+        try:
+            path = box.put("INBOX/cur/r5:2,S", _eml("before@example.test"))
+            box.index(path)
+            # Content replaced out of band, then renamed in the same
+            # folder with the T flag added — the trashed-rename case the
+            # finding describes.
+            path.write_bytes(_eml("after@example.test", "a completely different message"))
+            dest = box.root / "INBOX/cur/r5:2,ST"
+            path.rename(dest)
+
+            queue = IndexingQueue(box.db, max_attempts=3, base_backoff_seconds=0)
+            # Mirror mode: only it has a trashed-destination skip.
+            handler = main.MaildirHandler(box.db, queue, reconciler=box.reconciler)
+            with patch.object(main, "MAILDIR_PATH", box.root):
+                handler.on_moved(_moved(path, dest))
+
+            # Retired, not left dangling: no active occurrence anywhere.
+            assert box.active() == []
+            # Case 2's trashed skip is unchanged: the mismatched
+            # replacement is still not indexed as new mail.
+            assert not queue.has_pending_row(str(dest))
+            assert "did not match" in caplog.text
+            assert MARKER not in caplog.text
+        finally:
+            box.close()
+
     def test_a_mismatch_with_no_indexed_files_record_is_checked_by_claimant_hash(self, tmp_path):
         """A scan-bound occurrence (``bind_found_copy`` never writes
         ``indexed_files``) is verified by hashing the destination and
