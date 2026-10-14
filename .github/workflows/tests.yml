@@ -259,6 +259,15 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # The image's Debian SQLite differs from setup-python's SQLite. Check
+      # clock-index planner behavior with production builders and no mail.
+      - name: Verify clock indexes on runtime SQLite
+        run: |
+          docker build --tag clock-index-runtime mcp-server
+          docker run --rm -i --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --memory 512m --pids-limit 32 \
+            --entrypoint python clock-index-runtime - < mcp-server/tests/runtime_clock_indexes.py
+
   retrieval-baseline:
     # Step 1 indexes the synthetic mailbox with the real indexer and a
     # hashed embedder; step 2 checks the golden questions and the rank

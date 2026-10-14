@@ -184,7 +184,8 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # readers move to it (``migrations/0014_account_occurrences.sql``).
 # v15 (#1338): whether attachment occurrence rows belong to the current parse,
 # committed in phase 2c; NULL while pending, 0 when extraction was disabled.
-SCHEMA_VERSION = 15
+# v16 (#1123): partial clock/claimant indexes for selected-clock listing pages.
+SCHEMA_VERSION = 16
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -1180,6 +1181,12 @@ class Database:
             CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
             CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
             CREATE INDEX idx_messages_effective ON messages(effective_at);
+            CREATE INDEX idx_messages_sent ON messages(sent_at, claimant_id)
+                WHERE sent_at_status = 'parsed';
+            -- Exact page-only predicate: ordinary evidence/count date terms
+            -- do not imply this form under SQLite's partial-index matching.
+            CREATE INDEX idx_messages_occurred ON messages(occurred_at, claimant_id)
+                WHERE (occurred_at IS NOT NULL) = 1;
             -- Flag renames and cross-folder moves update by filepath.
             CREATE INDEX idx_messages_filepath ON messages(filepath);
 

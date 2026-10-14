@@ -46,6 +46,8 @@ def test_migration_keeps_old_inventory_unknown_and_queues_reparse(tmp_path):
     msg = make_message(message_id="old@test.example")
     db.upsert_thread(make_thread(messages=[msg]), [0.1] * 4096)
     db._conn.execute("ALTER TABLE messages DROP COLUMN attachment_rows_current")
+    db._conn.execute("DROP INDEX idx_messages_sent")
+    db._conn.execute("DROP INDEX idx_messages_occurred")
     db._conn.execute("UPDATE schema_version SET version=14")
     db._conn.commit()
     db.close()
@@ -55,7 +57,7 @@ def test_migration_keeps_old_inventory_unknown_and_queues_reparse(tmp_path):
         assert (
             db._conn.execute("SELECT version FROM schema_version").fetchone()[0]
             == SCHEMA_VERSION
-            == 15
+            == 16
         )
         assert (
             db._conn.execute(

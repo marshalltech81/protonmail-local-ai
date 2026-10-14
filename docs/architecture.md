@@ -1508,8 +1508,15 @@ and derives one effective time from them. `query_messages` and
 sent or occurred time for bounds, ordering and cursors. A missing
 selected sent or occurred clock is indeterminate even without bounds;
 changing clocks rejects the cursor. Other tools use effective time.
-Outputs return both stored fields. Sent and delivery clocks have no
-paging index yet (#1123); their pages scan and sort.
+Outputs return both stored fields. Selected-clock pages use partial indexes
+on `(sent_at, claimant_id)` for parsed send dates and
+`(occurred_at, claimant_id)` for delivery dates (#1123). Page-only guards
+permit raw clock ordering while evidence expressions and count SQL stay
+unchanged. The delivery index uses the exact predicate
+`(occurred_at IS NOT NULL) = 1` so ordinary date bounds do not imply its
+partial-index predicate on the tested SQLite versions. Plan tests detect
+changes to that matching behavior. Attachment joins can still sort, and
+exact counts still depend on the population examined.
 
 **`sent_at`** is the message's `Date:` header as parsed by
 `parsedate_to_datetime` (`indexer/src/parser.py` `_parse_date`),
@@ -3293,6 +3300,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 16 | `0016_selected_clock_indexes.sql` | Partial send/delivery clock and claimant-ID indexes for definite-match listing pages (#1123). No columns, evidence rows, reparses or embeddings change. |
 | 14 | `0014_account_occurrences.sql` | `accounts` (#1596; see *Account registry*): the configured `ACCOUNT_SCOPE` and `SOURCE_MODE` provider, bound in the migration's own transaction through connection-local functions; update and delete triggers. `message_occurrences` (#1566; see *Mailbox occurrences*), seeded with one occurrence per message whose `indexed_files` record carries its content hash, relative to the configured `MAILDIR_PATH`; a stored path outside that root fails the migration closed with fixed text, and a message whose path holds other bytes gets none (a WARNING counts them). The migration ends with the shared reparse statement: the reparse observes each seeded occurrence and binds the files the seed cannot see (an unmapped byte-identical copy), with no embedding call; dead-lettered jobs stay dead. Claimant, chunk and thread IDs and vectors are unchanged. |
 | 13 | `0013_message_headers.sql` | Bounded ordered `message_headers` and nullable `messages.headers_complete` (#1079); existing rows start unknown and a queued reparse fills them. |
 | 12 | `0012_extraction_identifier.sql` | `attachment_extractions.identifier` (#1416; see the `attachment_extractions` row above and *Extractor dispatch*): how the payload's container was certified, `container@<n>` or `none@<n>`, NULL (unknown) on every row cached before it. The bytes are not in the database, so the migration ends with the shared reparse statement (see *Reparse in place*): every occurrence passes through the lookup once, which records `none@<n>` on a row whose payload has neither signature and identifies and re-extracts the rest. Unchanged chunks keep their IDs and vectors; text a re-identified container now yields is new chunks, sent to the configured embedder, so the upgrade embeds the newly readable Office attachments once. A container sent under a `message/*` label is kept as sent from this release, so its occurrence gets a new attachment ID on the reparse: the old occurrence, FTS row, chunks and vectors are removed and the new one is extracted and embedded. The startup sweep's identification arm queues the same rows and clears their occurrences' `text_complete` first, so a message whose extraction continuation the reparse leaves queued refreshes them too. |
