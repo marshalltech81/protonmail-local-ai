@@ -4009,6 +4009,7 @@ def _open_database(account: AccountConfig) -> Database:
     operator_identity = _load_operator_identity(OPERATOR_IDENTITY_PATH)
     db = Database(SQLITE_PATH, account=account)
     db.set_operator_identity(operator_identity)
+    db.report_direction_conflicts()
     reclassified = db.set_authority_rules(authority_rules)
     if reclassified:
         log.info("Authority rules: reclassified %d existing entities", reclassified)
@@ -4262,6 +4263,7 @@ def main():
             if now - last_reconcile >= reconciler_config.sweep_interval_secs:
                 _run_periodic_reconcile(reconciler, db)
                 _run_vector_sums_check(db)
+                db.report_direction_conflicts()
                 last_reconcile = now
 
             # Recovery sweep: re-enqueue messages on chunkless

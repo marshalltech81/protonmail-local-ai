@@ -591,6 +591,9 @@ different filters"), never read against them.
 | `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded; unknown when it does not and the stored subject was cut or not checked |
 | `text` | words | `query_messages` `text` | as `body_words`, which it compiles to |
 | `header_exists` | header name | `query_messages` and `aggregate_messages` `where` | any occurrence of the named top-level header exists, even with an empty value; absence is unknown unless header evidence is complete |
+| `list_id_is` | list_id | deterministic queries `where` | canonical bracketless ASCII List-ID or explicit null for known absence; malformed/conflicting/incomplete evidence is unknown |
+| `precedence_is` | precedence | deterministic queries `where` | bulk, list, junk, unsupported or explicit null for known absence; unsupported raw tokens must agree before categorization |
+| `direction_is` | direction | deterministic message/thread/group queries; flat `direction` or `where` | inbound, outbound or self from explicit own addresses and claimed header evidence; partial knowledge preserved under NOT; no Bcc self matches yet |
 | `header_contains` | header name, text | `query_messages` and `aggregate_messages` `where` | any occurrence contains the Unicode caseless substring in its decoded value (raw value when decoding failed); a miss is unknown unless header evidence is complete |
 | `subject_contains` | text | `query_messages` and `aggregate_messages` `where` | same as `subject`, including unknown on a miss against an incomplete subject |
 | `attachment_content_type_is` | MIME type | `query_messages` and `aggregate_messages` `where` | exact declared type on a current occurrence; a miss is unknown unless the current inventory is exhaustive |
@@ -1398,6 +1401,32 @@ that set it (`address:<pattern>` or `domain:<pattern>`, null when
 unclassified).
 
 ### `query_messages`
+
+`direction="inbound"|"outbound"|"self"` filters claimed direction on this tool,
+`query_threads` and `aggregate_messages`. Explicit `where` uses
+`{"leaf":"direction_is","value":"inbound"}` with normal `any`/`negate` semantics.
+The exact own-address set comes from `config/identity.toml`; no alias or folder
+is inferred. Headers are claimed, not authenticated.
+
+A complete, unambiguous single external From is inbound. An own From with any
+observed external To/Cc is outbound, even when the recipient list is partial.
+An own From without such a recipient rules out inbound but cannot yet decide
+outbound or self without Bcc (#1090). Thus `self` never matches in this version;
+known inbound/outbound messages decide it false, and own-only visible recipients
+remain indeterminate. Missing configuration, incomplete or unchecked From,
+multiple From addresses and ambiguous senders leave direction unknown.
+
+Every query message row includes `direction` (`inbound`, `outbound`, `unknown`),
+also selectable through `fields`. This field does not extend `get_message`.
+`group_by="direction"` groups inbound/outbound and uses the existing null group
+for unknown direction; group counts remain per claimant. Negation acts on the
+predicate's partial knowledge, not the displayed label: an own-only sender's
+label is unknown while `NOT direction_is(inbound)` is true.
+
+All message cursors bind the identity snapshot, including calls without a
+direction filter. Old message cursors must restart. Thread/group cursors bind
+identity only for direction-sensitive calls; unrelated cursors retain their
+existing format. A stale cursor is rejected before population scanning.
 Enumerate **every** message matching exact criteria, with a total
 count. Unlike `search_emails`, which ranks threads by relevance and
 returns the top `limit`, this returns every individual message the
@@ -1918,6 +1947,65 @@ docker run --rm --entrypoint python \
 
 Run it only while the live indexer is idle: a busy indexer shares the
 host's CPU and disk and inflates every timing.
+
+#### Normalized List-ID and Precedence
+
+The three deterministic population tools accept `list_id_is` and `precedence_is`
+inside `where`, including `any` and `negate`. For example:
+
+```json
+{"where":{"all":[{"leaf":"list_id_is","value":"announcements.example"}]}}
+```
+
+List identifiers are ASCII-lowercased bracketless RFC 2919 dot-atoms containing
+a dot, at most 255 octets. They are not restricted to DNS-label syntax. The raw
+header must contain one structural `<identifier>` after a valid descriptive
+phrase, with only folding whitespace afterward. Quotes, escapes, comments
+(nesting at most 32), obsolete phrase periods and valid UTF-8 phrase text are
+recognized iteratively. Internal SP/HTAB and valid folds in the identifier are
+ignored. Encoded-words remain opaque phrase content and never create syntax.
+
+Precedence is unfolded, trimmed and ASCII-lowercased. One atom-like ASCII token
+maps to `bulk`, `list`, `junk` or `unsupported`; different unsupported tokens
+conflict before mapping. Empty, non-ASCII, internally spaced, commented,
+NUL-bearing or encoded-word-shaped values are malformed and unknown.
+
+Complete capture is required. No matching field is **known absence**. Identical
+normalized valid duplicates retain one scalar and a duplicate diagnostic.
+Conflicting or malformed fields, incomplete/unassessed capture and budget
+exhaustion are **unknown**, preserved as SQL NULL through negation. An explicit
+JSON `value:null` matches known absence; omitting `value` is an error.
+
+`query_messages(fields=["list_id","precedence"])` opts into normalized values.
+Each requested value also includes its `*_status`; requesting a status alone
+is allowed. Default rows and unrelated queries do not normalize these fields.
+Statuses are `valid`, `absent`, `duplicate`, `unsupported`, `conflict`,
+`malformed`, `incomplete`, `unassessed` and `budget_exceeded`. A null value needs
+its status to distinguish absence from unknown. These are sender-controlled
+claims for filtering, never authentication, authority or ranking signals.
+
+`aggregate_messages(group_by="list_id"|"precedence")` uses exact normalized keys,
+and samples come from the same memberships. Its null group means known absence
+only. Unknown membership is excluded and reported separately as
+`unknown_group_messages` (definite filter matches) and
+`unknown_group_indeterminate_messages` (filter-indeterminate messages). Counts
+are claimant messages; thread counts may overlap. These counters are omitted
+for unrelated dimensions.
+
+Requested metadata returns `metadata_diagnostics`, fixed status counts across
+all evaluated indexed claimants including Trash, not just matches or this page.
+The same counts appear on the call's timing line, without header values. The
+normalizer is materialized once per relevant header name per SQL statement and
+reused by leaves, grouping and samples. This adds population-dependent work:
+message counts, uncertainty, leaf accounting, pages and diagnostics use separate
+statements within the same snapshot. No migration or reparse is needed.
+
+SQL guards check type, NUL-safe BLOB byte length, original Latin-1 character
+length, field count and combined bytes before JSON transfer to Python. One
+message budget covers both header families: 256 fields, 1 MiB original bytes
+(UTF-8 storage may double that), and 16 KiB per field. Normalized capability
+coverage is `unmeasured`, with null usability counts: capture completeness does
+not prove valid normalization. Status never parses these headers.
 
 ### `query_threads`
 
@@ -3574,12 +3662,16 @@ index). Each entry reports:
 - `supported when present`: assessment is finished, but `missing_messages` lack
   fully usable evidence, for example a missing delivery date, ambiguous sender,
   parse cap or incomplete attachment extraction.
-- `unavailable`: required schema fields are absent. Counts are null and
+- `unmeasured`: normalized List-ID/Precedence usability has not been evaluated;
+  counts are null. Requested queries report actual normalization diagnostics.
+- `unavailable`: required schema fields are absent, or direction identity is
+  unconfigured (condition: configure `config/identity.toml` and restart). Counts are null and
   `condition` names the upgrade/migration or damaged-index rebuild needed to
   restore the required schema, and assessment of existing mail.
 
 `available_messages`, `unassessed_messages` and `missing_messages` partition the
-indexed `messages` rows, including Trash. Available means fully usable evidence,
+indexed `messages` rows, including Trash, when measured and available.
+Available means fully usable evidence,
 not a match. Unassessed takes precedence over missing when both affect one row,
 except that already usable evidence remains available. These are conservative
 coverage counts across the leaf's accepted operands: explicit address leaves
@@ -3589,8 +3681,13 @@ messages than an address leaf's coverage suggests. Retained positive evidence
 can match even on an incomplete row. Always use the actual query's
 `indeterminate` count to assess that result.
 
-The report reads flags and counts only, never addresses, headers, bodies or
-attachment text. It describes registered leaves; unsupported operands such as
+The report returns flags and counts only, never addresses, headers, bodies or
+attachment text. Direction coverage uses indexed participant probes: a capped
+two-row From cardinality check and visible-recipient existence checks. Fully
+usable direction evidence means known inbound/outbound across all operands;
+own-unresolved and incomplete From remain missing. `operator_identity` reports
+configuration state, address count and count-only Sent conflicts in the same
+status snapshot. This diagnostic is not authenticated direction. It describes registered leaves; unsupported operands such as
 `date_basis=internal` (#1092) and Bcc-inclusive roles (#1090) remain rejected by
 validation and are not advertised as registered leaves.
 

@@ -39,6 +39,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .list_metadata import canonical_list_id, metadata_known_sql, metadata_value_sql
 from .sources import active_sql, authority_excluded_sql, default_scope_sql
 
 
@@ -525,6 +526,10 @@ class LeafKind:
     # table name -> the columns the leaf's SQL (occurrence, message and
     # compile alike) reads from it.
     schema: dict[str, tuple[str, ...]] | None = None
+    identity_dependent: bool = False
+
+    normalized_metadata: str | None = None
+    coverage_unmeasured: bool = False
 
 
 # ``messages.sent_at_status`` (#1080): why ``sent_at`` is what it is.
@@ -945,6 +950,62 @@ def _compile_has_attachments(state: bool, params: list) -> str:
     )
 
 
+# Exact claimed-address membership; account-scoped identity replaces this
+# fragment when #1604 lands. No aliases are inferred.
+def own_address_sql(address: str) -> str:
+    # Column expressions are code-owned literals, never caller or mail text.
+    return f"EXISTS (SELECT 1 FROM operator_addresses oa WHERE oa.address = {address})"  # nosec B608
+
+
+def direction_state_sql() -> str:
+    """Claimed direction, retaining partial knowledge for each operand (#824)."""
+    own_from = own_address_sql("p.address")
+    external_recipient = own_address_sql("r.address")
+    return (
+        "CASE WHEN (SELECT state FROM operator_identity WHERE id=1) IS NOT 'configured' "  # nosec B608
+        "OR m.sender_ambiguous IS NOT 0 OR m.from_addresses_complete IS NOT 1 THEN NULL "
+        "WHEN (SELECT COUNT(*) FROM (SELECT 1 FROM message_participants p "
+        "WHERE p.claimant_id=m.claimant_id AND p.role='from' LIMIT 2)) != 1 THEN NULL "
+        "WHEN NOT EXISTS (SELECT 1 FROM message_participants p "
+        f"WHERE p.claimant_id=m.claimant_id AND p.role='from' AND {own_from}) THEN 'inbound' "
+        "WHEN EXISTS (SELECT 1 FROM message_participants r "
+        f"WHERE r.claimant_id=m.claimant_id AND r.role IN ('to','cc') AND NOT {external_recipient}) "
+        "THEN 'outbound' ELSE 'own_unresolved' END"
+    )
+
+
+DIRECTION_STATE_SQL = direction_state_sql()
+DIRECTION_LABEL_SQL = (
+    f"CASE ({DIRECTION_STATE_SQL}) WHEN 'inbound' THEN 'inbound' "
+    "WHEN 'outbound' THEN 'outbound' END"
+)
+
+
+def normalize_direction(value: str | None) -> str | None:
+    if value is not None and value not in ("inbound", "outbound", "self"):
+        raise InvalidFilterError("direction", "direction must be inbound, outbound or self")
+    return value
+
+
+def _compile_direction(value: str, params: list) -> str:
+    params.extend((value, value))
+    # An own sender rules out inbound; Bcc is needed to decide self.
+    return (
+        f"CASE ({DIRECTION_STATE_SQL}) WHEN 'inbound' THEN ? = 'inbound' "
+        "WHEN 'outbound' THEN ? = 'outbound' WHEN 'own_unresolved' THEN "
+        + ("0" if value == "inbound" else "NULL")
+        + " END"
+    )
+
+
+def _compile_metadata(name: str) -> Callable[[Any, list], str]:
+    def compile(value: str | None, params: list) -> str:
+        params.append(value)
+        return f"CASE WHEN {metadata_known_sql(name)} THEN {metadata_value_sql(name)} IS ? END"
+
+    return compile
+
+
 def _compile_authority_class(value: str, params: list) -> str:
     # The message part. A message with no matching copy outside Spam and
     # Recovered Messages is a decided "no" whatever its sender flag (#463,
@@ -1066,6 +1127,39 @@ _AUTHORITY_COVERAGE = (
 LEAVES: dict[str, LeafKind] = {
     kind.name: kind
     for kind in (
+        LeafKind(
+            "direction_is",
+            "direction",
+            _compile_direction,
+            Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=(
+                f"({DIRECTION_LABEL_SQL}) IS NOT NULL",
+                "m.sender_ambiguous IS NULL OR m.from_addresses_complete IS NULL",
+            ),
+            schema={
+                "messages": ("claimant_id", "sender_ambiguous", "from_addresses_complete"),
+                "message_participants": ("claimant_id", "role", "address"),
+                "operator_identity": ("id", "state", "address_digest"),
+                "operator_addresses": ("address",),
+            },
+            identity_dependent=True,
+        ),
+        *(
+            LeafKind(
+                name + "_is",
+                name,
+                _compile_metadata(name),
+                Evaluability.UNKNOWN_WHEN_NULL,
+                coverage=("0", "0"),
+                schema={
+                    "messages": ("claimant_id", "headers_complete"),
+                    "message_headers": ("claimant_id", "name_normalized", "raw_value"),
+                },
+                normalized_metadata=name,
+                coverage_unmeasured=True,
+            )
+            for name in ("list_id", "precedence")
+        ),
         # The flat address filters, in their inferred mode
         # (``inferred_address_leaf``).
         LeafKind(
@@ -1450,6 +1544,9 @@ WHERE_LEAVES = (
     "attachment_content_type_is",
     "header_exists",
     "header_contains",
+    "direction_is",
+    "list_id_is",
+    "precedence_is",
 )
 # The ``ROLE_SETS`` roles a caller names. ``visible_participant`` stays
 # internal (the flat ``participant``); the Bcc-inclusive ``recipient``
@@ -1470,6 +1567,9 @@ MAX_WHERE_VALUE_CHARS = {
     "attachment_text_words": 1000,
     "attachment_content_type_is": 1000,
     "header_contains": 500,
+    "direction_is": 8,
+    "list_id_is": 255,
+    "precedence_is": 11,
 }
 MAX_WHERE_ID_CHARS = 64
 
@@ -1489,6 +1589,9 @@ WhereLeafName = Literal[
     "attachment_content_type_is",
     "header_exists",
     "header_contains",
+    "direction_is",
+    "list_id_is",
+    "precedence_is",
 ]
 WhereRole = Literal["from", "to", "cc", "visible_recipient"]
 
@@ -1524,6 +1627,9 @@ class WhereLeafItem(BaseModel):
         if self.leaf == "header_exists":
             if "value" in self.model_fields_set:
                 raise ValueError("value is not accepted on header_exists")
+        elif self.leaf in {"list_id_is", "precedence_is"}:
+            if "value" not in self.model_fields_set:
+                raise ValueError("value is required on this leaf")
         elif self.value is None:
             raise ValueError("value is required on this leaf")
         return self
@@ -1609,6 +1715,8 @@ def _where_value(path: str, item: WhereLeafItem) -> Any:
         if name == "header_exists":
             return header_name
     if value is None:
+        if name in {"list_id_is", "precedence_is"}:
+            return None
         raise InvalidFilterError("where", f"{path}: value is required")
     limit = MAX_WHERE_VALUE_CHARS[name]
     if len(value) > limit:
@@ -1625,6 +1733,22 @@ def _where_value(path: str, item: WhereLeafItem) -> Any:
                 "where", f"{path}: {name} holds at most {_MAX_TEXT_TERMS} words"
             )
         return tuple(terms)
+    if name == "direction_is":
+        return normalize_direction(value)
+
+    if name == "list_id_is":
+        canonical = canonical_list_id(value)
+        if canonical is None:
+            raise InvalidFilterError(
+                "where", f"{path}: list_id_is takes a bracketless ASCII list identifier or null"
+            )
+        return canonical
+    if name == "precedence_is":
+        if value not in ("bulk", "list", "junk", "unsupported"):
+            raise InvalidFilterError(
+                "where", f"{path}: precedence_is takes bulk, list, junk, unsupported or null"
+            )
+        return value
     if name == "header_contains":
         return (header_name, value)
     if name == "subject_contains":
@@ -1741,6 +1865,7 @@ def query_messages_leaves(
     seen: bool | None,
     flagged: bool | None,
     replied: bool | None = None,
+    direction: str | None = None,
     size_min: int | None = None,
     size_max: int | None = None,
     date_basis: str | None = None,
@@ -1797,6 +1922,8 @@ def query_messages_leaves(
             leaves.append(Leaf(name, value))
     if authority_class:
         leaves.append(Leaf("authority_class", authority_class))
+    if direction is not None:
+        leaves.append(Leaf("direction_is", normalize_direction(direction)))
     return leaves
 
 

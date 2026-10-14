@@ -130,7 +130,8 @@ def test_schema_version_and_empty_population(tmp_path):
     assert status.index_schema_version == 14
     assert all(
         entry.status == "supported" and entry.available_messages == 0
-        for entry in status.query_capabilities.values()
+        for name, entry in status.query_capabilities.items()
+        if name not in {"direction_is", "list_id_is", "precedence_is"}
     )
     assert "Index schema version: 14" in _render(status)
     conn.close()
@@ -252,6 +253,9 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
     from src.lib.query_capabilities import query_capabilities
 
     conn, _ = _open_built_db_conn(tmp_path, "compiler-dependencies.db")
+    from src.lib.list_metadata import sqlite_normalize_fields, with_metadata
+
+    conn.create_function("mcp_list_metadata", 2, sqlite_normalize_fields)
     conn.create_function("mcp_casefold", 1, lambda value: value.casefold() if value else value)
     values = {
         "address": ("synthetic@example.com", "synthetic"),
@@ -270,6 +274,9 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
         "bytes": (1,),
         "class": ("unclassified",),
         "none": (None,),
+        "direction": ("inbound", "outbound", "self"),
+        "list_id": ("series.example", None),
+        "precedence": ("bulk", None),
     }
     tables = (
         "messages",
@@ -283,6 +290,8 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
         # occurrence and its account (#1568/#1612/#1627 panel).
         "message_occurrences",
         "accounts",
+        "operator_identity",
+        "operator_addresses",
     )
     for table in tables:
         columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
@@ -295,7 +304,12 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
                     params = []
                     sql = kind.compile(value, params)
                     try:
-                        conn.execute(f"EXPLAIN SELECT 1 FROM messages m WHERE {sql}", params)
+                        metadata = (kind.normalized_metadata,) if kind.normalized_metadata else ()
+                        conn.execute(
+                            "EXPLAIN "
+                            + with_metadata(f"SELECT 1 FROM messages m WHERE {sql}", metadata),
+                            params,
+                        )
                     except sqlite3.OperationalError:
                         assert report[name]["status"] == "unavailable", (table, column, name)
             conn.execute("ROLLBACK TO missing_field")

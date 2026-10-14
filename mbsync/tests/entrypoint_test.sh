@@ -3696,9 +3696,14 @@ fixed_refusal() {
 validate_env_with() {
     local root="$WORK/validate-env-root"
     if [[ ! -d "$root" ]]; then
-        mkdir -p "$root/scripts" "$root/mbsync" "$root/.secrets"
+        mkdir -p "$root/scripts" "$root/mbsync" "$root/.secrets" "$root/config"
         cp "$REPO_ROOT/scripts/validate-env.sh" "$root/scripts/validate-env.sh"
+        cp "$REPO_ROOT/scripts/config-mode.sh" "$root/scripts/config-mode.sh"
         cp "$PROTON_SETTINGS" "$root/mbsync/proton-settings.sh"
+        # Legacy mode (today's only form): config/mode exists, as make
+        # init-config writes it, so validate-env's legacy checks run (#1603).
+        printf 'legacy\n' >"$root/config/mode"
+        chmod 600 "$root/config/mode"
         printf '%s\n' 'ACCOUNT_SCOPE=00000000-0000-4000-8000-000000000001' \
             'BRIDGE_USER=placeholder@example.invalid' \
             "BRIDGE_CERT_FINGERPRINT=$FP_OLD" 'EMBED_BASE_URL=default' \

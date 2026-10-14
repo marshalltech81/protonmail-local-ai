@@ -62,6 +62,9 @@ config/identity.toml
 config/config.toml
 # What scripts/config/operator_config.py writes from it.
 .generated/
+# legacy or toml: which configuration form is active (#1603). Written
+# only by make init-config / make migrate-config.
+config/mode
 
 # Eval queries grounded in a real mailbox — must never be committed.
 # The ``.example`` companions are tracked as schema/templates.

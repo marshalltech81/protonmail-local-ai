@@ -239,6 +239,7 @@ def _mailbox_status(db) -> MailboxStatusOutput:
         extra_claimant_files=stats["extra_claimant_files"],
         header_predicates=stats["header_predicates"],
         query_capabilities=stats["query_capabilities"],
+        operator_identity=stats["operator_identity"],
         index_schema_version=stats["index_schema_version"],
         checked_at=now,
     )
@@ -258,6 +259,10 @@ def _render(out: MailboxStatusOutput) -> str:
         f"Current:        {'yes' if out.current else 'no'}",
     ]
     lines += [f"  - {reason}" for reason in out.not_current_reasons]
+    identity = out.operator_identity
+    lines.append(
+        f"Operator identity: {identity.state}; addresses={identity.address_count}; Sent conflicts={identity.sent_conflicts}"
+    )
     h = out.header_predicates
     lines.append(
         f"Header predicates: {h.status}; {h.unassessed_messages} unassessed, "

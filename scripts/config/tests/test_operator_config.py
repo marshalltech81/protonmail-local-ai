@@ -807,6 +807,23 @@ class Refusals(unittest.TestCase):
                         "each secret goes only where it belongs.",
                     )
 
+    def test_config_mode_is_not_an_api_key_file(self) -> None:
+        # Review round 2 (#1603): config/mode (the legacy/toml selector,
+        # #1603) is mode 600 with non-whitespace content ("toml" or
+        # "legacy"), so without this check check-secrets/validate-env
+        # would pass a layer whose api_key_file points at it, and the
+        # service would receive the selector string as its credential.
+        self.assertIn("config/mode", oc.RESERVED_DATA_FILES)
+        data = fixture()
+        data["global"].setdefault("inference", {})
+        data["global"]["inference"]["api_key_file"] = "mode"  # pragma: allowlist secret
+        self.assert_refused(
+            data,
+            "global.inference.api_key_file is a configuration, data or private-key file "
+            f"({', '.join(oc.RESERVED_DATA_FILES)}, or *.pem, *.key, *.p12, *.pfx): "
+            "each secret goes only where it belongs.",
+        )
+
     def test_role_checks_also_read_the_configuration_root(self) -> None:
         # Review round 7: with the configuration outside this checkout,
         # its own ../.secrets and config/ files are the conventional ones.
@@ -926,6 +943,29 @@ class Refusals(unittest.TestCase):
         data = fixture()
         data["accounts"] = [{"zq9": MARKER}] * (oc.MAX_ACCOUNTS + 1)
         self.assert_refused(data, f"accounts may hold at most {oc.MAX_ACCOUNTS} tables.")
+
+    def test_more_than_one_enabled_account_is_refused_until_1605(self) -> None:
+        # validate()/translate() still accept several enabled accounts
+        # (the #1608 Compose hardening tests, the future #1605
+        # collectors); check_single_enabled_account is the launcher's
+        # own, narrower cap (#1603).
+        data = fixture()
+        data["accounts"].append(second_account())
+        config = checked(data)
+        oc.translate(config)  # unrestricted: still succeeds
+        with self.assertRaises(oc.ConfigError) as caught:
+            oc.check_single_enabled_account(config)
+        self.assertEqual(
+            str(caught.exception),
+            "accounts: more than one account is enabled; exactly one is accepted "
+            "until per-account collectors exist (#1605).",
+        )
+        self.assertNotIn(MARKER, str(caught.exception))
+
+    def test_a_single_enabled_account_passes_the_launcher_cap(self) -> None:
+        data = fixture()
+        data["accounts"].append(second_account(enabled=False))
+        oc.check_single_enabled_account(checked(data))  # does not raise
 
 
 class Reading(unittest.TestCase):
@@ -1386,6 +1426,99 @@ class CommandLine(unittest.TestCase):
         result = self.run_cli((FIXTURES / "legacy.toml").read_text(encoding="utf-8"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.dir / ".generated" / "compose.env").is_file())
+
+    def run_check_secrets(self, config_text: str) -> subprocess.CompletedProcess[str]:
+        (self.dir / "config").mkdir(exist_ok=True)
+        path = self.dir / "config" / "config.toml"
+        path.write_text(config_text, encoding="utf-8")
+        os.chmod(path, 0o600)
+        return subprocess.run(  # nosec B603 - fixed argv
+            [
+                sys.executable,
+                str(REPO / "scripts" / "config" / "operator_config.py"),
+                "check-secrets",
+                "--config",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    def test_check_secrets_lists_every_accounts_and_layers_secret_path(self) -> None:
+        result = self.run_check_secrets((FIXTURES / "legacy.toml").read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split("\t", 1) for line in result.stdout.splitlines()]
+        self.assertEqual(len(rows), 4)  # one account + three model layers
+        requirement, password = rows[0]
+        self.assertEqual(requirement, "REQUIRED")  # every account's secret is required
+        self.assertTrue(password.endswith("/.secrets/bridge_pass.txt"), password)
+        self.assertTrue(all(Path(p).is_absolute() for _, p in rows))
+        # embedding has no "none" mode (always enabled); inference and
+        # reranking default to "none" in the legacy fixture, so their
+        # key files may be empty.
+        self.assertEqual(
+            [requirement for requirement, _ in rows[1:]], ["REQUIRED", "OPTIONAL", "OPTIONAL"]
+        )
+
+    def test_check_secrets_refuses_more_than_one_enabled_account(self) -> None:
+        legacy = (FIXTURES / "legacy.toml").read_text(encoding="utf-8")
+        text = (
+            legacy
+            + "\n"
+            + "\n".join(
+                [
+                    "[[accounts]]",
+                    f'scope_uuid = "{UUID_B}"',
+                    'name = "Second"',
+                    'provider = "proton-bridge"',
+                    f'maildir_root = "/accounts/{UUID_B}"',
+                    'password_file = "../.secrets/bridge_pass_second.txt"',
+                    "[accounts.connection]",
+                    'username = "second@example.com"',
+                    "[accounts.proton_bridge]",
+                    f'certificate_fingerprint = "{"b" * 64}"',
+                ]
+            )
+        )
+        result = self.run_check_secrets(text)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            result.stderr,
+            "ERROR: accounts: more than one account is enabled; exactly one is accepted "
+            "until per-account collectors exist (#1605).\n",
+        )
+        self.assertEqual(result.stdout, "")
+
+    def test_translate_refuses_more_than_one_enabled_account(self) -> None:
+        legacy = (FIXTURES / "legacy.toml").read_text(encoding="utf-8")
+        text = (
+            legacy
+            + "\n"
+            + "\n".join(
+                [
+                    "[[accounts]]",
+                    f'scope_uuid = "{UUID_B}"',
+                    'name = "Second"',
+                    'provider = "proton-bridge"',
+                    f'maildir_root = "/accounts/{UUID_B}"',
+                    'password_file = "../.secrets/bridge_pass_second.txt"',
+                    "[accounts.connection]",
+                    'username = "second@example.com"',
+                    "[accounts.proton_bridge]",
+                    f'certificate_fingerprint = "{"b" * 64}"',
+                ]
+            )
+        )
+        result = self.run_cli(text)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            result.stderr,
+            "ERROR: accounts: more than one account is enabled; exactly one is accepted "
+            "until per-account collectors exist (#1605).\n",
+        )
+        self.assertFalse((self.dir / ".generated").exists())
 
     def test_a_refusal_exits_1_with_fixed_text_and_writes_nothing(self) -> None:
         text = (

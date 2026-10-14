@@ -204,7 +204,12 @@ def test_pre_change_effective_cursors_remain_valid(clock_server, tool, payload):
     # no explicit date_basis) shape, not a value literally decoded pre-#1150.
     cursor = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
     first = _call(clock_server, tool, limit=1)
-    assert first["next_cursor"] == cursor
+    if tool == "query_messages":
+        # #824 deliberately rejects all old identity-unbound message cursors.
+        assert _wire(clock_server, tool, {"cursor": cursor}).is_error
+        cursor = first["next_cursor"]
+    else:
+        assert first["next_cursor"] == cursor
     resumed = _call(clock_server, tool, date_basis="effective", cursor=cursor)
     assert resumed["offset"] == 1
     assert resumed["returned"] == first["total_matches"] - 1
