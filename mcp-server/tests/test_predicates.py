@@ -699,7 +699,7 @@ class TestLogAllowlist:
 
     def test_allowlist_is_pinned(self):
         # #1085 added replied (bool) and size_min / size_max (ints);
-        # each passes only its own check. date_basis is not served.
+        # each passes only its own check. #1150 adds the selected clock enum.
         assert set(_LOGGABLE_TOOL_PARAMS) == {
             "mode",
             "style",
@@ -715,6 +715,7 @@ class TestLogAllowlist:
             "include_attachments_metadata",
             "date_from",
             "date_to",
+            "date_basis",
             "source",
             "scope",
             "max_chunks_per_thread",
@@ -822,8 +823,7 @@ def clocks_db(tmp_path) -> Database:
 
 class TestClockSizeAndRepliedLeaves:
     """``replied``, ``size_min`` / ``size_max`` and ``date_basis`` on
-    ``Database.query_messages`` (#1085; the tool does not take
-    ``date_basis`` yet, #1150). A NULL size or a NULL clock under the
+    ``Database.query_messages`` (#1085, #1150). A NULL size or a NULL clock under the
     chosen basis is neither a match nor a miss: the row is left out and
     counted as ``indeterminate``."""
 
@@ -1112,9 +1112,8 @@ class TestClockSizeAndRepliedLeaves:
 @pytest.mark.parametrize("value", [[], 3, True, 1.5, {"basis": "sent"}])
 def test_normalize_date_basis_rejects_a_non_string_with_fixed_text(value):
     """A non-string ``date_basis`` is an ``InvalidFilterError`` with
-    fixed text, not an ``AttributeError`` from ``.strip()`` (#1085). No
-    tool takes ``date_basis`` yet (#1150); this guards ``Database``
-    callers."""
+    fixed text, not an ``AttributeError`` from ``.strip()`` (#1085).
+    This guards Database callers; #1150 also exercises the tool wire."""
     from src.lib.predicates import normalize_date_basis
 
     with pytest.raises(InvalidFilterError) as info:

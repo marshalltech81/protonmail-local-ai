@@ -31,6 +31,7 @@ from .predicates import (
     ADDRESS_LEAF_ROWS,
     ADDRESS_ROLES,
     DATE_BASES,
+    DEFAULT_DATE_BASIS,
     EFFECTIVE_EVIDENCE_SQL,
     LEAVES,
     QUERY_DIGEST_FORMAT,
@@ -60,6 +61,7 @@ from .predicates import (
     search_emails_leaves,
     where_clauses,
 )
+from .query_capabilities import query_capabilities
 from .rate_limited_log import RateLimitedLog
 from .reranker import RerankerBackend
 from .sources import (
@@ -1531,7 +1533,7 @@ def _message_expression(leaves: Sequence[Leaf], where: Sequence[WhereLeaf]) -> t
     return where_sql, params
 
 
-def _record_clock(record: MessageRecord, basis: DateBasis) -> str:
+def _record_clock(record: MessageRecord | AttachmentOccurrenceRecord, basis: DateBasis) -> str:
     """``record``'s value of the clock ``basis`` names: the keyset
     position of a page ordered by it. Under a nullable basis the
     ``dated`` leaf keeps rows without that clock off the page."""
@@ -1838,7 +1840,9 @@ def _attachment_clauses(
     return filters, clauses, params
 
 
-def _attachment_digest(leaves: list[Leaf], filters: list[tuple[str, str]]) -> str:
+def _attachment_digest(
+    leaves: list[Leaf], filters: list[tuple[str, str]], date_basis: str = DEFAULT_DATE_BASIS
+) -> str:
     """The ``query_attachments`` cursor digest: the tool, the ordering
     clock, the message leaves and the attachment filters, so a cursor
     is never read against other predicates or by another tool."""
@@ -1846,19 +1850,21 @@ def _attachment_digest(leaves: list[Leaf], filters: list[tuple[str, str]]) -> st
         "query_attachments",
         # The leaves' meaning (#1080 changed the date bounds').
         QUERY_DIGEST_FORMAT,
-        "effective",
+        date_basis,
         [[leaf.name, leaf.value] for leaf in leaves],
         [list(f) for f in filters],
     ]
     return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()[:16]
 
 
-def _encode_attachment_cursor(digest: str, last: AttachmentOccurrenceRecord, offset: int) -> str:
+def _encode_attachment_cursor(
+    digest: str, last: AttachmentOccurrenceRecord, offset: int, basis: DateBasis
+) -> str:
     payload = json.dumps(
         {
             "v": 3,
             "q": digest,
-            "s": last.effective_at,
+            "s": _record_clock(last, basis),
             "m": last.claimant_id,
             "a": last.attachment_occurrence_id,
             "o": offset,
@@ -1868,7 +1874,7 @@ def _encode_attachment_cursor(digest: str, last: AttachmentOccurrenceRecord, off
 
 
 def _decode_attachment_cursor(cursor: str, digest: str) -> tuple[str, str, str, int]:
-    """Return ``(effective_at, claimant_id, attachment_occurrence_id,
+    """Return ``(selected_clock, claimant_id, attachment_occurrence_id,
     offset)`` of the last row returned. Version 3 only, so a
     ``query_messages`` cursor (version 2) is rejected here and this one
     there. Raises ``InvalidFilterError`` with fixed text, as
@@ -4765,13 +4771,25 @@ class Database:
             row = conn.execute("SELECT MIN(date_first), MAX(date_last) FROM threads").fetchone()
             stats["oldest_message"] = row[0]
             stats["newest_message"] = row[1]
-            header_counts = conn.execute(
-                "SELECT TOTAL(headers_complete IS NULL), TOTAL(headers_complete = 0) FROM messages"
+            version_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
             ).fetchone()
+            version = (
+                conn.execute("SELECT version FROM schema_version").fetchone()
+                if version_table
+                else None
+            )
+            stats["index_schema_version"] = version[0] if version else None
+            stats["query_capabilities"] = query_capabilities(conn)
+            header = stats["query_capabilities"]["header_exists"]
+            # Preserve the legacy header summary's distinction: assessed
+            # but incomplete evidence still has status "supported".
             stats["header_predicates"] = {
-                "status": "supported after backfill" if header_counts[0] else "supported",
-                "unassessed_messages": int(header_counts[0]),
-                "incomplete_messages": int(header_counts[1]),
+                "status": "supported"
+                if header["status"] == "supported when present"
+                else header["status"],
+                "unassessed_messages": header["unassessed_messages"],
+                "incomplete_messages": header["missing_messages"],
             }
             permission, rename = QUEUE_DEFERRED_PARSE_ERRORS
             buckets = {
@@ -4980,16 +4998,12 @@ class Database:
           copy (not ``T``-flagged) outside Trash (#1568).
         - ``date_from`` / ``date_to``: inclusive bounds on the clock
           ``date_basis`` names; date-only values cover the whole UTC day.
-        - ``date_basis`` (#1085): not served by the ``query_messages``
-          tool, which always uses the default (split out of #1085 by the
-          owner, 2026-10-08; the leaves and the cursor clock stay for
-          #1087 and #1150). ``effective`` (default; ``occurred_at``,
-          else ``sent_at``), ``sent`` (``sent_at``) or ``occurred``
-          (``occurred_at``) for the bounds, the order and the cursor. A
-          message without the clock (no delivery time under
-          ``occurred``) is neither a match nor a miss: left out and
-          counted in ``MessagePage.indeterminate``.
-          ``internal`` is a legal value that is unavailable until #1092.
+        - ``date_basis`` (#1150): ``effective`` (default; delivery, else
+          send date), ``sent`` or ``occurred`` for bounds, order
+          and cursor. A missing sent or occurred clock is indeterminate
+          even without bounds. Effective uses first-indexed time only
+          to order undated messages, never for date bounds.
+          ``internal`` is unavailable until #1092.
         - ``has_attachments``: the message's own attachment flag.
         - ``seen`` / ``flagged`` / ``replied``: a copy's read, flagged
           and answered state (its Maildir ``S`` / ``F`` / ``R`` flags).
@@ -5406,6 +5420,7 @@ class Database:
         folder: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        date_basis: str | None = None,
         filename: str | None = None,
         content_type: str | None = None,
         extraction_status: str | None = None,
@@ -5418,16 +5433,15 @@ class Database:
         (#796).
 
         One row per occurrence (one attachment on one message), never
-        folded by payload, newest carrying message first by effective
-        time; ``claimant_id`` then ``attachment_occurrence_id`` break
-        ties, so the keyset cursor is stable. Blank filters are ignored.
+        folded by payload, newest carrying message first by date_basis;
+        ``claimant_id`` then ``attachment_occurrence_id`` break ties, so the keyset cursor is stable. Blank filters are ignored.
 
         - ``sender`` / ``recipient`` / ``participant`` / ``folder`` /
           ``date_from`` / ``date_to``: the carrying message, through the
           ``query_messages`` leaves (``query_messages_leaves``), so a
           message filter means what it means there, Trash left out
           without ``folder`` and unknown leaves counted as
-          indeterminate. The clock is effective time only (#1150).
+          indeterminate. date_basis selects the same clock as query_messages.
         - ``filename`` / ``content_type`` / ``extraction_status`` /
           ``claimant_id`` / ``thread_id``: ``_attachment_clauses``.
 
@@ -5441,6 +5455,7 @@ class Database:
         date, an unknown ``extraction_status``, or a malformed or
         foreign cursor.
         """
+        basis = DATE_BASES[normalize_date_basis(date_basis)]
         leaves = query_messages_leaves(
             sender=sender,
             recipient=recipient,
@@ -5450,6 +5465,7 @@ class Database:
             folder=folder,
             date_from=date_from,
             date_to=date_to,
+            date_basis=basis.name,
             has_attachments=None,
             authority_class=None,
             seen=None,
@@ -5461,7 +5477,7 @@ class Database:
         message_sql, params = compile_leaves(leaves)
         where_sql = " AND ".join([message_sql, *clauses])
         params += clause_params
-        digest = _attachment_digest(leaves, filters)
+        digest = _attachment_digest(leaves, filters, basis.name)
 
         page_where_sql = where_sql
         page_params = list(params)
@@ -5471,7 +5487,7 @@ class Database:
                 cursor, digest
             )
             page_where_sql += (
-                " AND (m.effective_at, a.claimant_id, a.attachment_occurrence_id) < (?, ?, ?)"
+                f" AND ({basis.clock}, a.claimant_id, a.attachment_occurrence_id) < (?, ?, ?)"
             )
             page_params += [last_at, last_claimant, last_occurrence]
         # Only a leaf that can be unknown makes the indeterminate count
@@ -5509,7 +5525,7 @@ class Database:
             # occurrences only.
             rows = conn.execute(
                 "WITH page AS MATERIALIZED ( "  # nosec B608
-                "SELECT a.attachment_occurrence_id AS occ, m.effective_at AS clock, "
+                f"SELECT a.attachment_occurrence_id AS occ, {basis.clock} AS clock, "
                 f"a.claimant_id AS cid {_ATTACHMENT_FROM} WHERE {page_where_sql} "
                 "ORDER BY clock DESC, cid DESC, occ DESC LIMIT ? ) "
                 f"SELECT {_OCCURRENCE_COLUMNS} "
@@ -5533,7 +5549,9 @@ class Database:
             attachments=records,
             has_more=has_more,
             next_cursor=(
-                _encode_attachment_cursor(digest, records[-1], next_offset) if has_more else None
+                _encode_attachment_cursor(digest, records[-1], next_offset, basis)
+                if has_more
+                else None
             ),
         )
 

@@ -215,6 +215,8 @@ def _mailbox_status(db) -> MailboxStatusOutput:
         conflicting_message_ids=stats["conflicting_message_ids"],
         extra_claimant_files=stats["extra_claimant_files"],
         header_predicates=stats["header_predicates"],
+        query_capabilities=stats["query_capabilities"],
+        index_schema_version=stats["index_schema_version"],
         checked_at=now,
     )
 
@@ -229,14 +231,25 @@ def _render(out: MailboxStatusOutput) -> str:
     lines = [
         "=== Mailbox Status ===",
         f"Server version: {out.server_version}",
+        f"Index schema version: {out.index_schema_version}",
         f"Current:        {'yes' if out.current else 'no'}",
     ]
     lines += [f"  - {reason}" for reason in out.not_current_reasons]
     h = out.header_predicates
     lines.append(
-        f"Header predicates: {h.status}; {h.unassessed_messages:,} unassessed, "
-        f"{h.incomplete_messages:,} incomplete messages"
+        f"Header predicates: {h.status}; {h.unassessed_messages} unassessed, "
+        f"{h.incomplete_messages} incomplete messages"
     )
+    lines.append("Query capabilities (conservative evidence coverage, including Trash):")
+    for name, capability in out.query_capabilities.items():
+        lines.append(
+            f"  {name}: {capability.status}; "
+            f"{capability.available_messages} available, "
+            f"{capability.unassessed_messages} unassessed, "
+            f"{capability.missing_messages} missing messages"
+        )
+        if capability.condition:
+            lines.append(f"    {capability.condition}")
     q = out.queue
     lines += [
         f"Last mail sync: {_when(out.last_sync_at, out.checked_at)}",

@@ -186,6 +186,7 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     "include_attachments_metadata": _is_bool,
     "date_from": _is_iso_date,
     "date_to": _is_iso_date,
+    "date_basis": _one_of("effective", "sent", "occurred"),
     # ``get_evidence``'s precision controls (#988), with the ranges it
     # accepts (``tools/search``).
     "source": _one_of("any", "body", "attachment"),

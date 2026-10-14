@@ -677,9 +677,9 @@ class TestTool:
     def test_accepts_the_query_messages_filters(self, agg_db):
         qm = _tools(_server(agg_db))["query_messages"].input_schema["properties"]
         agg = _tools(_server(agg_db))["aggregate_messages"].input_schema["properties"]
-        # Every filter, not the row projection.
-        assert set(qm) - {"fields"} == set(agg) - {"group_by"}
-        for name in set(qm) - {"fields", "limit"}:
+        # Every filter except the listing clock (#1150), not the row projection.
+        assert set(qm) - {"fields", "date_basis"} == set(agg) - {"group_by"}
+        for name in set(qm) - {"fields", "limit", "date_basis"}:
             assert {k: v for k, v in agg[name].items() if k != "description"} == {
                 k: v for k, v in qm[name].items() if k != "description"
             }, name

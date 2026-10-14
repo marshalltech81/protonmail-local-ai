@@ -1533,9 +1533,8 @@ class TestQueryMessages:
         handler = _handlers(fake_server, messages_db)["query_messages"]
         assert "Error" in _error(handler())
 
-    def test_the_response_names_no_clock_choice(self, fake_server, messages_db):
-        # date_basis was split out of #1085 (owner, 2026-10-08): bounds,
-        # order and cursor use effective time, and nothing offers a choice.
+    def test_the_response_reports_default_clock(self, fake_server, messages_db):
+        # Omission preserves the effective clock, reported even without bounds.
         handler = _handlers(fake_server, messages_db)["query_messages"]
         out = asyncio.run(handler())
         assert out.structured_content["date_bounds"] is None
@@ -1543,8 +1542,9 @@ class TestQueryMessages:
         assert out.structured_content["date_bounds"] == {
             "date_from": "2024-01-01T00:00:00+00:00",
             "date_to": None,
+            "date_basis": "effective",
         }
-        assert "basis" not in _text(out)
+        assert "date_basis: effective" in _text(out)
 
     def test_replied_and_size_filters_are_described(self, fake_server, messages_db):
         handler = _handlers(fake_server, messages_db)["query_messages"]

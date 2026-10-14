@@ -272,8 +272,8 @@ class MessageHeaders(_Output):
     occurred_at: str | None = Field(
         description=(
             "Delivery date of the message (the date of its topmost Received: header) in UTC, ISO 8601; null when the header is absent (sent mail) or unparseable. "
-            "Date filters bound occurred_at, else sent_at; a message with neither is "
-            "indeterminate under them."
+            "For query_messages, date_basis selects the clock for bounds and ordering; "
+            "occurred uses this field without a fallback."
         )
     )
     folder: str = Field(
@@ -376,6 +376,12 @@ class DateBounds(_Output):
     )
     date_to: str | None = Field(
         description="The inclusive upper bound applied, in UTC (ISO 8601); null when not given."
+    )
+
+
+class QueryDateBounds(DateBounds):
+    date_basis: Literal["effective", "sent", "occurred"] = Field(
+        description="The selected clock the bounds apply to, also used for ordering and cursors."
     )
 
 
@@ -790,6 +796,13 @@ class WhereLeafResult(_Output):
 
 
 class QueryMessagesOutput(_Output):
+    date_basis: Literal["effective", "sent", "occurred"] = Field(
+        description="Clock for date bounds, ordering and cursors: effective (delivery, else "
+        "stored send date; undated rows use first-indexed time for ordering only; "
+        "bounds require a delivery or checked send date), sent "
+        "(parsed Date header), or occurred (topmost Received header). Under sent or "
+        "occurred, missing clocks are indeterminate even without date bounds."
+    )
     filters: list[FilterUse] = Field(description="How each given filter was applied; empty: none.")
     address_matches: list[AddressFilterMatch] = Field(
         description="Per sender / recipient / participant filter given, the addresses it "
@@ -799,7 +812,7 @@ class QueryMessagesOutput(_Output):
         description="Per where leaf, in request order, how it decided the matches; empty "
         "without where."
     )
-    date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
+    date_bounds: QueryDateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(
         description="Every message the filters definitely match, not just this page; the "
         "complete count only when indeterminate is 0."
@@ -821,8 +834,7 @@ class QueryMessagesOutput(_Output):
         description="Pass with the same filters for the next page; null when has_more is false."
     )
     messages: list[ListedMessage] = Field(
-        description="Newest first by delivery date, else send date (occurred_at, else "
-        "sent_at; an undated message by the time it was first indexed). With fields, each "
+        description="Newest first by date_basis, with claimant_id breaking ties. With fields, each "
         "row holds only those fields plus claimant_id and thread_id."
     )
 
@@ -980,8 +992,9 @@ class ListedAttachment(_Output):
     sent_at_status: SentAtStatus | None = Field(description=SENT_AT_STATUS_DESCRIPTION)
     occurred_at: str | None = Field(
         description="Delivery date of the carrying message (its topmost Received: header) in "
-        "UTC, ISO 8601; null when absent or unparseable. Rows are ordered by occurred_at, "
-        "else sent_at, else the time the message was first indexed."
+        "UTC, ISO 8601; null when absent or unparseable. For query_attachments, "
+        "date_basis selects the clock for bounds and ordering; occurred uses this "
+        "field without a fallback."
     )
     source_file: Source | None = Field(
         description="The raw file of the message carrying the attachment; null when "
@@ -1003,14 +1016,22 @@ class ListedAttachment(_Output):
 
 
 class QueryAttachmentsOutput(_Output):
+    date_basis: Literal["effective", "sent", "occurred"] = Field(
+        description="Clock for date bounds, ordering and cursors: effective (delivery, else "
+        "stored send date; undated rows use first-indexed time for ordering only; "
+        "bounds require a delivery or checked send date), sent "
+        "(parsed Date header), or occurred (topmost Received header). Under sent or "
+        "occurred, missing clocks are indeterminate even without date bounds."
+    )
     filters: list[FilterUse] = Field(description="How each given filter was applied; empty: none.")
-    date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
+    date_bounds: QueryDateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(
         description="Every attachment occurrence the filters definitely match, not just this "
         "page; the complete count only when indeterminate is 0."
     )
     indeterminate: int = Field(
-        description="Occurrences the filters could neither accept nor reject (a date bound "
+        description="Occurrences the filters could neither accept nor reject (a missing selected clock "
+        "under sent or occurred, even without bounds; an effective date bound "
         "on a carrying message with no delivery or parsed send date; a sender or "
         "participant filter on a carrying message whose sender is ambiguous or not yet "
         "checked; an address filter that finds nothing on one whose stored addresses for "
@@ -1031,8 +1052,7 @@ class QueryAttachmentsOutput(_Output):
         description="Pass with the same filters for the next page; null when has_more is false."
     )
     attachments: list[ListedAttachment] = Field(
-        description="Newest carrying message first by delivery date, else send date "
-        "(occurred_at, else sent_at, else the time it was first indexed); claimant_id then "
+        description="Newest carrying message first by date_basis; claimant_id then "
         "attachment_occurrence_id break ties."
     )
 
@@ -1149,11 +1169,11 @@ class QueueCounts(_Output):
 
 
 class HeaderPredicateCapability(_Output):
-    status: Literal["supported", "supported after backfill"]
-    unassessed_messages: int = Field(
+    status: Literal["supported", "supported after backfill", "unavailable"]
+    unassessed_messages: int | None = Field(
         description="Indexed messages awaiting header evidence assessment, including Trash."
     )
-    incomplete_messages: int = Field(
+    incomplete_messages: int | None = Field(
         description="Indexed messages whose header budget or parse lost fields, including Trash."
     )
 
@@ -1224,6 +1244,16 @@ class CollectionStatus(_Output):
     )
 
 
+class QueryCapability(_Output):
+    status: Literal[
+        "supported", "supported after backfill", "supported when present", "unavailable"
+    ]
+    available_messages: int | None
+    unassessed_messages: int | None
+    missing_messages: int | None
+    condition: str | None
+
+
 class MailboxStatusOutput(_Output):
     server_version: str = Field(
         description="MCP server's deployed source commit, with -dirty for local changes; "
@@ -1264,6 +1294,14 @@ class MailboxStatusOutput(_Output):
         "that file."
     )
     header_predicates: HeaderPredicateCapability
+    index_schema_version: int | None = Field(
+        description="Stored index schema version, or null when unstamped."
+    )
+    query_capabilities: dict[str, QueryCapability] = Field(
+        description="Per registered leaf, conservative evidence coverage across its accepted "
+        "operands, including Trash; not a particular query's indeterminate count. "
+        "Counts are null when schema evidence is unavailable."
+    )
     extra_claimant_files: int = Field(
         description="Indexed files beyond the first claimant of each conflicting Message-ID."
     )
