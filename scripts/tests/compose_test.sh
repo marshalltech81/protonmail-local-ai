@@ -230,8 +230,20 @@ def bounded_logging:
               else empty end),
         ($s | list("volumes")[] | select(.type != "volume" or $c.volumes[.target] != .source)
             | "\($c.service): mounts \(.source // .type) at \(.target), not its own Maildir or state volume"),
-        ($s.networks // {} | keys[] | select(. != $c.network)
-            | "\($c.service): joins network \(.), not its own"),
+        # The key check alone passed a collector or overlay that kept
+        # its own network but gave it a static ipv4_address (or another
+        # per-attachment field): Docker requires the top-level network
+        # to declare an IPAM subnet covering it, but the IPAM-identity
+        # check below holds this network own IPAM to the subnet-less
+        # base unchanged, so such a render cannot even start the
+        # collector -- a design-time check catching it before Compose
+        # does (review round 9). Compare the attachment value too, held
+        # to mbsync own (empty) attachment to bridge-net.
+        ($s.networks // {} | to_entries[]
+            | if .key != $c.network then "\($c.service): joins network \(.key), not its own"
+              elif .value != ($base[0].services["mbsync"].networks["bridge-net"])
+                then "\($c.service): network \($c.network) sets a static attachment"
+              else empty end),
         # A non-legacy declared collector has no entry of its own in
         # $base, so the existing-service checks below never run for it:
         # held only to the shape checks above, an overlay could reset
@@ -308,6 +320,20 @@ def bounded_logging:
               # setting is the operator chosen retention.
               (if $s.logging != $bbase.logging
                 then "\($c.service): logging differs from mbsync" else empty end),
+              # Neither was compared either. mbsync own entrypoint traps
+              # TERM and INT and waits while forwarding TERM to the
+              # active child (mbsync/entrypoint.sh), so a shutdown or
+              # recreation can finish an in-progress isync run; a
+              # collector or overlay setting stop_signal to a signal
+              # the entrypoint does not trap, or stop_grace_period to a
+              # period too short to wait for it, bypasses that and
+              # Docker kills the container immediately or immediately
+              # after the signal, despite every other check here still
+              # passing (review round 9).
+              (if $s.stop_signal != $bbase.stop_signal
+                then "\($c.service): stop_signal differs from mbsync" else empty end),
+              (if $s.stop_grace_period != $bbase.stop_grace_period
+                then "\($c.service): stop_grace_period differs from mbsync" else empty end),
               ($bbase | list("cap_drop")[]
                 | select(. as $cd | $s | list("cap_drop") | index($cd) == null)
                 | "\($c.service): cap_drop lost \(.)"),
@@ -342,6 +368,14 @@ def bounded_logging:
                 then "\($c.service): mem_limit is missing or above the base" else empty end),
               (if $s.image != $bbase.image or $s.build != $bbase.build
                 then "\($c.service): image or build differs from mbsync" else empty end),
+              # A service may keep its own image or build and still set
+              # provider: Compose then delegates its lifecycle to an
+              # external provider component instead of running that
+              # image directly, so `docker compose up` would invoke the
+              # provider (or fail when it is unavailable) rather than
+              # start mbsync, despite image and build staying identical
+              # (review round 9). mbsync own entry never sets one.
+              (if $s.provider != null then "\($c.service): sets a provider" else empty end),
               # A null user is the legacy mbsync own legitimate
               # rendering (the translator never sets one for it, relying
               # on the image own USER mbsync, mbsync/Dockerfile, the
@@ -356,6 +390,14 @@ def bounded_logging:
               (if ($s | overridden("entrypoint")) then "\($c.service): sets an entrypoint override" else empty end),
               (if ($s | overridden("command")) then "\($c.service): sets a command override" else empty end),
               (if ($s | set("healthcheck")) then "\($c.service): sets a healthcheck override" else empty end),
+              # pre_start is the same risk as post_start/pre_stop (Compose
+              # added it after that check was written): it may select
+              # another image, but inherits this service own environment
+              # and joins the same network and volumes, so it can run
+              # arbitrary code with the Bridge password, Maildir/state
+              # and bridge-net access a collector keeps, before mbsync
+              # itself starts (review round 9).
+              (if ($s | set("pre_start")) then "\($c.service): sets a pre_start hook" else empty end),
               (if ($s | set("post_start")) then "\($c.service): sets a post_start hook" else empty end),
               (if ($s | set("pre_stop")) then "\($c.service): sets a pre_stop hook" else empty end),
               (if ($s | set("configs")) then "\($c.service): mounts a config" else empty end),
@@ -445,9 +487,14 @@ def bounded_logging:
       # collector unable to reach the host-side Bridge through
       # host.docker.internal -- isolated from connectivity its own
       # comparison here otherwise required unchanged (review round 6,
-      # finding 4).
-      (if ($m.networks[$c.network] // {} | {driver, driver_opts, ipam, external, internal})
-            != ($base[0].networks["bridge-net"] | {driver, driver_opts, ipam, external, internal})
+      # finding 4). enable_ipv4/enable_ipv6 are the same class on a
+      # Compose version that supports them (2.33.1+): bridge-net never
+      # disables IPv4 either, and the Bridge path terminates at the
+      # host own IPv4-only 127.0.0.1, so a collector own network
+      # disabling it could never reach it (review round 9).
+      (if ($m.networks[$c.network] // {} | {driver, driver_opts, ipam, external, internal, enable_ipv4, enable_ipv6})
+            != ($base[0].networks["bridge-net"]
+                | {driver, driver_opts, ipam, external, internal, enable_ipv4, enable_ipv6})
         then "network \($c.network): driver settings differ from bridge-net or it is external"
         else empty end),
       ($c.volumes[] | select(($m.volumes[.] // {} | {driver, driver_opts, external})
@@ -1141,6 +1188,29 @@ networks:
   bridge-net-$UUID_B:
     internal: true
 EOF
+    # On Compose 2.33.1+, enable_ipv4: false is the same class under a
+    # different field: bridge-net never disables IPv4 either, and the
+    # Bridge path terminates at the host's IPv4-only 127.0.0.1, so this
+    # account could never reach it (review round 9).
+    expect_generated_rejected three-proton "" \
+        "network bridge-net-$UUID_B: driver settings differ from bridge-net or it is external" <<EOF
+networks:
+  bridge-net-$UUID_B:
+    enable_ipv4: false
+    enable_ipv6: true
+EOF
+    # The key check above passed a collector that kept its own network
+    # but gave it a static ipv4_address; docker compose config renders
+    # it without requiring a matching IPAM subnet, so this is caught
+    # here, not by a render failure (review round 9).
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: network bridge-net-$UUID_B sets a static attachment" <<EOF
+services:
+  mbsync-$UUID_B:
+    networks:
+      bridge-net-$UUID_B:
+        ipv4_address: 10.1.2.3
+EOF
 }
 
 generated_collectors_reject_an_extra_mount() {
@@ -1344,6 +1414,19 @@ services:
     tmpfs:
       - /usr/local/lib
 EOF
+    # Neither stop_signal nor stop_grace_period was compared either.
+    # mbsync's entrypoint traps TERM and INT and waits while forwarding
+    # TERM to the active isync child, so a collector or overlay setting
+    # SIGKILL or a zero grace period bypasses that and Docker kills it
+    # immediately, abandoning an in-progress run (review round 9).
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: stop_signal differs from mbsync" \
+        "mbsync-$UUID_B: stop_grace_period differs from mbsync" <<EOF
+services:
+  mbsync-$UUID_B:
+    stop_signal: SIGKILL
+    stop_grace_period: 0s
+EOF
 }
 
 # depends_on was never compared, so a collector could gain a dependency
@@ -1489,10 +1572,11 @@ generated_collectors_keep_the_mbsync_implementation() {
         "mbsync-$UUID_B: sets an entrypoint override" \
         "mbsync-$UUID_B: sets a command override" \
         "mbsync-$UUID_B: sets a healthcheck override" \
+        "mbsync-$UUID_B: sets a pre_start hook" \
         "mbsync-$UUID_B: sets a post_start hook" \
         "mbsync-$UUID_B: sets a pre_stop hook" \
         "mbsync-$UUID_B: mounts a config" \
-        "mbsync-$UUID_B: sets extra_hosts" <<EOF
+        "mbsync-$UUID_B: sets extra_hosts" <<EOF || return 1
 services:
   mbsync-$UUID_B:
     build: !reset null
@@ -1501,6 +1585,8 @@ services:
     command: ["true"]
     healthcheck:
       test: ["CMD", "true"]
+    pre_start:
+      - command: ["true"]
     post_start:
       - command: ["true"]
     pre_stop:
@@ -1513,6 +1599,19 @@ services:
 configs:
   proton_settings:
     content: "echo pwned"
+EOF
+    # provider delegates the service's whole lifecycle to an external
+    # provider component while image and build can stay mbsync's own,
+    # so it is its own case: docker compose up would invoke the
+    # provider instead of starting mbsync, or fail when it is
+    # unavailable, despite the checks above all passing unchanged
+    # (review round 9).
+    expect_generated_rejected three-proton "" \
+        "mbsync-$UUID_B: sets a provider" <<EOF
+services:
+  mbsync-$UUID_B:
+    provider:
+      type: model
 EOF
 }
 

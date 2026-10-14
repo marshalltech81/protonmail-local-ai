@@ -3,8 +3,9 @@
 Writes, for each case below, ``<out>/<case>/compose.accounts.yml`` as the
 translator renders it and ``<out>/<case>/collectors.json``, the enabled
 accounts the configuration declares (scope UUID, provider, Maildir root,
-the password file as Compose resolves it, and the rendered environment
-``collector_env()`` builds for it). The hardening checks of
+the password file as Compose resolves it, and the rendered environment,
+read independently of ``collector_env()`` by ``declared_environment()``
+below). The hardening checks of
 scripts/tests/compose_test.sh take the declared accounts from that file,
 the input, never from the generated Compose under test, and
 scripts/tests/semgrep_generated_test.sh scans each generated file.
@@ -55,6 +56,44 @@ def cases() -> dict[str, dict[str, Any]]:
     return {"one-proton": one, "two-proton": two, "three-proton": three}
 
 
+def declared_environment(account: dict[str, Any]) -> dict[str, str]:
+    """This account's collector environment, read straight from its own
+    validated fields -- never through collector_env(), the function
+    render_compose() calls to build the real render. Round 8, finding 6
+    (security) fixed this for BRIDGE_CERT_FINGERPRINT alone: every other
+    key still came from collector_env(), so a bug in it (for example,
+    reclassifying a setting so collector_env() stops emitting it) would
+    corrupt both this expectation and the real render alike, and the
+    merged hardening check would see no mismatch (review round 9,
+    finding 6). oc.validate() already fills every field used below with
+    its schema default (operator_config.py's ACCOUNT table and
+    _account_defaults) before this function ever sees the account, so
+    each value here is read directly off that validated dict and
+    formatted the same way _format() does (str, or "|".join for a
+    list) -- never through collector_env()'s MAPPING-driven lookup.
+    Scoped to a Proton account with no sync/connection overrides, the
+    only shape the cases below build; an imap case (#1606) or one that
+    overrides a sync/connection field needs its own expected values."""
+    connection = account["connection"]
+    sync = account["sync"]
+    bridge = account["proton_bridge"]
+    return {
+        "SOURCE_MODE": account["provider"],
+        "BRIDGE_USER": connection["username"],
+        "BRIDGE_IMAP_PORT": str(connection["port"]),
+        "BRIDGE_CERT_FINGERPRINT": bridge["certificate_fingerprint"],
+        "BRIDGE_HOST": connection["host"],
+        "BRIDGE_CERT_HOST": bridge["certificate_host"],
+        "PROTON_IMAP_ACCOUNT_NAME": sync["imap_account_name"],
+        "PROTON_REMOTE_STORE_NAME": sync["remote_store_name"],
+        "PROTON_LOCAL_STORE_NAME": sync["local_store_name"],
+        "PROTON_CHANNEL_NAME": sync["channel_name"],
+        "PROTON_FOLDER_EXCLUSIONS": "|".join(sync["mailboxes"]["exclude"]),
+        "SYNC_INTERVAL": str(sync["interval_seconds"]),
+        "SYNC_DEADLINE_SECONDS": str(sync["deadline_seconds"]),
+    }
+
+
 def declared(config: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {
@@ -69,32 +108,10 @@ def declared(config: dict[str, Any]) -> list[dict[str, Any]]:
             # BRIDGE_USER, or empty one, such as BRIDGE_CERT_FINGERPRINT,
             # without tripping anything. Comparing every declared value
             # also subsumes the trust-value check added for round 5,
-            # finding 3 (BRIDGE_CERT_FINGERPRINT).
-            #
-            # Every other key here comes from collector_env(), the same
-            # function render_compose() calls to build the real render,
-            # so a bug in that function would corrupt both sides alike
-            # and never produce a mismatch here. That is fine for a
-            # routing value such as BRIDGE_USER, but BRIDGE_CERT_FINGERPRINT
-            # is the one mbsync trusts to accept Bridge's certificate
-            # (AGENTS.md "Bridge-Specific Guardrails"): a collector_env()
-            # regression that cross-wires it with another account's
-            # fingerprint would let that account's mounted Bridge
-            # password reach an attacker's certificate, and this
-            # construction would not catch it, agreeing with the
-            # corrupted render by sharing its source (review round 8,
-            # finding 6, security). password_file above is already
-            # independent of collector_env() the same way; fingerprint
-            # is derived the same way here, straight from the account,
-            # not through collector_env(). (Pin rotation was the other
-            # trust value this check covered until #1616: it is now a
-            # one-run command, not configuration, and collector_env()
-            # sets no environment key for it at all, so there is nothing
-            # left to derive independently for it.)
-            "environment": {
-                **oc.collector_env(account),
-                "BRIDGE_CERT_FINGERPRINT": account["proton_bridge"]["certificate_fingerprint"],
-            },
+            # finding 3 (BRIDGE_CERT_FINGERPRINT). Derived independently
+            # of collector_env() by declared_environment() above (review
+            # round 9, finding 6).
+            "environment": declared_environment(account),
         }
         for account in config["accounts"]
         if account["enabled"]

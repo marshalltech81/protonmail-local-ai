@@ -1578,22 +1578,45 @@ class Compose(unittest.TestCase):
 class GeneratedCollectorFixture(unittest.TestCase):
     """scripts/config/tests/synthetic_compose.py builds the account data
     scripts/tests/compose_test.sh's merged hardening check takes as
-    ground truth for a generated collector. Its declared() took
+    ground truth for a generated collector. declared() took
     BRIDGE_CERT_FINGERPRINT from collector_env() -- the same function
     render_compose() calls to build the real render -- so a
     collector_env() regression that cross-wired the fingerprint with
     another account's would corrupt both sides alike and the merged
     hardening check would see no mismatch (review round 8, finding 6,
-    security). declared() must derive it straight from the account
-    instead, as it already does for password_file."""
+    security). Every other key in declared()'s environment had the same
+    problem until round 9, finding 6: for example, reclassifying
+    SYNC_INTERVAL so collector_env() stopped emitting it would make both
+    the generated Compose file and collectors.json omit the key, and the
+    full-environment comparison would still pass. declared_environment()
+    now derives every key straight from the account's own validated
+    fields instead, never through collector_env()."""
 
-    def test_the_declared_fingerprint_does_not_depend_on_collector_env(self) -> None:
+    def test_the_declared_environment_does_not_depend_on_collector_env(self) -> None:
         account = checked(fixture())["accounts"][0]
-        real_fingerprint = account["proton_bridge"]["certificate_fingerprint"]
-        corrupted_env = {**oc.collector_env(account), "BRIDGE_CERT_FINGERPRINT": "c" * 64}
+        expected = {
+            "SOURCE_MODE": "proton-bridge",
+            "BRIDGE_USER": "synthetic@example.com",
+            "BRIDGE_IMAP_PORT": "1143",
+            "BRIDGE_CERT_FINGERPRINT": "a" * 64,
+            "BRIDGE_HOST": "host.docker.internal",
+            "BRIDGE_CERT_HOST": "127.0.0.1",
+            "PROTON_IMAP_ACCOUNT_NAME": "protonmail",
+            "PROTON_REMOTE_STORE_NAME": "protonmail-remote",
+            "PROTON_LOCAL_STORE_NAME": "protonmail-local",
+            "PROTON_CHANNEL_NAME": "protonmail",
+            "PROTON_FOLDER_EXCLUSIONS": "All Mail|Labels/*|Starred",
+            "SYNC_INTERVAL": "60",
+            "SYNC_DEADLINE_SECONDS": "86400",
+        }
+        self.assertEqual(oc.collector_env(account).keys(), expected.keys())
+        # A reclassified setting (SYNC_INTERVAL here) makes collector_env()
+        # drop the key entirely, and a cross-wired one (BRIDGE_CERT_FINGERPRINT)
+        # substitutes another account's value; declared() must see neither.
+        corrupted_env = {k: "c" * 64 for k in expected if k != "SYNC_INTERVAL"}
         with unittest.mock.patch.object(oc, "collector_env", return_value=corrupted_env):
             [declared] = synthetic_compose.declared({"accounts": [account]})
-        self.assertEqual(declared["environment"]["BRIDGE_CERT_FINGERPRINT"], real_fingerprint)
+        self.assertEqual(declared["environment"], expected)
 
 
 if __name__ == "__main__":
