@@ -1222,6 +1222,13 @@ class CollectionStatus(_Output):
         description="A failed collection has not yet been followed by a successful one "
         "delivered to the index; current is false while it is true."
     )
+    success_undelivered: bool = Field(
+        description="outcome is a success, but the indexer has not yet confirmed its mail "
+        "was delivered to the index (the sync it has acknowledged does not yet name this "
+        "collection): a watcher delayed enough to read this collection's publication "
+        "before processing that sync's own events, not evidence of a problem on its own. "
+        "current is false while it is true."
+    )
     unknown_reason: (
         Literal[
             "not_recorded",

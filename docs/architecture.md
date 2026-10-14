@@ -4364,6 +4364,21 @@ currency* above and the Freshness bullet below.
   success that withheld folders keeps the existing criteria and shows
   its count. An `unknown` status leaves `current` to the existing
   criteria, except that an unrecovered failure still holds it false.
+  Delivery is also checked for a success terminal that was never
+  preceded by an *observed* failure (#1612 round 12): a watcher delayed
+  or behind enough to read a collection publication — a rename event,
+  or `maybe_record`'s periodic heartbeat, which reads the file directly
+  — before processing that same sync's own stamp rename can see a
+  success whose failed predecessor it never observed (the predecessor's
+  publication was already overwritten on disk by the time it was read).
+  `success_delivered` (stored per row, from the same attempt-ID match)
+  is checked on its own for this case; mcp-server reports it as
+  `collection.success_undelivered`, independent of
+  `failure_unrecovered`, so the gap closes whether or not the
+  intervening failure was ever seen. In normal operation this clears
+  within the watcher's own event-processing latency, since mbsync
+  writes the stamp before the collection status that names it as the
+  last success.
 
 ## File Identity on `indexed_files`
 

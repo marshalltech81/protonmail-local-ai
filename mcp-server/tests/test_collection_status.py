@@ -177,6 +177,26 @@ def test_a_success_not_yet_delivered_after_a_failure_is_not_current(fake_server,
     ]
 
 
+def test_a_success_not_yet_delivered_with_no_observed_failure_is_not_current(
+    fake_server, seeded_db
+):
+    """#1612 round 12: a watcher delayed or behind enough that it reads
+    the collection status file only after a failed publication was
+    already overwritten by a later successful one never observes the
+    failure at all (``unrecovered_failure_attempt_id`` stays null) — the
+    case above (an *observed* failure, still unrecovered) does not cover
+    this. ``success_delivered`` is checked on its own so the gap closes
+    whether or not the intervening failure was ever seen."""
+    data, _ = _status(fake_server, seeded_db, _known(success_delivered=0))
+    assert data["collection"]["outcome"] == "succeeded"
+    assert data["collection"]["failure_unrecovered"] is False
+    assert data["collection"]["success_undelivered"] is True
+    assert data["current"] is False
+    assert data["not_current_reasons"] == [
+        "mbsync's latest successful collection has not yet been confirmed delivered to the index"
+    ]
+
+
 def test_the_first_attempt_in_progress_has_no_outcome_yet(fake_server, seeded_db):
     data, text = _status(
         fake_server,

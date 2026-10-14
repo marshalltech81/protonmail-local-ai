@@ -111,6 +111,12 @@ def not_current_reasons(
     return reasons
 
 
+# Terminal outcomes that leave the collection a success, rather than a
+# failure: ``succeeded`` and the degraded-but-successful
+# ``succeeded_with_withheld_folders``.
+_SUCCESS_OUTCOMES = frozenset({"succeeded", "succeeded_with_withheld_folders"})
+
+
 def _time(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
@@ -128,6 +134,7 @@ def collection_status(row: dict | None) -> CollectionStatus:
             latest_attempt=None,
             last_success_at=None,
             failure_unrecovered=False,
+            success_undelivered=False,
             unknown_reason="not_recorded",
             observed_at=None,
         )
@@ -141,6 +148,7 @@ def collection_status(row: dict | None) -> CollectionStatus:
             latest_attempt=None,
             last_success_at=None,
             failure_unrecovered=unrecovered,
+            success_undelivered=False,
             unknown_reason=row["unknown_reason"],
             observed_at=_time(row["observed_at"]),
         )
@@ -156,6 +164,16 @@ def collection_status(row: dict | None) -> CollectionStatus:
         ),
         last_success_at=_time(row["success_completed_at"]),
         failure_unrecovered=unrecovered,
+        # A success terminal whose delivery the indexer has not yet
+        # confirmed (the acknowledged sync does not yet name it, #1612
+        # round 12): a watcher delayed or behind enough to read this
+        # collection's publication (a rename event, or the periodic
+        # heartbeat's direct read) before processing that sync's own
+        # stamp rename reports ``success_delivered`` 0 here even though
+        # no failure was ever observed in between, so this is checked
+        # independently of ``failure_unrecovered`` rather than relying on
+        # a failure having been seen.
+        success_undelivered=(terminal in _SUCCESS_OUTCOMES and not row["success_delivered"]),
         unknown_reason=None if terminal else "no_completed_attempt",
         observed_at=_time(row["observed_at"]),
     )
@@ -173,6 +191,11 @@ def collection_reasons(collection: CollectionStatus) -> list[str]:
         return [
             "mbsync's last failed collection attempt has not yet been followed by a "
             "successful sync delivered to the index"
+        ]
+    if collection.success_undelivered:
+        return [
+            "mbsync's latest successful collection has not yet been confirmed delivered "
+            "to the index"
         ]
     return []
 
