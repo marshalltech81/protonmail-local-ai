@@ -337,6 +337,7 @@ def store(cur: sqlite3.Cursor, claimant: str, capture: Capture | None) -> None:
             ),
         )
         classified_until = 0
+        classification = hashlib.sha256()
         if part.text is not None:
             stored_end = 0
             for ordinal, (start, end, data) in enumerate(fragments(part.text)):
@@ -371,6 +372,9 @@ def store(cur: sqlite3.Cursor, claimant: str, capture: Capture | None) -> None:
                     (claimant, part.ordinal, start, end, kind),
                 )
                 classified_until = end
+                classification.update(
+                    json.dumps((start, end, kind), separators=(",", ":")).encode()
+                )
                 count += 1
             lines_left -= work[0]
             ranges_left -= count
@@ -404,6 +408,7 @@ def store(cur: sqlite3.Cursor, claimant: str, capture: Capture | None) -> None:
                     len(part.text) if part.text is not None else None,
                     source.hexdigest(),
                     classified_until,
+                    classification.hexdigest(),
                 ),
                 separators=(",", ":"),
             ).encode()

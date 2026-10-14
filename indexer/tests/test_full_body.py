@@ -228,7 +228,7 @@ def test_classifier_stops_before_range_and_line_work_caps(monkeypatch):
     assert ranges[-1][1] == len("> q\r\nreply\r\n")
 
 
-def test_stored_sources_and_ranges_cascade_and_generation_is_content_bound():
+def test_stored_sources_and_ranges_cascade_and_generation_is_content_bound(monkeypatch):
     connection = sqlite3.connect(":memory:")
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute(
@@ -242,6 +242,28 @@ def test_stored_sources_and_ranges_cascade_and_generation_is_content_bound():
     assert b"".join(row[0] for row in rows) == b"body\r\n> quote\r\n"
     first_generation = connection.execute("SELECT full_body_generation FROM messages").fetchone()[0]
     assert len(first_generation) == hashlib.sha256().digest_size * 2
+    original = "body\r\n> quote\r\n"
+    monkeypatch.setattr(
+        full_body, "classify", lambda text, **kwargs: iter([(0, len(text), "body")])
+    )
+    full_body.store(
+        connection.cursor(),
+        "c",
+        full_body.prepare([full_body.Part(0, -1, "plain", True, original)], "c"),
+    )
+    body_generation = connection.execute("SELECT full_body_generation FROM messages").fetchone()[0]
+    monkeypatch.setattr(
+        full_body, "classify", lambda text, **kwargs: iter([(0, len(text), "quote")])
+    )
+    full_body.store(
+        connection.cursor(),
+        "c",
+        full_body.prepare([full_body.Part(0, -1, "plain", True, original)], "c"),
+    )
+    assert (
+        connection.execute("SELECT full_body_generation FROM messages").fetchone()[0]
+        != body_generation
+    )
     full_body.store(connection.cursor(), "c", full_body.prepare([], "c"))
     assert connection.execute("SELECT COUNT(*) FROM message_body_spans").fetchone()[0] == 0
     assert (

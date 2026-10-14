@@ -2231,7 +2231,17 @@ def _write_full_body(conn: sqlite3.Connection, rec: _Record) -> None:
         )
         generation.update(
             json.dumps(
-                (0, -1, "container", True, 0, None, hashlib.sha256().hexdigest(), 0),
+                (
+                    0,
+                    -1,
+                    "container",
+                    True,
+                    0,
+                    None,
+                    hashlib.sha256().hexdigest(),
+                    0,
+                    hashlib.sha256().hexdigest(),
+                ),
                 separators=(",", ":"),
             ).encode()
         )
@@ -2251,7 +2261,9 @@ def _write_full_body(conn: sqlite3.Connection, rec: _Record) -> None:
             "INSERT INTO message_body_spans VALUES (?,?,?,?,?,?)",
             (rec.cid, part, ordinal, start, end, data),
         )
+    classification = hashlib.sha256()
     if text:
+        classification.update(json.dumps((0, len(text), "body"), separators=(",", ":")).encode())
         conn.execute(
             "INSERT INTO message_body_ranges VALUES (?,?,?,?,?)",
             (rec.cid, part, 0, len(text), "body"),
@@ -2262,7 +2274,17 @@ def _write_full_body(conn: sqlite3.Connection, rec: _Record) -> None:
     )
     generation.update(
         json.dumps(
-            (part, parent, "plain", True, 0, len(text), digest.hexdigest(), len(text)),
+            (
+                part,
+                parent,
+                "plain",
+                True,
+                0,
+                len(text),
+                digest.hexdigest(),
+                len(text),
+                classification.hexdigest(),
+            ),
             separators=(",", ":"),
         ).encode()
     )
