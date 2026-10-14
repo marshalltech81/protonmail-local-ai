@@ -1,5 +1,15 @@
 # MCP Tool Reference
 
+Complete decoded body storage (#1362) is an internal prerequisite for future
+evidence jobs and literal phrases (#1388). It adds no public tool or field to
+the tools below. Existing body retrieval continues to return its documented
+chunk/reading representation; it does not automatically expose every quote,
+signature or MIME alternative. Internal `lib.full_body` primitives page original
+decoded sources and heuristic ranges inside a generation-bound read transaction,
+with eight 8192-codepoint fragments/256KiB or 256 fixed metadata/range rows per
+call. Capture/backfill/loss and unclassified suffixes remain explicit unknown
+evidence; see architecture.md, *Complete decoded body sources*.
+
 An MCP client connected to the running server sees the search,
 retrieval and system tools. The intelligence tools (Group 3) are
 registered only when `INFERENCE_MODE` is not `none` (the default is

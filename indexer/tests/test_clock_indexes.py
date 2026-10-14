@@ -31,7 +31,7 @@ def _v15(db):
 
 
 def test_fresh_clock_indexes(db):
-    assert SCHEMA_VERSION == 17
+    assert SCHEMA_VERSION == 18
     assert _indexes(db._conn) == {
         "idx_messages_sent": (["sent_at", "claimant_id"], "sent_at_status = 'parsed'"),
         "idx_messages_occurred": (["occurred_at", "claimant_id"], "(occurred_at IS NOT NULL) = 1"),

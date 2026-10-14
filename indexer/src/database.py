@@ -20,7 +20,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from . import vector_sums
+from . import full_body, vector_sums
 from .account import AccountConfig, register_account_functions, verified_account_id
 from .chunker import l2_normalize, truncate_to_tokens
 from .entities import (
@@ -186,7 +186,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # committed in phase 2c; NULL while pending, 0 when extraction was disabled.
 # v16 (#1123): partial clock/claimant indexes for selected-clock listing pages.
 # v17 (#1090): observed Bcc participants and nullable parse-capture completeness.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -839,6 +839,9 @@ class Database:
         # leaves it open for the stamp.
         try:
             self._run_initial_schema_script(cur)
+            for statement in full_body.SCHEMA_SQL.split(";"):
+                if statement.strip():
+                    cur.execute(statement)
             # The configured account, registered with the schema (#1596).
             cur.execute(
                 "INSERT INTO accounts (scope_uuid, provider, created_at) VALUES (?, ?, ?)",
@@ -1161,6 +1164,9 @@ class Database:
                 attachments_manifest_complete INTEGER
                     CHECK (attachments_manifest_complete IN (0, 1)),
                 body_complete INTEGER CHECK (body_complete IN (0, 1)),
+                full_body_complete INTEGER CHECK (full_body_complete IN (0, 1)),
+                full_body_generation TEXT,
+                full_body_version INTEGER,
                 attachment_rows_current INTEGER CHECK (attachment_rows_current IN (0, 1)),
                 -- The parse's nonzero ``PARSE_CAPS`` counts as a JSON
                 -- object of fixed names to integers, never content;
@@ -4323,6 +4329,7 @@ class Database:
         )
         # The parsed file is this message's occurrence at its path (#1566).
         self._bind_occurrence(cur, msg.claimant_id, msg.filepath, provenance="parse")
+        full_body.store(cur, msg.claimant_id, msg.full_body)
         cur.execute("DELETE FROM message_headers WHERE claimant_id = ?", (msg.claimant_id,))
         cur.executemany(
             "INSERT INTO message_headers "

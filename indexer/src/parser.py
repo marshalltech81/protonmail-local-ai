@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from . import full_body
 from .extractors import (
     has_container_prefix,
     note_parser_address_repeats,
@@ -650,6 +651,7 @@ class Message:
     # ``PARSE_CAPS`` order: fixed names and integers only, stored as
     # ``messages.caps_json``.
     parse_caps: dict[str, int] = field(default_factory=dict)
+    full_body: full_body.Capture | None = field(default=None, repr=False)
 
     @property
     def effective_date(self) -> datetime:
@@ -694,7 +696,9 @@ class SourceMetadata:
     path: str
 
 
-def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
+def parse_email(
+    path: Path, maildir_root: Path | None = None, *, capture_deadline: float | None = None
+) -> Message | None:
     """Parse a single .eml file from Maildir into a Message object.
 
     The Maildir adapter (#1077): reads the file under the size cap,
@@ -794,10 +798,14 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         mtime_ns=stat.st_mtime_ns if stat is not None else None,
         path=str(path),
     )
-    return parse_email_bytes(raw, source)
+    if capture_deadline is None:
+        return parse_email_bytes(raw, source)
+    return parse_email_bytes(raw, source, capture_deadline=capture_deadline)
 
 
-def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
+def parse_email_bytes(
+    raw: bytes, source: SourceMetadata, *, capture_deadline: float | None = None
+) -> Message | None:
     """Parse an RFC 822 message from its bytes into a Message object.
 
     The pure half of ``parse_email`` (#1077): no filesystem access, so
@@ -904,7 +912,10 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         )
     occurred_at = _parse_received_date(msg)
 
-    body_text, attachments = _extract_body_and_attachments(msg, caps=caps, raw=raw)
+    sources: list[full_body.Part] = []
+    body_text, attachments = _extract_body_and_attachments(
+        msg, caps=caps, raw=raw, full_parts=sources, capture_deadline=capture_deadline
+    )
     lost = [name for name in PARSE_CAPS if caps[name] and name not in PARSE_REPEATS]
     if lost:
         # Fixed names and counts only, with the Maildir path: the
@@ -952,6 +963,19 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     # ``mtime_ns`` is the adapter's (see ``parse_email``).
     size = len(raw)
     content_hash = hashlib.sha256(raw).hexdigest()
+    captured = full_body.prepare(
+        sources,
+        claimant_id(message_id, content_hash),
+        complete=not (caps["mime_parts"] or caps["body_parts"]),
+        deadline=capture_deadline,
+    )
+    if not captured.complete:
+        full_body.warn(
+            "full decoded body evidence incomplete: parts=%d bytes=%d loss_parts=%d",
+            len(captured.parts),
+            captured.source_bytes,
+            sum(bool(part.losses) for part in captured.parts),
+        )
 
     return Message(
         message_id=message_id,
@@ -981,6 +1005,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         first_indexed_at=datetime.now(UTC),
         occurred_at=occurred_at,
         body_text=body_text,
+        full_body=captured,
         folder=source.folder,
         filepath=path,
         attachments=attachments,
@@ -1680,6 +1705,9 @@ class _BodyNode:
     # The nearest inline email above (or at) this node that takes part in
     # an alternative's or related's choice, by node index, or -1.
     inline_root: int = -1
+    source_text: str | None = None
+    source_representation: str = "container"
+    source_losses: int = 0
 
 
 def _selects(node: _BodyNode) -> bool:
@@ -1806,6 +1834,8 @@ def _extract_body_and_attachments(
     caps: Counter[str] | None = None,
     walk: BodyWalk | None = None,
     raw: bytes | None = None,
+    full_parts: list[full_body.Part] | None = None,
+    capture_deadline: float | None = None,
 ) -> tuple[str, list[Attachment]]:
     """The message's body text and attachments. ``caps`` (when given)
     counts the content a work cap dropped, by ``PARSE_CAPS`` name. With
@@ -1820,6 +1850,7 @@ def _extract_body_and_attachments(
     attachments: list[Attachment] = []
     nodes: list[_BodyNode] = []
     text_parts = 0
+    full_text_parts = 0
     # Text parts past MAX_BODY_TEXT_PARTS: (node index, plain or not).
     capped: list[tuple[int, bool]] = []
     # In a body-only walk, the text parts whose transfer decoding lost or
@@ -1983,6 +2014,16 @@ def _extract_body_and_attachments(
             node.depth = node_depth
             node.inline_root = inline_root
             nodes.append(node)
+            if ct in ("multipart/alternative", "multipart/related", "message/rfc822"):
+                node.source_representation = {
+                    "multipart/alternative": "alternative",
+                    "multipart/related": "related",
+                    "message/rfc822": "message",
+                }[ct]
+            if part.get_content_maintype() == "multipart" and not part.is_multipart():
+                node.source_losses |= full_body.STRUCTURE_LOSS
+            if any(isinstance(d, DROPPED_HEADER_DEFECTS) for d in part.defects):
+                node.source_losses |= full_body.STRUCTURE_LOSS
             if parent >= 0 and _selects(nodes[parent]):
                 nodes[parent].children.append(len(nodes) - 1)
             if inline_email is not None:
@@ -2035,6 +2076,8 @@ def _extract_body_and_attachments(
                     part.get_content_maintype() == "message"
                     and encoding not in ("", "7bit", "8bit", "binary")
                 )
+                if skip and node is not None:
+                    node.source_losses |= full_body.STRUCTURE_LOSS
                 frames.append(
                     (
                         (c for c in children if isinstance(c, email.message.Message)),
@@ -2057,15 +2100,30 @@ def _extract_body_and_attachments(
         # content to prefer (#298).
         is_html = ct == "text/html"
         root = part is msg or (bool(inline_roots) and id(part) in inline_roots)
-        if not is_html and not (
+        legacy_text = is_html or (
             ct == "text/plain" or (root and part.get_content_maintype() == "text")
-        ):
+        )
+        capture_text = full_parts is not None and part.get_content_maintype() == "text"
+        if capture_text:
+            node.source_representation = (
+                "html" if is_html else "plain" if ct == "text/plain" else "other"
+            )
+            node.source_text = ""
+        if not legacy_text and not capture_text:
             continue
-        if text_parts >= max_text_parts:
+        if legacy_text and text_parts >= max_text_parts:
             # Counted below, once the body's selection is known.
             capped.append((len(nodes) - 1, not is_html))
+            node.source_losses |= full_body.BUDGET_LOSS
             continue
-        text_parts += 1
+        if legacy_text:
+            text_parts += 1
+        if capture_text:
+            if full_text_parts >= full_body.MAX_SOURCES:
+                node.source_losses |= full_body.BUDGET_LOSS
+                capture_text = False
+            else:
+                full_text_parts += 1
         payload = _decoded_payload(part)
         # A part whose decode lost bytes (``_decode_lost_bytes``), or in
         # an encoding not decoded here (anything unknown can come back as
@@ -2089,10 +2147,22 @@ def _extract_body_and_attachments(
             # envelope (#1311). A message root's headers and envelope
             # are checked where its section head is rendered.
             header_lost.append((len(nodes) - 1, not is_html))
-        fallback: Counter[str] | None = None if walk is None else Counter()
+        fallback: Counter[str] | None = Counter() if walk is not None or capture_text else None
         text = _safe_decode(payload, part.get_content_charset() or "utf-8", fallback)
         if fallback:
             charset_degraded.append((len(nodes) - 1, not is_html))
+        if capture_text:
+            node.source_representation = (
+                "html" if is_html else "plain" if ct == "text/plain" else "other"
+            )
+            if fallback:
+                node.source_losses |= full_body.CHARSET_LOSS
+            if _decode_lost_bytes(part, payload) or _transfer_decode_unchecked(part):
+                node.source_losses |= full_body.TRANSFER_LOSS
+            if not is_html:
+                node.source_text = text
+        if not legacy_text:
+            continue
         if is_html and walk is None:
             # Nothing reads a leaf's text before the walk ends, so the
             # message's HTML parts are converted together below.
@@ -2104,6 +2174,26 @@ def _extract_body_and_attachments(
 
     if html_parts:
         _convert_html_parts(nodes, html_parts, caps)
+        if full_parts is not None:
+            sources = [text for _, text in html_parts]
+            try:
+                texts, cut, losses = full_body.convert_html(sources, capture_deadline)
+            except html_conversion.CHILD_FAILURES as exc:
+                texts, cut = [], False
+                losses = [full_body.CONVERSION_LOSS] * len(sources)
+                reason = exc.type_name if isinstance(exc, ChildError) else type(exc).__name__
+                full_body.warn(
+                    "full HTML body capture failed (%s); sources=%d",
+                    reason,
+                    len(sources),
+                )
+            for position, (index, _) in enumerate(html_parts):
+                node = nodes[index]
+                node.source_representation = "html"
+                node.source_losses |= losses[position]
+                node.source_text = texts[position] if position < len(texts) else ""
+                if position >= len(texts) or (cut and position == len(texts) - 1):
+                    node.source_losses |= full_body.CONVERSION_LOSS
     if walk is not None:
         walk.parts_left -= walked
         walk.text_parts_left -= text_parts
@@ -2120,6 +2210,19 @@ def _extract_body_and_attachments(
             if found is not None or label:
                 walk.nested.append((found, depth))
     body = _assemble_body(nodes)
+    if full_parts is not None:
+        kept = _kept_nodes(nodes)
+        full_parts.extend(
+            full_body.Part(
+                index,
+                node.parent,
+                node.source_representation,
+                kept[index],
+                node.source_text,
+                node.source_losses,
+            )
+            for index, node in enumerate(nodes)
+        )
     if capped:
         lost = _capped_parts_lost(nodes, capped)
         if lost:

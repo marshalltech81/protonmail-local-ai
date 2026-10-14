@@ -76,6 +76,7 @@ MODULES = {
     "eml": "eml",
     "image": "image_child",
     "html": "html_child",
+    "html_full_body": "html_full_body",
     "pdf": "pdf_child",
     "container": "container_child",
 }
