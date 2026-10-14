@@ -328,6 +328,7 @@ _LEAF_CATALOGUE = [
     {"leaf": "body_words", "value": "alpha budget"},
     {"leaf": "subject_contains", "value": "STRASSE"},
     {"leaf": "attachment_text_words", "value": "alpha budget"},
+    {"leaf": "attachment_content_type_is", "value": "application/pdf"},
     {"leaf": "header_exists", "name": "X-List"},
     {"leaf": "header_contains", "name": "X-List", "value": "STRASSE"},
 ]

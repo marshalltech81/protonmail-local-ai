@@ -30,6 +30,7 @@ from . import timings
 from .predicates import (
     ADDRESS_LEAF_ROWS,
     ADDRESS_ROLES,
+    ATTACHMENT_INVENTORY_KNOWN_SQL,
     AUTHORITY_EXCLUDED_FOLDERS,
     DATE_BASES,
     DEFAULT_DATE_BASIS,
@@ -1197,6 +1198,8 @@ _SENDER_DIMENSIONS = ("sender_address", "sender_domain", "authority_class")
 AGGREGATE_DIMENSIONS = (
     "sender_address",
     "sender_domain",
+    "recipient_domain",
+    "attachment_content_type",
     "folder",
     "year",
     "month",
@@ -1275,6 +1278,7 @@ class MessageGroup:
     with_attachments: int
     indeterminate: int
     display_name: str | None = None
+    value_clipped: bool = False
     period: str | None = None
     active_periods: int = 0
     distinct_message_ids: int = 0
@@ -1308,6 +1312,8 @@ class GroupPage:
     # ``AUTHORITY_EXCLUDED_FOLDERS``. It includes a message with no
     # stored From row, which is also in the null group.
     incomplete_from_messages: int | None = None
+    incomplete_recipient_messages: int | None = None
+    incomplete_attachment_type_messages: int | None = None
     date_basis: str = "effective"
     period: str = "month"
     period_breakdown: bool = False
@@ -1558,6 +1564,19 @@ _GROUP_ROWS: dict[str, str] = {
         "SELECT DISTINCT e.*, substr(p.address, "  # nosec B608
         "length(rtrim(p.address, replace(p.address, '@', ''))) + 1) AS value, "
         f"NULL AS name FROM e {_SAFE_FROM_ROWS}"
+    ),
+    # SQLite's suffix predicate sees the prefix before an embedded NUL.
+    "recipient_domain": (
+        "SELECT DISTINCT e.*, p.value, NULL AS name FROM e LEFT JOIN ("
+        "SELECT claimant_id, CASE WHEN instr(address, '@') = 0 THEN NULL ELSE "
+        "NULLIF(substr(address, length(rtrim(address, replace(address, '@', ''))) + 1), '') "
+        "END AS value FROM (SELECT claimant_id, substr(address, 1, length(address)) AS address "
+        "FROM message_participants WHERE role IN ('to', 'cc'))) p "
+        "ON p.claimant_id = e.cid AND p.value IS NOT NULL"
+    ),
+    "attachment_content_type": (
+        "SELECT DISTINCT e.*, a.content_type AS value, NULL AS name FROM e "
+        "LEFT JOIN attachments a ON a.claimant_id = e.cid AND e.current = 1 AND e.att = 1"
     ),
     "folder": "SELECT e.*, e.folder AS value, NULL AS name FROM e",
     "year": "SELECT e.*, substr(e.at, 1, 4) AS value, NULL AS name FROM e",
@@ -5130,7 +5149,7 @@ class Database:
         last), paged by offset through ``cursor``.
 
         The filters compile to ``query_messages``' expression
-        (``_message_expression``), so a group's ``messages`` is that
+        (``_message_expression``), so for an accepted selector value, a group's ``messages`` is that
         tool's ``total_matches`` under the same filters plus the
         group's own: ``where`` ``address_is`` / ``domain_is`` on the
         From role, ``folder``, a date range spanning the UTC year or
@@ -5151,6 +5170,11 @@ class Database:
         from current occurrence rows, including partial manifests, with
         unknown exhaustive inventories disclosed separately. eligible_total
         includes both definite and indeterminate messages, once globally.
+        Recipient domains deduplicate To/Cc evidence. MIME types deduplicate
+        current observations; their payload identities are scoped to the type.
+        Dimension-specific coverage counts eligible incomplete memberships.
+        Full MIME types form groups; only their paged byte-bounded display
+        prefixes reach Python, with substitutions/truncation marked clipped.
 
         Bounded work: one statement in one read snapshot. It evaluates
         the expression once per message to filter and once more per
@@ -5225,14 +5249,30 @@ class Database:
         page_membership = "k.value IS p.value"
         if period_breakdown:
             page_membership += " AND k.bucket IS p.period"
+        recipient_incomplete = (
+            "TOTAL(tc IS NOT 1 OR cc IS NOT 1)" if group_by == "recipient_domain" else "NULL"
+        )
+        type_incomplete = (
+            "TOTAL(inventory_known IS NOT TRUE)"
+            if group_by == "attachment_content_type"
+            else "NULL"
+        )
+        type_match = (
+            " AND a.content_type IS kp.value" if group_by == "attachment_content_type" else ""
+        )
+        value_sql = (
+            f"substr(CAST(pg.value AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1})"
+            if group_by == "attachment_content_type"
+            else "pg.value"
+        )
         sql = (
             "WITH e AS MATERIALIZED (SELECT m.claimant_id AS cid, m.thread_id AS tid, "  # nosec B608
             f"{basis.bound} AS at, {bucket} AS bucket, m.message_id AS mid, "
             "m.has_attachments AS att, m.folder AS folder, "
             "m.sender_ambiguous AS sa, m.from_addresses_complete AS fc, "
+            "m.to_addresses_complete AS tc, m.cc_addresses_complete AS cc, "
             "m.attachment_rows_current AS current, "
-            "(m.attachments_manifest_complete = 1 AND "
-            "(m.has_attachments = 0 OR m.attachment_rows_current = 1)) AS inventory_known, "
+            f"({ATTACHMENT_INVENTORY_KNOWN_SQL}) AS inventory_known, "
             f"({expr}) AS ok FROM messages m WHERE ({expr}) IS NOT 0), "
             f"k AS MATERIALIZED ({rows_sql}), "
             f"g AS MATERIALIZED (SELECT value, {period_sql} AS period, TOTAL(ok IS 1) AS n, "
@@ -5255,13 +5295,18 @@ class Database:
             f"WHERE {page_membership} AND k.ok IS 1 AND k.current = 1 AND k.att = 1), "
             f"ga AS (SELECT value, {period_sql} AS period, "
             "COUNT(DISTINCT a.attachment_id) AS attachment_ids "
-            "FROM kp CROSS JOIN attachments a ON a.claimant_id = kp.cid "
+            f"FROM kp CROSS JOIN attachments a ON a.claimant_id = kp.cid{type_match} "
             f"GROUP BY {keys}), "
             "t AS (SELECT TOTAL(ok IS 1) AS matches, TOTAL(ok IS NULL) AS undecided, "
             f"(SELECT COUNT(*) FROM g) AS ngroups, {incomplete_sql} AS incomplete, "
+            f"{recipient_incomplete} AS incomplete_recipient, {type_incomplete} AS incomplete_type, "
             "TOTAL(ok IS 1 AND at IS NULL) AS undated, "
             "TOTAL(ok IS 1 AND inventory_known IS NOT TRUE) AS unknown_inventory FROM e) "
-            "SELECT t.matches, t.undecided AS total_undecided, t.ngroups, pg.*, t.incomplete, "
+            "SELECT t.matches, t.undecided AS total_undecided, t.ngroups, "
+            f"{value_sql} AS value, pg.period, pg.n, pg.threads, pg.first_at, pg.last_at, "
+            "pg.with_att, pg.undecided, pg.name, pg.active_periods, pg.message_ids, "
+            "pg.undated, pg.unknown_inventory, t.incomplete, "
+            "t.incomplete_recipient, t.incomplete_type, "
             "t.undated AS total_undated, t.unknown_inventory AS total_unknown_inventory, "
             "COALESCE(ga.attachment_ids, 0) AS attachment_ids "
             "FROM t LEFT JOIN p pg ON 1 "
@@ -5273,27 +5318,34 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
         matches, undecided, total_groups = (int(n) for n in rows[0][:3])
         incomplete = None if rows[0]["incomplete"] is None else int(rows[0]["incomplete"])
-        groups = [
-            MessageGroup(
-                value=r["value"],
-                period=r["period"],
-                messages=int(r["n"]),
-                threads=r["threads"],
-                first_at=r["first_at"],
-                last_at=r["last_at"],
-                with_attachments=int(r["with_att"]),
-                indeterminate=int(r["undecided"]),
-                display_name=r["name"],
-                active_periods=r["active_periods"],
-                distinct_message_ids=r["message_ids"],
-                distinct_attachment_ids=r["attachment_ids"],
-                eligible_total=int(r["n"] + r["undecided"]),
-                undated_messages=int(r["undated"]),
-                attachment_inventory_unknown_messages=int(r["unknown_inventory"]),
+        groups: list[MessageGroup] = []
+        for r in rows:
+            if r["n"] is None:
+                continue
+            value, clipped = r["value"], False
+            if group_by == "attachment_content_type" and value is not None:
+                value, clipped = _clipped_text(r["value"])
+                clipped = clipped or value.encode("utf-8") != r["value"]
+            groups.append(
+                MessageGroup(
+                    value=value,
+                    value_clipped=clipped,
+                    period=r["period"],
+                    messages=int(r["n"]),
+                    threads=r["threads"],
+                    first_at=r["first_at"],
+                    last_at=r["last_at"],
+                    with_attachments=int(r["with_att"]),
+                    indeterminate=int(r["undecided"]),
+                    display_name=r["name"],
+                    active_periods=r["active_periods"],
+                    distinct_message_ids=r["message_ids"],
+                    distinct_attachment_ids=r["attachment_ids"],
+                    eligible_total=int(r["n"] + r["undecided"]),
+                    undated_messages=int(r["undated"]),
+                    attachment_inventory_unknown_messages=int(r["unknown_inventory"]),
+                )
             )
-            for r in rows
-            if r["n"] is not None
-        ]
         has_more = len(groups) > limit
         groups = groups[:limit]
         return GroupPage(
@@ -5310,6 +5362,14 @@ class Database:
             offset=offset,
             groups=groups,
             incomplete_from_messages=incomplete,
+            incomplete_recipient_messages=(
+                None
+                if rows[0]["incomplete_recipient"] is None
+                else int(rows[0]["incomplete_recipient"])
+            ),
+            incomplete_attachment_type_messages=(
+                None if rows[0]["incomplete_type"] is None else int(rows[0]["incomplete_type"])
+            ),
             has_more=has_more,
             next_cursor=(
                 _encode_aggregate_cursor(digest, offset + len(groups)) if has_more else None

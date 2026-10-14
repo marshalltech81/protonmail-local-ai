@@ -511,6 +511,7 @@ different filters"), never read against them.
 | `header_exists` | header name | `query_messages` and `aggregate_messages` `where` | any occurrence of the named top-level header exists, even with an empty value; absence is unknown unless header evidence is complete |
 | `header_contains` | header name, text | `query_messages` and `aggregate_messages` `where` | any occurrence contains the Unicode caseless substring in its decoded value (raw value when decoding failed); a miss is unknown unless header evidence is complete |
 | `subject_contains` | text | `query_messages` and `aggregate_messages` `where` | same as `subject`, including unknown on a miss against an incomplete subject |
+| `attachment_content_type_is` | MIME type | `query_messages` and `aggregate_messages` `where` | exact declared type on a current occurrence; a miss is unknown unless the current inventory is exhaustive |
 | `attachment_text_words` | words | `query_messages` and `aggregate_messages` `where` | every word occurs in the message's attachment chunks (FTS, stemmed; at most 16 words); a miss is unknown unless the manifest and every occurrence's committed text are complete |
 | `body_words` | words | `query_messages` `text` and `where` | every word occurs in its indexed body (FTS, stemmed; at most 16 words); unknown when one does not and the indexed body is not complete |
 | `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it is filed in one of them |
@@ -1371,7 +1372,8 @@ through the flat parameters' inferred mode:
 - **Leaves:** `address_is`, `address_contains`,
   `display_name_contains`, `address_or_name_contains` and `domain_is`
   take a `role` (`from`, `to`, `cc` or `visible_recipient`);
-  `body_words`, `subject_contains` and `attachment_text_words` take none.
+  `body_words`, `subject_contains`, `attachment_text_words` and
+  `attachment_content_type_is` take none.
   `header_exists` takes a `name` and no `value`; `header_contains` takes
   a `name` and `value`. Names are 1–128 ASCII token characters, matched
   case-insensitively. Other leaves refuse `name`, including null.
@@ -1425,7 +1427,7 @@ through the flat parameters' inferred mode:
   follows the flat `subject` filter (Unicode caseless substring, a miss
   on an incomplete subject is unknown). A value may hold at most 320
   characters (`domain_is` 255, `subject_contains` 500,
-  `body_words` and `attachment_text_words` 1000).
+  `body_words`, `attachment_text_words` and `attachment_content_type_is` 1000).
 - **Limits:** at most 16 nodes, each leaf and each `any` group
   counting one; neither `all` nor an `any` group may be empty. The
   schema also caps each `all` and `any` list at 16 items (`maxItems`),
@@ -1904,7 +1906,7 @@ folder) instead of paging `query_messages` and counting on the client.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `group_by` | string | required | `sender_address`, `sender_domain`, `folder`, `year`, `month` or `authority_class` |
+| `group_by` | string | required | `sender_address`, `sender_domain`, `recipient_domain`, `attachment_content_type`, `folder`, `year`, `month` or `authority_class` |
 | `query_messages` filters | | none | `sender`, `recipient`, `participant`, `subject`, `text`, `folder`, `date_from`, `date_to`, `has_attachments`, `authority_class`, `seen`, `flagged`, `replied`, `size_min`, `size_max` and `where`, with the same schema and meaning; Trash is left out unless `folder="Trash"` ([Trash](#trash-is-left-out-by-default)) |
 | `date_basis` | string | `effective` | `effective`, `sent` or `occurred`, with the same validation and missing-clock semantics as `query_messages`; applies to bounds, group dates and period buckets |
 | `period` | string | `month` | UTC calendar `month` or `year` for active-period counts and breakdown cells |
@@ -1915,7 +1917,7 @@ folder) instead of paging `query_messages` and counting on the client.
 The filters compile to the same expression as `query_messages`
 ([Filter predicates](#filter-predicates)), so `total_matches` and
 `indeterminate` are the counts `query_messages` returns for the same
-filters and `date_basis`, and a group's `messages` is the
+filters and `date_basis`, and, for a key accepted by its selector, a group's `messages` is the
 `total_matches` of
 `query_messages` for the same filters plus the group's own:
 
@@ -1923,6 +1925,8 @@ filters and `date_basis`, and a group's `messages` is the
 |---|---|---|
 | `sender_address` | a From address | a `where` `address_is` leaf, role `from` |
 | `sender_domain` | the domain of a From address | a `where` `domain_is` leaf, role `from` |
+| `recipient_domain` | an observed To/Cc domain | a `where` `domain_is` leaf, role `visible_recipient`, when the key meets its operand validation |
+| `attachment_content_type` | declared MIME type on a current occurrence | a `where` `attachment_content_type_is` leaf, when `value_clipped=false` |
 | `folder` | the folder | `folder` |
 | `year` | `YYYY` of the selected evidence clock, UTC; no value without evidence on that clock, never the time a message was first indexed | `date_from` / `date_to` spanning that UTC year |
 | `month` | `YYYY-MM` of the selected evidence clock, UTC; no value likewise | `date_from` / `date_to` spanning that UTC month |
@@ -1936,7 +1940,7 @@ dates, never first-indexed time),
 `messages`) and, for `sender_address`, `display_name` (the display name
 on the group's latest match that has one, cut at 500 characters with a
 marker). A group whose messages are all undecided is listed with
-`messages` 0. The group value is never cut. `where` takes an address
+`messages` 0. Existing group values remain uncut. MIME display values are bounded as described below. `where` takes an address
 of at most 320 characters and a domain of at most 255; a longer
 sender address can be passed as `sender` instead, which matches a full
 address exactly.
@@ -1969,6 +1973,35 @@ includes a message with no stored From address, which is also in the
 `null` group. For `authority_class` it leaves out Spam, where no class
 matches. The prose states it when not 0, and the timing line carries
 it.
+
+Recipient domains count each message once per distinct To/Cc domain, including
+positive observations from incomplete roles. `incomplete_recipient_messages`
+counts eligible messages with either role incomplete, once globally. The null
+group means no observed recipient domain. SQLite text-prefix semantics match
+the existing domain predicate; this is stored evidence, not RFC validation.
+
+MIME groups count each message once per current declared type. Multiple
+occurrences of one type do not multiply messages. Current observations from
+partial manifests count; pending, stale and extraction-disabled rows do not.
+`distinct_attachment_ids` counts only payloads of that group's type. The null
+group means no observed current type, mixing proven empty inventories with
+unknown ones; it does not mean no attachments. `incomplete_attachment_type_messages`
+counts unknown exhaustive inventories among all eligible messages, including
+filter-indeterminate messages. These dimension-specific fields are absent for
+other dimensions. Group memberships overlap, so their counts may sum above
+the population total.
+
+Full stored MIME types define separate SQL groups. Only the selected page's
+labels are read into Python, at most 2,001 bytes and displayed at most 500
+characters. `value_clipped` indicates truncation or decoder substitution.
+A clipped label is display evidence, not an exact selector; distinct types
+sharing a displayed prefix remain separate rows. Other dimensions return
+`value_clipped=false`. Cursors contain a bounded digest and offset, never MIME
+labels. `attachment_content_type_is` accepts up to 1,000 characters before
+normalization, strips surrounding whitespace and lowercases, then compares
+exactly with stored declared types. A current positive is true; an exhaustive
+inventory without a match is false; otherwise unknown. No MIME grammar or
+extractor classifier is inferred from that evidence.
 
 The response echoes `date_basis`, `period` and `period_breakdown`. Each
 row also reports:

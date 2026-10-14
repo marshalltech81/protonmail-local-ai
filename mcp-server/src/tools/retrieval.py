@@ -98,6 +98,8 @@ _MAX_AGGREGATE_GROUPS = 100
 _NO_VALUE_LABELS = {
     "sender_address": "(no attributable sender)",
     "sender_domain": "(no attributable sender)",
+    "recipient_domain": "(no observed recipient domain)",
+    "attachment_content_type": "(no observed current attachment type)",
     "authority_class": "(no class: Spam, no attributable sender, or no classified sender)",
     # #1080: no delivery date and no parseable Date header, or a send
     # date not yet checked; never grouped by when it was indexed.
@@ -416,6 +418,7 @@ _INDETERMINATE_CAUSES: tuple[tuple[str, frozenset[str], str], ...] = (
         frozenset({"has_attachments"}),
         "attachment list incomplete (a parse cap), or not yet checked",
     ),
+    ("attachment_inventory", frozenset(), "current attachment inventory is not known exhaustive"),
     ("headers", frozenset(), "header evidence incomplete or not yet assessed"),
     ("attachment_text", frozenset(), "attachment text incomplete, unavailable, or not yet indexed"),
     ("size", frozenset({"size_min", "size_max"}), "no stored size"),
@@ -439,6 +442,9 @@ def _where_cause_keys(where: list[WhereLeaf]) -> set[str]:
             continue
         if w.leaf.name == "subject_contains":
             keys.add("subject")
+            continue
+        if w.leaf.name == "attachment_content_type_is":
+            keys.add("attachment_inventory")
             continue
         if w.leaf.name == "attachment_text_words":
             keys.update({"attachment_list", "attachment_text"})
@@ -506,8 +512,8 @@ def _describe_where(where: list[WhereLeaf]) -> list[str]:
         elif w.leaf.name == "header_contains":
             name, value = w.leaf.value
             parts.append(f"{prefix}header_contains({name!r}, {value!r})")
-        elif w.leaf.name == "subject_contains":
-            parts.append(f"{prefix}subject_contains({w.leaf.value!r})")
+        elif w.leaf.name in {"subject_contains", "attachment_content_type_is"}:
+            parts.append(f"{prefix}{w.leaf.name}({w.leaf.value!r})")
         else:
             role, value = w.leaf.value
             parts.append(f"{prefix}{w.leaf.name}({role}, {value!r})")
@@ -631,8 +637,14 @@ def _aggregate_result(text: str, output: AggregateMessagesOutput) -> CallToolRes
     """``tool_result`` without ``incomplete_from_messages`` for a
     dimension that does not read the From list (it is ``None`` there)."""
     result = tool_result(text, output)
-    if output.incomplete_from_messages is None and result.structured_content is not None:
-        result.structured_content.pop("incomplete_from_messages", None)
+    if result.structured_content is not None:
+        for field in (
+            "incomplete_from_messages",
+            "incomplete_recipient_messages",
+            "incomplete_attachment_type_messages",
+        ):
+            if getattr(output, field) is None:
+                result.structured_content.pop(field, None)
     return result
 
 
@@ -1870,7 +1882,14 @@ def register_retrieval_tools(server, db):
     @timings.timed_tool("aggregate_messages")
     async def aggregate_messages(
         group_by: Literal[
-            "sender_address", "sender_domain", "folder", "year", "month", "authority_class"
+            "sender_address",
+            "sender_domain",
+            "recipient_domain",
+            "attachment_content_type",
+            "folder",
+            "year",
+            "month",
+            "authority_class",
         ],
         sender: str | None = None,
         recipient: str | None = None,
@@ -1917,7 +1936,20 @@ def register_retrieval_tools(server, db):
         matched messages without a date; it is zero under sent/occurred, where
         those messages are indeterminate even without date bounds.
 
-        A group's ``messages`` equals query_messages' total_matches
+        recipient_domain counts a message once per observed To/Cc domain.
+        attachment_content_type counts it once per current declared MIME type;
+        its distinct_attachment_ids includes only payloads of that type.
+        incomplete_recipient_messages and incomplete_attachment_type_messages
+        count eligible messages whose further memberships may be missing.
+        A null MIME group means no observed current type, not no attachments.
+        MIME labels are displayed at most 500 characters; value_clipped marks
+        truncation or decoder substitution. Full types remain separate SQL
+        groups. Clipped labels cannot be used as exact follow-up selectors.
+        attachment_content_type_is selects an unclipped type through where;
+        current positives are true, exhaustive absence false, otherwise unknown.
+
+        For keys accepted by the group's selector, its ``messages`` equals
+        query_messages' total_matches
         for the same filters plus the group's own (sender address or
         domain as a where address_is / domain_is leaf on from, folder,
         the UTC year or month as a date range, or authority_class).
@@ -1942,7 +1974,8 @@ def register_retrieval_tools(server, db):
         recounts, so mail indexed between pages can shift groups.
 
         Args:
-            group_by: sender_address, sender_domain, folder, year,
+            group_by: sender_address, sender_domain, recipient_domain,
+                      attachment_content_type, folder, year,
                       month or authority_class (selected evidence clock, UTC).
             sender: As in query_messages.
             recipient: As in query_messages.
@@ -2035,6 +2068,11 @@ def register_retrieval_tools(server, db):
         timings.count("returned", len(page.groups))
         if page.incomplete_from_messages is not None:
             timings.count("incomplete_from_messages", page.incomplete_from_messages)
+        for field in ("incomplete_recipient_messages", "incomplete_attachment_type_messages"):
+            if (count := getattr(page, field)) is not None:
+                timings.count(field, count)
+        clipped_values = sum(g.value_clipped for g in page.groups)
+        timings.count("clipped_values", clipped_values)
         timings.count("undated_messages", page.undated_messages)
         timings.count(
             "attachment_inventory_unknown_messages", page.attachment_inventory_unknown_messages
@@ -2057,15 +2095,17 @@ def register_retrieval_tools(server, db):
             indeterminate=page.indeterminate,
             total_groups=page.total_groups,
             incomplete_from_messages=page.incomplete_from_messages,
+            incomplete_recipient_messages=page.incomplete_recipient_messages,
+            incomplete_attachment_type_messages=page.incomplete_attachment_type_messages,
             returned=len(page.groups),
             offset=page.offset,
             has_more=page.has_more,
             next_cursor=page.next_cursor,
             groups=[
                 MessageGroupRow(
-                    # Never cut: the value is the group's identity and
-                    # the exact follow-up filter (review round 1).
+                    # MIME display is bounded after full-value grouping/paging.
                     value=g.value,
+                    value_clipped=g.value_clipped,
                     period=g.period,
                     active_periods=g.active_periods,
                     distinct_message_ids=g.distinct_message_ids,
@@ -2117,6 +2157,21 @@ def register_retrieval_tools(server, db):
                 f"{page.incomplete_from_messages} messages have an incomplete From list; "
                 "further sender groups or memberships may be missing."
             )
+        if page.incomplete_recipient_messages:
+            lines.append(
+                f"{page.incomplete_recipient_messages} eligible messages have incomplete To/Cc lists; "
+                "further recipient groups or memberships may be missing."
+            )
+        if page.incomplete_attachment_type_messages:
+            lines.append(
+                f"{page.incomplete_attachment_type_messages} eligible messages have unknown exhaustive "
+                "attachment inventories; further type groups or memberships may be missing."
+            )
+        if clipped_values:
+            lines.append(
+                f"{clipped_values} MIME group values are clipped display labels, not exact selectors; "
+                "groups sharing a displayed prefix remain separate."
+            )
         if not page.groups:
             lines.append(f"groups: {page.total_groups} (returned 0)")
             if page.offset:
@@ -2138,6 +2193,8 @@ def register_retrieval_tools(server, db):
         lines.append("")
         for i, row in enumerate(output.groups, first):
             label = row.value if row.value is not None else _NO_VALUE_LABELS[page.group_by]
+            if row.value_clipped:
+                label += " [clipped display label]"
             if page.period_breakdown:
                 label += f" / {row.period or 'no date evidence'}"
             line = (
