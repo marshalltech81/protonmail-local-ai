@@ -121,6 +121,10 @@ CREATE INDEX idx_messages_message_effective ON messages(message_id, effective_at
 CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
 CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
 CREATE INDEX idx_messages_effective ON messages(effective_at);
+CREATE INDEX idx_messages_sent ON messages(sent_at, claimant_id)
+    WHERE sent_at_status = 'parsed';
+CREATE INDEX idx_messages_occurred ON messages(occurred_at, claimant_id)
+    WHERE (occurred_at IS NOT NULL) = 1;
 CREATE INDEX idx_messages_filepath ON messages(filepath);
 CREATE TABLE message_participants (
     claimant_id TEXT NOT NULL,

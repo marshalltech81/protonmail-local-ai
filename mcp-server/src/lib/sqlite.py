@@ -1448,6 +1448,46 @@ def _record_clock(record: MessageRecord | AttachmentOccurrenceRecord, basis: Dat
     return clock
 
 
+def _clock_page_predicate(
+    where_sql: str,
+    params: list,
+    basis: DateBasis,
+    leaves: Sequence[Leaf],
+    *,
+    where: Sequence[WhereLeaf] = (),
+    has_cursor: bool = False,
+) -> tuple[str, list]:
+    """Add indexable clock terms only to definite-match pages (#1123).
+
+    Mandatory ``dated`` already excludes unassessed/missing clocks. The
+    sent guard permits raw ordering without changing evidence. The occurred
+    guard exactly matches its partial index; its Boolean-equality form keeps
+    that index out of existing count plans on supported SQLite versions.
+    Keep counts, evidence predicates and cursor digests on their original SQL.
+    """
+    page_params = list(params)
+    if basis.page_guard:
+        # Compile mandatory bounds separately for pages; explicit Boolean terms
+        # still go through their unchanged compiler. Counts keep the original SQL.
+        page_leaves = [leaf for leaf in leaves if leaf.name not in (basis.from_leaf, basis.to_leaf)]
+        where_sql, page_params = _message_expression(page_leaves, where)
+        where_sql += f" AND {basis.page_guard}"
+        # Only normalized, mandatory selected-clock bounds can be copied here;
+        # a bound inside an explicit any/negate clause need not be true.
+        for leaf in leaves:
+            if leaf.name in (basis.from_leaf, basis.to_leaf):
+                op = ">=" if leaf.name == basis.from_leaf else "<="
+                clock = basis.page_clock
+                if has_cursor and leaf.name == basis.to_leaf:
+                    # A scalar upper range can win over the tuple cursor and
+                    # scan an entire timestamp tie. Keep the upper bound true,
+                    # but let only the cursor supply the index's upper seek.
+                    clock = f"CASE WHEN 1 THEN {clock} END"
+                where_sql += f" AND ({clock}) {op} ?"
+                page_params.append(leaf.value)
+    return where_sql, page_params
+
+
 def _encode_cursor(digest: str, last: MessageRecord, offset: int, basis: DateBasis) -> str:
     payload = json.dumps(
         {"v": 2, "q": digest, "s": _record_clock(last, basis), "m": last.claimant_id, "o": offset}
@@ -4935,15 +4975,16 @@ class Database:
         # A cursor is only meaningful for the predicates and the ordering
         # it was issued under; bind it to a digest of both.
         digest = leaf_digest(leaves, basis.name, where)
-        clock = basis.clock
-        page_where_sql = where_sql
-        page_params = list(params)
+        clock = basis.page_clock
+        page_where_sql, page_params = _clock_page_predicate(
+            where_sql, params, basis, leaves, where=where, has_cursor=bool(cursor)
+        )
         offset = 0
         if cursor:
             last_at, last_id, offset = _decode_cursor(cursor, digest)
             # Row-value form: SQLite seeks idx_messages_effective to the
             # cursor; the equivalent OR expansion sorted every earlier row.
-            # ``sent_at`` and ``occurred_at`` have no index yet (#1123).
+            # Selected clocks have composite indexes including the claimant tie-break.
             page_where_sql += f" AND ({clock}, m.claimant_id) < (?, ?)"
             page_params += [last_at, last_id]
 
@@ -5439,20 +5480,23 @@ class Database:
         filters, clauses, clause_params = _attachment_clauses(
             filename, content_type, extraction_status, claimant_id, thread_id
         )
-        message_sql, params = compile_leaves(leaves)
+        message_sql, message_params = compile_leaves(leaves)
         where_sql = " AND ".join([message_sql, *clauses])
-        params += clause_params
+        params = [*message_params, *clause_params]
         digest = _attachment_digest(leaves, filters, basis.name)
 
-        page_where_sql = where_sql
-        page_params = list(params)
+        page_message_sql, page_params = _clock_page_predicate(
+            message_sql, message_params, basis, leaves, has_cursor=bool(cursor)
+        )
+        page_where_sql = " AND ".join([page_message_sql, *clauses])
+        page_params += clause_params
         offset = 0
         if cursor:
             last_at, last_claimant, last_occurrence, offset = _decode_attachment_cursor(
                 cursor, digest
             )
             page_where_sql += (
-                f" AND ({basis.clock}, a.claimant_id, a.attachment_occurrence_id) < (?, ?, ?)"
+                f" AND ({basis.page_clock}, a.claimant_id, a.attachment_occurrence_id) < (?, ?, ?)"
             )
             page_params += [last_at, last_claimant, last_occurrence]
         # Only a leaf that can be unknown makes the indeterminate count
@@ -5490,7 +5534,7 @@ class Database:
             # occurrences only.
             rows = conn.execute(
                 "WITH page AS MATERIALIZED ( "  # nosec B608
-                f"SELECT a.attachment_occurrence_id AS occ, {basis.clock} AS clock, "
+                f"SELECT a.attachment_occurrence_id AS occ, {basis.page_clock} AS clock, "
                 f"a.claimant_id AS cid {_ATTACHMENT_FROM} WHERE {page_where_sql} "
                 "ORDER BY clock DESC, cid DESC, occ DESC LIMIT ? ) "
                 f"SELECT {_OCCURRENCE_COLUMNS} "

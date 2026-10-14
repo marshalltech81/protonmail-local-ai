@@ -526,6 +526,8 @@ class DateBasis:
     ``dated`` leaf so every row of the page has a place in the ordering.
     The effective clock is never NULL (``effective_at`` falls back to
     ``first_indexed_at``), but its bound is (#1080).
+    ``page_clock`` and ``page_guard`` permit indexable ordering of definite
+    matches only; they never replace the evidence clock in counts or leaves.
     """
 
     name: str
@@ -534,6 +536,8 @@ class DateBasis:
     from_leaf: str
     to_leaf: str
     nullable: bool
+    page_clock: str
+    page_guard: str = ""
 
 
 DEFAULT_DATE_BASIS = "effective"
@@ -548,10 +552,27 @@ DATE_BASES: dict[str, DateBasis] = {
             "effective_from",
             "effective_to",
             False,
+            "m.effective_at",
         ),
-        DateBasis("sent", SENT_CLOCK_SQL, SENT_CLOCK_SQL, "sent_from", "sent_to", True),
         DateBasis(
-            "occurred", "m.occurred_at", "m.occurred_at", "occurred_from", "occurred_to", True
+            "sent",
+            SENT_CLOCK_SQL,
+            SENT_CLOCK_SQL,
+            "sent_from",
+            "sent_to",
+            True,
+            "m.sent_at",
+            "m.sent_at_status = 'parsed'",
+        ),
+        DateBasis(
+            "occurred",
+            "m.occurred_at",
+            "m.occurred_at",
+            "occurred_from",
+            "occurred_to",
+            True,
+            "m.occurred_at",
+            "(m.occurred_at IS NOT NULL) = 1",
         ),
     )
 }

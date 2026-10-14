@@ -336,8 +336,8 @@ schema change needs a numbered migration.
    stays unknown (#1080). Per decision 35 the effective time stays the
    default; `date_basis` chooses `sent` or `occurred` for message and
    attachment listings (#1150). Keyset paging is retained; sent and delivery
-   clock pages scan and sort under the current schema. Index optimization
-   remains #1123.
+   clock pages use partial date-and-claimant indexes (#1123); attachment
+   joins can still sort.
    `internal` still waits on #1092 (item 5). Bitemporal claims
    wait for Phase 5.
 4. **Deletion/retention semantics.** Mirror is the default, archive
@@ -367,12 +367,11 @@ schema change needs a numbered migration.
    and attachment_text_words (#1091). `get_mailbox_status` reports
    every registered leaf's query capability from schema fields and stored
    evidence, with available, unassessed and missing message counts (#1093).
+   Selected-clock page indexes are served by #1123, with unchanged count/evidence
+   predicates and missing-clock handling; attachment joins can still sort.
    **Open, in order:**
    the further dimensions of #823 (its clocks, temporal statistics and explicit
-   identity counts are served by #1338); the
-   index optimization for selected clocks (#1123; #1150 serves
-   `date_basis` for both listings, retaining keyset paging with scan-and-sort
-   under the current schema and counting missing clocks as indeterminate); leaves
+   identity counts are served by #1338); leaves
    that wait on the evidence model (#1090 Bcc, #1092 internal date).
    Omitted by decision: IMAP UID,
    KEYWORD, DRAFT and DELETED.
@@ -885,8 +884,9 @@ superseded entries keep their number and one line.
     streaming reader reports an exact `total_chars` on every page;
     `date_basis` for both listing tools selects effective, sent or
     delivery time and reports missing selected clocks as indeterminate
-    (#1150, #796). Keyset paging is retained with scan-and-sort for
-    sent and delivery clocks under the current schema; index optimization is #1123.
+    (#1150, #796). Selected-clock listing pages use partial date-and-claimant
+    indexes (#1123); attachment joins can still sort and counts retain their
+    evidence predicates.
     Per-message completeness flags keep a leaf from answering a
     confident "no" on incomplete data: a stored match still answers
     yes, and finding nothing answers "can't tell" unless the relevant
@@ -1183,9 +1183,9 @@ superseded entries keep their number and one line.
 54. **Selected query clocks and paging (2026-10-13, #1150):** the owner
     approved serving `effective`, `sent` and `occurred` on
     `query_messages` and `query_attachments`, retaining keyset paging
-    with scan-and-sort for `sent` and `occurred` under the current
-    schema. Missing selected clocks remain indeterminate. Index
-    optimization stays in #1123; new clock indexes are not a
+    with scan-and-sort for `sent` and `occurred` in the initial implementation.
+    Missing selected clocks remain indeterminate. Later page optimization
+    is decision 57 (#1123); new clock indexes were not a
     correctness prerequisite. The Opus 5.5 and Codex GPT-6.1 Sol
     panel agreed. The synthetic timings establish neither complete-walk
     performance nor tail-latency or concurrency limits.
@@ -1211,6 +1211,19 @@ superseded entries keep their number and one line.
     Full MIME values define groups, but their displayed labels are bounded
     and explicitly marked when clipped. Period breakdown remains sender-only;
     the existing schema supplies the evidence.
+
+57. **Selected-clock page indexes (2026-10-14, #1123):** the owner
+    approved the Opus 5.5/GPT-6.1 Sol panel's common design: partial
+    `(sent_at, claimant_id)` for parsed send dates and
+    `(occurred_at, claimant_id)` under the exact Boolean-equality non-null
+    guard, shared structured page clocks/guards and normalized mandatory
+    bounds, with evidence predicates, count SQL and cursor digests unchanged.
+    No reparse or re-embedding is needed. The panel's remaining split was
+    universal latency parity versus representative regression gates; the owner
+    accepted the recommendation with representative gates and investigation
+    of measured regressions. Attachment joins can still sort. Migration
+    versions remain contiguous and must be coordinated with pending
+    occurrence-cutover and collection-state work.
 
 ## Notes for Agents
 
