@@ -2174,6 +2174,7 @@ def _phase2c_commit_vectors(
             dropped, dropped_slices = db.delete_attachment_occurrences(
                 msg.claimant_id, state.stale_occurrences, purged_extractions
             )
+            db.set_attachment_rows_current(msg.claimant_id, INDEXER_ATTACHMENT_EXTRACTION_ENABLED)
             # Replace the Phase 1 seed thread vector. Three cases:
             #   1. Thread now has chunks (this message contributed
             #      some, or earlier messages already had them) → use

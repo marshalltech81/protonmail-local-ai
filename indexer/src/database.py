@@ -182,7 +182,9 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # copy of a message as its own occurrence, seeded with one per message
 # whose file record carries its hash, then a reparse; dormant until the
 # readers move to it (``migrations/0014_account_occurrences.sql``).
-SCHEMA_VERSION = 14
+# v15 (#1338): whether attachment occurrence rows belong to the current parse,
+# committed in phase 2c; NULL while pending, 0 when extraction was disabled.
+SCHEMA_VERSION = 15
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -1155,6 +1157,7 @@ class Database:
                 attachments_manifest_complete INTEGER
                     CHECK (attachments_manifest_complete IN (0, 1)),
                 body_complete INTEGER CHECK (body_complete IN (0, 1)),
+                attachment_rows_current INTEGER CHECK (attachment_rows_current IN (0, 1)),
                 -- The parse's nonzero ``PARSE_CAPS`` counts as a JSON
                 -- object of fixed names to integers, never content;
                 -- NULL before v5's reparse.
@@ -4087,6 +4090,15 @@ class Database:
                 (int(complete), claimant_id),
             )
 
+    @_synchronized
+    def set_attachment_rows_current(self, claimant_id: str, current: bool) -> None:
+        """Commit current-inventory evidence with phase 2c's occurrence writes."""
+        with self.transaction():
+            self._conn.execute(
+                "UPDATE messages SET attachment_rows_current = ? WHERE claimant_id = ?",
+                (int(current), claimant_id),
+            )
+
     def _bind_occurrence(
         self, cur: sqlite3.Cursor, claimant_id: str, filepath: str, *, provenance: str
     ) -> None:
@@ -4256,6 +4268,7 @@ class Database:
                 attachments_manifest_complete = excluded.attachments_manifest_complete,
                 -- Not known until phase 2c commits this parse's chunks.
                 body_complete = NULL,
+                attachment_rows_current = NULL,
                 caps_json = excluded.caps_json,
                 headers_complete = excluded.headers_complete
             """,

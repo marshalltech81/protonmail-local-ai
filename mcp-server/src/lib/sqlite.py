@@ -1264,7 +1264,7 @@ class MessageGroup:
     whose ``value`` on the dimension is this one (``None``: no value,
     see ``Database.aggregate_messages``), and how many it leaves
     undecided. The thread count, dates and attachment count cover the
-    matches only; ``first_at`` / ``last_at`` (effective time) and
+    matches only; ``first_at`` / ``last_at`` (selected evidence clock) and
     ``display_name`` are ``None`` without a match."""
 
     value: str | None
@@ -1275,6 +1275,13 @@ class MessageGroup:
     with_attachments: int
     indeterminate: int
     display_name: str | None = None
+    period: str | None = None
+    active_periods: int = 0
+    distinct_message_ids: int = 0
+    distinct_attachment_ids: int = 0
+    eligible_total: int = 0
+    undated_messages: int = 0
+    attachment_inventory_unknown_messages: int = 0
 
 
 @dataclass
@@ -1301,6 +1308,12 @@ class GroupPage:
     # ``AUTHORITY_EXCLUDED_FOLDERS``. It includes a message with no
     # stored From row, which is also in the null group.
     incomplete_from_messages: int | None = None
+    date_basis: str = "effective"
+    period: str = "month"
+    period_breakdown: bool = False
+    eligible_total: int = 0
+    undated_messages: int = 0
+    attachment_inventory_unknown_messages: int = 0
 
 
 def _sql_casefold(value):
@@ -1464,11 +1477,20 @@ def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
     return data["s"], data["m"], data["o"]
 
 
-def _aggregate_digest(group_by: str, leaves: Sequence[Leaf], where: Sequence[WhereLeaf]) -> str:
+def _aggregate_digest(
+    group_by: str,
+    leaves: Sequence[Leaf],
+    where: Sequence[WhereLeaf],
+    date_basis: str = "effective",
+    period: str = "month",
+    period_breakdown: bool = False,
+) -> str:
     """The ``aggregate_messages`` cursor digest: the tool, the dimension
     and ``query_messages``' digest of the same filters (``leaf_digest``),
     so a cursor only pages the grouping it was issued for."""
-    canonical = ["aggregate_messages", group_by, leaf_digest(leaves, where=where)]
+    canonical: list[str | bool] = ["aggregate_messages", group_by, leaf_digest(leaves, where=where)]
+    if (date_basis, period, period_breakdown) != ("effective", "month", False):
+        canonical.extend([date_basis, period, period_breakdown])
     return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()[:16]
 
 
@@ -5088,6 +5110,9 @@ class Database:
         folder: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        date_basis: str | None = None,
+        period: str = "month",
+        period_breakdown: bool = False,
         has_attachments: bool | None = None,
         authority_class: str | None = None,
         seen: bool | None = None,
@@ -5109,7 +5134,7 @@ class Database:
         tool's ``total_matches`` under the same filters plus the
         group's own: ``where`` ``address_is`` / ``domain_is`` on the
         From role, ``folder``, a date range spanning the UTC year or
-        month (effective time), or ``authority_class``. A message the
+        month (selected evidence clock), or ``authority_class``. A message the
         expression leaves undecided is counted in its group's
         ``indeterminate``, never its ``messages``. A message with no
         value on the dimension is in the group whose value is ``None``:
@@ -5119,6 +5144,13 @@ class Database:
         From address. A message with several From addresses counts in
         each of their groups, so those groups can sum to more than
         ``total_matches``.
+
+        period selects UTC month/year buckets. period_breakdown pages
+        sender/domain x period cells; summary rows report active periods.
+        Identity counts use definite matches only. Attachment IDs come
+        from current occurrence rows, including partial manifests, with
+        unknown exhaustive inventories disclosed separately. eligible_total
+        includes both definite and indeterminate messages, once globally.
 
         Bounded work: one statement in one read snapshot. It evaluates
         the expression once per message to filter and once more per
@@ -5134,6 +5166,15 @@ class Database:
             raise InvalidFilterError(
                 "group_by", f"group_by must be one of {', '.join(AGGREGATE_DIMENSIONS)}"
             )
+        basis = DATE_BASES[normalize_date_basis(date_basis)]
+        if period not in ("month", "year"):
+            raise InvalidFilterError("period", "period must be month or year")
+        if type(period_breakdown) is not bool:
+            raise InvalidFilterError("period_breakdown", "period_breakdown must be a boolean")
+        if period_breakdown and group_by not in ("sender_address", "sender_domain"):
+            raise InvalidFilterError(
+                "period_breakdown", "period_breakdown requires sender_address or sender_domain"
+            )
         leaves = query_messages_leaves(
             sender=sender,
             recipient=recipient,
@@ -5143,6 +5184,7 @@ class Database:
             folder=folder,
             date_from=date_from,
             date_to=date_to,
+            date_basis=basis.name,
             has_attachments=has_attachments,
             authority_class=authority_class,
             seen=seen,
@@ -5152,7 +5194,7 @@ class Database:
             size_max=size_max,
         )
         expr, expr_params = _message_expression(leaves, where)
-        digest = _aggregate_digest(group_by, leaves, where)
+        digest = _aggregate_digest(group_by, leaves, where, basis.name, period, period_breakdown)
         offset = _decode_aggregate_cursor(cursor, digest) if cursor else 0
         rows_params = list(AUTHORITY_EXCLUDED_FOLDERS) if group_by == "authority_class" else []
         # Review round 3 (owner, 2026-10-08): for a sender dimension,
@@ -5170,53 +5212,98 @@ class Database:
                 )
                 incomplete_params = list(AUTHORITY_EXCLUDED_FOLDERS)
             incomplete_sql += ")"
-        # ``e`` is materialized so the expression is evaluated once per
-        # message it does not reject for ``ok``, not once per aggregate
-        # that reads it; ``g`` because the page and the group count both
-        # read it. One row always comes back, so a page past the last
-        # group still carries the totals.
+        # One filtered set and one read snapshot. Occurrence fan-out must
+        # not multiply message metrics or cause the predicates to run again.
+        bucket = f"substr({basis.bound}, 1, {7 if period == 'month' else 4})"
+        rows_sql = _GROUP_ROWS[group_by]
+        if period_breakdown and group_by == "sender_address":
+            rows_sql = rows_sql.replace(
+                "PARTITION BY value ORDER BY", "PARTITION BY value, bucket ORDER BY"
+            )
+        keys = "value, bucket" if period_breakdown else "value"
+        period_sql = "bucket" if period_breakdown else "NULL"
+        page_membership = "k.value IS p.value"
+        if period_breakdown:
+            page_membership += " AND k.bucket IS p.period"
         sql = (
             "WITH e AS MATERIALIZED (SELECT m.claimant_id AS cid, m.thread_id AS tid, "  # nosec B608
-            f"{EFFECTIVE_EVIDENCE_SQL} AS at, m.has_attachments AS att, m.folder AS folder, "
+            f"{basis.bound} AS at, {bucket} AS bucket, m.message_id AS mid, "
+            "m.has_attachments AS att, m.folder AS folder, "
             "m.sender_ambiguous AS sa, m.from_addresses_complete AS fc, "
+            "m.attachment_rows_current AS current, "
+            "(m.attachments_manifest_complete = 1 AND "
+            "(m.has_attachments = 0 OR m.attachment_rows_current = 1)) AS inventory_known, "
             f"({expr}) AS ok FROM messages m WHERE ({expr}) IS NOT 0), "
-            f"k AS ({_GROUP_ROWS[group_by]}), "
-            "g AS MATERIALIZED (SELECT value, TOTAL(ok IS 1) AS n, "
+            f"k AS MATERIALIZED ({rows_sql}), "
+            f"g AS MATERIALIZED (SELECT value, {period_sql} AS period, TOTAL(ok IS 1) AS n, "
             "COUNT(DISTINCT CASE WHEN ok IS 1 THEN tid END) AS threads, "
             "MIN(CASE WHEN ok IS 1 THEN at END) AS first_at, "
             "MAX(CASE WHEN ok IS 1 THEN at END) AS last_at, "
             "TOTAL(ok IS 1 AND att = 1) AS with_att, TOTAL(ok IS NULL) AS undecided, "
-            "MAX(CASE WHEN ok IS 1 THEN name END) AS name FROM k GROUP BY value), "
+            "MAX(CASE WHEN ok IS 1 THEN name END) AS name, "
+            "COUNT(DISTINCT CASE WHEN ok IS 1 THEN bucket END) AS active_periods, "
+            "COUNT(DISTINCT CASE WHEN ok IS 1 THEN mid END) AS message_ids, "
+            "TOTAL(ok IS 1 AND at IS NULL) AS undated, "
+            "TOTAL(ok IS 1 AND inventory_known IS NOT TRUE) AS unknown_inventory "
+            f"FROM k GROUP BY {keys}), "
+            "p AS MATERIALIZED (SELECT * FROM g ORDER BY n DESC, value IS NULL, value, "
+            "period IS NULL, period LIMIT ? OFFSET ?), "
+            # Cap sender memberships before occurrence expansion. Both sides
+            # can be attacker-controlled; a small page must not count every
+            # address x attachment combination in the whole population.
+            "kp AS MATERIALIZED (SELECT k.* FROM p CROSS JOIN k "
+            f"WHERE {page_membership} AND k.ok IS 1 AND k.current = 1 AND k.att = 1), "
+            f"ga AS (SELECT value, {period_sql} AS period, "
+            "COUNT(DISTINCT a.attachment_id) AS attachment_ids "
+            "FROM kp CROSS JOIN attachments a ON a.claimant_id = kp.cid "
+            f"GROUP BY {keys}), "
             "t AS (SELECT TOTAL(ok IS 1) AS matches, TOTAL(ok IS NULL) AS undecided, "
-            f"(SELECT COUNT(*) FROM g) AS ngroups, {incomplete_sql} AS incomplete FROM e) "
-            "SELECT t.matches, t.undecided, t.ngroups, pg.value, pg.n, pg.threads, "
-            "pg.first_at, pg.last_at, pg.with_att, pg.undecided, pg.name, t.incomplete "
-            "FROM t LEFT JOIN (SELECT * FROM g ORDER BY n DESC, value IS NULL, value "
-            "LIMIT ? OFFSET ?) pg ON 1 ORDER BY pg.n DESC, pg.value IS NULL, pg.value"
+            f"(SELECT COUNT(*) FROM g) AS ngroups, {incomplete_sql} AS incomplete, "
+            "TOTAL(ok IS 1 AND at IS NULL) AS undated, "
+            "TOTAL(ok IS 1 AND inventory_known IS NOT TRUE) AS unknown_inventory FROM e) "
+            "SELECT t.matches, t.undecided AS total_undecided, t.ngroups, pg.*, t.incomplete, "
+            "t.undated AS total_undated, t.unknown_inventory AS total_unknown_inventory, "
+            "COALESCE(ga.attachment_ids, 0) AS attachment_ids "
+            "FROM t LEFT JOIN p pg ON 1 "
+            "LEFT JOIN ga ON ga.value IS pg.value AND ga.period IS pg.period "
+            "ORDER BY pg.n DESC, pg.value IS NULL, pg.value, pg.period IS NULL, pg.period"
         )
-        params = [*expr_params, *expr_params, *rows_params, *incomplete_params, limit + 1, offset]
+        params = [*expr_params, *expr_params, *rows_params, limit + 1, offset, *incomplete_params]
         with closing(self._connect()) as conn:
             rows = conn.execute(sql, params).fetchall()
         matches, undecided, total_groups = (int(n) for n in rows[0][:3])
-        incomplete = None if rows[0][11] is None else int(rows[0][11])
+        incomplete = None if rows[0]["incomplete"] is None else int(rows[0]["incomplete"])
         groups = [
             MessageGroup(
-                value=r[3],
-                messages=int(r[4]),
-                threads=r[5],
-                first_at=r[6],
-                last_at=r[7],
-                with_attachments=int(r[8]),
-                indeterminate=int(r[9]),
-                display_name=r[10],
+                value=r["value"],
+                period=r["period"],
+                messages=int(r["n"]),
+                threads=r["threads"],
+                first_at=r["first_at"],
+                last_at=r["last_at"],
+                with_attachments=int(r["with_att"]),
+                indeterminate=int(r["undecided"]),
+                display_name=r["name"],
+                active_periods=r["active_periods"],
+                distinct_message_ids=r["message_ids"],
+                distinct_attachment_ids=r["attachment_ids"],
+                eligible_total=int(r["n"] + r["undecided"]),
+                undated_messages=int(r["undated"]),
+                attachment_inventory_unknown_messages=int(r["unknown_inventory"]),
             )
             for r in rows
-            if r[4] is not None
+            if r["n"] is not None
         ]
         has_more = len(groups) > limit
         groups = groups[:limit]
         return GroupPage(
             group_by=group_by,
+            date_basis=basis.name,
+            period=period,
+            period_breakdown=period_breakdown,
+            eligible_total=matches + undecided,
+            undated_messages=int(rows[0]["total_undated"]),
+            attachment_inventory_unknown_messages=int(rows[0]["total_unknown_inventory"]),
             total_matches=matches,
             indeterminate=undecided,
             total_groups=total_groups,

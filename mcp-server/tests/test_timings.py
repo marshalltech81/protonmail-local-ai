@@ -714,6 +714,8 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
             "groups": 1,
             "returned": 1,
             "incomplete_from_messages": 0,
+            "undated_messages": 0,
+            "attachment_inventory_unknown_messages": 0,
         },
     ),
     "query_attachments": (

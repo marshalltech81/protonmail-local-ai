@@ -1880,6 +1880,9 @@ def register_retrieval_tools(server, db):
         folder: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        date_basis: DateBasisArgument = DEFAULT_DATE_BASIS,
+        period: Literal["month", "year"] = "month",
+        period_breakdown: bool = False,
         has_attachments: bool | None = None,
         authority_class: str | None = None,
         seen: bool | None = None,
@@ -1899,9 +1902,22 @@ def register_retrieval_tools(server, db):
         for volume questions ("top senders", "mail per month", "which
         folders") instead of paging query_messages and counting.
 
-        Takes query_messages' filters except date_basis (effective time
-        only), with the same meaning under that clock,
-        so a group's ``messages`` equals query_messages' total_matches
+        Takes query_messages' filters and date_basis with the same meaning.
+        period selects UTC month or year (default month); active_periods
+        counts dated periods with definite matches. period_breakdown=true
+        returns paginated sender_address or sender_domain x period cells,
+        including a null period for missing dates, instead of summary groups.
+        eligible_total is matches + indeterminate, each message once globally;
+        sender groups may overlap. Distinct Message-IDs and attachment identities
+        do not prove distinct reports. Attachment identities include current
+        positive observations from partial manifests; when
+        attachment_inventory_unknown_messages is nonzero they are lower bounds.
+        Unknown inventories include pending reparses and extraction-disabled
+        passes; stale occurrence rows never contribute. undated_messages counts
+        matched messages without a date; it is zero under sent/occurred, where
+        those messages are indeterminate even without date bounds.
+
+        A group's ``messages`` equals query_messages' total_matches
         for the same filters plus the group's own (sender address or
         domain as a where address_is / domain_is leaf on from, folder,
         the UTC year or month as a date range, or authority_class).
@@ -1921,14 +1937,13 @@ def register_retrieval_tools(server, db):
         many groups (total_groups) you will read. Prefer the smallest
         page that answers the question (the top groups for a "top N"
         question). To page, call again with the SAME filters and
-        group_by plus ``cursor`` set to ``next_cursor``. Each page
+        group_by, date_basis, period and period_breakdown plus ``cursor`` set
+        to ``next_cursor``. Each page
         recounts, so mail indexed between pages can shift groups.
 
         Args:
             group_by: sender_address, sender_domain, folder, year,
-                      month or authority_class (dates are the effective
-                      time, occurred_at else sent_at, in UTC; null
-                      without either).
+                      month or authority_class (selected evidence clock, UTC).
             sender: As in query_messages.
             recipient: As in query_messages.
             participant: As in query_messages.
@@ -1937,6 +1952,9 @@ def register_retrieval_tools(server, db):
             folder: As in query_messages; without it Trash is left out.
             date_from: As in query_messages.
             date_to: As in query_messages.
+            date_basis: effective, sent or occurred, as in query_messages.
+            period: UTC calendar month (default) or year for active periods and cells.
+            period_breakdown: Return sender/domain x period cells instead of summaries.
             has_attachments: As in query_messages.
             authority_class: As in query_messages.
             seen: As in query_messages.
@@ -1968,15 +1986,35 @@ def register_retrieval_tools(server, db):
         log_tool_call(
             log,
             "aggregate_messages",
-            {"group_by": group_by, **args, "where": where, "limit": limit, "cursor": cursor},
+            {
+                "group_by": group_by,
+                **args,
+                "date_basis": date_basis,
+                "period": period,
+                "period_breakdown": period_breakdown,
+                "where": where,
+                "limit": limit,
+                "cursor": cursor,
+            },
         )
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_AGGREGATE_GROUPS)
         try:
-            bounds = date_bounds(*validate_date_range(date_from, date_to))
+            if date_basis is None:
+                raise InvalidFilterError("date_basis", "date_basis must be a string")
+            date_basis = normalize_date_basis(date_basis)
+            lower, upper = validate_date_range(date_from, date_to)
+            bounds = (
+                QueryDateBounds(date_from=lower, date_to=upper, date_basis=date_basis)
+                if lower is not None or upper is not None
+                else None
+            )
             where_leaves = normalize_where(where) if where is not None else []
             page = await asyncio.to_thread(
                 db.aggregate_messages,
                 group_by=group_by,
+                date_basis=date_basis,
+                period=period,
+                period_breakdown=period_breakdown,
                 **args,
                 where=where_leaves,
                 limit=limit,
@@ -1997,12 +2035,22 @@ def register_retrieval_tools(server, db):
         timings.count("returned", len(page.groups))
         if page.incomplete_from_messages is not None:
             timings.count("incomplete_from_messages", page.incomplete_from_messages)
+        timings.count("undated_messages", page.undated_messages)
+        timings.count(
+            "attachment_inventory_unknown_messages", page.attachment_inventory_unknown_messages
+        )
         uses = _filter_uses(args)
         if page.indeterminate:
-            for key, _ in _indeterminate_cause_entries(uses, where_leaves):
+            for key, _ in _indeterminate_cause_entries(uses, where_leaves, date_basis):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = AggregateMessagesOutput(
             group_by=page.group_by,
+            date_basis=page.date_basis,
+            period=page.period,
+            period_breakdown=page.period_breakdown,
+            eligible_total=page.eligible_total,
+            undated_messages=page.undated_messages,
+            attachment_inventory_unknown_messages=page.attachment_inventory_unknown_messages,
             filters=uses,
             date_bounds=bounds,
             total_matches=page.total_matches,
@@ -2018,6 +2066,13 @@ def register_retrieval_tools(server, db):
                     # Never cut: the value is the group's identity and
                     # the exact follow-up filter (review round 1).
                     value=g.value,
+                    period=g.period,
+                    active_periods=g.active_periods,
+                    distinct_message_ids=g.distinct_message_ids,
+                    distinct_attachment_ids=g.distinct_attachment_ids,
+                    eligible_total=g.eligible_total,
+                    undated_messages=g.undated_messages,
+                    attachment_inventory_unknown_messages=g.attachment_inventory_unknown_messages,
                     messages=g.messages,
                     threads=g.threads,
                     first_at=g.first_at,
@@ -2034,13 +2089,25 @@ def register_retrieval_tools(server, db):
         parts = [_describe_filters(uses, none=""), *_describe_where(where_leaves)]
         lines = [
             f"group_by: {page.group_by}",
+            f"date_basis: {page.date_basis}; period: {page.period}; period_breakdown: {page.period_breakdown}",
             f"Query: {', '.join(p for p in parts if p) or _describe_filters([])}",
         ]
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
-        lines.append(f"total_matches: {page.total_matches}")
+        lines.append(f"total_matches: {page.total_matches}; eligible_total: {page.eligible_total}")
+        lines.append(
+            "Units: claimant messages, distinct Message-ID strings and distinct attachment payload identities; none proves distinct reports. Sender groups may overlap."
+        )
+        if page.undated_messages:
+            lines.append(
+                f"undated_messages: {page.undated_messages} (matched but without selected-clock date evidence)"
+            )
+        if page.attachment_inventory_unknown_messages:
+            lines.append(
+                f"attachment_inventory_unknown_messages: {page.attachment_inventory_unknown_messages}; groups with unknown inventories have lower-bound attachment identity counts."
+            )
         if page.indeterminate:
-            causes = _indeterminate_causes(uses, where_leaves)
+            causes = _indeterminate_causes(uses, where_leaves, date_basis)
             lines.append(
                 f"indeterminate: {page.indeterminate} (messages the filters could neither "
                 f"accept nor reject: {'; '.join(causes)}; in no group's message count)"
@@ -2066,19 +2133,27 @@ def register_retrieval_tools(server, db):
         if page.next_cursor:
             lines.append(f"next_cursor: {page.next_cursor}")
             lines.append(
-                "(Call again with the same filters, group_by and this cursor for the next page.)"
+                "(Call again with the same filters, group_by, date_basis, period, period_breakdown and this cursor for the next page.)"
             )
         lines.append("")
         for i, row in enumerate(output.groups, first):
             label = row.value if row.value is not None else _NO_VALUE_LABELS[page.group_by]
+            if page.period_breakdown:
+                label += f" / {row.period or 'no date evidence'}"
             line = (
                 f"{i}. {label}: {row.messages} messages, {row.threads} threads, "
-                f"{row.with_attachments} with attachments"
+                f"{row.with_attachments} with attachments, {row.active_periods} active periods, "
+                f"{row.distinct_message_ids} distinct Message-IDs, "
+                f"{row.distinct_attachment_ids} distinct attachment identities, eligible {row.eligible_total}"
             )
             if row.first_at:
                 line += f", {row.first_at} to {row.last_at}"
             if row.indeterminate:
                 line += f", indeterminate {row.indeterminate}"
+            if row.attachment_inventory_unknown_messages:
+                line += f", attachment identities are a lower bound ({row.attachment_inventory_unknown_messages} unknown inventories)"
+            if row.undated_messages:
+                line += f", undated {row.undated_messages}"
             if row.display_name is not None:
                 line += f", display name {row.display_name!r}"
             lines.append(line)
