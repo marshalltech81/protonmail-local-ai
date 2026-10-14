@@ -2080,11 +2080,12 @@ def register_retrieval_tools(server, db):
             log.error("aggregate_messages error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
-        timings.count("samples_returned", page.samples_returned)
-        timings.count(
-            "sample_subjects_clipped",
-            sum(s.subject_clipped for g in page.groups for s in g.samples),
-        )
+        if sample_per_group:
+            timings.count("samples_returned", page.samples_returned)
+            timings.count(
+                "sample_subjects_clipped",
+                sum(s.subject_clipped for g in page.groups for s in g.samples),
+            )
         timings.count("total_matches", page.total_matches)
         timings.count("indeterminate", page.indeterminate)
         timings.count("groups", page.total_groups)
