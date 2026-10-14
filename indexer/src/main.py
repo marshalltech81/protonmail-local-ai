@@ -1295,17 +1295,30 @@ class MaildirHandler(FileSystemEventHandler):
         # less real.
         verified_identity = None
         stale_occurrence: sqlite3.Row | None = None
+        # Set only when ``verify_rename_bytes`` actually read the
+        # destination's bytes and proved they are not the source
+        # occurrence's claimant (#1612 round 14): a caller reading
+        # ``stale_occurrence`` alone cannot tell that proven case apart
+        # from an inconclusive one (an unreadable destination, or
+        # metadata that alone ruled out trusting it without reading
+        # anything), which must not be treated as a confirmed mismatch.
+        rename_mismatch = False
         if occurrence is not None:
-            verified_identity = verify_rename_bytes(
+            verification = verify_rename_bytes(
                 self.db, src_path, dest_path, occurrence["claimant_id"]
             )
+            verified_identity = verification.identity
             take_case_1 = verified_identity is not None
             if not take_case_1:
                 stale_occurrence = occurrence
+                rename_mismatch = verification.mismatch
                 warn_rate_limited(
                     log,
                     "on_moved: %d rename's destination bytes did not match the "
-                    "source occurrence's claimant; treating as new mail",
+                    "source occurrence's claimant; treating as new mail"
+                    if rename_mismatch
+                    else "on_moved: %d rename's destination bytes could not be verified "
+                    "against the source occurrence's claimant; treating as new mail",
                     1,
                     level=logging.WARNING,
                     attachment=False,
@@ -1388,17 +1401,29 @@ class MaildirHandler(FileSystemEventHandler):
             "cur",
             "new",
         ) and self._is_reaped_or_deleted(dest_path)
-        if stale_occurrence is not None and trashed_destination:
+        if stale_occurrence is not None and trashed_destination and rename_mismatch:
             # This destination is skipped below, so nothing else will
             # ever revisit this rename: the periodic reconciliation scan
             # only retires an occurrence whose uniq resolves to no file
             # at all, never one whose uniq still resolves to *some*
-            # file, however mismatched (#1612 round 13). The watcher
-            # already confirmed the destination's bytes are not this
-            # occurrence's claimant — retire it now rather than leaving
-            # it active at a path that no longer exists.
+            # file, however mismatched (#1612 round 13). Gated on
+            # ``rename_mismatch``, not merely on ``not take_case_1``
+            # (#1612 round 14): the watcher confirmed, by actually
+            # reading the destination's bytes, that they are not this
+            # occurrence's claimant — an inconclusive check (an
+            # unreadable destination, or metadata alone) proves nothing
+            # and is left for a later reconciliation pass instead, the
+            # same as any other unverified rename. On a confirmed
+            # mismatch, retire the stale occurrence now rather than
+            # leaving it active at a path that no longer exists, and
+            # tombstone its claimant if that was its last live
+            # occurrence (``Reconciler.handle_moved``'s own rule for an
+            # ordinary trashed rename, #1612 round 14): without this,
+            # the deletion grace period would not start until the next
+            # reconciliation sweep, up to an hour by default.
             try:
-                self.db.retire_mismatched_rename(stale_occurrence["id"], src_path)
+                if self.db.retire_mismatched_rename(stale_occurrence["id"], src_path):
+                    self.db.mark_lost_messages(stale_occurrence["claimant_id"])
             except Exception as e:
                 log.error("retire_mismatched_rename failed: %s", type(e).__name__)
         if (

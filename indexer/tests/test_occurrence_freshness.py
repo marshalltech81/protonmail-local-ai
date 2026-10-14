@@ -333,7 +333,12 @@ class TestWatcherRenameVerification:
         """The metadata-based check: the source has an indexed_files
         record, but the race (something else wrote different content at
         the rename's destination between the OS rename and this event)
-        means the destination's bytes no longer match it."""
+        means the destination's metadata no longer matches it. Neither
+        side's bytes are ever read here (#1612 round 14): a metadata
+        mismatch alone is inconclusive, not a proven mismatch, the same
+        as an unreadable destination — see
+        ``test_an_inconclusive_check_onto_an_already_trashed_destination_does_not_retire``
+        for why that distinction matters."""
         box = Box(tmp_path)
         try:
             path = box.put("INBOX/cur/r2:2,S", _eml("before@example.test"))
@@ -355,7 +360,8 @@ class TestWatcherRenameVerification:
             assert box.db.find_active_occurrence(str(dest)) is None
             # Treated as new mail instead.
             assert queue.has_pending_row(str(dest))
-            assert "did not match" in caplog.text
+            assert "could not be verified" in caplog.text
+            assert "did not match" not in caplog.text
             assert MARKER not in caplog.text
         finally:
             box.close()
@@ -421,15 +427,35 @@ class TestWatcherRenameVerification:
         resolves to no file at all, never one whose uniq still resolves
         to *some* file, however mismatched. Without an explicit retire
         here, the stale occurrence would stay active at a path that no
-        longer exists, keeping the old message searchable forever."""
+        longer exists, keeping the old message searchable forever.
+
+        The replacement keeps the source's recorded size and mtime
+        (round 14: a metadata mismatch alone is inconclusive, not a
+        proven one, since neither side's bytes are read to produce it —
+        see ``test_an_inconclusive_check_...`` below; this is instead a
+        *hash*-verified mismatch, the only kind this retirement acts
+        on)."""
         box = Box(tmp_path)
         try:
-            path = box.put("INBOX/cur/r5:2,S", _eml("before@example.test"))
+            old_raw = _eml("before@example.test")
+            path = box.put("INBOX/cur/r5:2,S", old_raw)
             box.index(path)
-            # Content replaced out of band, then renamed in the same
-            # folder with the T flag added — the trashed-rename case the
-            # finding describes.
-            path.write_bytes(_eml("after@example.test", "a completely different message"))
+            stat_before = path.stat()
+            # Content replaced out of band (same size, same mtime —
+            # mbsync sets mtime from IMAP's INTERNALDATE, so two
+            # different messages can legitimately share one), then
+            # renamed in the same folder with the T flag added — the
+            # trashed-rename case the finding describes.
+            new_raw = _eml("after@example.test", body="a completely different payload")
+            pad = len(old_raw) - len(new_raw)
+            new_raw = (
+                new_raw[:-2] + b" " * pad + new_raw[-2:]
+                if pad > 0
+                else new_raw[: pad - 2] + new_raw[-2:]
+            )
+            assert len(new_raw) == len(old_raw) and new_raw != old_raw
+            path.write_bytes(new_raw)
+            os.utime(path, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
             dest = box.root / "INBOX/cur/r5:2,ST"
             path.rename(dest)
 
@@ -445,6 +471,50 @@ class TestWatcherRenameVerification:
             # replacement is still not indexed as new mail.
             assert not queue.has_pending_row(str(dest))
             assert "did not match" in caplog.text
+            assert MARKER not in caplog.text
+            # #1612 round 14: the claimant is tombstoned together with
+            # the retire, the same as ``Reconciler.handle_moved``'s own
+            # trashed-rename rule, so the deletion grace period starts
+            # at once rather than waiting for the next reconciliation
+            # sweep.
+            assert len(box.tombstones()) == 1
+        finally:
+            box.close()
+
+    def test_an_inconclusive_check_onto_an_already_trashed_destination_does_not_retire(
+        self, tmp_path, caplog
+    ):
+        """#1612 round 14: ``verify_rename_bytes`` returns ``None`` not
+        only for a proven mismatch, but also when the destination cannot
+        be read at verification time — here, simulating a race where the
+        file is gone again by the time the handler runs. The source
+        occurrence must stay active (left for a later reconciliation
+        pass, the same as any other unverified rename) rather than being
+        retired on an inconclusive result."""
+        box = Box(tmp_path)
+        try:
+            path = box.put("INBOX/cur/r6:2,S", _eml("before@example.test"))
+            box.index(path)
+            dest = box.root / "INBOX/cur/r6:2,ST"
+            path.rename(dest)
+            # The destination is unreadable at verification time (not a
+            # proven mismatch): simulates a race where it vanished again
+            # before the handler ran. ``is_trashed`` reads only the
+            # filename, so the ``T`` flag is still seen.
+            dest.unlink()
+
+            queue = IndexingQueue(box.db, max_attempts=3, base_backoff_seconds=0)
+            handler = main.MaildirHandler(box.db, queue, reconciler=box.reconciler)
+            with patch.object(main, "MAILDIR_PATH", box.root):
+                handler.on_moved(_moved(path, dest))
+
+            # Not retired: the occurrence is still active, at the old
+            # (now-missing) path, left for the reconciliation scan.
+            assert box.active() == [("INBOX/cur/r6:2,S", 0)]
+            assert len(box.tombstones()) == 0
+            assert not queue.has_pending_row(str(dest))
+            assert "could not be verified" in caplog.text
+            assert "did not match" not in caplog.text
             assert MARKER not in caplog.text
         finally:
             box.close()

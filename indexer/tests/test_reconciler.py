@@ -321,8 +321,10 @@ class TestSweepPaths:
         """The sweep runs before the startup walk; rescanning the whole
         folder for every stale path would be O(N^2) for N files renamed
         while the indexer was down (#246). Each directory is listed once
-        per sweep, by its walk, and a rename is verified from the
-        recorded file identity without reading the file (#1567)."""
+        per sweep, by its walk. A rename is admitted by the recorded
+        file identity as a fast shortcut, but is hash-verified before
+        being trusted (``_recorded_hash``, #1612 round 14) — a metadata
+        match alone is never proof."""
         count = 6
         for i in range(count):
             path = maildir / f"17000000{i:02d}.M{i}.host:2,S"
@@ -330,8 +332,6 @@ class TestSweepPaths:
             _index(path, db, threader)
             path.rename(path.with_name(path.name.replace(":2,S", ":2,RS")))
         import os
-
-        import src.occurrence_scan as scan_module
 
         listed: list[str] = []
         real_scandir = os.scandir
@@ -341,8 +341,6 @@ class TestSweepPaths:
             return real_scandir(path)
 
         monkeypatch.setattr(os, "scandir", counting_scandir)
-        hashed: list[Path] = []
-        monkeypatch.setattr(scan_module, "_sha256", lambda p: hashed.append(p) or "")
 
         result = sweep_paths(db, maildir_root=db.account.maildir_root)
 
@@ -359,7 +357,6 @@ class TestSweepPaths:
         }
         assert len(listed) == len(set(listed))
         assert str(maildir) in listed
-        assert hashed == []
 
     def test_does_not_tombstone_missing_files(self, db, threader, maildir):
         """sweep_paths is the always-on variant; a missing file's

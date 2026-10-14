@@ -4415,10 +4415,14 @@ left on the old path would be dropped as missing.
 The occurrence reconciliation scan (*Occurrence reconciliation* under
 *Deletion Reconciliation*, #1567) reads all three: a file whose size and
 mtime match its record (or, for a missed rename, the record of the path
-it was renamed from, since a rename keeps both) has the recorded
-`content_hash` as its bytes, which verifies a rename or names the
-message a found copy belongs to (`messages.content_hash` is indexed for
-that lookup) without reading the file; any other file is hashed only
+it was renamed from, since a rename keeps both) is a candidate to carry
+the recorded `content_hash` forward as its bytes — a fast admission
+shortcut, not proof (mbsync sets mtime from IMAP's INTERNALDATE, so two
+different messages can legitimately share one), so the file is also
+hashed and checked against that recorded hash before it verifies a
+rename or names the message a found copy belongs to (`_recorded_hash`,
+#1612 round 14; `messages.content_hash` is indexed for the found-copy
+lookup); any other file is hashed only
 where the module docstring says. The reaper unmarks every path recorded
 with a removed message's hash (#1102); `indexed_files` has no
 `content_hash` index, so that lookup reads the wanted hashes by claimant
@@ -4484,16 +4488,28 @@ scan's own "missed renames" check only retires an occurrence whose
 uniq resolves to no file at all under its folder, never one whose uniq
 still resolves to *some* file, however mismatched (`scan_occurrences`,
 module docstring "Missed renames"). `on_moved` closes this one case
-itself: when the active occurrence's verification failed **and** the
-destination is about to be skipped as already trashed, it retires the
-occurrence directly (`Database.retire_mismatched_rename`, #1612 round
-13) rather than leaving it dangling with no path to ever notice. Unlike
-`retire_mismatched_occurrence` (the content backstop's case, where the
-mismatched file is still at the same recorded path) there is nothing
-left to re-check about the destination — `verify_rename_bytes` already
-hashed it — so the only guard is the usual `state = 'active' AND
-relative_path = ?` check against a concurrent move or retire of the
-same occurrence.
+itself: when the active occurrence's verification **proved** a mismatch
+(it read the destination's bytes and they were not this claimant's)
+**and** the destination is about to be skipped as already trashed, it
+retires the occurrence directly (`Database.retire_mismatched_rename`,
+#1612 round 13) and tombstones the claimant if that was its last live
+occurrence (`Database.mark_lost_messages`, #1612 round 14 — the same
+rule `Reconciler.handle_moved` applies to an ordinary trashed rename,
+so the deletion grace period starts at once instead of waiting for the
+next reconciliation sweep), rather than leaving it dangling with no
+path to ever notice. Unlike `retire_mismatched_occurrence` (the content
+backstop's case, where the mismatched file is still at the same
+recorded path) there is nothing left to re-check about the
+destination — `verify_rename_bytes` already hashed it — so the only
+guard is the usual `state = 'active' AND relative_path = ?` check
+against a concurrent move or retire of the same occurrence.
+`verify_rename_bytes` returns a proven mismatch only when it actually
+read the destination's bytes and they disagreed with the expected
+hash; an unreadable destination or one whose metadata alone ruled out
+trusting it without reading anything is inconclusive, not a mismatch
+(#1612 round 14 — the earlier implementation conflated the two, firing
+this retirement on a merely inconclusive check), and is left active for
+a later reconciliation pass like any other unverified rename.
 
 ### The content backstop
 

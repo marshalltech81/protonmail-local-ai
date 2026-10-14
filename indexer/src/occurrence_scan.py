@@ -8,17 +8,19 @@ Maildir root and comparing it with the account's active occurrences:
 - **Missed renames.** An active occurrence whose file is gone but whose
   folder holds a file with its Maildir uniq (a flag change, a
   ``new``/``cur`` move) moves to that file, once its bytes are verified
-  to be the message's (``_verify``): by the recorded file identity when
-  size and mtime match, else by hashing the file.
+  to be the message's (``_verify``): a size/mtime match with the
+  recorded file identity is checked, then hashed before it is trusted
+  (``_recorded_hash``, #1612 round 14) — a metadata match alone is
+  never proof — else the candidate is hashed directly.
 - **Found copies.** A file no active occurrence holds whose bytes are an
   indexed message's is bound to it as an occurrence with provenance
   ``scan``: a byte-identical copy the migration seed or the parse never
   bound (a ``T``-flagged file the drain parks, a dead-lettered job, an
-  unmapped copy moved across folders, #1141). Its bytes come from its
-  ``indexed_files`` record when size and mtime match, else, only for a
-  ``T``-flagged or dead-lettered file and with a ``hash_cache``, from
-  hashing it; any other unindexed file is left to the Maildir walk,
-  whose parse binds it.
+  unmapped copy moved across folders, #1141). Its bytes are confirmed
+  against its own ``indexed_files`` record (metadata match, then
+  hashed) when it has one, else, only for a ``T``-flagged or dead-
+  lettered file and with a ``hash_cache``, from hashing it; any other
+  unindexed file is left to the Maildir walk, whose parse binds it.
 - **Vanished files.** An active occurrence with no such file is retired
   only by a complete scan: the walk read every directory under the root.
   A partial scan (an unreadable directory, a missing root) establishes
@@ -198,15 +200,30 @@ def _stat_identity(path: Path) -> tuple[int, int] | None:
     return st.st_size, st.st_mtime_ns
 
 
-def _recorded_hash(db: Database, recorded_at: Path, path: Path) -> str | None:
+def _recorded_hash(db: Database, recorded_at: Path, path: Path, counts: ScanCounts) -> str | None:
     """The content hash ``indexed_files`` records for ``recorded_at``,
-    when ``path`` has the size and mtime recorded with it (the file
-    identity the Maildir walk trusts, docs/architecture.md "File
-    Identity on ``indexed_files``"): a rename keeps both."""
+    once ``path``'s current bytes are confirmed to hold it: a size and
+    mtime match with the identity recorded with it (the file identity
+    the Maildir walk trusts, docs/architecture.md "File Identity on
+    ``indexed_files``") is a fast admission shortcut, not proof — the
+    same reasoning the content backstop and ``verify_rename_bytes``
+    rest on, extended here (#1612 round 14) to this scan's own rename-
+    matching and found-copy binding, which previously trusted the
+    metadata match alone and never read ``path`` at all. Once the
+    metadata agrees, ``path`` is hashed and checked against the
+    recorded hash before it is trusted. Returns ``None`` on a metadata
+    mismatch, no recorded hash, an unreadable file, or a hash mismatch;
+    the caller's own fallback covers a genuine mismatch."""
     identity = db.file_identity(str(recorded_at))
     if identity is None or identity["content_hash"] is None:
         return None
     if _stat_identity(path) != (identity["size"], identity["mtime_ns"]):
+        return None
+    try:
+        counts.hashed += 1
+        if _sha256(path) != identity["content_hash"]:
+            return None
+    except OSError:
         return None
     return str(identity["content_hash"])
 
@@ -218,7 +235,7 @@ def _verify(
     ``content_hash``: by the identity recorded for ``old`` (the file
     before the rename) or ``candidate``, else by hashing it."""
     for recorded_at in (old, candidate):
-        recorded = _recorded_hash(db, recorded_at, candidate)
+        recorded = _recorded_hash(db, recorded_at, candidate, counts)
         if recorded is not None:
             return recorded == content_hash
     try:
@@ -228,9 +245,30 @@ def _verify(
         return False
 
 
+@dataclass(frozen=True)
+class RenameVerification:
+    """The result of checking whether ``new_path`` still holds a
+    claimant's bytes after a watcher-observed rename (#1612 round 14).
+    ``identity`` is ``new_path``'s size, mtime and inode, captured at
+    verification time, present only when the bytes are proven to
+    match — the caller passes it into ``Database.update_filepath`` as
+    ``verified_identity`` for the in-transaction recheck
+    (``move_verified_occurrence`` uses the same pattern). ``mismatch``
+    is true only when the destination's bytes were actually read and
+    found not to be the claimant's: never for a destination this check
+    could not read, or whose metadata alone ruled out trusting it
+    without reading anything — those leave the destination's status
+    unproven either way, and a caller must not treat an unproven result
+    as a confirmed mismatch (conflating the two let a trashed-rename
+    retirement fire on a merely inconclusive check)."""
+
+    identity: tuple[int, int, int] | None
+    mismatch: bool = False
+
+
 def verify_rename_bytes(
     db: Database, old_path: str, new_path: str, claimant_id: str
-) -> tuple[int, int, int] | None:
+) -> RenameVerification:
     """Whether ``new_path`` still holds ``claimant_id``'s bytes after a
     watcher-observed rename from ``old_path`` (#1612): by ``old_path``'s
     ``indexed_files`` identity (a rename keeps size and mtime) when there
@@ -249,36 +287,31 @@ def verify_rename_bytes(
     nullable) falls through to the claimant-hash-prefix check below, the
     same as having no prior record at all.
 
-    Returns ``new_path``'s identity (size, mtime, inode) captured at
-    verification time, for the caller to pass into
-    ``Database.update_filepath`` as ``verified_identity`` for the
-    in-transaction recheck (the same pattern ``move_verified_occurrence``
-    already uses), or ``None`` when the bytes cannot be verified — a
-    caller that observed only a pre-check, not this return value, must
-    not trust the rename.
+    Returns a ``RenameVerification``: a caller that observed only a
+    pre-check, not this return value, must not trust the rename.
     """
     identity = file_identity(Path(new_path))
     if identity is None:
-        return None
+        return RenameVerification(None)
     prior = db.file_identity(old_path)
     if prior is not None:
         if (identity[0], identity[1]) != (prior["size"], prior["mtime_ns"]):
-            return None
+            return RenameVerification(None)
         if prior["content_hash"] is not None:
             try:
-                if _sha256(Path(new_path)) != prior["content_hash"]:
-                    return None
+                matches = _sha256(Path(new_path)) == prior["content_hash"]
             except OSError:
-                return None
-            return identity
+                return RenameVerification(None)
+            return RenameVerification(identity if matches else None, mismatch=not matches)
     expected = _claimant_hash_prefix(claimant_id)
     if expected is None:
-        return None
+        return RenameVerification(None)
     try:
         digest = _sha256(Path(new_path))
     except OSError:
-        return None
-    return identity if digest[: len(expected)] == expected else None
+        return RenameVerification(None)
+    matches = digest[: len(expected)] == expected
+    return RenameVerification(identity if matches else None, mismatch=not matches)
 
 
 def scan_occurrences(
@@ -366,7 +399,7 @@ def scan_occurrences(
         identity = file_identity(path)
         if identity is None:
             continue
-        content_hash = _recorded_hash(db, path, path)
+        content_hash = _recorded_hash(db, path, path, counts)
         if content_hash is None and hash_cache is not None:
             content_hash = _hash_unindexed(db, path, identity, hash_cache, counts)
         if content_hash is None:
