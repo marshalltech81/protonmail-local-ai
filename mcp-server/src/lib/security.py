@@ -156,6 +156,7 @@ QUERY_MESSAGE_FIELDS = (
     "source_file",
     "thread_id",
     "pending_deletion",
+    "direction",
 )
 
 
@@ -199,6 +200,7 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     ),
     # ``query_messages``' projection: logged only when every name is a row field.
     "fields": _names_from(QUERY_MESSAGE_FIELDS),
+    "direction": _one_of("inbound", "outbound", "self"),
     # ``query_messages``' answered flag and size bounds (numbers the
     # caller chose, never mail; only in the range ``normalize_size_bound``
     # accepts) (#1085; ``lib/predicates``).
@@ -217,6 +219,7 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
         "sender_address",
         "sender_domain",
         "recipient_domain",
+        "direction",
         "attachment_content_type",
         "folder",
         "year",

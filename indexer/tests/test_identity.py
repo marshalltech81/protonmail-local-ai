@@ -242,3 +242,31 @@ class TestStartup:
         finally:
             db.close()
         assert MARKER not in caplog.text
+
+
+def test_sent_conflict_diagnostic_warns_and_recovers_without_mail(db, caplog):
+    db.set_operator_identity(OperatorIdentity(addresses=frozenset({"own@self.example"})))
+    for i in range(2):
+        msg = make_message(
+            message_id=f"synthetic-{i}@example.com",
+            from_addr=f"{MARKER}@other.example",
+            folder="Sent",
+        )
+        db.upsert_thread(make_thread(messages=[msg], thread_id=f"t{i}"), _vec())
+    with caplog.at_level(logging.INFO, logger="indexer.database"):
+        assert db.report_direction_conflicts() == 2
+        before = len(caplog.records)
+        assert db.report_direction_conflicts() == 2
+        assert len(caplog.records) == before
+        db._conn.execute("UPDATE messages SET folder='INBOX' WHERE thread_id='t0'")
+        db._conn.commit()
+        assert db.report_direction_conflicts() == 1
+        db.set_operator_identity(OperatorIdentity(addresses=frozenset({f"{MARKER}@other.example"})))
+        assert db.report_direction_conflicts() == 0
+    assert [r.levelno for r in caplog.records if "Sent conflicts=" in r.message] == [
+        logging.WARNING,
+        logging.INFO,
+        logging.INFO,
+    ]
+    assert "Sent conflicts=0" in caplog.text
+    assert MARKER not in caplog.text

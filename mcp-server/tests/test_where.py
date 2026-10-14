@@ -145,6 +145,7 @@ class TestModel:
             "attachment_content_type_is",
             "header_exists",
             "header_contains",
+            "direction_is",
         )
         assert WHERE_ROLES == ("from", "to", "cc", "visible_recipient")
         assert set(WHERE_LEAVES) <= set(predicates.LEAVES)

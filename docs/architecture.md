@@ -1825,7 +1825,13 @@ are exact canonical addresses, normalised as `canonical_addr` normalises
 a participant address (`message_participants.address`), so a stored
 participant address is in the set exactly when the operator listed it.
 Nothing is inferred from a domain, a plus-alias or the Sent folder.
-They are for message direction (#824); nothing reads them yet.
+They support claimed message direction (#824). Deterministic message queries
+classify from the stored exact own-address set, complete unambiguous single
+From and observed external To/Cc evidence. Classification does not authenticate
+headers or infer aliases from folders. Own From without an external visible
+recipient remains unresolved until Bcc evidence (#1090). Identity replacement
+and direction-sensitive pagination share a read snapshot; cursor digests bind
+identity state, address digest and classifier version.
 
 The indexer loads the file at startup (`load_operator_identity`,
 `indexer/src/entities.py`; at most 64 KiB and 1,000 addresses, errors

@@ -234,10 +234,11 @@ class TestQueryMessagesFields:
         "source_file",
         "thread_id",
         "pending_deletion",
+        "direction",
     ]
 
-    def test_without_fields_the_output_is_unchanged(self, messages_db):
-        # Pinned on main before the parameter existed.
+    def test_without_fields_the_output_includes_direction(self, messages_db):
+        # Default rows include every query field, including claimed direction.
         server = _server(messages_db)
         result = _wire(server, "query_messages", {"subject": "Re: Budget"})
         assert result.content[0].text == (
@@ -247,7 +248,7 @@ class TestQueryMessagesFields:
             "returned: 1 (matches 1-1)\n"
             "has_more: false\n"
             "\n"
-            "1. 2024-01-11T10:00:00+00:00 | INBOX | unread | attachments\n"
+            "1. 2024-01-11T10:00:00+00:00 | INBOX | unread | attachments | direction unknown\n"
             "   Subject: Re: Budget review\n"
             "   From: bob@example.com\n"
             "   To: Jane Doe <jane@example.com>\n"
@@ -336,12 +337,12 @@ class TestQueryMessagesFields:
             result = _wire(_server(messages_db), "query_messages", {"fields": ["subject"] * 10_000})
         assert result.is_error
         text = result.content[0].text
-        assert "fields lists at most 24 names" in text
+        assert "fields lists at most 25 names" in text
         assert len(text) < 200
         assert "'subject'" not in caplog.text
         assert "query_messages rejected invalid fields" in caplog.text
         # Up to one entry per field, repeats included, is accepted.
-        page = _call(_server(messages_db), "query_messages", fields=["subject"] * 24, limit=1)
+        page = _call(_server(messages_db), "query_messages", fields=["subject"] * 25, limit=1)
         assert set(page["messages"][0]) == {"claimant_id", "thread_id", "subject"}
 
     def test_unknown_field_is_rejected_by_name_and_not_logged(self, messages_db, caplog):
@@ -363,7 +364,7 @@ class TestQueryMessagesFields:
         with caplog.at_level("DEBUG"):
             for _ in range(5):
                 assert _wire(server, "query_messages", {"fields": [marker]}).is_error
-                assert _wire(server, "query_messages", {"fields": ["subject"] * 25}).is_error
+                assert _wire(server, "query_messages", {"fields": ["subject"] * 26}).is_error
         lines = [
             r.getMessage()
             for r in caplog.records

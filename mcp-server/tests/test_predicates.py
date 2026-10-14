@@ -345,6 +345,7 @@ _DOCS = Path(__file__).resolve().parents[2] / "docs" / "mcp-tools.md"
 # One sample value per declared parameter shape. A leaf declaring a new
 # shape must add its sample here, so its compiler gets exercised.
 _SAMPLES: dict[str, object] = {
+    "direction": "inbound",
     "header name": "list-id",
     "header name, text": ("list-id", "synthetic"),
     "address": "jane@example.test",
@@ -397,6 +398,7 @@ def _every_adapter_leaf_name() -> set[str]:
     names = {
         leaf.name
         for leaf in query_messages_leaves(
+            direction="inbound",
             sender="a@example.test",
             recipient="b@example.test",
             participant="c@example.test",
@@ -479,7 +481,7 @@ class TestLeafRegistry:
 
     def test_registry_is_keyed_by_leaf_name(self):
         assert all(name == kind.name for name, kind in LEAVES.items())
-        assert len(LEAVES) == 32
+        assert len(LEAVES) == 33
 
     @pytest.mark.parametrize("name", sorted(LEAVES))
     def test_leaf_compiles_with_a_rule_and_a_docs_entry(self, name, mixed_db):
@@ -493,6 +495,7 @@ class TestLeafRegistry:
                 "NULLIF(m.",
                 "NULLIF((CASE WHEN m.",
                 "CASE WHEN ",
+                "CASE (",
                 "(CASE WHEN m.",
                 "(COALESCE(m.",
             )
@@ -715,6 +718,7 @@ class TestLogAllowlist:
             "dedupe_attachments",
             "authority_class",
             "fields",
+            "direction",
             "replied",
             "size_min",
             "size_max",
@@ -1016,6 +1020,7 @@ class TestClockSizeAndRepliedLeaves:
             "effective_to",
             "sent_from",
             "sent_to",
+            "direction_is",
             "sender",
             "recipient",
             "participant",

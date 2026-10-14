@@ -509,6 +509,7 @@ different filters"), never read against them.
 | `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded; unknown when it does not and the stored subject was cut or not checked |
 | `text` | words | `query_messages` `text` | as `body_words`, which it compiles to |
 | `header_exists` | header name | `query_messages` and `aggregate_messages` `where` | any occurrence of the named top-level header exists, even with an empty value; absence is unknown unless header evidence is complete |
+| `direction_is` | direction | deterministic message/thread/group queries; flat `direction` or `where` | inbound, outbound or self from explicit own addresses and claimed header evidence; partial knowledge preserved under NOT; no Bcc self matches yet |
 | `header_contains` | header name, text | `query_messages` and `aggregate_messages` `where` | any occurrence contains the Unicode caseless substring in its decoded value (raw value when decoding failed); a miss is unknown unless header evidence is complete |
 | `subject_contains` | text | `query_messages` and `aggregate_messages` `where` | same as `subject`, including unknown on a miss against an incomplete subject |
 | `attachment_content_type_is` | MIME type | `query_messages` and `aggregate_messages` `where` | exact declared type on a current occurrence; a miss is unknown unless the current inventory is exhaustive |
@@ -1309,6 +1310,32 @@ that set it (`address:<pattern>` or `domain:<pattern>`, null when
 unclassified).
 
 ### `query_messages`
+
+`direction="inbound"|"outbound"|"self"` filters claimed direction on this tool,
+`query_threads` and `aggregate_messages`. Explicit `where` uses
+`{"leaf":"direction_is","value":"inbound"}` with normal `any`/`negate` semantics.
+The exact own-address set comes from `config/identity.toml`; no alias or folder
+is inferred. Headers are claimed, not authenticated.
+
+A complete, unambiguous single external From is inbound. An own From with any
+observed external To/Cc is outbound, even when the recipient list is partial.
+An own From without such a recipient rules out inbound but cannot yet decide
+outbound or self without Bcc (#1090). Thus `self` never matches in this version;
+known inbound/outbound messages decide it false, and own-only visible recipients
+remain indeterminate. Missing configuration, incomplete or unchecked From,
+multiple From addresses and ambiguous senders leave direction unknown.
+
+Every query message row includes `direction` (`inbound`, `outbound`, `unknown`),
+also selectable through `fields`. This field does not extend `get_message`.
+`group_by="direction"` groups inbound/outbound and uses the existing null group
+for unknown direction; group counts remain per claimant. Negation acts on the
+predicate's partial knowledge, not the displayed label: an own-only sender's
+label is unknown while `NOT direction_is(inbound)` is true.
+
+All message cursors bind the identity snapshot, including calls without a
+direction filter. Old message cursors must restart. Thread/group cursors bind
+identity only for direction-sensitive calls; unrelated cursors retain their
+existing format. A stale cursor is rejected before population scanning.
 Enumerate **every** message matching exact criteria, with a total
 count. Unlike `search_emails`, which ranks threads by relevance and
 returns the top `limit`, this returns every individual message the
@@ -3481,7 +3508,8 @@ index). Each entry reports:
 - `supported when present`: assessment is finished, but `missing_messages` lack
   fully usable evidence, for example a missing delivery date, ambiguous sender,
   parse cap or incomplete attachment extraction.
-- `unavailable`: required schema fields are absent. Counts are null and
+- `unavailable`: required schema fields are absent, or direction identity is
+  unconfigured (condition: configure `config/identity.toml` and restart). Counts are null and
   `condition` names the upgrade/migration or damaged-index rebuild needed to
   restore the required schema, and assessment of existing mail.
 
@@ -3496,8 +3524,13 @@ messages than an address leaf's coverage suggests. Retained positive evidence
 can match even on an incomplete row. Always use the actual query's
 `indeterminate` count to assess that result.
 
-The report reads flags and counts only, never addresses, headers, bodies or
-attachment text. It describes registered leaves; unsupported operands such as
+The report returns flags and counts only, never addresses, headers, bodies or
+attachment text. Direction coverage uses indexed participant probes: a capped
+two-row From cardinality check and visible-recipient existence checks. Fully
+usable direction evidence means known inbound/outbound across all operands;
+own-unresolved and incomplete From remain missing. `operator_identity` reports
+configuration state, address count and count-only Sent conflicts in the same
+status snapshot. This diagnostic is not authenticated direction. It describes registered leaves; unsupported operands such as
 `date_basis=internal` (#1092) and Bcc-inclusive roles (#1090) remain rejected by
 validation and are not advertised as registered leaves.
 
