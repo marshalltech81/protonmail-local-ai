@@ -56,6 +56,7 @@ from .outputs import (
     GetAttachmentOutput,
     GetMessageOutput,
     GetThreadOutput,
+    GroupSampleRow,
     ListedAttachment,
     ListFoldersOutput,
     ListThreadsOutput,
@@ -1910,16 +1911,26 @@ def register_retrieval_tools(server, db):
         size_min: SizeBound = None,
         size_max: SizeBound = None,
         where: Where | None = None,
+        sample_per_group: Annotated[int, Field(strict=True, ge=0, le=10)] = 0,
         limit: int = 25,
         cursor: str | None = None,
     ) -> CallToolResult:
         """
         Count the messages query_messages would match, grouped by one
-        dimension, without listing them: per group the message count,
+        dimension: per group the message count,
         distinct threads, first and last date, messages with
         attachments and, for a sender address, a display name. Use it
         for volume questions ("top senders", "mail per month", "which
         folders") instead of paging query_messages and counting.
+
+        sample_per_group (strict integer 0..10, default 0) optionally returns
+        bounded subjects and exact IDs from each group's definite matches.
+        Subjects reach the calling model. Samples are spread through chronological
+        order, not statistically representative, a series classification or an
+        exhaustive read. Each group returns min(sample_per_group, messages).
+        The actual page is rejected above 100 sample membership rows; reduce limit
+        to the fitting value reported for that offset and snapshot. Overlapping
+        groups can repeat IDs. Counts-only calls read no sample subjects.
 
         Takes query_messages' filters and date_basis with the same meaning.
         period selects UTC month or year (default month); active_periods
@@ -1997,6 +2008,7 @@ def register_retrieval_tools(server, db):
             size_max: As in query_messages.
             where: As in query_messages (all / any / negate).
             limit: Groups per page (default 25, clamped to [1, 100]).
+            sample_per_group: Definite chronological sample rows per group (0..10; default 0).
             cursor: ``next_cursor`` from the previous page of the same call.
         """
         args = {
@@ -2025,6 +2037,7 @@ def register_retrieval_tools(server, db):
                 "date_basis": date_basis,
                 "period": period,
                 "period_breakdown": period_breakdown,
+                "sample_per_group": sample_per_group,
                 "where": where,
                 "limit": limit,
                 "cursor": cursor,
@@ -2032,6 +2045,10 @@ def register_retrieval_tools(server, db):
         )
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_AGGREGATE_GROUPS)
         try:
+            if type(sample_per_group) is not int or not 0 <= sample_per_group <= 10:
+                raise InvalidFilterError(
+                    "sample_per_group", "sample_per_group must be an integer from 0 to 10"
+                )
             if date_basis is None:
                 raise InvalidFilterError("date_basis", "date_basis must be a string")
             date_basis = normalize_date_basis(date_basis)
@@ -2048,6 +2065,7 @@ def register_retrieval_tools(server, db):
                 date_basis=date_basis,
                 period=period,
                 period_breakdown=period_breakdown,
+                sample_per_group=sample_per_group,
                 **args,
                 where=where_leaves,
                 limit=limit,
@@ -2062,6 +2080,11 @@ def register_retrieval_tools(server, db):
             log.error("aggregate_messages error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
+        timings.count("samples_returned", page.samples_returned)
+        timings.count(
+            "sample_subjects_clipped",
+            sum(s.subject_clipped for g in page.groups for s in g.samples),
+        )
         timings.count("total_matches", page.total_matches)
         timings.count("indeterminate", page.indeterminate)
         timings.count("groups", page.total_groups)
@@ -2082,6 +2105,8 @@ def register_retrieval_tools(server, db):
             for key, _ in _indeterminate_cause_entries(uses, where_leaves, date_basis):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = AggregateMessagesOutput(
+            sample_per_group=page.sample_per_group,
+            samples_returned=page.samples_returned,
             group_by=page.group_by,
             date_basis=page.date_basis,
             period=page.period,
@@ -2103,6 +2128,18 @@ def register_retrieval_tools(server, db):
             next_cursor=page.next_cursor,
             groups=[
                 MessageGroupRow(
+                    samples_returned=len(g.samples),
+                    samples=[
+                        GroupSampleRow(
+                            claimant_id=s.claimant_id,
+                            thread_id=s.thread_id,
+                            at=s.at,
+                            subject=s.subject,
+                            subject_clipped=s.subject_clipped,
+                            subject_complete=s.subject_complete,
+                        )
+                        for s in g.samples
+                    ],
                     # MIME display is bounded after full-value grouping/paging.
                     value=g.value,
                     value_clipped=g.value_clipped,
@@ -2132,6 +2169,13 @@ def register_retrieval_tools(server, db):
             f"date_basis: {page.date_basis}; period: {page.period}; period_breakdown: {page.period_breakdown}",
             f"Query: {', '.join(p for p in parts if p) or _describe_filters([])}",
         ]
+        if sample_per_group:
+            lines.append(
+                f"sample_per_group: {sample_per_group}; samples_returned: {page.samples_returned} (membership rows; groups may overlap)"
+            )
+            lines.append(
+                "Samples show chronological-order metadata evidence, not statistical representation, series classification or exhaustive reading."
+            )
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}; eligible_total: {page.eligible_total}")
@@ -2214,6 +2258,14 @@ def register_retrieval_tools(server, db):
             if row.display_name is not None:
                 line += f", display name {row.display_name!r}"
             lines.append(line)
+            if sample_per_group:
+                lines.append(
+                    f"  samples_returned: {row.samples_returned} of {row.messages} messages"
+                )
+                for sample in row.samples:
+                    lines.append(
+                        f"  [{sample.claimant_id}] thread_id: {sample.thread_id}; at: {sample.at}; subject: {sample.subject!r}; subject_clipped: {sample.subject_clipped}; subject_complete: {sample.subject_complete}"
+                    )
         return _aggregate_result("\n".join(lines), output)
 
     @server.tool(

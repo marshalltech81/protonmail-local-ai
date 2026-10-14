@@ -65,6 +65,7 @@ from .predicates import (
 from .query_capabilities import query_capabilities
 from .rate_limited_log import RateLimitedLog
 from .reranker import RerankerBackend
+from .validation import clamp_int
 
 log = logging.getLogger("mcp.sqlite")
 
@@ -1262,6 +1263,18 @@ def _decode_thread_cursor(cursor: str, digest: str) -> tuple[str, int]:
 
 
 @dataclass
+class GroupSample:
+    """Selected definite membership; metadata evidence, not a message read."""
+
+    claimant_id: str
+    thread_id: str
+    at: str | None
+    subject: str | None
+    subject_clipped: bool
+    subject_complete: bool | None
+
+
+@dataclass
 class MessageGroup:
     """One ``aggregate_messages`` group: the messages the filters match
     whose ``value`` on the dimension is this one (``None``: no value,
@@ -1286,6 +1299,7 @@ class MessageGroup:
     eligible_total: int = 0
     undated_messages: int = 0
     attachment_inventory_unknown_messages: int = 0
+    samples: list[GroupSample] = field(default_factory=list)
 
 
 @dataclass
@@ -1320,6 +1334,8 @@ class GroupPage:
     eligible_total: int = 0
     undated_messages: int = 0
     attachment_inventory_unknown_messages: int = 0
+    sample_per_group: int = 0
+    samples_returned: int = 0
 
 
 def _sql_casefold(value):
@@ -5181,6 +5197,7 @@ class Database:
         size_min: int | None = None,
         size_max: int | None = None,
         where: Sequence[WhereLeaf] = (),
+        sample_per_group: int = 0,
         limit: int = 25,
         cursor: str | None = None,
     ) -> GroupPage:
@@ -5220,7 +5237,11 @@ class Database:
         Bounded work: one statement in one read snapshot. It evaluates
         the expression once per message to filter and once more per
         message it does not reject, then groups those rows; ``limit``
-        caps the groups returned, not the rows grouped.
+        caps the groups returned, not the rows grouped. Optional samples rank
+        only returned groups' definite memberships, then project bounded subjects
+        for selected ranks. Actual-page admission (100 sample memberships) is
+        checked before ranking. Sorting and membership work remain population-
+        dependent; samples are ordinal evidence, not statistical representation.
 
         Raises ``ValueError`` for an unknown ``group_by`` and for what
         ``query_messages`` rejects (``InvalidFilterError``), including
@@ -5231,6 +5252,11 @@ class Database:
             raise InvalidFilterError(
                 "group_by", f"group_by must be one of {', '.join(AGGREGATE_DIMENSIONS)}"
             )
+        if type(sample_per_group) is not int or not 0 <= sample_per_group <= 10:
+            raise InvalidFilterError(
+                "sample_per_group", "sample_per_group must be an integer from 0 to 10"
+            )
+        limit = clamp_int(limit, default=25, minimum=1, maximum=100)
         basis = DATE_BASES[normalize_date_basis(date_basis)]
         if period not in ("month", "year"):
             raise InvalidFilterError("period", "period must be month or year")
@@ -5306,6 +5332,45 @@ class Database:
             if group_by == "attachment_content_type"
             else "pg.value"
         )
+        sample_ctes = sample_columns = sample_join = ""
+        sample_params: list[int] = []
+        if sample_per_group:
+            # Admission precedes ranking; full keys never leave SQL. The
+            # lookahead row is excluded, and subjects are read only after
+            # the selected ranks have been materialized.
+            # SQL structure is fixed; counts/limits are bound parameters.
+            sample_ctes = (
+                "sp AS MATERIALIZED (SELECT *, MIN(?, CAST(n AS INTEGER)) AS take, "  # nosec B608
+                "ROW_NUMBER() OVER (ORDER BY n DESC, value IS NULL, value, period IS NULL, period) AS pos "
+                "FROM p ORDER BY n DESC, value IS NULL, value, period IS NULL, period LIMIT ?), "
+                "sb AS MATERIALIZED (SELECT COALESCE(SUM(take), 0) AS requested, "
+                "COALESCE(MAX(CASE WHEN running <= 100 THEN pos END), 0) AS fitting FROM ("
+                "SELECT take, pos, SUM(take) OVER (ORDER BY pos) AS running FROM sp)), "
+                "sr AS MATERIALIZED (SELECT k.cid, k.tid, k.at, sp.value, sp.period, "
+                "CAST(sp.n AS INTEGER) AS n, sp.take, "
+                "ROW_NUMBER() OVER (PARTITION BY sp.pos ORDER BY k.at IS NULL, k.at, k.cid) AS rn "
+                "FROM sb CROSS JOIN sp CROSS JOIN k "
+                "WHERE sb.requested <= 100 AND k.ok IS 1 AND k.value IS sp.value "
+                + ("AND k.bucket IS sp.period " if period_breakdown else "")
+                + "), si(i) AS (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)), "  # nosec B608
+                "ss AS MATERIALIZED (SELECT sr.* FROM sr CROSS JOIN si "
+                "WHERE si.i < sr.take AND sr.rn = CASE WHEN sr.take = 1 "
+                "THEN (sr.n - 1) / 2 + 1 ELSE 1 + si.i * (sr.n - 1) / (sr.take - 1) END), "
+                "sj AS MATERIALIZED (SELECT ss.value, ss.period, json_group_array(json_object("
+                "'claimant_id', ss.cid, 'thread_id', ss.tid, 'at', ss.at, "
+                "'subject_head', CASE WHEN m.subject IS NULL THEN NULL ELSE "
+                f"hex(substr(CAST(m.subject AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1})) END, "
+                "'subject_complete', m.subject_complete) ORDER BY ss.rn) AS samples "
+                "FROM ss CROSS JOIN messages m ON m.claimant_id = ss.cid "
+                "GROUP BY ss.value, ss.period), "
+            )
+            sample_columns = (
+                ", sb.requested AS sample_requested, sb.fitting AS sample_fitting, sj.samples"
+            )
+            sample_join = (
+                " CROSS JOIN sb LEFT JOIN sj ON sj.value IS pg.value AND sj.period IS pg.period "
+            )
+            sample_params = [sample_per_group, limit]
         sql = (
             "WITH e AS MATERIALIZED (SELECT m.claimant_id AS cid, m.thread_id AS tid, "  # nosec B608
             f"{basis.bound} AS at, {bucket} AS bucket, m.message_id AS mid, "
@@ -5332,7 +5397,8 @@ class Database:
             # Cap sender memberships before occurrence expansion. Both sides
             # can be attacker-controlled; a small page must not count every
             # address x attachment combination in the whole population.
-            "kp AS MATERIALIZED (SELECT k.* FROM p CROSS JOIN k "
+            + sample_ctes
+            + "kp AS MATERIALIZED (SELECT k.* FROM p CROSS JOIN k "  # nosec B608
             f"WHERE {page_membership} AND k.ok IS 1 AND k.current = 1 AND k.att = 1), "
             f"ga AS (SELECT value, {period_sql} AS period, "
             "COUNT(DISTINCT a.attachment_id) AS attachment_ids "
@@ -5349,14 +5415,29 @@ class Database:
             "pg.undated, pg.unknown_inventory, t.incomplete, "
             "t.incomplete_recipient, t.incomplete_type, "
             "t.undated AS total_undated, t.unknown_inventory AS total_unknown_inventory, "
-            "COALESCE(ga.attachment_ids, 0) AS attachment_ids "
+            "COALESCE(ga.attachment_ids, 0) AS attachment_ids " + sample_columns + " "
             "FROM t LEFT JOIN p pg ON 1 "
             "LEFT JOIN ga ON ga.value IS pg.value AND ga.period IS pg.period "
-            "ORDER BY pg.n DESC, pg.value IS NULL, pg.value, pg.period IS NULL, pg.period"
+            + sample_join
+            + "ORDER BY pg.n DESC, pg.value IS NULL, pg.value, pg.period IS NULL, pg.period"
         )
-        params = [*expr_params, *expr_params, *rows_params, limit + 1, offset, *incomplete_params]
+        params = [
+            *expr_params,
+            *expr_params,
+            *rows_params,
+            limit + 1,
+            offset,
+            *sample_params,
+            *incomplete_params,
+        ]
         with closing(self._connect()) as conn:
             rows = conn.execute(sql, params).fetchall()
+        if sample_per_group and rows[0]["sample_requested"] > 100:
+            raise InvalidFilterError(
+                "sample_per_group",
+                "sample_per_group exceeds the 100-row page budget; "
+                f"use limit <= {rows[0]['sample_fitting']} at this offset and snapshot",
+            )
         matches, undecided, total_groups = (int(n) for n in rows[0][:3])
         incomplete = None if rows[0]["incomplete"] is None else int(rows[0]["incomplete"])
         groups: list[MessageGroup] = []
@@ -5367,8 +5448,25 @@ class Database:
             if group_by == "attachment_content_type" and value is not None:
                 value, clipped = _clipped_text(r["value"])
                 clipped = clipped or value.encode("utf-8") != r["value"]
+            samples = []
+            if sample_per_group:
+                for sample in json.loads(r["samples"] or "[]"):
+                    head = sample.pop("subject_head")
+                    subject, subject_clipped = (
+                        (None, False) if head is None else _clipped_text(bytes.fromhex(head))
+                    )
+                    complete = sample.pop("subject_complete")
+                    samples.append(
+                        GroupSample(
+                            **sample,
+                            subject=subject,
+                            subject_clipped=subject_clipped,
+                            subject_complete=None if complete is None else bool(complete),
+                        )
+                    )
             groups.append(
                 MessageGroup(
+                    samples=samples,
                     value=value,
                     value_clipped=clipped,
                     period=r["period"],
@@ -5390,6 +5488,8 @@ class Database:
         has_more = len(groups) > limit
         groups = groups[:limit]
         return GroupPage(
+            sample_per_group=sample_per_group,
+            samples_returned=sum(len(g.samples) for g in groups),
             group_by=group_by,
             date_basis=basis.name,
             period=period,

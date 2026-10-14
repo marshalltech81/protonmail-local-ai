@@ -1225,6 +1225,20 @@ superseded entries keep their number and one line.
     versions remain contiguous and must be coordinated with pending
     occurrence-cutover and collection-state work.
 
+57. **Deterministic group samples (#1169, owner, 2026-10-14).**
+    The Opus 5.5/GPT-6.1 Sol high-effort panel reached consensus after
+    three exchange rounds; the owner approved optional 0–10 definite
+    chronological-order samples per aggregate group, with an actual-page
+    cap of 100 membership rows checked before ranking or subject reads.
+    Integer ordinal ranks include both endpoints for multiple samples,
+    or the lower median for one. Full group keys, null memberships and
+    period cells are preserved. Samples carry exact IDs, nullable evidence
+    dates and byte-bounded subjects with separate display-clipping and
+    stored-completeness flags. Counts-only execution and cursor digests
+    stay unchanged; no migration. Samples are evidence, not statistical
+    representation, classification or exhaustive reading. Verify actual-reader
+    work and host/runtime timings under skew and fanout before capacity claims.
+
 ## Notes for Agents
 
 - Read `AGENTS.md` before making changes.

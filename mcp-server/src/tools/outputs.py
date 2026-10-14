@@ -840,7 +840,25 @@ class QueryThreadsOutput(_Output):
     )
 
 
+class GroupSampleRow(_Output):
+    claimant_id: str
+    thread_id: str
+    at: str | None = Field(description="Selected evidence clock, null without date evidence.")
+    subject: str | None
+    subject_clipped: bool = Field(
+        description="Subject display was clipped; independent of stored completeness."
+    )
+    subject_complete: bool | None = Field(
+        description="Stored subject completeness; null when unassessed."
+    )
+
+
 class MessageGroupRow(_Output):
+    samples: list[GroupSampleRow] = Field(
+        default_factory=list,
+        description="Definite memberships spread through chronological order, not statistically representative or exhaustive reading.",
+    )
+    samples_returned: int = 0
     value_clipped: bool = Field(
         default=False,
         description="MIME grouping only: display differs from full stored type; not an exact selector. "
@@ -895,6 +913,11 @@ class MessageGroupRow(_Output):
 
 
 class AggregateMessagesOutput(_Output):
+    sample_per_group: int = 0
+    samples_returned: int = Field(
+        default=0,
+        description="Sample membership rows returned on this page; overlapping groups may repeat claimant IDs.",
+    )
     group_by: str
     date_basis: str
     period: str
