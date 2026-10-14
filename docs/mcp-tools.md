@@ -1900,7 +1900,7 @@ Prefer the smallest sufficient page.
 
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,
-grouped by one dimension or sender/domain and UTC period, without listing them
+grouped by one dimension or sender/domain and UTC period, with optional sample metadata
 ([#823](https://github.com/marshalltech81/protonmail-local-ai/issues/823)).
 Use it for volume questions (top senders, mail per month, mail per
 folder) instead of paging `query_messages` and counting on the client.
@@ -1912,6 +1912,7 @@ folder) instead of paging `query_messages` and counting on the client.
 | `date_basis` | string | `effective` | `effective`, `sent` or `occurred`, with the same validation and missing-clock semantics as `query_messages`; applies to bounds, group dates and period buckets |
 | `period` | string | `month` | UTC calendar `month` or `year` for active-period counts and breakdown cells |
 | `period_breakdown` | bool | `false` | Return flat sender/domain × period cells; requires `group_by=sender_address` or `sender_domain` |
+| `sample_per_group` | strict int | `0` | Samples per returned group, `[0,10]`; 0 keeps counts-only execution. Actual page budget: 100 sample membership rows |
 | `limit` | int | `25` | Groups (breakdown: cells) per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same call |
 
@@ -2043,7 +2044,7 @@ None of these units establishes distinct reports or report series: duplicate
 deliveries, replies and forwards can increase message counts; the same stored
 payload identity can appear in several messages, and an identity may hash
 normalised serialization. Subject filters can narrow a population, but subject
-grouping and per-group samples (#1169) are separate work.
+grouping is separate work. Per-group samples are described below.
 
 Groups come most messages first, then by value and, in breakdown mode, period; null keys
 come last among ties. `total_groups` counts them all. Group values and
@@ -2058,6 +2059,46 @@ pages can move a group to another page. One SQL statement answers a
 call: it evaluates the filters once per message to select them and
 once more per message they do not reject, then groups those rows;
 `limit` caps the groups/cells returned, not the messages grouped. Existing effective-time default-summary cursors remain valid.
+
+Optional `sample_per_group` ([#1169](https://github.com/marshalltech81/protonmail-local-ai/issues/1169))
+returns exactly `min(sample_per_group, messages)` definite memberships for each
+returned group. `samples_returned` reports their count per group and for the page;
+the top level also echoes `sample_per_group`. Groups can overlap, so the same
+claimant can appear in several groups. These counts measure metadata sampled,
+not messages whose bodies have been read.
+
+Within each group, sort definite memberships by selected evidence date ascending,
+undated last, then claimant ID ascending. For `k >= 2`, select zero-based positions
+`floor(i * (n - 1) / (k - 1))`, for `i = 0..k-1`; for one sample, select the lower
+median. This spreads positions through chronological order, not equal calendar
+intervals or a statistical sample. Effective-clock undated matches remain eligible;
+missing sent/occurred evidence is indeterminate and never sampled. An undated last
+sample need not equal `last_at`. Selection is repeatable on an unchanged index and
+independent of page size/offset. It preserves full group keys, null groups and
+period cells, including MIME labels whose clipped displays coincide.
+
+Each sample contains exact `claimant_id`, `thread_id`, nullable selected-clock `at`,
+and `subject` bounded to 500 characters by reading at most 2,001 UTF-8 bytes.
+`subject_clipped` describes display truncation; `subject_complete` independently
+reports stored parsing completeness (null means unassessed). No body, address list
+or attachment text is fetched for sampling. Subjects reach the calling model.
+Before enabling sampling, make a counts-only call (`sample_per_group=0`), calculate
+`sum(min(N, messages))` across its returned groups, and tell the user how many sample
+subjects you expect to read. Choose the smallest sufficient sample and disclose
+before each sampled page; a fresh snapshot can change the actual count.
+Use exact claimant IDs for bounded follow-up reads. Samples are evidence for a
+hypothesis, never a series classification or proof of semantic completeness.
+
+The actual returned page must satisfy `sum(min(N, messages)) <= 100`, excluding
+the lookahead group. An oversized page is rejected before ranking or subject reads,
+with the largest fitting `limit` at this offset and snapshot. No group is silently
+starved. Index changes can make a later page exceed the budget. `sample_per_group`
+is not cursor-bound: sampled and counts-only paging are interchangeable.
+
+Sampling remains in the same statement and snapshot as counts. It ranks memberships
+of returned groups and reads subjects only for selected ranks. Its computation
+is population-dependent, including membership selection and sorting; the output
+cap is not a constant-work or latency guarantee.
 
 ### `query_attachments`
 Enumerate **every** attachment occurrence matching exact criteria, with
