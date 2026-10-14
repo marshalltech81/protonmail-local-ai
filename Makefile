@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead reparse rotate-bridge-pin force-deletion clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-config test-make-status test-maintenance-commands test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead reparse rotate-bridge-pin force-deletion clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets init-config migrate-config validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -16,7 +16,9 @@ help:
 	@echo "  protonmail-local-ai"
 	@echo ""
 	@echo "  init-secrets Create placeholder secret files under .secrets/ and write ACCOUNT_SCOPE to .env when it is missing (run once on setup)"
-	@echo "  validate-env Verify .env values and secret file permissions before startup"
+	@echo "  init-config  Write config/mode=legacy when it is missing (run once on setup; never writes toml)"
+	@echo "  migrate-config  Import .env into config/config.toml and switch config/mode to toml (one-run; needs python3 3.11+)"
+	@echo "  validate-env Verify .env (legacy) or config/config.toml (toml) values and secret file permissions before startup"
 	@echo "  build        Build all Docker images"
 	@echo "  build-nocache Rebuild all Docker images from scratch (skips BuildKit cache)"
 	@echo "  ppt-checksums Rewrite indexer/java/checksums/checksums.sha256 after an indexer/java/pom.xml change (downloads from Maven Central)"
@@ -32,7 +34,7 @@ help:
 	@echo "  rotate-bridge-pin  Replace the Bridge certificate pin once with the certificate the app presents, which must match BRIDGE_CERT_FINGERPRINT, then recreate mbsync (docs/troubleshooting.md)"
 	@echo "  force-deletion  Stop the indexer, run one deletion pass past the mass-delete brake (same grace window), then start the indexer again"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
-	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, operator config, make status, maintenance command, index backup, image pin, Trivy flag and Maven checksum script tests locally"
+	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, operator config, config mode, make status, maintenance command, index backup, image pin, Trivy flag and Maven checksum script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
@@ -42,7 +44,8 @@ help:
 	@echo "  test-mbsync-host-aliases  Check each accepted BRIDGE_HOST name reaches a 127.0.0.1-only listener on this Mac (needs Docker, python3; not in CI)"
 	@echo "  test-compose Run Compose rendering and merged-hardening tests"
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
-	@echo "  test-config  Run the operator configuration translator tests (python3 3.11+; the file is not yet used by make up)"
+	@echo "  test-config  Run the operator configuration translator tests (python3 3.11+); checked by validate-env in TOML mode"
+	@echo "  test-config-mode  Run config/mode, init-config and migrate-config tests"
 	@echo "  test-index-backup  Run backup-index and restore-index tests against a fake docker (no daemon)"
 	@echo "  test-make-status  Run make status tests against a fake docker (no daemon)"
 	@echo "  test-maintenance-commands  Run rotate-bridge-pin and force-deletion tests against a fake docker (no daemon)"
@@ -114,6 +117,21 @@ init-secrets:
 	fi
 	@./scripts/init-account-scope.sh
 
+# Write config/mode=legacy when it is missing (#1603, PLAN.md decision
+# 50): a fresh deployment keeps today's .env form. Never writes "toml"
+# and never replaces an existing value; refuses when config/config.toml
+# exists without config/mode (an ambiguous state only the operator can
+# resolve, with make migrate-config or by removing the stray file).
+init-config:
+	@./scripts/init-config.sh
+
+# Import the effective .env settings into config/config.toml as the one
+# account at /maildir, and switch config/mode to toml (#1603, PLAN.md
+# decision 50). One-run: refuses when config/config.toml already exists
+# or config/mode is already toml. Needs host Python 3.11+.
+migrate-config:
+	@python3 scripts/config/migrate.py
+
 # Source commit baked into each image (the org.opencontainers.image.revision
 # label and GIT_COMMIT) and logged at startup (#887): the short HEAD hash,
 # plus -dirty when a tracked file is modified or an untracked file is not
@@ -158,7 +176,7 @@ validate-env:
 	./scripts/validate-env.sh
 
 # Start the full stack in detached mode
-up: init-secrets validate-env
+up: init-secrets init-config validate-env
 	docker compose up -d
 
 # Restart the indexer after editing config/authority.toml or
@@ -291,7 +309,7 @@ restore-index:
 	BACKUP="$(BACKUP)" ./scripts/restore-index.sh
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-config test-make-status test-maintenance-commands test-index-backup test-image-pins test-trivy-flags test-maven-checksums
+test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-index-backup test-image-pins test-trivy-flags test-maven-checksums
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -323,6 +341,10 @@ test-validate-env:
 # later, standard library only.
 test-config:
 	python3 -m unittest discover -s scripts/config/tests
+
+# config/mode and make init-config/migrate-config (#1603).
+test-config-mode:
+	bash scripts/tests/config_mode_test.sh
 
 test-make-status:
 	bash scripts/tests/make_status_test.sh

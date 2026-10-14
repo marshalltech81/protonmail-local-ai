@@ -925,22 +925,49 @@ resources until a restart. A client that comes back after that gets
 `404` for the old session ID and starts a new session; raise the value
 in `.env` if a client of yours does not reconnect on its own.
 
-## Operator configuration file (not yet active)
+## Operator configuration file (validated, not yet consumed by Compose)
 
-**Nothing below changes how the stack runs today.** `make up` reads
-`.env`, the secret files and `config/*.toml` exactly as described above.
-A versioned TOML file with several accounts is the approved direction
-(#1353); this section describes its schema and its translator, which
-exist now so the mapping can be checked. The launcher that runs the
-stack from it, and the explicit choice between `.env` and TOML, come
-with #1603.
+`config/mode` (gitignored, mode `600`) selects which form is active:
+`legacy` (`.env`, the default — everything above this section) or
+`toml` (`config/config.toml`, below). It is written only by an explicit
+command, never guessed: `make init-config` (which `make up` now runs,
+after `init-secrets`) writes `legacy` on a fresh deployment and never
+replaces an existing value; `make migrate-config` writes `toml`, once,
+after importing the effective `.env` settings into `config/config.toml`
+as the one account at `/maildir` (`ACCOUNT_SCOPE` imported exactly as
+read, never regenerated: a different UUID is a different account,
+#1596). `make validate-env` (so `make up`, `restart-indexer`,
+`rotate-bridge-pin` and `force-deletion`, which all run it first)
+refuses with fixed text when `config/mode` is missing or holds neither
+value, or when the configuration is mixed (`config/config.toml` present
+while the mode is `legacy`, or absent while it is `toml`) — there is no
+fallback in either direction.
 
-`config/config.toml` (copy `config/config.toml.example`) holds
-`schema_version = 1`, a `[global]` table (the model layers and their
-API-key files, the indexer, MCP and the source-authority rules) and one
-`[[accounts]]` table per account. It is gitignored and must be mode
-`600`: it holds your Bridge username and addresses. Secrets stay in
-their files; the TOML holds only their paths, relative to `config/`.
+**What TOML mode changes today, and what it does not.** In `toml` mode,
+`make validate-env` runs the translator below against
+`config/config.toml` instead of the `.env` and fixed-path secret checks
+above, and independently checks every declared account's and model
+layer's secret file (existence, mode `600`, non-empty when that layer
+is enabled) by its own path from the TOML, not a fixed one. Exactly one
+account may be *enabled* until per-account collectors exist (#1605); a
+second enabled account is refused there, even though the translator
+itself (and the Compose hardening tests below) accept several. `docker
+compose up` itself is unchanged: it still reads `.env` and the fixed
+secret paths in `docker-compose.yml`, in both modes, until #1638 wires
+`compose.env` into it with `--env-file` and stops reading `.env`, as
+the owner approved (#1353's decision). `make migrate-config`
+and TOML mode are therefore safe to adopt for validation today, but
+changing `config/config.toml` does not yet change what the running
+containers see — keep `.env` and `config/config.toml` describing the
+same account until that issue lands.
+
+`config/config.toml` (copy `config/config.toml.example`, or write it
+with `make migrate-config`) holds `schema_version = 1`, a `[global]`
+table (the model layers and their API-key files, the indexer, MCP and
+the source-authority rules) and one `[[accounts]]` table per account.
+It is gitignored and must be mode `600`: it holds your Bridge username
+and addresses. Secrets stay in their files; the TOML holds only their
+paths, relative to `config/`.
 
 ```bash
 install -m 600 config/config.toml.example config/config.toml
@@ -949,8 +976,10 @@ python3 scripts/config/operator_config.py translate
 ```
 
 The translator reads at most 4 MiB, validates the file, and writes
-`.generated/` (gitignored, directories `700`, files `600`): nothing reads
-it yet.
+`.generated/` (gitignored, directories `700`, files `600`).
+`check-secrets` runs the same validation and lists every account's and
+model layer's secret path, one per line (`REQUIRED` or `OPTIONAL`, by
+tab), for `make validate-env`'s own check; it writes nothing.
 
 - `compose.env`: the settings `.env` holds today, for the global keys and
   the account at `/maildir`, each value in single quotes.

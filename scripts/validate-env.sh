@@ -472,6 +472,31 @@ normalize_mode() {
     trim "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+# The token must be one scripts/mcp-auth-headers.sh can send and
+# mcp-server accepts at startup (#589): at least 32 RFC 6750 b64token
+# characters once surrounding whitespace is stripped, as both of them
+# strip it. ``make init-secrets`` writes 64 hex characters. LC_ALL=C
+# keeps the ranges ASCII. Command substitution drops NUL bytes, which
+# mcp-server would keep and reject, so they are counted first. The
+# message never includes the token. Defined here, above both the
+# legacy and TOML-mode bodies, so each can call it; TOML mode has no
+# other reason to read $MCP_TOKEN_FILE's own existence/emptiness
+# checks from the legacy body, which it does not run.
+check_mcp_token() {
+    local LC_ALL=C token="" nul_bytes
+    nul_bytes="$(tr -cd '\000' <"$MCP_TOKEN_FILE" | wc -c)"
+    if ((nul_bytes == 0)); then
+        token="$(<"$MCP_TOKEN_FILE")"
+        token="${token#"${token%%[![:space:]]*}"}"
+        token="${token%"${token##*[![:space:]]}"}"
+    fi
+    if ((${#token} < 32)) || [[ ! "$token" =~ ^[A-Za-z0-9._~+/-]+=*$ ]]; then
+        printf 'ERROR: MCP bearer token in %s must be at least 32 characters from A-Z a-z 0-9 - . _ ~ + / with optional trailing =. Regenerate it with: (umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)\n' \
+            "$MCP_TOKEN_FILE" >&2
+        exit 1
+    fi
+}
+
 if [[ "${1:-}" == "--get" ]]; then
     [[ $# -eq 2 ]] || {
         echo "ERROR: usage: validate-env.sh --get KEY" >&2
@@ -479,6 +504,80 @@ if [[ "${1:-}" == "--get" ]]; then
     }
     require_file "$ENV_FILE" ".env"
     get_env_value "$2"
+    exit 0
+fi
+
+# config/mode selects .env (legacy, today's only form) or
+# config/config.toml (toml, #1603, PLAN.md decision 50). Checked before
+# any of the legacy checks below, which assume .env is the active
+# configuration.
+readonly CONFIG_MODE_FILE="${ROOT_DIR}/config/mode"
+readonly CONFIG_TOML_FILE="${ROOT_DIR}/config/config.toml"
+# shellcheck source=scripts/config-mode.sh disable=SC1091 # linted on its own
+source "${ROOT_DIR}/scripts/config-mode.sh"
+CONFIG_MODE_PROBLEM="$(config_mode_problem "$CONFIG_MODE_FILE" "$CONFIG_TOML_FILE")"
+if [[ -n "$CONFIG_MODE_PROBLEM" ]]; then
+    printf 'ERROR: %s\n' "$CONFIG_MODE_PROBLEM" >&2
+    exit 1
+fi
+
+if [[ "$(read_config_mode "$CONFIG_MODE_FILE")" == "$CONFIG_MODE_TOML" ]]; then
+    # TOML mode: .env, ACCOUNT_SCOPE, BRIDGE_* and the model secrets'
+    # fixed paths are not read here; config/config.toml and its own
+    # secret paths are checked instead (operator_config.py, #1603). The
+    # MCP bearer token stays at its fixed path in both modes: it is not
+    # part of the TOML schema. This mirrors the legacy-mode check below
+    # rather than sharing it, since the legacy body is skipped entirely
+    # in this branch.
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'ERROR: python3 (3.11+) is required to check config/config.toml in TOML mode.\n' >&2
+        exit 1
+    }
+    if [[ ! -f "$MCP_TOKEN_FILE" ]] || ! grep -q '[^[:space:]]' "$MCP_TOKEN_FILE"; then
+        printf 'ERROR: MCP bearer token is missing or empty at %s. Create it with: (umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)\n' \
+            "$MCP_TOKEN_FILE" >&2
+        exit 1
+    fi
+    require_mode_600 "$MCP_TOKEN_FILE"
+    check_mcp_token
+    # Security review finding (round 1): a stale or mistakenly
+    # duplicated secret in .env is still readable by another local
+    # account (.env is not held to mode 600, unlike the Docker secret
+    # files), and Compose never passes these as env vars in either
+    # mode, so a value here is always wrong. .env is optional in TOML
+    # mode (reject_secret_in_env requires it to exist), so this only
+    # runs when there is one to check.
+    if [[ -f "$ENV_FILE" ]]; then
+        reject_secret_in_env "INFERENCE_API_KEY" "$INFERENCE_KEY_FILE"
+        reject_secret_in_env "EMBED_API_KEY" "$EMBED_KEY_FILE"
+        reject_secret_in_env "RERANK_API_KEY" "$RERANK_KEY_FILE"
+        reject_secret_in_env "MCP_AUTH_TOKEN" "$MCP_TOKEN_FILE"
+    fi
+    # The indexer still mounts these two at their fixed path regardless
+    # of config/mode (#1603 does not yet wire the TOML-generated
+    # config/identity.toml and config/authority.toml into it; see
+    # docs/setup.md), so they are still what is live and are still
+    # checked here.
+    require_private_optional_file "$AUTHORITY_FILE"
+    require_private_optional_file "$IDENTITY_FILE"
+
+    if ! TRANSLATE_OUTPUT="$(python3 "${ROOT_DIR}/scripts/config/operator_config.py" translate 2>&1)"; then
+        printf '%s\n' "$TRANSLATE_OUTPUT" >&2
+        exit 1
+    fi
+    if ! SECRETS_OUTPUT="$(python3 "${ROOT_DIR}/scripts/config/operator_config.py" check-secrets 2>&1)"; then
+        printf '%s\n' "$SECRETS_OUTPUT" >&2
+        exit 1
+    fi
+    while IFS=$'\t' read -r secret_requirement secret_path; do
+        [[ -n "$secret_path" ]] || continue
+        require_file "$secret_path" "account or model layer secret"
+        require_mode_600 "$secret_path"
+        if [[ "$secret_requirement" == "REQUIRED" ]]; then  # pragma: allowlist secret
+            require_nonempty_file "$secret_path" "account or model layer secret"
+        fi
+    done <<<"$SECRETS_OUTPUT"
+    printf 'Environment validation passed (TOML mode).\n'
     exit 0
 fi
 
@@ -496,27 +595,6 @@ if [[ ! -f "$MCP_TOKEN_FILE" ]] || ! grep -q '[^[:space:]]' "$MCP_TOKEN_FILE"; t
         "$MCP_TOKEN_FILE" >&2
     exit 1
 fi
-# The token must be one scripts/mcp-auth-headers.sh can send and
-# mcp-server accepts at startup (#589): at least 32 RFC 6750 b64token
-# characters once surrounding whitespace is stripped, as both of them
-# strip it. ``make init-secrets`` writes 64 hex characters. LC_ALL=C
-# keeps the ranges ASCII. Command substitution drops NUL bytes, which
-# mcp-server would keep and reject, so they are counted first. The
-# message never includes the token.
-check_mcp_token() {
-    local LC_ALL=C token="" nul_bytes
-    nul_bytes="$(tr -cd '\000' <"$MCP_TOKEN_FILE" | wc -c)"
-    if ((nul_bytes == 0)); then
-        token="$(<"$MCP_TOKEN_FILE")"
-        token="${token#"${token%%[![:space:]]*}"}"
-        token="${token%"${token##*[![:space:]]}"}"
-    fi
-    if ((${#token} < 32)) || [[ ! "$token" =~ ^[A-Za-z0-9._~+/-]+=*$ ]]; then
-        printf 'ERROR: MCP bearer token in %s must be at least 32 characters from A-Z a-z 0-9 - . _ ~ + / with optional trailing =. Regenerate it with: (umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)\n' \
-            "$MCP_TOKEN_FILE" >&2
-        exit 1
-    fi
-}
 check_mcp_token
 
 # Mode selects the wire protocol; BASE_URL, MODEL and API_KEY configure
