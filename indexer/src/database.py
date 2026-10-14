@@ -1132,7 +1132,7 @@ class Database:
                 -- default; mcp-server reads NULL as "can't tell".
                 sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
                 -- 1 when the parser's display-name stage stored every
-                -- distinct name in ``message_participant_names``, 0 when
+                -- distinct From/To/Cc name in ``message_participant_names``, 0 when
                 -- its per-message budget dropped one (#1140); NULL = not
                 -- yet known (a row from before v4 the reparse has not
                 -- reached). It covers that stage only: it does not
@@ -4230,8 +4230,8 @@ class Database:
             ("bcc", msg.bcc_addrs),
         ]
         # Every distinct display name per (role, address) (#1140), within
-        # the parser's per-message budget, and whether that budget kept
-        # them all. A Message built without parsing derives both here.
+        # the parser's per-message budget; completeness covers From/To/Cc
+        # names only. A Message built without parsing derives both here.
         names = msg.participant_names
         complete = msg.participant_names_complete
         if names is None:

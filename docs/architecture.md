@@ -1040,14 +1040,18 @@ always kept; every further one spends one per-message budget of
 `MAX_EXTRA_PARTICIPANT_NAMES` (1,000) names and
 `MAX_EXTRA_PARTICIPANT_NAME_BYTES` (64,000) UTF-8 bytes, and a name
 past it is dropped and counted as the parser cap `participant_names`
+for From/To/Cc or `bcc_participant_names` for Bcc
 (see `docs/troubleshooting.md`).
 
 `messages.participant_names_complete` records, per message, whether
-that name stage kept every distinct name: `1` when it finished within
-the budget, `0` when the budget dropped one, `NULL` for mail not yet
+that name stage kept every distinct From/To/Cc name: `1` when those
+names finished within the budget, `0` when the budget dropped one, `NULL` for mail not yet
 reparsed since the v4 upgrade (and for a dead-lettered message until
 `make requeue-dead`). It is written in the same transaction as the
-participant and name rows. It covers the name stage only: whether
+participant and name rows. Bcc names use the same budget after visible
+names; Bcc-only loss does not change this visible-name flag. Bcc-inclusive
+predicates still report unmatched evidence as unknown. It covers the
+name stage only: whether
 the participant rows hold every address is the per-role completeness
 below. A `sender`, `recipient` or `participant` filter given as a name
 or fragment is decided by a match on a stored address or name; a
