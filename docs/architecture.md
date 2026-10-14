@@ -1040,14 +1040,18 @@ always kept; every further one spends one per-message budget of
 `MAX_EXTRA_PARTICIPANT_NAMES` (1,000) names and
 `MAX_EXTRA_PARTICIPANT_NAME_BYTES` (64,000) UTF-8 bytes, and a name
 past it is dropped and counted as the parser cap `participant_names`
+for From/To/Cc or `bcc_participant_names` for Bcc
 (see `docs/troubleshooting.md`).
 
 `messages.participant_names_complete` records, per message, whether
-that name stage kept every distinct name: `1` when it finished within
-the budget, `0` when the budget dropped one, `NULL` for mail not yet
+that name stage kept every distinct From/To/Cc name: `1` when those
+names finished within the budget, `0` when the budget dropped one, `NULL` for mail not yet
 reparsed since the v4 upgrade (and for a dead-lettered message until
 `make requeue-dead`). It is written in the same transaction as the
-participant and name rows. It covers the name stage only: whether
+participant and name rows. Bcc names use the same budget after visible
+names; Bcc-only loss does not change this visible-name flag. Bcc-inclusive
+predicates still report unmatched evidence as unknown. It covers the
+name stage only: whether
 the participant rows hold every address is the per-role completeness
 below. A `sender`, `recipient` or `participant` filter given as a name
 or fragment is decided by a match on a stored address or name; a
@@ -1836,9 +1840,9 @@ These claimed values never affect authority or ranked search.
 
 They support claimed message direction (#824). Deterministic message queries
 classify from the stored exact own-address set, complete unambiguous single
-From and observed external To/Cc evidence. Classification does not authenticate
-headers or infer aliases from folders. Own From without an external visible
-recipient remains unresolved until Bcc evidence (#1090). Identity replacement
+From and observed external To/Cc/Bcc evidence. Classification does not authenticate
+headers or infer aliases from folders. Own From without an observed external
+recipient remains unresolved until exhaustive Bcc provenance (#1644). Identity replacement
 and direction-sensitive pagination share a read snapshot; cursor digests bind
 identity state, address digest and classifier version.
 
@@ -4572,3 +4576,22 @@ Set `INFERENCE_MODE` in `.env`:
 
 The toggle applies per-deployment. A per-session toggle is not planned
 (`PLAN.md`, "Not doing").
+
+
+### Observed Bcc capture (#1090, staged)
+
+Schema17 extends message_participants' role constraint with `bcc` and adds
+nullable `messages.bcc_addresses_complete`. A forward migration preserves
+participant insertion order and name foreign keys, then queues reparse using
+the existing job queue. This flag covers captured header parsing only; it is
+never evidence that a copy retains the exhaustive original Bcc list. Bcc is
+read after From/To/Cc, sharing every existing address and name work ceiling.
+Bcc-only name loss has its own count so visible name completeness is unchanged.
+
+Explicit Bcc-inclusive predicates retain observed positives and answer unknown
+for every no-match. Folders, own From and header presence never supply source
+provenance. External observed Bcc is an outbound witness, while self remains
+unavailable. Shared header outputs show bounded observed Bcc plus retained
+counts; find_contact and thread participant discovery remain visible-only.
+The approved split leaves #1090 open; #1644 owns provenance-backed negatives,
+self and effective completeness at the metadata boundary (#1598/#1584).

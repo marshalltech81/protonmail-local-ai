@@ -1268,3 +1268,15 @@ superseded entries keep their number and one line.
     encoded-word clarification. No migration, reparse, authority or ranking
     change. Cost: normalization of requested metadata over the evaluated
     population; synthetic 5k/50k actual-reader work gates cover it.
+
+59. **Observed Bcc, staged (#1090, owner, 2026-10-14):** after the
+    Opus 5.5/GPT-6.1 Sol high-effort panel agreed, the owner approved
+    bounded last-role Bcc capture, schema17 migration/reparse, shared
+    observed-header output/counts and explicit bcc/recipient/any roles.
+    Every unmatched new Bcc-inclusive predicate stays unknown on all
+    copies; visible roles, flat filters and contact discovery stay
+    unchanged. External observed Bcc can establish claimed outbound;
+    self, definite negatives and effective completeness require the
+    separately tracked exhaustive source-bound provenance in #1644,
+    blocked by #1598/#1584. #1090 stays open. No live-account run or
+    folder/header heuristic is approved.

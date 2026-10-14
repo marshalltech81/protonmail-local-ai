@@ -227,9 +227,9 @@ def test_invalid_direction_operands_rejected(direction_db):
             direction_db.query_messages(direction=value)
 
 
-@pytest.mark.parametrize("role", ["from", "to", "cc"])
+@pytest.mark.parametrize("role", ["from", "to", "cc", "bcc"])
 def test_direction_reader_work_tracks_only_relevant_participant_fanout(tmp_path, monkeypatch, role):
-    """Measure real readers, every connection, and separate From/To/Cc work."""
+    """Measure real readers, every connection, and separate From/To/Cc/Bcc work."""
     import time
 
     from src.lib.predicates import DIRECTION_STATE_SQL

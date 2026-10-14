@@ -334,6 +334,7 @@ ROLE_COMPLETE_COLUMNS = {
     "from": "from_addresses_complete",
     "to": "to_addresses_complete",
     "cc": "cc_addresses_complete",
+    "bcc": "bcc_addresses_complete",
 }
 
 
@@ -350,7 +351,11 @@ def _role_clause(mode: str, value: str, roles: tuple[str, ...], params: list) ->
     budget dropped a name, or the message is not assessed yet (not
     reparsed since the upgrade that added the flag)."""
     match_sql, reads_names = _ADDRESS_MODES[mode]
-    complete = [f"m.{ROLE_COMPLETE_COLUMNS[role]} = 1" for role in roles]
+    # Until provenance-backed exhaustive Bcc is supplied (#1644), every
+    # no-match in a Bcc-inclusive role is unknown, even on Sent copies.
+    complete = (
+        ["0"] if "bcc" in roles else [f"m.{ROLE_COMPLETE_COLUMNS[role]} = 1" for role in roles]
+    )
     if reads_names:
         complete.append("m.participant_names_complete = 1")
     match = match_sql(value, roles, params)
@@ -670,11 +675,14 @@ ADDRESS_LEAF_ROWS: dict[str, Callable[[str, tuple[str, ...], list], str]] = {
 # The stored ``message_participants`` roles each explicit address
 # leaf's role names (#1088). ``visible_participant`` (From, To or Cc)
 # is internal: it is what the flat ``participant`` filter compiles to.
-# The Bcc-inclusive ``recipient`` and ``any`` arrive with Bcc (#1090).
+# Bcc-inclusive roles retain observed positives; no-match remains unknown (#1090).
 ROLE_SETS: dict[str, tuple[str, ...]] = {
     "from": ("from",),
     "to": ("to",),
     "cc": ("cc",),
+    "bcc": ("bcc",),
+    "recipient": ("to", "cc", "bcc"),
+    "any": ("from", "to", "cc", "bcc"),
     "visible_recipient": ("to", "cc"),
     "visible_participant": ("from", "to", "cc"),
 }
@@ -912,7 +920,7 @@ def direction_state_sql() -> str:
         "WHEN NOT EXISTS (SELECT 1 FROM message_participants p "
         f"WHERE p.claimant_id=m.claimant_id AND p.role='from' AND {own_from}) THEN 'inbound' "
         "WHEN EXISTS (SELECT 1 FROM message_participants r "
-        f"WHERE r.claimant_id=m.claimant_id AND r.role IN ('to','cc') AND NOT {external_recipient}) "
+        f"WHERE r.claimant_id=m.claimant_id AND r.role IN ('to','cc','bcc') AND NOT {external_recipient}) "
         "THEN 'outbound' ELSE 'own_unresolved' END"
     )
 
@@ -1127,7 +1135,12 @@ LEAVES: dict[str, LeafKind] = {
                 param,
                 _compile_address(mode),
                 Evaluability.UNKNOWN_WHEN_NULL,
-                coverage=_address_coverage(("from", "to", "cc"), names=_ADDRESS_MODES[mode][1]),
+                coverage=(
+                    "0",
+                    _address_coverage(("from", "to", "cc", "bcc"), names=_ADDRESS_MODES[mode][1])[
+                        1
+                    ],
+                ),
                 schema=_address_schema(names=_ADDRESS_MODES[mode][1]),
             )
             for mode, param in (
@@ -1444,9 +1457,8 @@ WHERE_LEAVES = (
     "precedence_is",
 )
 # The ``ROLE_SETS`` roles a caller names. ``visible_participant`` stays
-# internal (the flat ``participant``); the Bcc-inclusive ``recipient``
-# and ``any`` arrive with #1090.
-WHERE_ROLES = ("from", "to", "cc", "visible_recipient")
+# internal (the flat ``participant``); Bcc-inclusive roles are positive-only.
+WHERE_ROLES = ("from", "to", "cc", "bcc", "visible_recipient", "recipient", "any")
 
 # Every leaf and every ``any`` group counts one node.
 MAX_WHERE_NODES = 16
@@ -1488,7 +1500,7 @@ WhereLeafName = Literal[
     "list_id_is",
     "precedence_is",
 ]
-WhereRole = Literal["from", "to", "cc", "visible_recipient"]
+WhereRole = Literal["from", "to", "cc", "bcc", "visible_recipient", "recipient", "any"]
 
 
 # The ``where`` argument models. They carry no docstrings: FastMCP
