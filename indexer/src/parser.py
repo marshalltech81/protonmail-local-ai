@@ -107,6 +107,8 @@ type DateStatus = Literal["parsed", "missing", "invalid"]
 # * ``participant_names``: a display name past the first for its (role,
 #   address), past the ``MAX_EXTRA_PARTICIPANT_*`` budget, is not stored
 #   (#1140); the address and its first name are kept;
+# * ``bcc_participant_names``: the same shared name budget dropped a Bcc
+#   name; tracked separately so visible-role name completeness is unchanged;
 # * ``subject_length``: a decoded subject over ``SUBJECT_MAX_CHARS`` is
 #   cut to the cap (#902);
 # * ``in_reply_to_length`` / ``references_length``: an In-Reply-To, or
@@ -116,7 +118,7 @@ type DateStatus = Literal["parsed", "missing", "invalid"]
 # Two names count repeated headers, which lose nothing (#1144) and are
 # logged on their own lines, not the cap line (``PARSE_REPEATS``):
 #
-# * ``address_repeated``: a To or Cc header after the first of its name,
+# * ``address_repeated``: a To, Cc or Bcc header after the first of its name,
 #   merged into that role (recovered);
 # * ``from_repeated``: a From header after the first, counted and never
 #   parsed: the first is kept and the sender flagged ambiguous.
@@ -142,6 +144,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "address_count",
     "address_unparsed",
     "participant_names",
+    "bcc_participant_names",
     "subject_length",
     "headers_budget",
     "headers_parse",
@@ -580,6 +583,8 @@ class Message:
     # RFC 5322 allows several. ``from_addr`` stays the first author for the
     # thread-level sender lists.
     from_addrs: list[str] = field(default_factory=list)
+    # Observed Bcc header participants; capture does not prove exhaustiveness.
+    bcc_addrs: list[str] = field(default_factory=list)
     # File identity captured at parse time. ``size`` / ``mtime_ns``
     # / ``content_hash`` feed ``indexed_files`` so the reconciler can tell a
     # flag-only rename from a genuine content change without re-reading every
@@ -638,6 +643,7 @@ class Message:
     from_addresses_complete: bool = True
     to_addresses_complete: bool = True
     cc_addresses_complete: bool = True
+    bcc_addresses_complete: bool = True
     attachments_manifest_complete: bool = True
     body_complete: bool = True
     # The parse's nonzero ``PARSE_CAPS`` counts by name, in
@@ -869,6 +875,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
             ("from", addresses.from_addrs or [addresses.from_addr]),
             ("to", addresses.to_addrs),
             ("cc", addresses.cc_addrs),
+            ("bcc", addresses.bcc_addrs),
         ),
         caps,
     )
@@ -955,6 +962,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         from_addrs=addresses.from_addrs,
         to_addrs=addresses.to_addrs,
         cc_addrs=addresses.cc_addrs,
+        bcc_addrs=addresses.bcc_addrs,
         sender_ambiguous=addresses.sender_ambiguous,
         participant_names=names,
         participant_names_complete=not caps["participant_names"],
@@ -964,6 +972,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         from_addresses_complete=addresses.from_complete,
         to_addresses_complete=addresses.to_complete,
         cc_addresses_complete=addresses.cc_complete,
+        bcc_addresses_complete=addresses.bcc_complete,
         attachments_manifest_complete=not any(caps[name] for name in ATTACHMENT_LOSS_CAPS),
         body_complete=not any(caps[name] for name in BODY_LOSS_CAPS),
         parse_caps={name: caps[name] for name in PARSE_CAPS if caps[name]},
@@ -2589,16 +2598,16 @@ _MAX_ADDRESS_ELEMENT_CHARS = 128_000
 _MAX_ADDRESS_CHARS = 998
 
 # One message's address-header budget (#1144), spent by
-# ``_read_address_headers`` across From, To and Cc together, so
+# ``_read_address_headers`` across From, To, Cc and Bcc together, so
 # repeating a header cannot multiply the work. Each dimension the cost
 # depends on has its own limit, checked before the work it bounds:
-# header fields scanned for the three names; occurrences read; raw
+# header fields scanned for the four names; occurrences read; raw
 # characters in all (checked, with the per-value
 # ``_MAX_ADDRESS_HEADER_CHARS``, before an occurrence is fetched,
 # decoded or split, so decoding is linear in at most this much text);
 # elements split and parsed (each element costs at most two
 # ``parseaddr`` calls); and addresses kept, one participant row each.
-# Real mail has one From, To and Cc among a few dozen fields, so these
+# Real mail has one From, To, Cc and Bcc among a few dozen fields, so these
 # only touch crafted messages; what they drop is counted in
 # ``PARSE_CAPS``.
 MAX_ADDRESS_HEADER_FIELDS = 10_000
@@ -2615,7 +2624,7 @@ MAX_MESSAGE_ADDRESSES = 10_000
 # is always kept: at most one per ``message_participants`` row, so the
 # address budget above already bounds it. Each
 # further distinct name for the same (role, address) costs one name and
-# its UTF-8 bytes from this budget, across From, To and Cc together, so
+# its UTF-8 bytes from this budget, across From, To, Cc and Bcc together, so
 # every stored name row and byte past the participant rows themselves is
 # bounded. Real mail rarely writes one address under two names; names
 # past the budget are dropped and counted as ``participant_names`` in
@@ -2630,7 +2639,7 @@ def participant_names(
     """Every distinct display name per (role, address), as
     ``(role, address, name)`` rows in header order (#1140).
 
-    ``roles`` is ``(role, address strings)`` in From, To, Cc order, as
+    ``roles`` is ``(role, address strings)`` in From, To, Cc, Bcc order, as
     the participant writer reads them; ``address`` is the
     ``canonical_addr`` it keys rows by and ``name`` the stripped
     ``parseaddr`` display name it stores, so a participant row's
@@ -2638,7 +2647,8 @@ def participant_names(
     address). Exact duplicates are kept once and
     casing is kept. Names past the first of a (role, address) spend the
     ``MAX_EXTRA_PARTICIPANT_*`` budget; each one refused is counted in
-    ``caps["participant_names"]``. Two ``parseaddr`` calls per address.
+    ``caps["participant_names"]`` (or ``bcc_participant_names`` for Bcc).
+    Two ``parseaddr`` calls per address.
     """
     seen: dict[tuple[str, str], set[str]] = {}
     rows: list[tuple[str, str, str]] = []
@@ -2660,7 +2670,10 @@ def participant_names(
                     extra_names >= MAX_EXTRA_PARTICIPANT_NAMES
                     or extra_bytes + size > MAX_EXTRA_PARTICIPANT_NAME_BYTES
                 ):
-                    caps["participant_names"] += 1
+                    if role == "bcc":
+                        caps["bcc_participant_names"] += 1
+                    else:
+                        caps["participant_names"] += 1
                     continue
                 extra_names += 1
                 extra_bytes += size
@@ -2685,17 +2698,19 @@ class _AddressBudget:
 
 @dataclass
 class _AddressHeaders:
-    """The From, To and Cc of one message (``_read_address_headers``)."""
+    """The From, To, Cc and Bcc of one message (``_read_address_headers``)."""
 
     from_addr: str
     from_addrs: list[str]
     to_addrs: list[str]
     cc_addrs: list[str]
+    bcc_addrs: list[str]
     sender_ambiguous: bool
     # Whether every address of the role was kept (#1086).
     from_complete: bool
     to_complete: bool
     cc_complete: bool
+    bcc_complete: bool
 
 
 def _address_losses(caps: Counter[str]) -> int:
@@ -2704,7 +2719,7 @@ def _address_losses(caps: Counter[str]) -> int:
 
 
 def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _AddressHeaders:
-    """Read From, To and Cc under one ``_AddressBudget`` (#1144).
+    """Read From, To, Cc and Bcc under one ``_AddressBudget`` (#1144).
 
     One pass over the raw header fields (up to
     ``MAX_ADDRESS_HEADER_FIELDS``) collects every occurrence of the three
@@ -2720,7 +2735,7 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
     cut short, and (for From) no later From went unparsed (#1086).
     """
     budget = _AddressBudget()
-    found: dict[str, list[str]] = {"from": [], "to": [], "cc": []}
+    found: dict[str, list[str]] = {"from": [], "to": [], "cc": [], "bcc": []}
     complete = True
     for name, raw in msg.raw_items():
         if budget.fields >= MAX_ADDRESS_HEADER_FIELDS:
@@ -2747,7 +2762,7 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
 
     recipients: dict[str, list[str]] = {}
     recipients_complete: dict[str, bool] = {}
-    for role, header in (("to", "To"), ("cc", "Cc")):
+    for role, header in (("to", "To"), ("cc", "Cc"), ("bcc", "Bcc")):
         addrs: list[str] = []
         lost = _address_losses(caps)
         for index, raw in enumerate(found[role]):
@@ -2765,10 +2780,12 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
         from_addrs=from_addrs,
         to_addrs=recipients["to"],
         cc_addrs=recipients["cc"],
+        bcc_addrs=recipients["bcc"],
         sender_ambiguous=len(found["from"]) > 1 or not complete,
         from_complete=from_complete,
         to_complete=recipients_complete["to"],
         cc_complete=recipients_complete["cc"],
+        bcc_complete=recipients_complete["bcc"],
     )
 
 

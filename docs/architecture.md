@@ -1836,9 +1836,9 @@ These claimed values never affect authority or ranked search.
 
 They support claimed message direction (#824). Deterministic message queries
 classify from the stored exact own-address set, complete unambiguous single
-From and observed external To/Cc evidence. Classification does not authenticate
-headers or infer aliases from folders. Own From without an external visible
-recipient remains unresolved until Bcc evidence (#1090). Identity replacement
+From and observed external To/Cc/Bcc evidence. Classification does not authenticate
+headers or infer aliases from folders. Own From without an observed external
+recipient remains unresolved until exhaustive Bcc provenance (#1644). Identity replacement
 and direction-sensitive pagination share a read snapshot; cursor digests bind
 identity state, address digest and classifier version.
 
@@ -4572,3 +4572,22 @@ Set `INFERENCE_MODE` in `.env`:
 
 The toggle applies per-deployment. A per-session toggle is not planned
 (`PLAN.md`, "Not doing").
+
+
+### Observed Bcc capture (#1090, staged)
+
+Schema17 extends message_participants' role constraint with `bcc` and adds
+nullable `messages.bcc_addresses_complete`. A forward migration preserves
+participant insertion order and name foreign keys, then queues reparse using
+the existing job queue. This flag covers captured header parsing only; it is
+never evidence that a copy retains the exhaustive original Bcc list. Bcc is
+read after From/To/Cc, sharing every existing address and name work ceiling.
+Bcc-only name loss has its own count so visible name completeness is unchanged.
+
+Explicit Bcc-inclusive predicates retain observed positives and answer unknown
+for every no-match. Folders, own From and header presence never supply source
+provenance. External observed Bcc is an outbound witness, while self remains
+unavailable. Shared header outputs show bounded observed Bcc plus retained
+counts; find_contact and thread participant discovery remain visible-only.
+The approved split leaves #1090 open; #1644 owns provenance-backed negatives,
+self and effective completeness at the metadata boundary (#1598/#1584).

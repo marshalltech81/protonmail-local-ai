@@ -715,6 +715,7 @@ class MessageRecord:
     from_: list[Participant] = field(default_factory=list)
     to: list[Participant] = field(default_factory=list)
     cc: list[Participant] = field(default_factory=list)
+    bcc: list[Participant] = field(default_factory=list)
     source_file: SourceFile | None = None
     # Delivery time from the top ``Received:`` header; None when unknown.
     occurred_at: str | None = None
@@ -737,6 +738,7 @@ class MessageRecord:
     from_count: int | None = None
     to_count: int | None = None
     cc_count: int | None = None
+    bcc_count: int | None = None
     direction: Literal["inbound", "outbound", "unknown"] = "unknown"
     list_metadata: dict[str, tuple[str | None, str]] = field(default_factory=dict)
 
@@ -811,7 +813,7 @@ def _attach_participants(conn: sqlite3.Connection, records: list[MessageRecord])
     if not by_id:
         return
     for record in records:
-        record.from_count = record.to_count = record.cc_count = 0
+        record.from_count = record.to_count = record.cc_count = record.bcc_count = 0
     placeholders = ",".join(["?"] * len(by_id))
     # rowid order is insertion order, i.e. header order.
     rows = conn.execute(
@@ -825,7 +827,7 @@ def _attach_participants(conn: sqlite3.Connection, records: list[MessageRecord])
         [*by_id, MAX_LISTED_MESSAGE_HEADERS],
     ).fetchall()
     for p in rows:
-        role_list = {"from": "from_", "to": "to", "cc": "cc"}[p["role"]]
+        role_list = {"from": "from_", "to": "to", "cc": "cc", "bcc": "bcc"}[p["role"]]
         setattr(by_id[p["claimant_id"]], f"{p['role']}_count", p["participant_count"])
         getattr(by_id[p["claimant_id"]], role_list).append(
             Participant(name=p["name"], address=p["address"])
@@ -1464,6 +1466,14 @@ def _leaf_results(
             role, value = w.leaf.value
             rows_params: list = []
             rows_sql = ADDRESS_LEAF_ROWS[w.leaf.name](value, ROLE_SETS[role], rows_params)
+            if role == "any":
+                # Another role can prove the leaf while From is unsafe.
+                # Such a From row is not a matching-address witness.
+                rows_sql = (
+                    f"({rows_sql}) AND (p.role != 'from' OR EXISTS "  # nosec B608 -- code-owned row SQL; values bound
+                    "(SELECT 1 FROM messages am WHERE am.claimant_id=p.claimant_id "
+                    "AND am.sender_ambiguous=0))"
+                )
             returned_sql, returned_params = where_sql, where_params
             if w.path in grouped:
                 own_params: list = []
@@ -2065,8 +2075,8 @@ def _aggregate_participants(
 ) -> dict[str, dict]:
     """``find_contact``'s default aggregation, on ``conn``.
 
-    The query selects addresses; every row of a selected address then
-    aggregates, so a name match reports the contact's other names and
+    The query selects visible-role addresses; every visible row of a selected address then
+    aggregates, so a name match reports the contact's other visible names and
     threads too. Names are every display name each message wrote the
     address with (``message_participant_names``, #1140), each matched
     on its own. Addresses are stored canonical (lowercased); names
@@ -2080,11 +2090,12 @@ def _aggregate_participants(
         JOIN messages m ON m.claimant_id = p.claimant_id
         LEFT JOIN message_participant_names n
             ON n.claimant_id = p.claimant_id AND n.role = p.role AND n.address = p.address
-        WHERE p.address IN (
-            SELECT address FROM message_participants WHERE instr(address, ?) > 0
+        WHERE p.role IN ('from', 'to', 'cc') AND p.address IN (
+            SELECT address FROM message_participants
+            WHERE role IN ('from', 'to', 'cc') AND instr(address, ?) > 0
             UNION
             SELECT address FROM message_participant_names
-            WHERE instr(mcp_casefold(name), ?) > 0
+            WHERE role IN ('from', 'to', 'cc') AND instr(mcp_casefold(name), ?) > 0
         )
         """,
         (needle, name_needle),
@@ -2268,10 +2279,10 @@ def read_stored_schema_version(path: str) -> str:
 
 
 def _identity_digest(conn: sqlite3.Connection, digest: str) -> str:
-    """Bind direction classifier v1 to the identity in this read snapshot."""
+    """Bind direction classifier v2 to the identity in this read snapshot."""
     row = conn.execute("SELECT state, address_digest FROM operator_identity WHERE id=1").fetchone()
     identity = list(row) if row is not None else ["unconfigured", ""]
-    return hashlib.sha256(json.dumps(["direction-v1", digest, identity]).encode()).hexdigest()[:16]
+    return hashlib.sha256(json.dumps(["direction-v2", digest, identity]).encode()).hexdigest()[:16]
 
 
 def _uses_identity(leaves: Sequence[Leaf], where: Sequence[WhereLeaf]) -> bool:

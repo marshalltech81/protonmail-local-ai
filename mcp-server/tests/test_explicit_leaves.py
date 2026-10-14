@@ -174,11 +174,14 @@ def test_evaluability_is_declared(name):
     assert LEAVES[name].evaluability is Evaluability.UNKNOWN_WHEN_NULL
 
 
-def test_roles_are_the_decided_visible_sets():
+def test_roles_include_positive_only_bcc_and_preserve_visible_sets():
     assert ROLE_SETS == {
         "from": ("from",),
         "to": ("to",),
         "cc": ("cc",),
+        "bcc": ("bcc",),
+        "recipient": ("to", "cc", "bcc"),
+        "any": ("from", "to", "cc", "bcc"),
         "visible_recipient": ("to", "cc"),
         "visible_participant": ("from", "to", "cc"),
     }
