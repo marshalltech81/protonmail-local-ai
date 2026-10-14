@@ -718,6 +718,9 @@ class TestLogAllowlist:
             "size_max",
             # #796: query_attachments' status enum, only as one of its values.
             "extraction_status",
+            # #1338: closed calendar period enum and Boolean breakdown.
+            "period",
+            "period_breakdown",
             # #823: aggregate_messages' dimension, only as one of its values.
             "group_by",
         }

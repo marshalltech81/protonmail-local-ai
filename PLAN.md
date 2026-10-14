@@ -76,8 +76,9 @@ Outcomes:
    by sender, domain, folder, year, month and authority class
    (`aggregate_messages`), and subject, header and attachment-text
    leaves in `where` (#1079, #1089, #1091), and exhaustive thread
-   grouping (`query_threads`). Open: the rest of #823 (selectable clocks,
-   further dimensions and identity counts).
+   grouping (`query_threads`). Selectable aggregation clocks, temporal
+   statistics and explicit identity counts are served by #1338. Open:
+   the further dimensions of #823.
 3. **Source metadata stays evidence:** bounded ordered headers,
    unknown send dates kept unknown, verified arrival time, participant
    and Bcc semantics, authority from the stored sender only when it is
@@ -367,8 +368,8 @@ schema change needs a numbered migration.
    every registered leaf's query capability from schema fields and stored
    evidence, with available, unassessed and missing message counts (#1093).
    **Open, in order:**
-   the rest of #823 (selectable clocks,
-   further dimensions and identity counts); the
+   the further dimensions of #823 (its clocks, temporal statistics and explicit
+   identity counts are served by #1338); the
    index optimization for selected clocks (#1123; #1150 serves
    `date_basis` for both listings, retaining keyset paging with scan-and-sort
    under the current schema and counting missing clocks as indeterminate); leaves
@@ -1188,6 +1189,18 @@ superseded entries keep their number and one line.
     correctness prerequisite. The Opus 5.5 and Codex GPT-6.1 Sol
     panel agreed. The synthetic timings establish neither complete-walk
     performance nor tail-latency or concurrency limits.
+
+55. **Temporal aggregates and identity evidence (2026-10-13, #1338):**
+    the owner approved `aggregate_messages` effective/sent/occurred clocks,
+    month/year active-period statistics, optional capped sender/domain ×
+    period pages, explicit matched-plus-indeterminate eligible populations,
+    and distinct Message-ID/payload identity counts. The Opus 5.5 and
+    GPT-6.1 Sol panel agreed after three rounds. A nullable current-inventory
+    marker commits with attachment occurrences; current positives from partial
+    manifests count, stale rows do not, and unknown exhaustive inventories
+    make payload counts lower bounds. The schema migration queues a reparse
+    that reuses unchanged embeddings. Neither technical identity establishes
+    distinct reports; subject grouping and samples remain separate work.
 
 ## Notes for Agents
 

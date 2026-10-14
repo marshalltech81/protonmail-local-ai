@@ -3907,6 +3907,23 @@ re-queues them once it is on), and for mail reparsed while
 `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` was off (phase 2 writes no
 attachment rows then; run `make reparse` after enabling it).
 
+The v15 migration (`0015_attachment_inventory_current.sql`, #1338) adds
+`messages.attachment_rows_current`, NULL until reparsed. Phase 1 resets it to
+NULL; phase 2c sets it in the same transaction as the occurrence writes and
+stale removals: 1 when extraction is enabled, 0 when disabled. Deferred and
+retained current occurrences count as current even without complete extracted
+text. The migration queues the standard reparse, keeping unchanged chunks and
+vectors. This marker certifies currentness, not manifest exhaustiveness:
+`aggregate_messages` counts current positive payload identities even with an
+incomplete manifest, and reports definite matches whose inventory is not known
+exhaustive (`manifest = 1 AND (has_attachments = 0 OR current = 1)`). Unknown
+inventories make identity counts lower bounds. A disabled-extraction pass leaves
+old rows untouched and cannot certify them as current. The aggregation selects
+its clock through the shared predicates, materializes message memberships once,
+and counts attachment identities separately so occurrence fan-out does not
+inflate message totals or repeat predicate evaluation. Sender/domain period
+breakdowns are flat, capped pages over UTC calendar month/year cells.
+
 The v8 migration (`0008_unknown_sent_dates.sql`, #1080) rebuilds
 `messages` with `sent_at_status` `NULL` on every row and queues the
 reparse (see *Message time*). Phase 1 of each job stores the send date

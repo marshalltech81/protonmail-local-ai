@@ -529,7 +529,7 @@ def _work_corpus(tmp_path, size: int) -> Database:
     return Database(str(path))
 
 
-def _probe(db: Database, monkeypatch, group_by: str, items: list) -> tuple:
+def _probe(db: Database, monkeypatch, group_by: str, items: list, **aggregate_args) -> tuple:
     """Each leaf's evaluations in the aggregate statement, the
     connections the call opened and its top-level statements."""
     statements: list[str] = []
@@ -560,7 +560,7 @@ def _probe(db: Database, monkeypatch, group_by: str, items: list) -> tuple:
             name,
             predicates.LeafKind(kind.name, kind.param, spy, kind.evaluability),
         )
-    page = db.aggregate_messages(group_by=group_by, where=_where(*items), limit=2)
+    page = db.aggregate_messages(group_by=group_by, where=_where(*items), limit=2, **aggregate_args)
     ours = [s for s in statements if s.startswith("WITH e AS MATERIALIZED")]
     return calls, page, len(connections), (len(ours), len(statements))
 
@@ -624,6 +624,13 @@ class TestTool:
             "with_attachments": 1,
             "indeterminate": 0,
             "display_name": "Ann B",
+            "period": None,
+            "active_periods": 3,
+            "distinct_message_ids": 4,
+            "distinct_attachment_ids": 0,
+            "eligible_total": 4,
+            "undated_messages": 0,
+            "attachment_inventory_unknown_messages": 0,
         }
         nxt = _call(
             _server(agg_db),
@@ -677,9 +684,9 @@ class TestTool:
     def test_accepts_the_query_messages_filters(self, agg_db):
         qm = _tools(_server(agg_db))["query_messages"].input_schema["properties"]
         agg = _tools(_server(agg_db))["aggregate_messages"].input_schema["properties"]
-        # Every filter except the listing clock (#1150), not the row projection.
-        assert set(qm) - {"fields", "date_basis"} == set(agg) - {"group_by"}
-        for name in set(qm) - {"fields", "limit", "date_basis"}:
+        # Every message filter, including the selected clock, not the projection.
+        assert set(qm) - {"fields"} == set(agg) - {"group_by", "period", "period_breakdown"}
+        for name in set(qm) - {"fields", "limit"}:
             assert {k: v for k, v in agg[name].items() if k != "description"} == {
                 k: v for k, v in qm[name].items() if k != "description"
             }, name
@@ -731,7 +738,10 @@ class TestTool:
         assert MARKER in _text(out)
         assert MARKER not in caplog.text
         assert MARKER.lower() not in caplog.text
-        assert "tool=aggregate_messages {'group_by': 'sender_address', 'limit': 25}" in caplog.text
+        assert (
+            "tool=aggregate_messages {'group_by': 'sender_address', 'date_basis': 'effective', 'period': 'month', 'period_breakdown': False, 'limit': 25}"
+            in caplog.text
+        )
         [line] = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
         assert "outcome=ok" in line
         assert "'total_matches': 1" in line and "'groups': 1" in line
