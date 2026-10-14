@@ -76,8 +76,9 @@ Outcomes:
    by sender, domain, folder, year, month and authority class
    (`aggregate_messages`), and subject, header and attachment-text
    leaves in `where` (#1079, #1089, #1091), and exhaustive thread
-   grouping (`query_threads`). Open: the rest of #823 (selectable clocks,
-   further dimensions and identity counts).
+   grouping (`query_threads`). Selectable aggregation clocks, temporal
+   statistics and explicit identity counts are served by #1338. Open:
+   the further dimensions of #823.
 3. **Source metadata stays evidence:** bounded ordered headers,
    unknown send dates kept unknown, verified arrival time, participant
    and Bcc semantics, authority from the stored sender only when it is
@@ -367,8 +368,8 @@ schema change needs a numbered migration.
    every registered leaf's query capability from schema fields and stored
    evidence, with available, unassessed and missing message counts (#1093).
    **Open, in order:**
-   the rest of #823 (selectable clocks,
-   further dimensions and identity counts); the
+   the further dimensions of #823 (its clocks, temporal statistics and explicit
+   identity counts are served by #1338); the
    index optimization for selected clocks (#1123; #1150 serves
    `date_basis` for both listings, retaining keyset paging with scan-and-sort
    under the current schema and counting missing clocks as indeterminate); leaves
@@ -1022,7 +1023,7 @@ superseded entries keep their number and one line.
     outside its provider's Trash role, considering only its non-`T`
     active occurrences when any exist, otherwise all its active ones
     (owner, 2026-10-13, #1568). Schema v14 (#1596, #1566) is additive
-    and changes no reader; v15 (#1567, #1568, #1569) moves the readers
+    and changes no reader; v16 (#1567, #1568, #1569) moves the readers
     and drops the old columns. The v14 migration binds the account row,
     seeds one occurrence per message whose `indexed_files` record for
     its stored path carries the same content hash (stored records only;
@@ -1129,7 +1130,7 @@ superseded entries keep their number and one line.
     that withheld folders keeps today's criteria and shows the count;
     upstream Bridge/Proton currency stays the fixed "unknown". The
     indexer stores the outcome per account in `account_collection_state`
-    at schema v16, after decision 47's v15. A missing, legacy,
+    at schema v17, after decision 47's v16. A missing, legacy,
     malformed, unsupported or mismatched file reads as unknown with a
     fixed-text WARNING, never as a success, and a rebuilt index
     recovers the state from the file. `get_mailbox_status` gains a
@@ -1210,6 +1211,28 @@ superseded entries keep their number and one line.
     correctness prerequisite. The Opus 5.5 and Codex GPT-6.1 Sol
     panel agreed. The synthetic timings establish neither complete-walk
     performance nor tail-latency or concurrency limits.
+
+55. **Temporal aggregates and identity evidence (2026-10-13, #1338):**
+    the owner approved `aggregate_messages` effective/sent/occurred clocks,
+    month/year active-period statistics, optional capped sender/domain ×
+    period pages, explicit matched-plus-indeterminate eligible populations,
+    and distinct Message-ID/payload identity counts. The Opus 5.5 and
+    GPT-6.1 Sol panel agreed after three rounds. A nullable current-inventory
+    marker commits with attachment occurrences; current positives from partial
+    manifests count, stale rows do not, and unknown exhaustive inventories
+    make payload counts lower bounds. The schema migration queues a reparse
+    that reuses unchanged embeddings. Neither technical identity establishes
+    distinct reports; subject grouping and samples remain separate work.
+
+56. **Recipient and MIME aggregates (2026-10-14, #1337):** the owner
+    approved recipient-domain and declared-MIME message groups after the
+    Opus 5.5/GPT-6.1 Sol panel reached consensus. Current partial attachment
+    observations count; stale rows do not. Eligible-population counters
+    disclose missing group memberships. MIME payload identities are scoped
+    to the group type, and an exact MIME predicate selects its messages.
+    Full MIME values define groups, but their displayed labels are bounded
+    and explicitly marked when clipped. Period breakdown remains sender-only;
+    the existing schema supplies the evidence.
 
 ## Notes for Agents
 

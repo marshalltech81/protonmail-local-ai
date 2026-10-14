@@ -1031,7 +1031,7 @@ header's date, or NULL), `first_indexed_at` (see Message time),
 `in_reply_to` /
 references, attachment flag, and its bytes' `size_bytes` and
 `content_hash` (SHA-256 of the raw `.eml`). Its folders, file locators
-and read state are its copies' (see *Mailbox occurrences*; v15 dropped
+and read state are its copies' (see *Mailbox occurrences*; v16 dropped
 the row's own `filepath`, `folder`, `seen`, `flagged` and `replied` and
 `message_thread_map.filepath`, #1568). The MCP server returns the
 representative copy's locator with the hash and size as `source_file`
@@ -1282,7 +1282,7 @@ predicates", lists the leaves.
 Each Maildir copy of a message is its own occurrence
 (`message_occurrences`, #1566, PLAN.md decision 47), so two
 byte-identical files in different folders keep their own folder, flags
-and observation times; since v15 the `messages` row holds none of them
+and observation times; since v16 the `messages` row holds none of them
 (#1568). An active occurrence is keyed by the
 account (`accounts`, see *Account registry*), its folder relative to the
 account, the file's Maildir uniq (the name before `:2,`, which flag
@@ -1323,7 +1323,7 @@ to. Relocating the root alone keeps every occurrence.
   retirement mark; a retired row keeps its locator for diagnostics.
   `provenance` records how the row was created (`parse`, an observed
   `rename`, a reconciliation `scan` that verified a found copy's bytes,
-  or the `migration` seed: v14's, and v15's retired row for a message
+  or the `migration` seed: v14's, and v16's retired row for a message
   the v14 seed could not bind); `first_observed_at` /
   `last_observed_at` when the indexer saw the file (NULL on a seeded row
   until a parse sees it, so no observation is invented); `internal_at`
@@ -1333,7 +1333,7 @@ to. Relocating the root alone keeps every occurrence.
 The reconciler and the reaper read occurrences (#1567): a message is
 live while it has an active occurrence that is not `T`-flagged, and its
 tombstones in `pending_deletions` are keyed by occurrence (see *Deletion
-Reconciliation*). Every message keeps at least one occurrence: v15 gave
+Reconciliation*). Every message keeps at least one occurrence: v16 gave
 a message the v14 seed could not bind a retired one at its stored path,
 since no file was verified to hold its bytes. A message is re-read (a
 re-extraction sweep, a reap's survivor) from an active occurrence, a
@@ -3350,8 +3350,9 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
-| 16 | `0016_account_collection_state.sql` | `account_collection_state` (#1592; see *Collection status*): mbsync's latest collection outcome per account, empty until the indexer first reads mbsync's collection status file. Nothing the parser produces is added, so no reparse is queued. |
-| 15 | `0015_occurrence_readers.sql` | The readers move to the occurrences (#1567, #1568, #1569). `message_occurrences` is rebuilt, rows and ids unchanged, to accept the `scan` provenance; a message the v14 seed could not bind gets a retired occurrence at its stored path (a WARNING counts them), so every message keeps one; `pending_deletions` is keyed by occurrence, each message's old tombstones carried over as one row with their latest mark, which the next sweep clears for a message that is still live; `messages.content_hash` is indexed; `messages.filepath`, `folder`, `seen`, `flagged` and `replied` and `message_thread_map.filepath` are dropped (each drop rewrites its table once). Nothing the parser produces is added, so no reparse is queued; claimant, chunk and thread IDs and vectors are unchanged. On a synthetic 36,500-message index (14,600 threads, 160 MB) the startup open including the migration took 0.4–0.5 s (three runs, Apple M5 Max). |
+| 17 | `0017_account_collection_state.sql` | `account_collection_state` (#1592; see *Collection status*): mbsync's latest collection outcome per account, empty until the indexer first reads mbsync's collection status file. Nothing the parser produces is added, so no reparse is queued. |
+| 16 | `0016_occurrence_readers.sql` | The readers move to the occurrences (#1567, #1568, #1569). `message_occurrences` is rebuilt, rows and ids unchanged, to accept the `scan` provenance; a message the v14 seed could not bind gets a retired occurrence at its stored path (a WARNING counts them), so every message keeps one; `pending_deletions` is keyed by occurrence, each message's old tombstones carried over as one row with their latest mark, which the next sweep clears for a message that is still live; `messages.content_hash` is indexed; `messages.filepath`, `folder`, `seen`, `flagged` and `replied` and `message_thread_map.filepath` are dropped (each drop rewrites its table once). Nothing the parser produces is added, so no reparse is queued; claimant, chunk and thread IDs and vectors are unchanged. On a synthetic 36,500-message index (14,600 threads, 160 MB) the startup open including the migration took 0.4–0.5 s (three runs, Apple M5 Max). |
+| 15 | `0015_attachment_inventory_current.sql` | `messages.attachment_rows_current` (#1338; see the attachment-inventory discussion below): NULL until reparsed, then 1 when extraction is enabled or 0 when disabled, set by phase 2c in the same transaction as the occurrence writes. The migration queues the standard reparse, keeping unchanged chunks and vectors. |
 | 14 | `0014_account_occurrences.sql` | `accounts` (#1596; see *Account registry*): the configured `ACCOUNT_SCOPE` and `SOURCE_MODE` provider, bound in the migration's own transaction through connection-local functions; update and delete triggers. `message_occurrences` (#1566; see *Mailbox occurrences*), seeded with one occurrence per message whose `indexed_files` record carries its content hash, relative to the configured `MAILDIR_PATH`; a stored path outside that root fails the migration closed with fixed text, and a message whose path holds other bytes gets none (a WARNING counts them). The migration ends with the shared reparse statement: the reparse observes each seeded occurrence and binds the files the seed cannot see (an unmapped byte-identical copy), with no embedding call; dead-lettered jobs stay dead. Claimant, chunk and thread IDs and vectors are unchanged. |
 | 13 | `0013_message_headers.sql` | Bounded ordered `message_headers` and nullable `messages.headers_complete` (#1079); existing rows start unknown and a queued reparse fills them. |
 | 12 | `0012_extraction_identifier.sql` | `attachment_extractions.identifier` (#1416; see the `attachment_extractions` row above and *Extractor dispatch*): how the payload's container was certified, `container@<n>` or `none@<n>`, NULL (unknown) on every row cached before it. The bytes are not in the database, so the migration ends with the shared reparse statement (see *Reparse in place*): every occurrence passes through the lookup once, which records `none@<n>` on a row whose payload has neither signature and identifies and re-extracts the rest. Unchanged chunks keep their IDs and vectors; text a re-identified container now yields is new chunks, sent to the configured embedder, so the upgrade embeds the newly readable Office attachments once. A container sent under a `message/*` label is kept as sent from this release, so its occurrence gets a new attachment ID on the reparse: the old occurrence, FTS row, chunks and vectors are removed and the new one is extracted and embedded. The startup sweep's identification arm queues the same rows and clears their occurrences' `text_complete` first, so a message whose extraction continuation the reparse leaves queued refreshes them too. |
@@ -4006,6 +4007,23 @@ re-queues them once it is on), and for mail reparsed while
 `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` was off (phase 2 writes no
 attachment rows then; run `make reparse` after enabling it).
 
+The v15 migration (`0015_attachment_inventory_current.sql`, #1338) adds
+`messages.attachment_rows_current`, NULL until reparsed. Phase 1 resets it to
+NULL; phase 2c sets it in the same transaction as the occurrence writes and
+stale removals: 1 when extraction is enabled, 0 when disabled. Deferred and
+retained current occurrences count as current even without complete extracted
+text. The migration queues the standard reparse, keeping unchanged chunks and
+vectors. This marker certifies currentness, not manifest exhaustiveness:
+`aggregate_messages` counts current positive payload identities even with an
+incomplete manifest, and reports definite matches whose inventory is not known
+exhaustive (`manifest = 1 AND (has_attachments = 0 OR current = 1)`). Unknown
+inventories make identity counts lower bounds. A disabled-extraction pass leaves
+old rows untouched and cannot certify them as current. The aggregation selects
+its clock through the shared predicates, materializes message memberships once,
+and counts attachment identities separately so occurrence fan-out does not
+inflate message totals or repeat predicate evaluation. Sender/domain period
+breakdowns are flat, capped pages over UTC calendar month/year cells.
+
 The v8 migration (`0008_unknown_sent_dates.sql`, #1080) rebuilds
 `messages` with `sent_at_status` `NULL` on every row and queues the
 reparse (see *Message time*). Phase 1 of each job stores the send date
@@ -4348,7 +4366,7 @@ currency* above and the Freshness bullet below.
   unsupported, unreadable or other-account file reads as `unknown`
   with that reason and one fixed-text WARNING per change of reason,
   never as a success.
-- **Storage.** `account_collection_state`, one row per account (v16),
+- **Storage.** `account_collection_state`, one row per account (v17),
   replaced in the same transaction as `ingestion_state`, so the
   acknowledged sync and the outcome are one snapshot. A rebuilt index
   recovers the row from the file at its first write.

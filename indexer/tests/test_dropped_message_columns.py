@@ -1,6 +1,6 @@
-"""#1568: no code reads the per-copy columns the v15 migration drops.
+"""#1568: no code reads the per-copy columns the v16 migration drops.
 
-v15 moves folder, locator and Maildir flags to ``message_occurrences``
+v16 moves folder, locator and Maildir flags to ``message_occurrences``
 and drops ``messages.filepath/folder/seen/flagged/replied`` and
 ``message_thread_map.filepath``. A statement still naming one fails only
 when it runs, so a path no test executes would fail on a live index.
@@ -12,7 +12,7 @@ a reference to a dropped column through the table's name, an alias the
 source gives it, an ``INSERT`` column list, an ``UPDATE ... SET``, a
 column interpolated after an alias, or a bare column name in a statement
 on the table that no other table in it could own. Which other tables own
-a column comes from the real v15 schema.
+a column comes from the real schema.
 """
 
 import ast
@@ -29,9 +29,9 @@ _ROOTS = (
     _REPO / "mcp-server" / "src",
     _REPO / "mcp-server" / "scripts",
 )
-# Migrations up to v15 describe the schema they replace: they create,
+# Migrations up to v16 describe the schema they replace: they create,
 # copy and drop these columns by design.
-_LAST_HISTORICAL_MIGRATION = 15
+_LAST_HISTORICAL_MIGRATION = 16
 
 DROPPED = {
     "messages": ("filepath", "folder", "seen", "flagged", "replied"),

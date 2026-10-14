@@ -962,10 +962,10 @@ below it, for example one built under another root; the migration
 stops with nothing applied. Restore the original `MAILDIR_PATH`, or
 rebuild the index. The message never names the path.
 
-v15 (#1567, #1568) moves every folder, path and flag reader to the
+v16 (#1567, #1568) moves every folder, path and flag reader to the
 occurrences and drops the per-message copies of them; it queues no
 reparse and takes about half a second on a 36,500-message index. A
-WARNING `Migration v15 found N message(s) with no verified file` counts
+WARNING `Migration v16 found N message(s) with no verified file` counts
 messages the v14 migration could not bind to a file holding their
 bytes: each gets a retired occurrence and is treated as having lost its
 last live copy, so under mirror retention the reconciler tombstones it

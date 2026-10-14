@@ -28,6 +28,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import operator_config as oc  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import synthetic_compose  # noqa: E402
+
 REPO = oc.REPO_ROOT
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CONFIG_DIR = REPO / "config"
@@ -1556,10 +1560,64 @@ class Compose(unittest.TestCase):
             self.assertEqual(service["security_opt"], ["no-new-privileges:true"], name)
             self.assertEqual(service["pids_limit"], 128, name)
             self.assertNotIn("ports", service, name)
+        # A collector Compose does not define in docker-compose.yml names
+        # its non-root user, mbsync's UID and GID (mbsync/Dockerfile), as
+        # compose_test.sh requires of every new service (#1608); the
+        # legacy collector stays today's mbsync service.
+        self.assertEqual(services[f"mbsync-{UUID_B}"]["user"], "1001:1001")
+        self.assertNotIn("user", services["mbsync"])
+        dockerfile = (REPO / "mbsync" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertRegex(dockerfile, r"groupadd --gid 1001 mbsync")
+        self.assertRegex(dockerfile, r"useradd --uid 1001 \\\s+--gid 1001")
         self.assertNotEqual(
             generated["secrets"]["bridge_pass"]["file"],
             generated["secrets"][f"bridge_pass_{UUID_B}"]["file"],
         )
+
+
+class GeneratedCollectorFixture(unittest.TestCase):
+    """scripts/config/tests/synthetic_compose.py builds the account data
+    scripts/tests/compose_test.sh's merged hardening check takes as
+    ground truth for a generated collector. declared() took
+    BRIDGE_CERT_FINGERPRINT from collector_env() -- the same function
+    render_compose() calls to build the real render -- so a
+    collector_env() regression that cross-wired the fingerprint with
+    another account's would corrupt both sides alike and the merged
+    hardening check would see no mismatch (review round 8, finding 6,
+    security). Every other key in declared()'s environment had the same
+    problem until round 9, finding 6: for example, reclassifying
+    SYNC_INTERVAL so collector_env() stopped emitting it would make both
+    the generated Compose file and collectors.json omit the key, and the
+    full-environment comparison would still pass. declared_environment()
+    now derives every key straight from the account's own validated
+    fields instead, never through collector_env()."""
+
+    def test_the_declared_environment_does_not_depend_on_collector_env(self) -> None:
+        account = checked(fixture())["accounts"][0]
+        expected = {
+            "SOURCE_MODE": "proton-bridge",
+            "ACCOUNT_SCOPE": "00000000-0000-4000-8000-000000000001",
+            "BRIDGE_USER": "synthetic@example.com",
+            "BRIDGE_IMAP_PORT": "1143",
+            "BRIDGE_CERT_FINGERPRINT": "a" * 64,
+            "BRIDGE_HOST": "host.docker.internal",
+            "BRIDGE_CERT_HOST": "127.0.0.1",
+            "PROTON_IMAP_ACCOUNT_NAME": "protonmail",
+            "PROTON_REMOTE_STORE_NAME": "protonmail-remote",
+            "PROTON_LOCAL_STORE_NAME": "protonmail-local",
+            "PROTON_CHANNEL_NAME": "protonmail",
+            "PROTON_FOLDER_EXCLUSIONS": "All Mail|Labels/*|Starred",
+            "SYNC_INTERVAL": "60",
+            "SYNC_DEADLINE_SECONDS": "86400",
+        }
+        self.assertEqual(oc.collector_env(account).keys(), expected.keys())
+        # A reclassified setting (SYNC_INTERVAL here) makes collector_env()
+        # drop the key entirely, and a cross-wired one (BRIDGE_CERT_FINGERPRINT)
+        # substitutes another account's value; declared() must see neither.
+        corrupted_env = {k: "c" * 64 for k in expected if k != "SYNC_INTERVAL"}
+        with unittest.mock.patch.object(oc, "collector_env", return_value=corrupted_env):
+            [declared] = synthetic_compose.declared({"accounts": [account]})
+        self.assertEqual(declared["environment"], expected)
 
 
 if __name__ == "__main__":

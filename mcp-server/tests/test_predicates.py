@@ -351,6 +351,7 @@ _SAMPLES: dict[str, object] = {
     "address": "jane@example.test",
     "text": "budget",
     "words": ("budget", "plan"),
+    "MIME type": "application/pdf",
     "folders": ("INBOX", "Archive"),
     "instant": "2024-01-01T00:00:00+00:00",
     "bool": True,
@@ -377,6 +378,7 @@ _NOT_BUILT: dict[str, str] = {
         "domain_is",
         "subject_contains",
         "attachment_text_words",
+        "attachment_content_type_is",
         "header_exists",
         "header_contains",
     )
@@ -479,7 +481,7 @@ class TestLeafRegistry:
 
     def test_registry_is_keyed_by_leaf_name(self):
         assert all(name == kind.name for name, kind in LEAVES.items())
-        assert len(LEAVES) == 31
+        assert len(LEAVES) == 32
 
     @pytest.mark.parametrize("name", sorted(LEAVES))
     def test_leaf_compiles_with_a_rule_and_a_docs_entry(self, name, mixed_db):
@@ -728,6 +730,9 @@ class TestLogAllowlist:
             "size_max",
             # #796: query_attachments' status enum, only as one of its values.
             "extraction_status",
+            # #1338: closed calendar period enum and Boolean breakdown.
+            "period",
+            "period_breakdown",
             # #823: aggregate_messages' dimension, only as one of its values.
             "group_by",
         }
@@ -1040,6 +1045,7 @@ class TestClockSizeAndRepliedLeaves:
             "body_words",
             "subject_contains",
             "attachment_text_words",
+            "attachment_content_type_is",
             "header_exists",
             "header_contains",
         }

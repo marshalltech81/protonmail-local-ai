@@ -4,7 +4,7 @@ Ingest binds every parsed file to an occurrence keyed by (account,
 account-relative folder, Maildir uniq, claimant ID), with its path
 relative to the account's Maildir root; an observed rename keeps it
 (flags, ``new``/``cur``) or replaces it (folder or uniq); the v14
-migration seeds one per message and queues a reparse. Since v15 the
+migration seeds one per message and queues a reparse. Since v16 the
 reconciler, reaper and MCP server read occurrences, and the per-copy
 ``messages`` columns are gone (#1567, #1568)."""
 
@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 from src import account as account_mod
 from src import main
-from src.database import EMBEDDING_DIM, Database
+from src.database import EMBEDDING_DIM, SCHEMA_VERSION, Database
 from src.occurrence_scan import file_identity
 from src.occurrences import OUTSIDE_ROOT, OccurrenceLocatorError, locate
 from src.parser import _derive_folder, parse_email
@@ -525,7 +525,7 @@ class TestMigrationV14:
         path, before = _v13_index(tmp_path, root)
         db = Database(path, account=_account(root))
         try:
-            assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 16
+            assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 17
             rows = _occurrences(db)
             by_claimant = {o["claimant_id"]: o for o in rows}
             assert len(rows) == len(before["messages"]) == 2
@@ -710,7 +710,7 @@ class TestMigrationV14:
         db = Database(path, account=_account(root))
         try:
             assert [o["relative_path"] for o in _active(db)] == ["Folders/.Clients/cur/s2:2,FT"]
-            # v15 gives it a retired occurrence (#1567): no file holds its bytes.
+            # v16 gives it a retired occurrence (#1567): no file holds its bytes.
             (retired,) = [o for o in _occurrences(db) if o["state"] == "retired"]
             assert (retired["relative_path"], retired["provenance"]) == (
                 "INBOX/cur/s1:2,S",
@@ -740,3 +740,6 @@ class TestMigrationV14:
             Path(main.__file__).parent / "migrations" / "0014_account_occurrences.sql"
         ).read_text()
         assert sql.rstrip().endswith(REPARSE_ENQUEUE_SQL)
+
+    def test_the_schema_version_is_17(self):
+        assert SCHEMA_VERSION == 17

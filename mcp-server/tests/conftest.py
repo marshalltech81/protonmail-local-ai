@@ -95,6 +95,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             attachments_manifest_complete INTEGER
                 CHECK (attachments_manifest_complete IN (0, 1)),
             body_complete INTEGER CHECK (body_complete IN (0, 1)),
+            attachment_rows_current INTEGER CHECK (attachment_rows_current IN (0, 1)),
             caps_json TEXT,
             headers_complete INTEGER CHECK (headers_complete IN (0, 1))
         );
@@ -255,7 +256,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             (1, '00000000-0000-4000-8000-000000000001', 'proton-bridge',
              '2024-01-01T00:00:00+00:00');
         -- mbsync's latest collection outcome per account (indexer
-        -- schema v16, #1592).
+        -- schema v17, #1592).
         CREATE TABLE account_collection_state (
             account_id                     INTEGER PRIMARY KEY REFERENCES accounts(id),
             status                         TEXT NOT NULL,
@@ -669,7 +670,7 @@ def _insert_message_record(
     ``completeness`` overrides the #1086 completeness columns, which are
     otherwise all 1 (complete) with no caps.
     """
-    flags = {**COMPLETE, **(completeness or {})}
+    flags = {**COMPLETE, "attachment_rows_current": 1, **(completeness or {})}
     if sent_at_status == "":
         sent_at_status = "parsed" if sent_at is not None else "missing"
     cur.execute(

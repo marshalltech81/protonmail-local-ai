@@ -213,8 +213,17 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
         "success", "empty", "unsupported", "too_large", "failed", "deferred", "none"
     ),
     # ``aggregate_messages``' dimension (#823; ``lib/sqlite.AGGREGATE_DIMENSIONS``).
+    "period": _one_of("month", "year"),
+    "period_breakdown": _is_bool,
     "group_by": _one_of(
-        "sender_address", "sender_domain", "folder", "year", "month", "authority_class"
+        "sender_address",
+        "sender_domain",
+        "recipient_domain",
+        "attachment_content_type",
+        "folder",
+        "year",
+        "month",
+        "authority_class",
     ),
 }
 

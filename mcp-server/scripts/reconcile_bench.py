@@ -107,6 +107,7 @@ CREATE TABLE messages (
     cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
     attachments_manifest_complete INTEGER CHECK (attachments_manifest_complete IN (0, 1)),
     body_complete INTEGER CHECK (body_complete IN (0, 1)),
+    attachment_rows_current INTEGER CHECK (attachment_rows_current IN (0, 1)),
     caps_json TEXT,
     headers_complete INTEGER CHECK (headers_complete IN (0, 1)),
     FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id) ON DELETE CASCADE
@@ -715,9 +716,9 @@ _INSERT_MESSAGE = (
     "has_attachments, size_bytes, content_hash, indexed_at, first_indexed_at, "
     "sender_ambiguous, participant_names_complete, "
     "subject_complete, from_addresses_complete, to_addresses_complete, "
-    "cc_addresses_complete, attachments_manifest_complete, body_complete, caps_json, headers_complete) "
+    "cc_addresses_complete, attachments_manifest_complete, body_complete, attachment_rows_current, caps_json, headers_complete) "
     "VALUES (?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, 0, "
-    "1, 1, 1, 1, 1, 1, ?, ?, ?)"
+    "1, 1, 1, 1, 1, 1, ?, ?, ?, ?)"
 )
 
 
@@ -739,7 +740,7 @@ _UPSERT_MESSAGE = _INSERT_MESSAGE + (
     "to_addresses_complete = excluded.to_addresses_complete, "
     "cc_addresses_complete = excluded.cc_addresses_complete, "
     "attachments_manifest_complete = excluded.attachments_manifest_complete, "
-    "body_complete = NULL, caps_json = excluded.caps_json, "
+    "body_complete = NULL, attachment_rows_current = NULL, caps_json = excluded.caps_json, "
     "headers_complete = excluded.headers_complete"
 )
 
@@ -761,6 +762,7 @@ def _message_values(rec: _Record, now: str, body_complete: int | None) -> tuple:
         now,
         now,
         body_complete,
+        body_complete,  # fixture inventory committed, or phase 1 pending
         "{}" if rec.headers_complete else json.dumps({"headers_budget": 1}),
         int(rec.headers_complete),
     )
@@ -2370,6 +2372,9 @@ def _writer_phase2c(
             (PDF_EXTRACTOR, occurrence),
         )
         chunks(attachment_id)
+    conn.execute(
+        "UPDATE messages SET attachment_rows_current = 1 WHERE claimant_id = ?", (rec.cid,)
+    )
     if count:
         # ``thread_chunk_mean`` from the sums just written.
         _write_thread_vector(conn, rec.tid, _thread_vector(total, count))

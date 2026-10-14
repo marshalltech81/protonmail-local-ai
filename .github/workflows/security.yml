@@ -286,3 +286,9 @@ jobs:
         run: >-
           semgrep scan --metrics=off --disable-version-check --strict --error
           --config .semgrep/compose.yaml --config .semgrep/shell.yaml .
+
+      # The translator's compose.accounts.yml (#1608) is written to the
+      # gitignored .generated/, which the scan above does not read: scan
+      # the output of the synthetic configurations by explicit path.
+      - name: Scan the generated Compose files
+        run: bash scripts/tests/semgrep_generated_test.sh

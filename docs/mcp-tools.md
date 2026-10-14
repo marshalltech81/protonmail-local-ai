@@ -267,7 +267,8 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `total_matches` and `returned` (`query_messages`, `query_attachments`,
   `aggregate_messages`, whose `returned` counts groups), `groups`
   (`aggregate_messages`: every group, not just the page),
-  `incomplete_from_messages` (`aggregate_messages` sender dimensions), `indeterminate`
+  `incomplete_from_messages` (`aggregate_messages` sender dimensions), `undated_messages`,
+  `attachment_inventory_unknown_messages` (`aggregate_messages`), `indeterminate`
   (`query_messages`, `query_attachments`, `aggregate_messages`, and
   `search_attachments` with `sender`), and, when `query_messages`',
   `aggregate_messages`' or `query_attachments`' `indeterminate` is not 0, one
@@ -592,6 +593,7 @@ different filters"), never read against them.
 | `header_exists` | header name | `query_messages` and `aggregate_messages` `where` | any occurrence of the named top-level header exists, even with an empty value; absence is unknown unless header evidence is complete |
 | `header_contains` | header name, text | `query_messages` and `aggregate_messages` `where` | any occurrence contains the Unicode caseless substring in its decoded value (raw value when decoding failed); a miss is unknown unless header evidence is complete |
 | `subject_contains` | text | `query_messages` and `aggregate_messages` `where` | same as `subject`, including unknown on a miss against an incomplete subject |
+| `attachment_content_type_is` | MIME type | `query_messages` and `aggregate_messages` `where` | exact declared type on a current occurrence; a miss is unknown unless the current inventory is exhaustive |
 | `attachment_text_words` | words | `query_messages` and `aggregate_messages` `where` | every word occurs in the message's attachment chunks (FTS, stemmed; at most 16 words); a miss is unknown unless the manifest and every occurrence's committed text are complete |
 | `body_words` | words | `query_messages` `text` and `where` | every word occurs in its indexed body (FTS, stemmed; at most 16 words); unknown when one does not and the indexed body is not complete |
 | `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it has an active copy in one of them ([one copy](#copies-and-one-copy-matching)) |
@@ -1459,7 +1461,8 @@ through the flat parameters' inferred mode:
 - **Leaves:** `address_is`, `address_contains`,
   `display_name_contains`, `address_or_name_contains` and `domain_is`
   take a `role` (`from`, `to`, `cc` or `visible_recipient`);
-  `body_words`, `subject_contains` and `attachment_text_words` take none.
+  `body_words`, `subject_contains`, `attachment_text_words` and
+  `attachment_content_type_is` take none.
   `header_exists` takes a `name` and no `value`; `header_contains` takes
   a `name` and `value`. Names are 1–128 ASCII token characters, matched
   case-insensitively. Other leaves refuse `name`, including null.
@@ -1513,7 +1516,7 @@ through the flat parameters' inferred mode:
   follows the flat `subject` filter (Unicode caseless substring, a miss
   on an incomplete subject is unknown). A value may hold at most 320
   characters (`domain_is` 255, `subject_contains` 500,
-  `body_words` and `attachment_text_words` 1000).
+  `body_words`, `attachment_text_words` and `attachment_content_type_is` 1000).
 - **Limits:** at most 16 nodes, each leaf and each `any` group
   counting one; neither `all` nor an `any` group may be empty. The
   schema also caps each `all` and `any` list at 16 items (`maxItems`),
@@ -1985,22 +1988,25 @@ Prefer the smallest sufficient page.
 
 ### `aggregate_messages`
 Count the messages [`query_messages`](#query_messages) would match,
-grouped by one dimension, without listing them
+grouped by one dimension or sender/domain and UTC period, without listing them
 ([#823](https://github.com/marshalltech81/protonmail-local-ai/issues/823)).
 Use it for volume questions (top senders, mail per month, mail per
 folder) instead of paging `query_messages` and counting on the client.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `group_by` | string | required | `sender_address`, `sender_domain`, `folder`, `year`, `month` or `authority_class` |
-| `query_messages` filters except `date_basis` | | none | `sender`, `recipient`, `participant`, `subject`, `text`, `folder`, `date_from`, `date_to`, `has_attachments`, `authority_class`, `seen`, `flagged`, `replied`, `size_min`, `size_max` and `where`, with the same schema and meaning; Trash is left out unless `folder="Trash"` ([Trash](#trash-is-left-out-by-default)) |
-| `limit` | int | `25` | Groups per page; clamped to `[1, 100]` |
+| `group_by` | string | required | `sender_address`, `sender_domain`, `recipient_domain`, `attachment_content_type`, `folder`, `year`, `month` or `authority_class` |
+| `query_messages` filters | | none | `sender`, `recipient`, `participant`, `subject`, `text`, `folder`, `date_from`, `date_to`, `has_attachments`, `authority_class`, `seen`, `flagged`, `replied`, `size_min`, `size_max` and `where`, with the same schema and meaning; Trash is left out unless `folder="Trash"` ([Trash](#trash-is-left-out-by-default)) |
+| `date_basis` | string | `effective` | `effective`, `sent` or `occurred`, with the same validation and missing-clock semantics as `query_messages`; applies to bounds, group dates and period buckets |
+| `period` | string | `month` | UTC calendar `month` or `year` for active-period counts and breakdown cells |
+| `period_breakdown` | bool | `false` | Return flat sender/domain × period cells; requires `group_by=sender_address` or `sender_domain` |
+| `limit` | int | `25` | Groups (breakdown: cells) per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same call |
 
 The filters compile to the same expression as `query_messages`
 ([Filter predicates](#filter-predicates)), so `total_matches` and
 `indeterminate` are the counts `query_messages` returns for the same
-filters with `date_basis="effective"`, and a group's `messages` is the
+filters and `date_basis`, and, for a key accepted by its selector, a group's `messages` is the
 `total_matches` of
 `query_messages` for the same filters plus the group's own:
 
@@ -2008,20 +2014,22 @@ filters with `date_basis="effective"`, and a group's `messages` is the
 |---|---|---|
 | `sender_address` | a From address | a `where` `address_is` leaf, role `from` |
 | `sender_domain` | the domain of a From address | a `where` `domain_is` leaf, role `from` |
+| `recipient_domain` | an observed To/Cc domain | a `where` `domain_is` leaf, role `visible_recipient`, when the key meets its operand validation |
+| `attachment_content_type` | declared MIME type on a current occurrence | a `where` `attachment_content_type_is` leaf, when `value_clipped=false` |
 | `folder` | the folder | `folder` |
-| `year` | `YYYY` of the effective time (`occurred_at`, else `sent_at`), UTC; no value without either (or with a send date not yet checked), never the time a message was first indexed | `date_from` / `date_to` spanning that UTC year |
-| `month` | `YYYY-MM` of the effective time, UTC; no value likewise | `date_from` / `date_to` spanning that UTC month |
+| `year` | `YYYY` of the selected evidence clock, UTC; no value without evidence on that clock, never the time a message was first indexed | `date_from` / `date_to` spanning that UTC year |
+| `month` | `YYYY-MM` of the selected evidence clock, UTC; no value likewise | `date_from` / `date_to` spanning that UTC month |
 | `authority_class` | the class of a From address | `authority_class` |
 
 Per group: `messages`, `threads` (distinct threads of those
-messages), `first_at` / `last_at` (their earliest and latest effective
-time, from the messages with a delivery or checked send date),
+messages), `first_at` / `last_at` (their earliest and latest selected-clock evidence
+dates, never first-indexed time),
 `with_attachments` (those with an attachment), `indeterminate`
 (messages in the group the filters could not decide, never counted in
 `messages`) and, for `sender_address`, `display_name` (the display name
 on the group's latest match that has one, cut at 500 characters with a
 marker). A group whose messages are all undecided is listed with
-`messages` 0. The group value is never cut. `where` takes an address
+`messages` 0. Existing group values remain uncut. MIME display values are bounded as described below. `where` takes an address
 of at most 320 characters and a domain of at most 255; a longer
 sender address can be passed as `sender` instead, which matches a full
 address exactly.
@@ -2056,19 +2064,89 @@ includes a message with no stored From address, which is also in the
 Messages, where no class matches. The prose states it when not 0, and the timing line carries
 it.
 
-Groups come most messages first, then by value, with the `null` group
-last among ties. `total_groups` counts them all. Group values and
+Recipient domains count each message once per distinct To/Cc domain, including
+positive observations from incomplete roles. `incomplete_recipient_messages`
+counts eligible messages with either role incomplete, once globally. The null
+group means no observed recipient domain. SQLite text-prefix semantics match
+the existing domain predicate; this is stored evidence, not RFC validation.
+
+MIME groups count each message once per current declared type. Multiple
+occurrences of one type do not multiply messages. Current observations from
+partial manifests count; pending, stale and extraction-disabled rows do not.
+`distinct_attachment_ids` counts only payloads of that group's type. The null
+group means no observed current type, mixing proven empty inventories with
+unknown ones; it does not mean no attachments. `incomplete_attachment_type_messages`
+counts unknown exhaustive inventories among all eligible messages, including
+filter-indeterminate messages. These dimension-specific fields are absent for
+other dimensions. Group memberships overlap, so their counts may sum above
+the population total.
+
+Full stored MIME types define separate SQL groups. Only the selected page's
+labels are read into Python, at most 2,001 bytes and displayed at most 500
+characters. `value_clipped` indicates truncation or decoder substitution.
+A clipped label is display evidence, not an exact selector; distinct types
+sharing a displayed prefix remain separate rows. Other dimensions return
+`value_clipped=false`. Cursors contain a bounded digest and offset, never MIME
+labels. `attachment_content_type_is` accepts up to 1,000 characters before
+normalization, strips surrounding whitespace and lowercases, then compares
+exactly with stored declared types. A current positive is true; an exhaustive
+inventory without a match is false; otherwise unknown. No MIME grammar or
+extractor classifier is inferred from that evidence.
+
+The response echoes `date_basis`, `period` and `period_breakdown`. Each
+row also reports:
+
+- `active_periods`: distinct non-null UTC periods containing definite matches.
+- `distinct_message_ids`: distinct stored Message-ID strings among definite
+  matches. Different claimant rows can share a sender-controlled Message-ID.
+- `distinct_attachment_ids`: distinct payload identities on definite matches
+  whose occurrence rows belong to the current parse. Current positive
+  observations count even when a parse cap left the manifest incomplete.
+- `attachment_inventory_unknown_messages`: definite matches whose current
+  inventory is not known exhaustive. When nonzero, the attachment identity
+  count is a **lower bound**, not an exact full inventory. Stale and pending
+  occurrence rows never contribute; extraction-disabled passes remain unknown
+  when attachments are present. A complete manifest proving no attachments
+  contributes zero even if older occurrence rows remain.
+- `eligible_total`: `messages + indeterminate` for the row. At call level it is
+  `total_matches + indeterminate`, counting each indexed message the filters do
+  not reject once before group memberships. It is not the whole Maildir count.
+- `undated_messages`: definite matches without selected-clock evidence. They
+  count in `messages` but not `active_periods`. Under sent/occurred they are
+  indeterminate instead, so this field is zero.
+
+Call-level `undated_messages` and `attachment_inventory_unknown_messages`
+count each definite match once, independent of overlapping group membership.
+The inventory marker is unknown until a reparse commits its current occurrence
+rows. An empty reparse queue does not prove coverage: dead letters stay unknown.
+These fields and filter `indeterminate` describe different missing evidence.
+
+In breakdown mode `period` on each row is `YYYY-MM` or `YYYY`, or null
+without date evidence. Each cell has the same statistics scoped to that
+sender/domain and period; its `active_periods` is 1 only when a dated cell
+has a definite match. There are no nested period lists. Unknown-only cells
+are retained with `messages=0`. Distinct identities may repeat across cells,
+so summing their counts does not give the summary's distinct count.
+
+None of these units establishes distinct reports or report series: duplicate
+deliveries, replies and forwards can increase message counts; the same stored
+payload identity can appear in several messages, and an identity may hash
+normalised serialization. Subject filters can narrow a population, but subject
+grouping and per-group samples (#1169) are separate work.
+
+Groups come most messages first, then by value and, in breakdown mode, period; null keys
+come last among ties. `total_groups` counts them all. Group values and
 display names go to the calling model, which may be remote, so the
 tool description asks the client to tell the user how many groups it
 will read before paging past the first page, and to prefer the
 smallest page that answers (the top groups for a "top N" question).
-To page, call again with the same filters and `group_by` plus `cursor`.
-The cursor is bound to the filters and the dimension, as
+To page, call again with the same filters, `group_by`, `date_basis`, `period` and `period_breakdown` plus `cursor`.
+The cursor is bound to the filters, dimension, clock, period and breakdown mode, as
 `query_messages`' is. Each page recounts, so mail indexed between
 pages can move a group to another page. One SQL statement answers a
 call: it evaluates the filters once per message to select them and
 once more per message they do not reject, then groups those rows;
-`limit` caps the groups returned, not the messages grouped.
+`limit` caps the groups/cells returned, not the messages grouped. Existing effective-time default-summary cursors remain valid.
 
 ### `query_attachments`
 Enumerate **every** attachment occurrence matching exact criteria, with

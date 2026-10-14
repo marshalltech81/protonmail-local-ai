@@ -172,7 +172,11 @@ def test_every_typed_parameter_of_every_tool_is_rejected_through_the_limiter(
         for tool in ("query_messages", "aggregate_messages", "query_threads")
         for name in ("size_min", "size_max")
     }
-    handler_checked |= {"query_messages.date_basis", "query_attachments.date_basis"}
+    handler_checked |= {
+        "query_messages.date_basis",
+        "query_attachments.date_basis",
+        "aggregate_messages.date_basis",
+    }
     assert counts == {key: "3" for key in keys - handler_checked}
     assert MARKER not in caplog.text
 

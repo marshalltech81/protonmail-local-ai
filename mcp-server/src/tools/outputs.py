@@ -900,18 +900,25 @@ class QueryThreadsOutput(_Output):
 
 
 class MessageGroupRow(_Output):
+    value_clipped: bool = Field(
+        default=False,
+        description="MIME grouping only: display differs from full stored type; not an exact selector. "
+        "Full types sharing a displayed prefix remain separate groups.",
+    )
     value: str | None = Field(
         description="The group's address, domain, folder, year (YYYY), month (YYYY-MM) or "
-        "authority class; null for the messages with no value on the dimension."
+        "authority class or declared MIME display label; null for no observed value."
     )
     messages: int = Field(description="Messages the filters definitely match in this group.")
     threads: int = Field(description="Distinct threads of those messages.")
     first_at: str | None = Field(
-        description="Earliest effective time (occurred_at, else sent_at) of those messages; "
+        description="Earliest evidence date on the selected date_basis of those messages; "
         "null without one. Year and month group by it too: an undated message is in the "
         "null group."
     )
-    last_at: str | None = Field(description="Latest effective time; null without one.")
+    last_at: str | None = Field(
+        description="Latest selected-basis evidence date; null without one."
+    )
     with_attachments: int = Field(description="Of those messages, how many have an attachment.")
     indeterminate: int = Field(
         description="Messages in this group the filters could neither accept nor reject; "
@@ -922,11 +929,46 @@ class MessageGroupRow(_Output):
         "that has one; null otherwise."
     )
 
+    period: str | None = Field(
+        default=None,
+        description="UTC YYYY-MM or YYYY cell in period_breakdown; null without date evidence or in summary mode.",
+    )
+    active_periods: int = Field(
+        description="Distinct non-null UTC periods with definite matches; never inferred report series."
+    )
+    distinct_message_ids: int = Field(
+        description="Distinct stored Message-ID strings among definite matches; sender controlled, not distinct reports."
+    )
+    distinct_attachment_ids: int = Field(
+        description="Distinct payload identities from current occurrence rows on definite matches; MIME groups scope these to their type. A lower bound when attachment_inventory_unknown_messages is nonzero; not distinct reports."
+    )
+    eligible_total: int = Field(
+        description="messages + indeterminate in this group. Sender groups can overlap."
+    )
+    undated_messages: int = Field(
+        description="Definite matches without selected-clock evidence; zero for sent/occurred where missing dates are indeterminate."
+    )
+    attachment_inventory_unknown_messages: int = Field(
+        description="Definite matches whose current attachment inventory is not known exhaustive. When nonzero, distinct_attachment_ids is a lower bound."
+    )
+
 
 class AggregateMessagesOutput(_Output):
     group_by: str
+    date_basis: str
+    period: str
+    period_breakdown: bool
+    eligible_total: int = Field(
+        description="total_matches + indeterminate, each indexed message not rejected by the filters counted once before group memberships."
+    )
+    undated_messages: int = Field(
+        description="Definite matches without selected-clock evidence, counted once across the call."
+    )
+    attachment_inventory_unknown_messages: int = Field(
+        description="Definite matches with unknown exhaustive current attachment inventory, each once across the call. Attachment identity counts are lower bounds when nonzero."
+    )
     filters: list[FilterUse] = Field(description="How each given filter was applied; empty: none.")
-    date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
+    date_bounds: QueryDateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(
         description="Messages the filters definitely match, as query_messages counts them."
     )
@@ -945,15 +987,25 @@ class AggregateMessagesOutput(_Output):
         "From address (also in the null group). authority_class leaves out Spam and "
         "Recovered Messages.",
     )
+    incomplete_recipient_messages: int | None = Field(
+        default=None,
+        description="recipient_domain only: eligible messages whose To/Cc lists "
+        "are not known complete, once globally; further memberships may be missing.",
+    )
+    incomplete_attachment_type_messages: int | None = Field(
+        default=None,
+        description="attachment_content_type only: eligible messages with unknown "
+        "exhaustive current inventories, once globally; further types may be missing.",
+    )
     returned: int
     offset: int = Field(description="Groups returned by earlier pages.")
     has_more: bool
     next_cursor: str | None = Field(
-        description="Pass with the same filters and group_by for the next page; null when "
+        description="Pass with the same filters, group_by, date_basis, period and period_breakdown for the next page; null when "
         "has_more is false."
     )
     groups: list[MessageGroupRow] = Field(
-        description="Most messages first, then by value; the null-value group last among ties."
+        description="Most messages first, then by value and period; null keys last among ties. Breakdown pages contain group-period cells."
     )
 
 

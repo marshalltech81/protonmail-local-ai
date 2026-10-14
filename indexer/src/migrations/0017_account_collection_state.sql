@@ -1,4 +1,4 @@
--- v15 -> v16 (#1592): mbsync's latest collection outcome, one row per
+-- v16 -> v17 (#1592): mbsync's latest collection outcome, one row per
 -- account, which the indexer fills from mbsync's collection status file
 -- at its next read (startup, each ingestion-state heartbeat, and each
 -- rename of the file). The table starts empty: get_mailbox_status reads

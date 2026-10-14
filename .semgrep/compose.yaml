@@ -31,6 +31,8 @@
 # Tests: .semgrep/compose.test.yml (run `semgrep test .semgrep`), and
 # scripts/tests/semgrep_paths_test.sh, which checks that every rule
 # reads every Compose file name, since `semgrep test` ignores `paths`.
+# The translator's gitignored compose.accounts.yml is scanned by
+# explicit path (scripts/tests/semgrep_generated_test.sh, #1608).
 rules:
   - id: compose-privileged
     languages: [yaml]

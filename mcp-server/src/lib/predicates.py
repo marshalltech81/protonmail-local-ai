@@ -775,6 +775,23 @@ def _compile_body_words(terms: tuple[str, ...], params: list) -> str:
     return _decided_by(f"({match})", "body_complete")
 
 
+ATTACHMENT_INVENTORY_KNOWN_SQL = (
+    "m.attachments_manifest_complete = 1 AND "
+    "(m.has_attachments = 0 OR m.attachment_rows_current = 1)"
+)
+
+
+def _compile_attachment_content_type(value: str, params: list) -> str:
+    params.append(value)
+    return (
+        # Only fixed SQL is interpolated; the MIME operand is bound.
+        "CASE WHEN m.attachment_rows_current = 1 AND m.has_attachments = 1 "  # nosec B608
+        "AND EXISTS (SELECT 1 FROM attachments a WHERE a.claimant_id = m.claimant_id "
+        "AND a.content_type = ?) THEN 1 "
+        f"WHEN {ATTACHMENT_INVENTORY_KNOWN_SQL} THEN 0 ELSE NULL END"
+    )
+
+
 def _compile_attachment_text_words(terms: tuple[str, ...], params: list) -> str:
     # Same token semantics and one FTS subquery per word as body_words,
     # across the message's attachment chunks, never its body chunks.
@@ -1121,6 +1138,21 @@ LEAVES: dict[str, LeafKind] = {
             coverage=_ATTACHMENT_COVERAGE,
             schema={**_WORD_SCHEMA, "attachments": ("claimant_id", "text_complete")},
         ),
+        LeafKind(
+            "attachment_content_type_is",
+            "MIME type",
+            _compile_attachment_content_type,
+            Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=(
+                ATTACHMENT_INVENTORY_KNOWN_SQL,
+                "m.attachments_manifest_complete IS NULL OR "
+                "(m.has_attachments IS NOT 0 AND m.attachment_rows_current IS NULL)",
+            ),
+            schema={
+                "messages": ("claimant_id", "has_attachments", "attachment_rows_current"),
+                "attachments": ("claimant_id", "content_type"),
+            },
+        ),
         # ``text`` is the flat filter's name for ``body_words`` (#1088).
         LeafKind(
             "text",
@@ -1394,6 +1426,7 @@ WHERE_LEAVES = (
     "body_words",
     "subject_contains",
     "attachment_text_words",
+    "attachment_content_type_is",
     "header_exists",
     "header_contains",
 )
@@ -1414,6 +1447,7 @@ MAX_WHERE_VALUE_CHARS = {
     "body_words": 1000,
     "subject_contains": 500,
     "attachment_text_words": 1000,
+    "attachment_content_type_is": 1000,
     "header_contains": 500,
 }
 MAX_WHERE_ID_CHARS = 64
@@ -1431,6 +1465,7 @@ WhereLeafName = Literal[
     "body_words",
     "subject_contains",
     "attachment_text_words",
+    "attachment_content_type_is",
     "header_exists",
     "header_contains",
 ]
@@ -1573,6 +1608,8 @@ def _where_value(path: str, item: WhereLeafItem) -> Any:
         return (header_name, value)
     if name == "subject_contains":
         return value
+    if name == "attachment_content_type_is":
+        return value.lower()
     if name == "address_is":
         if address_match_mode(value) != "exact":
             raise InvalidFilterError(
