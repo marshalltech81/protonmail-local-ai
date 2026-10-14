@@ -18,18 +18,46 @@ class RuntimeClockIndexes(unittest.TestCase):
             conn = sqlite3.connect(":memory:")
             try:
                 conn.execute("PRAGMA temp_store=MEMORY")
+                # Folder, flags and read state live on message_occurrences,
+                # not messages, since the occurrence cutover (#1567,
+                # #1568): every compiled leaf this script exercises --
+                # including the default_scope leaf query_messages_leaves
+                # always appends without an explicit folder -- reads them
+                # from there through an EXISTS against message_occurrences
+                # (and, for folder roles, accounts.provider).
+                conn.execute(
+                    "CREATE TABLE accounts (id INTEGER PRIMARY KEY, provider TEXT NOT NULL)"
+                )
+                conn.execute("INSERT INTO accounts VALUES (1, 'proton-bridge')")
                 conn.execute(
                     "CREATE TABLE messages (claimant_id TEXT PRIMARY KEY, sent_at TEXT, "
-                    "sent_at_status TEXT, occurred_at TEXT, folder TEXT, seen INTEGER, subject TEXT, "
+                    "sent_at_status TEXT, occurred_at TEXT, subject TEXT, "
                     "subject_complete INTEGER DEFAULT 1)"
+                )
+                conn.execute(
+                    "CREATE TABLE message_occurrences (id INTEGER PRIMARY KEY, "
+                    "account_id INTEGER NOT NULL, claimant_id TEXT NOT NULL, folder TEXT NOT NULL, "
+                    "state TEXT NOT NULL, trashed INTEGER NOT NULL, seen INTEGER NOT NULL, "
+                    "flagged INTEGER NOT NULL, replied INTEGER NOT NULL)"
+                )
+                # The real idx_message_occurrences_claimant: every default-
+                # scoped or flag/folder-filtered compile correlates by it,
+                # so without it this EXISTS would be a full scan per row.
+                conn.execute(
+                    "CREATE INDEX idx_message_occurrences_claimant "
+                    "ON message_occurrences(claimant_id)"
                 )
                 stamp = "2024-01-01T00:00:00+00:00"
                 conn.executemany(
-                    "INSERT INTO messages (claimant_id, sent_at, sent_at_status, occurred_at, folder, seen, subject) "
-                    "VALUES (?, ?, 'parsed', ?, 'INBOX', 0, 'synthetic')",
+                    "INSERT INTO messages (claimant_id, sent_at, sent_at_status, occurred_at, subject) "
+                    "VALUES (?, ?, 'parsed', ?, 'synthetic')",
                     ((f"claim-{i:06d}", stamp, stamp) for i in range(size)),
                 )
-                conn.execute("CREATE INDEX idx_folder ON messages(folder)")
+                conn.executemany(
+                    "INSERT INTO message_occurrences (account_id, claimant_id, folder, state, "
+                    "trashed, seen, flagged, replied) VALUES (1, ?, 'INBOX', 'active', 0, 0, 0, 0)",
+                    ((f"claim-{i:06d}",) for i in range(size)),
+                )
                 conn.create_function("mcp_casefold", 1, str.casefold, deterministic=True)
                 for basis_name in ("sent", "occurred"):
                     basis = DATE_BASES[basis_name]

@@ -620,6 +620,8 @@ class TestTool:
         assert (out["total_matches"], out["indeterminate"], out["total_groups"]) == (10, 0, 5)
         assert out["returned"] == 2 and out["has_more"] is True and out["next_cursor"]
         assert out["groups"][0] == {
+            "samples": [],
+            "samples_returned": 0,
             "value": "ann@one.test",
             "value_clipped": False,
             "messages": 4,
@@ -690,7 +692,12 @@ class TestTool:
         qm = _tools(_server(agg_db))["query_messages"].input_schema["properties"]
         agg = _tools(_server(agg_db))["aggregate_messages"].input_schema["properties"]
         # Every message filter, including the selected clock, not the projection.
-        assert set(qm) - {"fields"} == set(agg) - {"group_by", "period", "period_breakdown"}
+        assert set(qm) - {"fields"} == set(agg) - {
+            "group_by",
+            "period",
+            "period_breakdown",
+            "sample_per_group",
+        }
         for name in set(qm) - {"fields", "limit"}:
             assert {k: v for k, v in agg[name].items() if k != "description"} == {
                 k: v for k, v in qm[name].items() if k != "description"
