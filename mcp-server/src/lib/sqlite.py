@@ -27,6 +27,15 @@ from urllib.parse import quote
 import sqlite_vec
 
 from . import timings
+from .list_metadata import (
+    metadata_diagnostics,
+    metadata_known_sql,
+    metadata_result_sql,
+    metadata_value_sql,
+    requested_metadata,
+    sqlite_normalize_fields,
+    with_metadata,
+)
 from .predicates import (
     ADDRESS_LEAF_ROWS,
     ADDRESS_ROLES,
@@ -729,6 +738,7 @@ class MessageRecord:
     to_count: int | None = None
     cc_count: int | None = None
     direction: Literal["inbound", "outbound", "unknown"] = "unknown"
+    list_metadata: dict[str, tuple[str | None, str]] = field(default_factory=dict)
 
 
 # Whether the reconciler tombstoned the message (#794). A tombstone
@@ -1184,6 +1194,7 @@ class MessagePage:
     address_matches: dict[str, AddressMatches] = field(default_factory=dict)
     indeterminate: int = 0
     leaf_results: list[LeafResult] = field(default_factory=list)
+    metadata_diagnostics: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 _INVALID_CURSOR = "invalid cursor; restart the query without a cursor"
@@ -1203,6 +1214,8 @@ AGGREGATE_DIMENSIONS = (
     "sender_domain",
     "recipient_domain",
     "direction",
+    "list_id",
+    "precedence",
     "attachment_content_type",
     "folder",
     "year",
@@ -1237,6 +1250,8 @@ class QueryThreadPage:
     offset: int
     has_more: bool
     next_cursor: str | None
+
+    metadata_diagnostics: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 def _encode_thread_cursor(digest: str, thread_id: str, offset: int) -> str:
@@ -1340,6 +1355,10 @@ class GroupPage:
     sample_per_group: int = 0
     samples_returned: int = 0
 
+    metadata_diagnostics: dict[str, dict[str, int]] = field(default_factory=dict)
+    unknown_group_messages: int | None = None
+    unknown_group_indeterminate_messages: int | None = None
+
 
 def _sql_casefold(value):
     """Unicode caseless folding for SQL. SQLite's built-in ``lower`` folds
@@ -1356,6 +1375,7 @@ def _address_matches(
     where_sql: str,
     where_params: list,
     total: int,
+    metadata: tuple[str, ...] = (),
 ) -> AddressMatches:
     """The distinct addresses the address filter ``value`` matched in
     ``roles`` over the messages ``where_sql`` selects (#801), on the
@@ -1371,21 +1391,29 @@ def _address_matches(
         return AddressMatches(distinct=len(addresses), addresses=addresses)
     params: list = []
     rows_sql = _substring_participant_rows(value, roles, params)
-    return _matched_addresses(conn, rows_sql, params, where_sql, where_params)
+    return _matched_addresses(conn, rows_sql, params, where_sql, where_params, metadata)
 
 
 def _matched_addresses(
-    conn: sqlite3.Connection, rows_sql: str, params: list, where_sql: str, where_params: list
+    conn: sqlite3.Connection,
+    rows_sql: str,
+    params: list,
+    where_sql: str,
+    where_params: list,
+    metadata: tuple[str, ...] = (),
 ) -> AddressMatches:
     """The distinct addresses of the ``message_participants p`` rows
     ``rows_sql`` selects on the messages ``where_sql`` selects, most
     matching messages first: one grouped query."""
     rows = conn.execute(
-        "SELECT address, COUNT(*) OVER () FROM ("  # nosec B608
-        "SELECT p.address AS address, COUNT(DISTINCT p.claimant_id) AS n "
-        f"FROM message_participants p WHERE {rows_sql} "
-        f"AND p.claimant_id IN (SELECT m.claimant_id FROM messages m WHERE {where_sql}) "
-        "GROUP BY p.address) ORDER BY n DESC, address LIMIT ?",
+        with_metadata(
+            "SELECT address, COUNT(*) OVER () FROM ("  # nosec B608
+            "SELECT p.address AS address, COUNT(DISTINCT p.claimant_id) AS n "
+            f"FROM message_participants p WHERE {rows_sql} "
+            f"AND p.claimant_id IN (SELECT m.claimant_id FROM messages m WHERE {where_sql}) "
+            "GROUP BY p.address) ORDER BY n DESC, address LIMIT ?",
+            metadata,
+        ),
         [*params, *where_params, MAX_LISTED_MATCHED_ADDRESSES],
     ).fetchall()
     return AddressMatches(
@@ -1394,7 +1422,11 @@ def _matched_addresses(
 
 
 def _leaf_results(
-    conn: sqlite3.Connection, where: Sequence[WhereLeaf], where_sql: str, where_params: list
+    conn: sqlite3.Connection,
+    where: Sequence[WhereLeaf],
+    where_sql: str,
+    where_params: list,
+    metadata: tuple[str, ...] = (),
 ) -> list[LeafResult]:
     """Each ``where`` leaf's result (``LeafResult``), on the caller's
     read transaction: one statement that evaluates every leaf's own SQL
@@ -1416,8 +1448,11 @@ def _leaf_results(
     # of P: a plain subquery is flattened into the aggregates, which
     # then evaluate each leaf once per aggregate that reads it.
     counts = conn.execute(
-        f"WITH p AS MATERIALIZED (SELECT {columns} FROM messages m "  # nosec B608
-        f"WHERE ({where_sql}) IS NOT 0) SELECT {sums} FROM p",
+        with_metadata(
+            f"WITH p AS MATERIALIZED (SELECT {columns} FROM messages m "  # nosec B608
+            f"WHERE ({where_sql}) IS NOT 0) SELECT {sums} FROM p",
+            metadata,
+        ),
         [*params, *where_params],
     ).fetchone()
     grouped = {w.path for clause in where_clauses(where) if len(clause) > 1 for w in clause}
@@ -1435,7 +1470,9 @@ def _leaf_results(
                 own_sql = LEAVES[w.leaf.name].compile(w.leaf.value, own_params)
                 returned_sql = f"({where_sql}) AND ({own_sql}) IS 1"
                 returned_params = [*where_params, *own_params]
-            matched = _matched_addresses(conn, rows_sql, rows_params, returned_sql, returned_params)
+            matched = _matched_addresses(
+                conn, rows_sql, rows_params, returned_sql, returned_params, metadata
+            )
             result.distinct, result.addresses = matched.distinct, matched.addresses
         results.append(result)
     return results
@@ -1608,6 +1645,8 @@ _SAFE_FROM_ROWS = (
 # except the excluded folders' placeholders, bound in order.
 _GROUP_ROWS: dict[str, str] = {
     "direction": "SELECT e.*, direction AS value, NULL AS name FROM e",
+    "list_id": "SELECT e.*, metadata_value AS value, NULL AS name FROM e WHERE metadata_known",
+    "precedence": "SELECT e.*, metadata_value AS value, NULL AS name FROM e WHERE metadata_known",
     # The participant row keeps the first name the message wrote the
     # address with, NULL when that one had none; every name is in
     # ``message_participant_names`` (#1140), whose least is the fallback.
@@ -2359,6 +2398,7 @@ class Database:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         conn.create_function("mcp_casefold", 1, _sql_casefold, deterministic=True)
+        conn.create_function("mcp_list_metadata", 2, sqlite_normalize_fields, deterministic=True)
         conn.execute("PRAGMA query_only = ON")
         return conn
 
@@ -4942,6 +4982,7 @@ class Database:
         size_max: int | None = None,
         date_basis: str | None = None,
         where: Sequence[WhereLeaf] = (),
+        metadata_fields: Sequence[str] = (),
         limit: int = 25,
         cursor: str | None = None,
     ) -> MessagePage:
@@ -5026,6 +5067,10 @@ class Database:
             for leaf in leaves
             if leaf.name in ADDRESS_ROLES
         ]
+        metadata = requested_metadata(leaves, where, metadata_fields)
+        metadata_columns = "".join(
+            f", {metadata_result_sql(name)} AS {name}_metadata" for name in metadata
+        )
         explicit = [w.leaf for w in where]
         where_sql, params = _message_expression(leaves, where)
 
@@ -5052,11 +5097,11 @@ class Database:
                 page_where_sql += f" AND ({clock}, m.claimant_id) < (?, ?)"
                 page_params += [last_at, last_id]
             total = conn.execute(
-                "SELECT COUNT(*) FROM messages m WHERE " + where_sql,  # nosec B608
+                with_metadata("SELECT COUNT(*) FROM messages m WHERE " + where_sql, metadata),  # nosec B608
                 params,
             ).fetchone()[0]
             address_matches = {
-                name: _address_matches(conn, value, roles, where_sql, params, total)
+                name: _address_matches(conn, value, roles, where_sql, params, total, metadata)
                 for name, value, roles in address_filters
             }
             # Rows the predicate could neither accept nor reject: the
@@ -5069,21 +5114,31 @@ class Database:
                 for leaf in [*leaves, *explicit]
             ):
                 indeterminate = conn.execute(
-                    f"SELECT COUNT(*) FROM messages m WHERE ({where_sql}) IS NULL",  # nosec B608
+                    with_metadata(
+                        f"SELECT COUNT(*) FROM messages m WHERE ({where_sql}) IS NULL",  # nosec B608
+                        metadata,
+                    ),  # nosec B608
                     params,
                 ).fetchone()[0]
-            leaf_results = _leaf_results(conn, where, where_sql, params) if where else []
+            leaf_results = _leaf_results(conn, where, where_sql, params, metadata) if where else []
             rows = conn.execute(
-                f"SELECT {_MESSAGE_COLUMNS}, {DIRECTION_LABEL_SQL} AS direction FROM messages m WHERE "  # nosec B608
-                + page_where_sql
-                + f" ORDER BY {clock} DESC, m.claimant_id DESC LIMIT ?",
+                with_metadata(
+                    f"SELECT {_MESSAGE_COLUMNS}, {DIRECTION_LABEL_SQL} AS direction{metadata_columns} FROM messages m WHERE "  # nosec B608
+                    + page_where_sql
+                    + f" ORDER BY {clock} DESC, m.claimant_id DESC LIMIT ?",
+                    metadata,
+                ),
                 [*page_params, limit + 1],
             ).fetchall()
             has_more = len(rows) > limit
             records = [_row_to_message_record(r) for r in rows[:limit]]
             for record, row in zip(records, rows):
                 record.direction = row["direction"] or "unknown"
+                record.list_metadata = {
+                    name: tuple(json.loads(row[name + "_metadata"])) for name in metadata
+                }
             _attach_participants(conn, records)
+            diagnostics = metadata_diagnostics(conn, metadata)
             conn.rollback()
 
         next_offset = offset + len(records)
@@ -5098,6 +5153,7 @@ class Database:
             address_matches=address_matches,
             indeterminate=indeterminate,
             leaf_results=leaf_results,
+            metadata_diagnostics=diagnostics,
         )
 
     def query_threads(
@@ -5146,6 +5202,7 @@ class Database:
             size_min=size_min,
             size_max=size_max,
         )
+        metadata = requested_metadata(leaves, where)
         expr, params = _message_expression(leaves, where)
         digest = hashlib.sha256(
             json.dumps(["query_threads", leaf_digest(leaves, where=where)]).encode()
@@ -5187,11 +5244,15 @@ class Database:
             "LEFT JOIN meta ON meta.tid=pg.tid LEFT JOIN people ON people.tid=pg.tid ORDER BY pg.tid"
         )
         with closing(self._connect()) as conn:
-            if _uses_identity(leaves, where):
+            if metadata or _uses_identity(leaves, where):
                 conn.execute("BEGIN")
+            if _uses_identity(leaves, where):
                 digest = _identity_digest(conn, digest)
             last_id, offset = _decode_thread_cursor(cursor, digest) if cursor else (None, 0)
-            rows = conn.execute(sql, [*params, last_id, last_id, limit + 1]).fetchall()
+            rows = conn.execute(
+                with_metadata(sql, metadata), [*params, last_id, last_id, limit + 1]
+            ).fetchall()
+            diagnostics = metadata_diagnostics(conn, metadata)
         totals = [int(n) for n in rows[0][:4]]
         records = [
             QueriedThread(
@@ -5212,6 +5273,7 @@ class Database:
         has_more = len(records) > limit
         records = records[:limit]
         return QueryThreadPage(
+            metadata_diagnostics=diagnostics,
             total_threads=totals[0],
             total_matching_messages=totals[1],
             indeterminate_messages=totals[2],
@@ -5336,6 +5398,8 @@ class Database:
             size_min=size_min,
             size_max=size_max,
         )
+        metadata = requested_metadata(leaves, where, group_by=group_by)
+        metadata_dimension = group_by in ("list_id", "precedence")
         expr, expr_params = _message_expression(leaves, where)
         digest = _aggregate_digest(group_by, leaves, where, basis.name, period, period_breakdown)
         offset = 0
@@ -5432,6 +5496,11 @@ class Database:
             "m.attachment_rows_current AS current, "
             f"({ATTACHMENT_INVENTORY_KNOWN_SQL}) AS inventory_known, "
             + (f"{DIRECTION_LABEL_SQL} AS direction, " if group_by == "direction" else "")
+            + (
+                f"{metadata_value_sql(group_by)} AS metadata_value, {metadata_known_sql(group_by)} AS metadata_known, "
+                if metadata_dimension
+                else ""
+            )
             + f"({expr}) AS ok FROM messages m WHERE ({expr}) IS NOT 0), "  # nosec B608
             f"k AS MATERIALIZED ({rows_sql}), "
             f"g AS MATERIALIZED (SELECT value, {period_sql} AS period, TOTAL(ok IS 1) AS n, "
@@ -5467,15 +5536,24 @@ class Database:
             "pg.undated, pg.unknown_inventory, t.incomplete, "
             "t.incomplete_recipient, t.incomplete_type, "
             "t.undated AS total_undated, t.unknown_inventory AS total_unknown_inventory, "
-            "COALESCE(ga.attachment_ids, 0) AS attachment_ids " + sample_columns + " "
+            "COALESCE(ga.attachment_ids, 0) AS attachment_ids "
+            + sample_columns
+            + (
+                ", (SELECT TOTAL(ok IS 1 AND metadata_known IS NOT TRUE) FROM e) AS metadata_unknown, "
+                "(SELECT TOTAL(ok IS NULL AND metadata_known IS NOT TRUE) FROM e) AS metadata_unknown_indeterminate "
+                if metadata_dimension
+                else " "
+            )
+            + " "
             "FROM t LEFT JOIN p pg ON 1 "
             "LEFT JOIN ga ON ga.value IS pg.value AND ga.period IS pg.period "
             + sample_join
             + "ORDER BY pg.n DESC, pg.value IS NULL, pg.value, pg.period IS NULL, pg.period"
         )
         with closing(self._connect()) as conn:
-            if group_by == "direction" or _uses_identity(leaves, where):
+            if metadata or group_by == "direction" or _uses_identity(leaves, where):
                 conn.execute("BEGIN")
+            if group_by == "direction" or _uses_identity(leaves, where):
                 digest = _identity_digest(conn, digest)
             offset = _decode_aggregate_cursor(cursor, digest) if cursor else 0
             params = [
@@ -5487,7 +5565,8 @@ class Database:
                 *sample_params,
                 *incomplete_params,
             ]
-            rows = conn.execute(sql, params).fetchall()
+            rows = conn.execute(with_metadata(sql, metadata), params).fetchall()
+            diagnostics = metadata_diagnostics(conn, metadata)
         if sample_per_group and rows[0]["sample_requested"] > 100:
             raise InvalidFilterError(
                 "sample_per_group",
@@ -5544,6 +5623,11 @@ class Database:
         has_more = len(groups) > limit
         groups = groups[:limit]
         return GroupPage(
+            metadata_diagnostics=diagnostics,
+            unknown_group_messages=int(rows[0]["metadata_unknown"]) if metadata_dimension else None,
+            unknown_group_indeterminate_messages=int(rows[0]["metadata_unknown_indeterminate"])
+            if metadata_dimension
+            else None,
             sample_per_group=sample_per_group,
             samples_returned=sum(len(g.samples) for g in groups),
             group_by=group_by,

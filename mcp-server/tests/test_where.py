@@ -146,6 +146,8 @@ class TestModel:
             "header_exists",
             "header_contains",
             "direction_is",
+            "list_id_is",
+            "precedence_is",
         )
         assert WHERE_ROLES == ("from", "to", "cc", "visible_recipient")
         assert set(WHERE_LEAVES) <= set(predicates.LEAVES)

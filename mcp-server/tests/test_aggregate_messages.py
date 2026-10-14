@@ -565,7 +565,11 @@ def _probe(db: Database, monkeypatch, group_by: str, items: list, **aggregate_ar
             predicates.LeafKind(kind.name, kind.param, spy, kind.evaluability),
         )
     page = db.aggregate_messages(group_by=group_by, where=_where(*items), limit=2, **aggregate_args)
-    ours = [s for s in statements if s.startswith("WITH e AS MATERIALIZED")]
+    ours = [
+        s
+        for s in statements
+        if (s.startswith("WITH e AS MATERIALIZED") or ", e AS MATERIALIZED (" in s)
+    ]
     return calls, page, len(connections), (len(ours), len(statements))
 
 

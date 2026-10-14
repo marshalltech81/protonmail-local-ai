@@ -49,6 +49,15 @@ def query_capabilities(conn: sqlite3.Connection) -> dict:
                 "missing_messages": None,
                 "condition": "Configure explicit own addresses in config/identity.toml and restart the indexer.",
             }
+
+        elif kind.coverage_unmeasured:
+            result[name] = {
+                "status": "unmeasured",
+                "available_messages": None,
+                "unassessed_messages": None,
+                "missing_messages": None,
+                "condition": "Normalized header usability is measured only by requested queries; complete capture does not establish valid normalization.",
+            }
         else:
             rules[name] = (complete, unassessed)
     expressions = ["COUNT(*)"]

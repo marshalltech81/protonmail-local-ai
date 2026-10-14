@@ -1250,3 +1250,21 @@ superseded entries keep their number and one line.
 - Edit this file only when a decision, roadmap status or known
   limitation changes; keep it concise, and do not add done-lists,
   measurements or PR chronology.
+
+
+58. **Normalized list metadata (2026-10-14, #825):** the owner approved an
+    iterative bounded raw List-ID/Precedence recognizer and query-time exact
+    leaves, opt-in paired value/status fields and metadata groups. Identical
+    valid duplicates retain a scalar; conflicting, malformed, incomplete,
+    unassessed and over-budget evidence stays unknown. Explicit null means
+    known absence; unknown group memberships are excluded and disclosed for
+    definite and filter-indeterminate populations separately. SQL type and
+    NUL-safe byte/count guards precede Python, materialization prevents repeated
+    normalization within a statement, and status reports unmeasured usability
+    with null counts. Encoded-word-shaped Precedence remains unknown. The
+    authorized Opus 5.5/GPT-6.1 Sol panel reached its three-round limit without
+    formal consensus; final responses converged on the byte guards and coverage
+    extension, and the owner approved the explicit contract including that
+    encoded-word clarification. No migration, reparse, authority or ranking
+    change. Cost: normalization of requested metadata over the evaluated
+    population; synthetic 5k/50k actual-reader work gates cover it.

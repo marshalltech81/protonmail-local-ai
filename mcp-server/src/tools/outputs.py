@@ -259,14 +259,51 @@ class ListedMessage(MessageHeaders):
     )
 
 
+MetadataStatus = Literal[
+    "valid",
+    "absent",
+    "duplicate",
+    "unsupported",
+    "conflict",
+    "malformed",
+    "incomplete",
+    "unassessed",
+    "budget_exceeded",
+]
+
+
 class QueriedMessage(ListedMessage):
     direction: Literal["inbound", "outbound", "unknown"] = Field(
         description="Claimed direction from configured own addresses; unknown includes own-only visible recipients until Bcc is indexed. Headers are unauthenticated; folders do not classify direction."
     )
 
+    list_id: str | None = Field(
+        default=None,
+        description="Opt-in normalized claimed List-ID; null needs list_id_status to distinguish known absence from unknown.",
+    )
+    list_id_status: MetadataStatus | None = Field(
+        default=None,
+        description="Opt-in normalization status, also included whenever list_id is selected.",
+    )
+    precedence: str | None = Field(
+        default=None,
+        description="Opt-in claimed bulk/list/junk/unsupported category; null needs precedence_status to distinguish absence from unknown.",
+    )
+    precedence_status: MetadataStatus | None = Field(
+        default=None,
+        description="Opt-in normalization status, also included whenever precedence is selected.",
+    )
+
 
 def queried_message(m: MessageRecord) -> QueriedMessage:
-    return QueriedMessage(**listed_message(m).model_dump(), direction=m.direction)
+    metadata = {
+        key: value
+        for name, (value, status) in m.list_metadata.items()
+        for key, value in ((name, value), (name + "_status", status))
+    }
+    return QueriedMessage.model_validate(
+        {**listed_message(m).model_dump(), "direction": m.direction, **metadata}
+    )
 
 
 def message_headers(m: MessageRecord) -> MessageHeaders:
@@ -748,6 +785,11 @@ class WhereLeafResult(_Output):
 
 
 class QueryMessagesOutput(_Output):
+    metadata_diagnostics: dict[str, dict[str, int]] = Field(
+        default_factory=dict,
+        exclude_if=lambda v: not v,
+        description="Fixed normalization status counts over all evaluated indexed claimants, including Trash; not just matches or this page.",
+    )
     date_basis: Literal["effective", "sent", "occurred"] = Field(
         description="Clock for date bounds, ordering and cursors: effective (delivery, else "
         "stored send date; undated rows use first-indexed time for ordering only; "
@@ -786,7 +828,7 @@ class QueryMessagesOutput(_Output):
     )
     messages: list[QueriedMessage] = Field(
         description="Newest first by date_basis, with claimant_id breaking ties. With fields, each "
-        "row holds only those fields plus claimant_id and thread_id."
+        "row holds those fields plus claimant_id and thread_id; selected list metadata values also include their status. Default rows omit normalized list metadata."
     )
 
 
@@ -825,6 +867,11 @@ class QueriedThreadRow(_Output):
 
 
 class QueryThreadsOutput(_Output):
+    metadata_diagnostics: dict[str, dict[str, int]] = Field(
+        default_factory=dict,
+        exclude_if=lambda v: not v,
+        description="Fixed normalization status counts over all evaluated indexed claimants, including Trash; not just matches or this page.",
+    )
     filters: list[FilterUse]
     date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_threads: int = Field(
@@ -923,6 +970,21 @@ class MessageGroupRow(_Output):
 
 
 class AggregateMessagesOutput(_Output):
+    unknown_group_messages: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Definite filter matches excluded from normalized metadata groups because membership is unknown; null group is known absence only.",
+    )
+    unknown_group_indeterminate_messages: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Filter-indeterminate messages excluded from normalized metadata groups because membership is unknown.",
+    )
+    metadata_diagnostics: dict[str, dict[str, int]] = Field(
+        default_factory=dict,
+        exclude_if=lambda v: not v,
+        description="Fixed normalization status counts over all evaluated indexed claimants, including Trash; not just matches or this page.",
+    )
     sample_per_group: int = 0
     samples_returned: int = Field(
         default=0,
@@ -1205,7 +1267,11 @@ class HeaderPredicateCapability(_Output):
 
 class QueryCapability(_Output):
     status: Literal[
-        "supported", "supported after backfill", "supported when present", "unavailable"
+        "supported",
+        "supported after backfill",
+        "supported when present",
+        "unavailable",
+        "unmeasured",
     ]
     available_messages: int | None
     unassessed_messages: int | None
@@ -1258,7 +1324,7 @@ class MailboxStatusOutput(_Output):
     query_capabilities: dict[str, QueryCapability] = Field(
         description="Per registered leaf, conservative evidence coverage across its accepted "
         "operands, including Trash; not a particular query's indeterminate count. "
-        "Counts are null when schema evidence is unavailable."
+        "Counts are null when schema evidence is unavailable or normalized metadata coverage is unmeasured."
     )
     extra_claimant_files: int = Field(
         description="Indexed files beyond the first claimant of each conflicting Message-ID."
