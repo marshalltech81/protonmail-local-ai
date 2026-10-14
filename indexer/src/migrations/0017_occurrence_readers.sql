@@ -1,4 +1,4 @@
--- v15 -> v16 (#1567, #1568, #1569): the readers move to mailbox
+-- v16 -> v17 (#1567, #1568, #1569): the readers move to mailbox
 -- occurrences, in one transaction with the version stamp. Nothing the
 -- parser produces is added, so no reparse is queued; claimant, chunk
 -- and thread IDs and vectors are unchanged.
@@ -6,7 +6,7 @@
 -- An occurrence the reconciliation scan bound records provenance
 -- ``scan``; the CHECK is part of the table, so the table is rebuilt
 -- with its rows and ids unchanged.
-CREATE TABLE message_occurrences_v16 (
+CREATE TABLE message_occurrences_v17 (
     id                INTEGER PRIMARY KEY,
     account_id        INTEGER NOT NULL REFERENCES accounts(id),
     folder            TEXT NOT NULL,
@@ -26,14 +26,14 @@ CREATE TABLE message_occurrences_v16 (
                       CHECK (provenance IN ('parse', 'rename', 'scan', 'migration')),
     CHECK ((state = 'retired') = (retired_at IS NOT NULL))
 );
-INSERT INTO message_occurrences_v16
+INSERT INTO message_occurrences_v17
     (id, account_id, folder, uniq, claimant_id, relative_path, seen, flagged, replied,
      trashed, first_observed_at, last_observed_at, internal_at, state, retired_at, provenance)
 SELECT id, account_id, folder, uniq, claimant_id, relative_path, seen, flagged, replied,
        trashed, first_observed_at, last_observed_at, internal_at, state, retired_at, provenance
 FROM message_occurrences;
 DROP TABLE message_occurrences;
-ALTER TABLE message_occurrences_v16 RENAME TO message_occurrences;
+ALTER TABLE message_occurrences_v17 RENAME TO message_occurrences;
 CREATE UNIQUE INDEX idx_message_occurrences_key
     ON message_occurrences(account_id, folder, uniq, claimant_id) WHERE state = 'active';
 CREATE UNIQUE INDEX idx_message_occurrences_path
@@ -65,13 +65,13 @@ ORDER BY m.claimant_id;
 -- starts earlier than before. The reconciler's next sweep clears the
 -- rows of a message that still has a live occurrence and marks every
 -- message that has none.
-CREATE TABLE pending_deletions_v16 (
+CREATE TABLE pending_deletions_v17 (
     occurrence_id INTEGER PRIMARY KEY
                   REFERENCES message_occurrences(id) ON DELETE CASCADE,
     claimant_id   TEXT NOT NULL,
     marked_at     TEXT NOT NULL
 );
-INSERT INTO pending_deletions_v16 (occurrence_id, claimant_id, marked_at)
+INSERT INTO pending_deletions_v17 (occurrence_id, claimant_id, marked_at)
 SELECT occurrence_id, claimant_id, marked_at FROM (
     SELECT p.claimant_id, MAX(p.marked_at) AS marked_at,
            (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = p.claimant_id
@@ -81,7 +81,7 @@ SELECT occurrence_id, claimant_id, marked_at FROM (
 )
 WHERE occurrence_id IS NOT NULL;
 DROP TABLE pending_deletions;
-ALTER TABLE pending_deletions_v16 RENAME TO pending_deletions;
+ALTER TABLE pending_deletions_v17 RENAME TO pending_deletions;
 CREATE INDEX idx_pending_deletions_claimant ON pending_deletions(claimant_id, marked_at);
 
 -- The reconciliation scan binds a found copy to the message holding its

@@ -1,5 +1,5 @@
 """#1592: mbsync's collection status file, as the indexer reads and
-records it, and the per-account ``account_collection_state`` table (v17).
+records it, and the per-account ``account_collection_state`` table (v18).
 
 The file is synthetic throughout; a folder-name marker stands in for
 mailbox content and must never reach a log line or the stored row.
@@ -32,7 +32,7 @@ from src.database import SCHEMA_VERSION, Database
 from src.maildir import SyncStamp
 
 from tests.conftest import TEST_ACCOUNT
-from tests.test_database import _schema_shape, _v16_from_fresh
+from tests.test_database import _schema_shape, _v17_from_fresh
 
 SCOPE = TEST_ACCOUNT.scope_uuid
 OTHER_SCOPE = "00000000-0000-4000-8000-000000000002"
@@ -655,21 +655,21 @@ class TestRecorder:
         )
 
 
-class TestMigrationV17:
-    def test_v16_migrates_to_the_fresh_shape_with_rows_kept(self, tmp_path, caplog):
+class TestMigrationV18:
+    def test_v17_migrates_to_the_fresh_shape_with_rows_kept(self, tmp_path, caplog):
         caplog.set_level(logging.INFO)
-        db = Database(tmp_path / "v16.db", account=TEST_ACCOUNT)
+        db = Database(tmp_path / "v17.db", account=TEST_ACCOUNT)
         db.record_ingestion_state(
             sync_completed_at="2026-10-12T10:00:00+00:00",
             sync_interval_secs=60,
             seen_at="2026-10-12T10:00:30+00:00",
         )
-        _v16_from_fresh(db)
+        _v17_from_fresh(db)
         db.close()
-        migrated = Database(tmp_path / "v16.db", account=TEST_ACCOUNT)
+        migrated = Database(tmp_path / "v17.db", account=TEST_ACCOUNT)
         fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
-            assert SCHEMA_VERSION == 17
+            assert SCHEMA_VERSION == 18
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             assert migrated.get_collection_state() is None
             state = migrated._conn.execute(
@@ -681,7 +681,7 @@ class TestMigrationV17:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [17]" in caplog.text
+        assert "applied migrations: [18]" in caplog.text
 
     def test_a_row_must_name_a_registered_account(self, db):
         with pytest.raises(sqlite3.IntegrityError):

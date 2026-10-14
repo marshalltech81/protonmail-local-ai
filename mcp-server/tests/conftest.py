@@ -107,6 +107,10 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
         CREATE INDEX idx_messages_effective ON messages(effective_at);
         CREATE INDEX idx_messages_content_hash ON messages(content_hash);
+        CREATE INDEX idx_messages_sent ON messages(sent_at, claimant_id)
+            WHERE sent_at_status = 'parsed';
+        CREATE INDEX idx_messages_occurred ON messages(occurred_at, claimant_id)
+            WHERE (occurred_at IS NOT NULL) = 1;
 
         CREATE TABLE message_headers (
             claimant_id TEXT NOT NULL,
@@ -256,7 +260,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             (1, '00000000-0000-4000-8000-000000000001', 'proton-bridge',
              '2024-01-01T00:00:00+00:00');
         -- mbsync's latest collection outcome per account (indexer
-        -- schema v17, #1592).
+        -- schema v18, #1592).
         CREATE TABLE account_collection_state (
             account_id                     INTEGER PRIMARY KEY REFERENCES accounts(id),
             status                         TEXT NOT NULL,

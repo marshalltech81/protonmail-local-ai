@@ -54,7 +54,7 @@ def test_migration_keeps_old_inventory_unknown_and_queues_reparse(tmp_path):
         assert (
             db._conn.execute("SELECT version FROM schema_version").fetchone()[0]
             == SCHEMA_VERSION
-            == 17
+            == 18
         )
         assert (
             db._conn.execute(

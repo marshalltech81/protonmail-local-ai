@@ -1031,7 +1031,7 @@ header's date, or NULL), `first_indexed_at` (see Message time),
 `in_reply_to` /
 references, attachment flag, and its bytes' `size_bytes` and
 `content_hash` (SHA-256 of the raw `.eml`). Its folders, file locators
-and read state are its copies' (see *Mailbox occurrences*; v16 dropped
+and read state are its copies' (see *Mailbox occurrences*; v17 dropped
 the row's own `filepath`, `folder`, `seen`, `flagged` and `replied` and
 `message_thread_map.filepath`, #1568). The MCP server returns the
 representative copy's locator with the hash and size as `source_file`
@@ -1282,7 +1282,7 @@ predicates", lists the leaves.
 Each Maildir copy of a message is its own occurrence
 (`message_occurrences`, #1566, PLAN.md decision 47), so two
 byte-identical files in different folders keep their own folder, flags
-and observation times; since v16 the `messages` row holds none of them
+and observation times; since v17 the `messages` row holds none of them
 (#1568). An active occurrence is keyed by the
 account (`accounts`, see *Account registry*), its folder relative to the
 account, the file's Maildir uniq (the name before `:2,`, which flag
@@ -1323,7 +1323,7 @@ to. Relocating the root alone keeps every occurrence.
   retirement mark; a retired row keeps its locator for diagnostics.
   `provenance` records how the row was created (`parse`, an observed
   `rename`, a reconciliation `scan` that verified a found copy's bytes,
-  or the `migration` seed: v14's, and v16's retired row for a message
+  or the `migration` seed: v14's, and v17's retired row for a message
   the v14 seed could not bind); `first_observed_at` /
   `last_observed_at` when the indexer saw the file (NULL on a seeded row
   until a parse sees it, so no observation is invented); `internal_at`
@@ -1333,7 +1333,7 @@ to. Relocating the root alone keeps every occurrence.
 The reconciler and the reaper read occurrences (#1567): a message is
 live while it has an active occurrence that is not `T`-flagged, and its
 tombstones in `pending_deletions` are keyed by occurrence (see *Deletion
-Reconciliation*). Every message keeps at least one occurrence: v16 gave
+Reconciliation*). Every message keeps at least one occurrence: v17 gave
 a message the v14 seed could not bind a retired one at its stored path,
 since no file was verified to hold its bytes. A message is re-read (a
 re-extraction sweep, a reap's survivor) from an active occurrence, a
@@ -1562,8 +1562,15 @@ and derives one effective time from them. `query_messages` and
 sent or occurred time for bounds, ordering and cursors. A missing
 selected sent or occurred clock is indeterminate even without bounds;
 changing clocks rejects the cursor. Other tools use effective time.
-Outputs return both stored fields. Sent and delivery clocks have no
-paging index yet (#1123); their pages scan and sort.
+Outputs return both stored fields. Selected-clock pages use partial indexes
+on `(sent_at, claimant_id)` for parsed send dates and
+`(occurred_at, claimant_id)` for delivery dates (#1123). Page-only guards
+permit raw clock ordering while evidence expressions and count SQL stay
+unchanged. The delivery index uses the exact predicate
+`(occurred_at IS NOT NULL) = 1` so ordinary date bounds do not imply its
+partial-index predicate on the tested SQLite versions. Plan tests detect
+changes to that matching behavior. Attachment joins can still sort, and
+exact counts still depend on the population examined.
 
 **`sent_at`** is the message's `Date:` header as parsed by
 `parsedate_to_datetime` (`indexer/src/parser.py` `_parse_date`),
@@ -3350,8 +3357,9 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
-| 17 | `0017_account_collection_state.sql` | `account_collection_state` (#1592; see *Collection status*): mbsync's latest collection outcome per account, empty until the indexer first reads mbsync's collection status file. Nothing the parser produces is added, so no reparse is queued. |
-| 16 | `0016_occurrence_readers.sql` | The readers move to the occurrences (#1567, #1568, #1569). `message_occurrences` is rebuilt, rows and ids unchanged, to accept the `scan` provenance; a message the v14 seed could not bind gets a retired occurrence at its stored path (a WARNING counts them), so every message keeps one; `pending_deletions` is keyed by occurrence, each message's old tombstones carried over as one row with their latest mark, which the next sweep clears for a message that is still live; `messages.content_hash` is indexed; `messages.filepath`, `folder`, `seen`, `flagged` and `replied` and `message_thread_map.filepath` are dropped (each drop rewrites its table once). Nothing the parser produces is added, so no reparse is queued; claimant, chunk and thread IDs and vectors are unchanged. On a synthetic 36,500-message index (14,600 threads, 160 MB) the startup open including the migration took 0.4–0.5 s (three runs, Apple M5 Max). |
+| 18 | `0018_account_collection_state.sql` | `account_collection_state` (#1592; see *Collection status*): mbsync's latest collection outcome per account, empty until the indexer first reads mbsync's collection status file. Nothing the parser produces is added, so no reparse is queued. |
+| 17 | `0017_occurrence_readers.sql` | The readers move to the occurrences (#1567, #1568, #1569). `message_occurrences` is rebuilt, rows and ids unchanged, to accept the `scan` provenance; a message the v14 seed could not bind gets a retired occurrence at its stored path (a WARNING counts them), so every message keeps one; `pending_deletions` is keyed by occurrence, each message's old tombstones carried over as one row with their latest mark, which the next sweep clears for a message that is still live; `messages.content_hash` is indexed; `messages.filepath`, `folder`, `seen`, `flagged` and `replied` and `message_thread_map.filepath` are dropped (each drop rewrites its table once). Nothing the parser produces is added, so no reparse is queued; claimant, chunk and thread IDs and vectors are unchanged. On a synthetic 36,500-message index (14,600 threads, 160 MB) the startup open including the migration took 0.4–0.5 s (three runs, Apple M5 Max). |
+| 16 | `0016_selected_clock_indexes.sql` | Partial send/delivery clock and claimant-ID indexes for definite-match listing pages (#1123). No columns, evidence rows, reparses or embeddings change. |
 | 15 | `0015_attachment_inventory_current.sql` | `messages.attachment_rows_current` (#1338; see the attachment-inventory discussion below): NULL until reparsed, then 1 when extraction is enabled or 0 when disabled, set by phase 2c in the same transaction as the occurrence writes. The migration queues the standard reparse, keeping unchanged chunks and vectors. |
 | 14 | `0014_account_occurrences.sql` | `accounts` (#1596; see *Account registry*): the configured `ACCOUNT_SCOPE` and `SOURCE_MODE` provider, bound in the migration's own transaction through connection-local functions; update and delete triggers. `message_occurrences` (#1566; see *Mailbox occurrences*), seeded with one occurrence per message whose `indexed_files` record carries its content hash, relative to the configured `MAILDIR_PATH`; a stored path outside that root fails the migration closed with fixed text, and a message whose path holds other bytes gets none (a WARNING counts them). The migration ends with the shared reparse statement: the reparse observes each seeded occurrence and binds the files the seed cannot see (an unmapped byte-identical copy), with no embedding call; dead-lettered jobs stay dead. Claimant, chunk and thread IDs and vectors are unchanged. |
 | 13 | `0013_message_headers.sql` | Bounded ordered `message_headers` and nullable `messages.headers_complete` (#1079); existing rows start unknown and a queued reparse fills them. |
@@ -4366,7 +4374,7 @@ currency* above and the Freshness bullet below.
   unsupported, unreadable or other-account file reads as `unknown`
   with that reason and one fixed-text WARNING per change of reason,
   never as a success.
-- **Storage.** `account_collection_state`, one row per account (v17),
+- **Storage.** `account_collection_state`, one row per account (v18),
   replaced in the same transaction as `ingestion_state`, so the
   acknowledged sync and the outcome are one snapshot. A rebuilt index
   recovers the row from the file at its first write.

@@ -1679,9 +1679,10 @@ another query, or a malformed one, is rejected with an error rather
 than silently restarting.
 
 Existing effective-time cursors remain valid. Keep the same `date_basis`
-on every page; changing it rejects the cursor. Sent and delivery clocks retain
-keyset paging with scan-and-sort under the current schema; index
-optimization is tracked in #1123.
+on every page; changing it rejects the cursor. Sent and delivery clocks use
+partial date-and-claimant indexes for page ordering and cursor seeks (#1123).
+Counts retain their evidence predicates and still examine the eligible population;
+the indexes do not establish a full-call latency bound.
 
 To examine every match, follow `next_cursor` until `has_more` is false.
 Each page uses a fresh index snapshot, so the matching set can change
@@ -2186,8 +2187,9 @@ selected clock, also in `date_bounds` when bounds are given. Missing
 sent or delivery clocks are indeterminate even without bounds: counted
 once per stored occurrence, never as matches. Existing effective-time
 cursors remain valid; keep the same basis on every page. Sent and delivery
-clocks retain keyset paging with scan-and-sort under the current schema;
-index optimization is tracked in #1123.
+clocks use the same partial message-clock indexes as `query_messages` (#1123).
+The attachment join can still sort across occurrences; these indexes do not
+establish constant-work attachment paging or full-call latency bounds.
 
 **Unknown values.** A filter can leave an occurrence undecided: a
 message filter for the reasons it leaves a message undecided in
