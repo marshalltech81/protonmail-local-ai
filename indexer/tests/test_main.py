@@ -6364,6 +6364,53 @@ class TestMainStartupAndLoop:
         init = next(e for e in events if e.startswith("initial_index"))
         assert events.index("sweep_paths") < events.index(init)
 
+    def test_startup_sweep_shares_the_reconcilers_hash_cache_in_mirror_mode(
+        self, tmp_path, monkeypatch
+    ):
+        """#1612 round 15: in mirror mode, ``Reconciler.sweep()`` runs
+        its own ``scan_occurrences`` moments after this always-on
+        startup sweep. Passing the reconciler's own ``_hash_cache``
+        here instead of the module-level one (archive mode's, which
+        has no reconciler to share) means a path the startup sweep's
+        content backstop already hash-verified is not immediately
+        re-hashed by the reconciliation sweep that follows it."""
+        from src.reconciler import ReconcilerConfig
+
+        monkeypatch.setattr(
+            main,
+            "load_config_from_env",
+            lambda _env: ReconcilerConfig(
+                enabled=True,
+                grace_days=7,
+                sweep_interval_secs=3600,
+                max_batch_pct=0.05,
+                force=False,
+            ),
+        )
+        real_reconciler_cls = main.Reconciler
+        built: list = []
+
+        def recording_reconciler(*a, **kw):
+            instance = real_reconciler_cls(*a, **kw)
+            built.append(instance)
+            return instance
+
+        monkeypatch.setattr(main, "Reconciler", recording_reconciler)
+
+        sweep_hash_caches: list = []
+
+        def capturing_sweep_paths(db, **kw):
+            self._events.append("sweep_paths")
+            sweep_hash_caches.append(kw.get("hash_cache"))
+
+        self._run_main(tmp_path, monkeypatch, sweep_due=False, sweep_paths=capturing_sweep_paths)
+
+        assert len(built) == 1
+        assert len(sweep_hash_caches) == 1
+        # Identity, not equality: two distinct empty dicts compare equal
+        # but would not share a single file's hash between the sweeps.
+        assert sweep_hash_caches[0] is built[0]._hash_cache
+
     # --- #934: startup and recovery failures log the type only ------------
 
     @staticmethod
@@ -6398,7 +6445,10 @@ class TestMainStartupAndLoop:
 
         class _Raising:
             def __init__(self, *_a, **_kw):
-                pass
+                # The startup sweep reads this before sweep()/reap() run
+                # (#1612 round 15): it shares the reconciler's own cache
+                # instead of the module-level one in mirror mode.
+                self._hash_cache: dict = {}
 
             def sweep(self):
                 calls.append("sweep")

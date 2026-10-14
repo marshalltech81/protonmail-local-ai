@@ -1313,12 +1313,23 @@ to. Relocating the root alone keeps every occurrence.
   *and* hashed bytes all match the record (#1141, #1612): size and
   mtime agreement alone is not proof — mbsync sets mtime from IMAP's
   INTERNALDATE, so two different messages can legitimately share one.
+  The destination's identity (size, mtime, inode) is captured before
+  the hash and rechecked immediately before the bind (#1612 round 15,
+  the same TOCTOU pattern `move_verified_occurrence` and
+  `bind_found_copy` already use for their own writes): a replacement in
+  the narrow window between a successful hash and the bind is not
+  carried forward either.
 - **Missed renames, found copies, vanished files.** The reconciliation
   scan (*Occurrence reconciliation* under *Deletion Reconciliation*,
   #1567) follows a rename the watcher missed once the file's bytes are
   verified, binds a byte-identical copy no occurrence held (provenance
   `scan`), and retires an occurrence whose file a complete scan did not
-  find; a partial scan retires nothing.
+  find; a partial scan retires nothing. A same-uniq candidate whose
+  bytes are read and *proven* not to be the occurrence's (not merely
+  unreadable or unresolved) retires it directly too (#1612 round 15):
+  the uniq still resolving to some file would otherwise make the
+  vanished-file retirement refuse, leaving the wrong claimant active
+  and searchable indefinitely.
 - **Columns.** `state` (`active` / `retired`) with `retired_at` as the
   retirement mark; a retired row keeps its locator for diagnostics.
   `provenance` records how the row was created (`parse`, an observed
@@ -4554,13 +4565,17 @@ comparing the digest to the occurrence's claimant, bounded per pass:
   (`Database.retire_mismatched_occurrence`) — the file is still there,
   unlike `retire_vanished_occurrence`'s case — and the path is queued
   for a reparse through `Database.queue_enqueue_if_absent`
-  (`STALE_ENQUEUE_SQL`, `ON CONFLICT DO NOTHING`). Unlike
-  `queue_enqueue`'s `INSERT OR REPLACE` (a watcher event is fresh
-  intent and should reset prior state), a background detection can
-  recur on a later pass before the worker catches up, so admission must
-  not keep resetting a pending retry's attempts and error, or silently
-  resurrect a dead letter — both stay exactly as they are until the
-  worker or the operator (`make requeue-dead`) acts on them.
+  (`STALE_ENQUEUE_SQL`, `ON CONFLICT DO NOTHING`), both in one
+  transaction (#1612 round 15): a crash or SQLite error between the two
+  writes must not leave the retirement committed with no runnable job
+  for the replacement. Unlike `queue_enqueue`'s `INSERT OR REPLACE` (a
+  watcher event is fresh intent and should reset prior state), a
+  background detection can recur on a later pass before the worker
+  catches up, so admission must not keep resetting a pending retry's
+  attempts and error, or silently resurrect a dead letter — both stay
+  exactly as they are until the worker or the operator
+  (`make requeue-dead`) acts on them (an existing dead row at this path
+  is a known, accepted gap: nothing here resets it).
 - **On an unreadable or unstable file** (a permission error, the file
   gone again between the walk and the check), the path is counted
   `unverified`, never retired: the backstop only acts on a positive
@@ -4581,7 +4596,13 @@ comparing the digest to the occurrence's claimant, bounded per pass:
 `scan_occurrences` now, including from its three archive-mode call
 sites in `main.py`; before #1612 those passed none, so the backstop (and
 the hashing of unindexed `T`-flagged or dead-lettered files it shares
-the cache with) silently never ran outside mirror mode.
+the cache with) silently never ran outside mirror mode. In mirror mode,
+`main()`'s always-on startup rename sweep shares `Reconciler._hash_cache`
+rather than the module-level cache archive mode keeps (#1612 round 15):
+`Reconciler.sweep()` runs its own `scan_occurrences` moments later, and
+without the shared cache it would re-hash the same held paths the
+startup sweep had just verified, under its own fresh (and separately
+budgeted) backstop pass.
 
 ## Vulnerability Scans
 

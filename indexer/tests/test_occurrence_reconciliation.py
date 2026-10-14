@@ -348,14 +348,44 @@ class TestMissedRenames:
         assert (after["relative_path"], after["flagged"]) == ("INBOX/cur/l1:2,FS", 1)
         assert box.db.is_indexed(str(renamed)) and not box.db.is_indexed(str(path))
 
-    def test_a_same_uniq_file_with_other_bytes_is_neither_followed_nor_retired(self, box):
+    def test_a_same_uniq_file_with_other_bytes_is_not_followed_but_is_retired(self, box):
+        """#1612 round 15: ``_verify`` reads the candidate's bytes and
+        proves they are not this occurrence's, so the missed rename is
+        not followed (the replacement is not bound to the old
+        claimant) but the vanished claimant IS retired directly —
+        ``retire_vanished_occurrence`` would refuse, since the uniq
+        still resolves to this (wrong) file."""
         path = box.put("INBOX/cur/m1:2,S", _eml("same@example.test"))
         box.index(path)
         path.unlink()
         box.put("INBOX/cur/m1:2,FS", _eml("different@example.test"))
         counts = box.reconciler.sweep()
+        assert (counts["renamed"], counts["retired"], counts["unverified"]) == (0, 1, 0)
+        assert box.active() == []
+
+    def test_a_same_uniq_file_unreadable_at_verification_is_left_unverified(self, box, monkeypatch):
+        """Companion to the proven-mismatch case above: when the
+        candidate cannot be read at all (inconclusive, not proven), the
+        occurrence must stay active, not be retired on an unproven
+        result (#1612 round 15)."""
+        import src.occurrence_scan as scan_module
+
+        path = box.put("INBOX/cur/m2:2,S", _eml("same2@example.test"))
+        box.index(path)
+        path.unlink()
+        candidate = box.put("INBOX/cur/m2:2,FS", _eml("different2@example.test"))
+
+        real_sha256 = scan_module._sha256
+
+        def _raise_for_candidate(p):
+            if p == candidate:
+                raise OSError("synthetic: candidate unreadable at verification time")
+            return real_sha256(p)
+
+        monkeypatch.setattr(scan_module, "_sha256", _raise_for_candidate)
+        counts = box.reconciler.sweep()
         assert (counts["renamed"], counts["retired"], counts["unverified"]) == (0, 0, 1)
-        assert box.active() == [("INBOX/cur/m1:2,S", 0)]
+        assert box.active() == [("INBOX/cur/m2:2,S", 0)]
 
     def test_an_unmapped_copy_moved_across_folders_keeps_the_message(self, tmp_path):
         """#1141: the copy no occurrence held moves; the watcher binds its
@@ -436,6 +466,56 @@ class TestMissedRenames:
         box.handle_moved(str(old), str(dest))
         assert box.active() == []
 
+    def test_a_reused_path_replaced_again_right_after_hashing_is_not_bound(self, box):
+        """#1612 round 15: the destination's hash matched the retired
+        path's stale ``indexed_files`` record (a genuine rename, no
+        mismatch), but it is replaced again — same size and mtime, a
+        new inode — in the window between that hash check succeeding
+        and the bind. ``_move_occurrence``'s unheld-rename branch must
+        recheck the identity it captured before hashing, the same
+        TOCTOU pattern ``move_verified_occurrence`` and
+        ``bind_found_copy`` already use for their own write, or it
+        binds the replacement to the wrong (old) claimant."""
+        import src.database as database_module
+
+        old_raw = _eml("old@example.test")
+        old = box.put("INBOX/cur/r2:2,S", old_raw)
+        box.index(old)
+        box.db._conn.execute(
+            "UPDATE message_occurrences SET state = 'retired', retired_at = '2026-01-01' "
+            "WHERE relative_path = 'INBOX/cur/r2:2,S'"
+        )
+        box.db._conn.commit()
+        dest = box.root / "INBOX/cur/r2:2,FS"
+        old.rename(dest)
+        stat_before = dest.stat()
+
+        real_sha256 = database_module._sha256
+
+        def _hash_then_replace(filepath):
+            digest = real_sha256(filepath)
+            if filepath == str(dest):
+                # The race: a different message, same size as the
+                # genuine rename's, replaces dest right after its
+                # hash matched -- by the time _move_occurrence binds.
+                replacement = _eml("intruder@example.test", body="a different payload entirely")
+                pad = len(old_raw) - len(replacement)
+                replacement = (
+                    replacement[:-2] + b" " * pad + replacement[-2:]
+                    if pad > 0
+                    else replacement[: pad - 2] + replacement[-2:]
+                )
+                assert len(replacement) == len(old_raw)
+                tmp = dest.with_name(dest.name + ".racetmp")
+                tmp.write_bytes(replacement)
+                os.utime(tmp, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+                os.replace(tmp, dest)
+            return digest
+
+        with patch.object(database_module, "_sha256", _hash_then_replace):
+            box.handle_moved(str(old), str(dest))
+        assert box.active() == []
+
     def test_an_unmapped_copy_moved_in_archive_mode_keeps_its_occurrence(self, box):
         raw = _eml("archived@example.test")
         inbox = box.put("INBOX/cur/o1:2,S", raw)
@@ -508,6 +588,38 @@ class TestInterleavings:
         )
         assert box.db.retire_vanished_occurrence(o["id"], o["relative_path"]) is False
         assert box.active() == [("INBOX/cur/s1:2,RS", 0)]
+
+    def test_move_verified_occurrence_reports_a_rename_rows_failure(self, box, monkeypatch):
+        """#1612 round 15: ``move_verified_occurrence``'s own
+        preconditions (the occurrence still active at its recorded
+        path, the identity still matching, no other active occurrence
+        at the destination) can pass while ``_move_occurrence``'s own
+        in-transaction recheck of that same identity still refuses --
+        a race too narrow to reproduce with real file I/O in a
+        single-threaded test, simulated here the same way other races
+        in this suite are. Before the fix, ``move_verified_occurrence``
+        called ``_rename_rows`` and returned ``True`` unconditionally,
+        regardless of whether anything was actually moved."""
+        path = box.put("INBOX/cur/v1:2,S", _eml("raced@example.test"))
+        box.index(path)
+        (o,) = box.occurrences()
+        dest = box.root / "INBOX/cur/v1:2,RS"
+        path.rename(dest)
+        identity = file_identity(dest)
+        assert identity is not None
+
+        # _move_occurrence's own in-transaction recheck found nothing to
+        # move or bind (its genuine failure mode, #1612 round 15).
+        monkeypatch.setattr(box.db, "_move_occurrence", lambda *a, **kw: (None, False))
+
+        assert (
+            box.db.move_verified_occurrence(
+                o["id"], o["relative_path"], str(dest), identity=identity
+            )
+            is False
+        )
+        # Nothing actually moved: the occurrence is still where it was.
+        assert box.active() == [("INBOX/cur/v1:2,S", 0)]
 
     def test_a_file_back_before_the_retire_is_kept(self, box):
         path = box.put("INBOX/cur/t1:2,S", _eml("back@example.test"))

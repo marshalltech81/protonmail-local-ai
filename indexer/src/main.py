@@ -4147,8 +4147,16 @@ def main():
     # initial walk so a renamed file's new path is already recorded as
     # indexed: otherwise the walk reprocesses every file renamed while
     # the indexer was down as new mail.
+    #
+    # In mirror mode, Reconciler.sweep() runs its own scan_occurrences
+    # moments later (below); sharing its _hash_cache here instead of the
+    # module-level one avoids re-hashing the same held paths twice under
+    # the backstop's per-pass budget (#1612 round 15). Archive mode has
+    # no reconciler, so it keeps the module-level cache across all three
+    # sweep_paths call sites.
+    sweep_hash_cache = reconciler._hash_cache if reconciler is not None else _sweep_hash_cache
     try:
-        sweep_paths(db, maildir_root=MAILDIR_PATH, hash_cache=_sweep_hash_cache)
+        sweep_paths(db, maildir_root=MAILDIR_PATH, hash_cache=sweep_hash_cache)
     except Exception as e:
         log.error("startup rename sweep failed: %s", type(e).__name__)
 

@@ -11,7 +11,12 @@ Maildir root and comparing it with the account's active occurrences:
   to be the message's (``_verify``): a size/mtime match with the
   recorded file identity is checked, then hashed before it is trusted
   (``_recorded_hash``, #1612 round 14) — a metadata match alone is
-  never proof — else the candidate is hashed directly.
+  never proof — else the candidate is hashed directly. A candidate
+  whose bytes are read and proven not to be the occurrence's (not
+  merely unreadable or unresolved) retires it directly (#1612 round
+  15): the uniq still resolving to some file would otherwise make
+  ``retire_vanished_occurrence`` refuse, leaving the vanished claimant
+  active and searchable indefinitely.
 - **Found copies.** A file no active occurrence holds whose bytes are an
   indexed message's is bound to it as an occurrence with provenance
   ``scan``: a byte-identical copy the migration seed or the parse never
@@ -230,10 +235,14 @@ def _recorded_hash(db: Database, recorded_at: Path, path: Path, counts: ScanCoun
 
 def _verify(
     db: Database, old: Path, candidate: Path, content_hash: str, counts: ScanCounts
-) -> bool:
+) -> bool | None:
     """Whether ``candidate`` holds the bytes whose hash is
     ``content_hash``: by the identity recorded for ``old`` (the file
-    before the rename) or ``candidate``, else by hashing it."""
+    before the rename) or ``candidate``, else by hashing it directly.
+    Returns ``None``, not ``False``, when ``candidate`` could not be
+    read for the direct hash: inconclusive, not a proven mismatch
+    (#1612 round 15) — a caller must not retire an occurrence on this
+    result the way it would on a hash-proven ``False``."""
     for recorded_at in (old, candidate):
         recorded = _recorded_hash(db, recorded_at, candidate, counts)
         if recorded is not None:
@@ -242,7 +251,7 @@ def _verify(
         counts.hashed += 1
         return _sha256(candidate) == content_hash
     except OSError:
-        return False
+        return None
 
 
 @dataclass(frozen=True)
@@ -360,13 +369,22 @@ def scan_occurrences(
         old = account_root / relative
         candidates = [c for c in by_uniq.get((o["folder"], o["uniq"]), []) if c not in held]
         moved = False
+        mismatched = False
         for candidate in sorted(candidates):
             identity = file_identity(files[candidate])
-            if (
-                identity is None
-                or o["content_hash"] is None
-                or not _verify(db, old, files[candidate], o["content_hash"], counts)
-            ):
+            if identity is None or o["content_hash"] is None:
+                continue
+            verified = _verify(db, old, files[candidate], o["content_hash"], counts)
+            if verified is None:
+                continue
+            if not verified:
+                # A candidate's bytes were read and proven not to be
+                # this occurrence's (#1612 round 15), not merely
+                # unreadable or unresolved: distinguish this from the
+                # inconclusive case below, which retire_vanished_
+                # occurrence would refuse anyway (the uniq still
+                # resolves to a file).
+                mismatched = True
                 continue
             if db.move_verified_occurrence(
                 o["id"], relative, str(files[candidate]), identity=identity
@@ -377,7 +395,18 @@ def scan_occurrences(
                 break
         if moved:
             continue
-        if candidates:
+        if mismatched:
+            # retire_vanished_occurrence would refuse (the uniq still
+            # resolves to some file), leaving the vanished claimant
+            # active and searchable indefinitely; retire it directly,
+            # the sibling of on_moved's trashed-destination retire
+            # (round 13) for a watcher-missed rename instead of an
+            # observed one.
+            if db.retire_mismatched_rename(o["id"], str(old)):
+                counts.retired += 1
+            else:
+                counts.unreachable += 1
+        elif candidates:
             # A file with its uniq is there, but not with its bytes (or
             # the move was refused): not a removal the scan can establish.
             counts.unverified += 1
@@ -471,11 +500,18 @@ def _backstop_check(
     if digest == occurrence["content_hash"]:
         hash_cache[key] = digest
         return
-    if db.retire_mismatched_occurrence(
-        occurrence["id"], occurrence["relative_path"], identity=identity
-    ):
+    # One transaction (#1612 round 15): a crash or SQLite error between
+    # the retire and the admission must not leave the retirement
+    # committed with no runnable job for the replacement -- both happen
+    # or neither does.
+    with db.transaction():
+        retired = db.retire_mismatched_occurrence(
+            occurrence["id"], occurrence["relative_path"], identity=identity
+        )
+        if retired:
+            db.queue_enqueue_if_absent(str(path), REASON_STALE_CONTENT)
+    if retired:
         counts.stale += 1
-        db.queue_enqueue_if_absent(str(path), REASON_STALE_CONTENT)
     else:
         # The occurrence moved or retired since active_occurrences() read
         # it, or the file changed again before the retire's transaction

@@ -25,9 +25,11 @@ All fixtures are synthetic (never derived from real mail).
 from __future__ import annotations
 
 import os
+import sqlite3
 from dataclasses import replace
 from unittest.mock import patch
 
+import pytest
 from src import main
 from src.database import EMBEDDING_DIM, Database
 from src.occurrence_scan import scan_occurrences
@@ -681,6 +683,39 @@ class TestContentBackstop:
             assert counts.stale == 1
             assert box.db.find_active_occurrence(str(path)) is None
             assert box.db.queue_get_status(str(path)) == "queued"
+        finally:
+            box.close()
+
+    def test_retirement_and_admission_commit_or_roll_back_together(self, tmp_path, monkeypatch):
+        """#1612 round 15: a crash or SQLite error between the
+        stale-content retirement and the queue admission must not leave
+        the occurrence retired with no runnable job for the replacement
+        -- both happen or neither does, so a failure partway rolls back
+        the retirement too, leaving the occurrence exactly as it was
+        for a later pass to retry."""
+        box = Box(tmp_path)
+        try:
+            path = box.put("INBOX/cur/b10:2,S", _eml("eeeeeeee@example.test", "AAAA"))
+            box.index(path)
+            before_stat = path.stat()
+
+            replacement = _eml("ffffffff@example.test", "BBBB")
+            assert len(replacement) == len(path.read_bytes())
+            path.write_bytes(replacement)
+            os.utime(path, ns=(before_stat.st_mtime_ns, before_stat.st_mtime_ns))
+
+            def _boom(*a, **kw):
+                raise sqlite3.OperationalError("synthetic: queue admission failed")
+
+            monkeypatch.setattr(box.db, "queue_enqueue_if_absent", _boom)
+
+            with pytest.raises(sqlite3.OperationalError):
+                scan_occurrences(box.db, box.root, hash_cache={})
+
+            # Rolled back together: still active, not retired with no
+            # job to ever reindex the replacement.
+            assert box.db.find_active_occurrence(str(path)) is not None
+            assert box.db.queue_get_status(str(path)) is None
         finally:
             box.close()
 

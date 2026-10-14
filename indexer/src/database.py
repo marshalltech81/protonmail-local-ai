@@ -3720,10 +3720,16 @@ class Database:
     def queue_enqueue_if_absent(self, filepath: str, reason: str) -> bool:
         """Run ``STALE_ENQUEUE_SQL`` for one path and return whether a row
         was inserted (``False`` when one was already there, whatever its
-        state, which is left untouched, #1612)."""
+        state, which is left untouched, #1612). Uses ``self.transaction()``,
+        not a direct commit, so a caller needing this admission and
+        another write (the stale-content retirement, #1612 round 15) to
+        commit or roll back together can wrap both in one outer
+        ``with self.transaction():``."""
         now_iso = datetime.now(UTC).isoformat()
-        cur = self._conn.execute(STALE_ENQUEUE_SQL, (filepath, reason, now_iso, now_iso, now_iso))
-        self._conn.commit()
+        with self.transaction():
+            cur = self._conn.execute(
+                STALE_ENQUEUE_SQL, (filepath, reason, now_iso, now_iso, now_iso)
+            )
         return cur.rowcount > 0
 
     @_synchronized
@@ -4151,11 +4157,14 @@ class Database:
         """Carry an active occurrence to ``new_path``, a file the scan
         found under its folder and uniq and whose bytes it verified
         (``occurrence_scan``), with the file's ``indexed_files`` and queue
-        rows. Returns False, changing nothing, when the occurrence moved or
-        retired since the scan read it, ``new_path`` is no longer the file
-        verified (``identity``, its size, mtime and inode before the
-        verification: gone or replaced), or another active occurrence
-        holds it."""
+        rows. Returns False, changing nothing effective, when the
+        occurrence moved or retired since the scan read it, ``new_path``
+        is no longer the file verified (``identity``, its size, mtime and
+        inode before the verification: gone or replaced) at either this
+        check or ``_rename_rows``'s own in-transaction recheck of it
+        (#1612 round 15 — the candidate can be replaced again in the
+        window between the two), or another active occurrence holds
+        it."""
         with self.transaction():
             cur = self._conn.cursor()
             if (
@@ -4169,10 +4178,10 @@ class Database:
                 or self._active_at(cur, new_path) is not None
             ):
                 return False
-            self._rename_rows(
+            claimant_id = self._rename_rows(
                 cur, self._absolute(old_relative_path), new_path, True, verified_identity=identity
             )
-        return True
+        return claimant_id is not None
 
     @_synchronized
     def retire_vanished_occurrence(self, occurrence_id: int, relative_path: str) -> bool:
@@ -4732,10 +4741,18 @@ class Database:
                 return None, True
             if (st.st_size, st.st_mtime_ns) != (prior["size"], prior["mtime_ns"]):
                 return None, True
+            identity = (st.st_size, st.st_mtime_ns, st.st_ino)
             try:
                 if _sha256(new_path) != prior["content_hash"]:
                     return None, True
             except OSError:
+                return None, True
+            # The same TOCTOU recheck move_verified_occurrence and
+            # bind_found_copy already do for their own write (#1612
+            # round 8 review): mbsync can replace new_path again between
+            # the hash above and the bind below, and this path captured
+            # no identity to recheck until now (#1612 round 15).
+            if not _same_file(new_path, identity):
                 return None, True
             self._bind_occurrence(cur, prior["claimant_id"], new_path, provenance="rename")
             return str(prior["claimant_id"]), False
