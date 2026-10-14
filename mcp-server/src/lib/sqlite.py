@@ -5222,6 +5222,9 @@ class Database:
             )
         keys = "value, bucket" if period_breakdown else "value"
         period_sql = "bucket" if period_breakdown else "NULL"
+        page_membership = "k.value IS p.value"
+        if period_breakdown:
+            page_membership += " AND k.bucket IS p.period"
         sql = (
             "WITH e AS MATERIALIZED (SELECT m.claimant_id AS cid, m.thread_id AS tid, "  # nosec B608
             f"{basis.bound} AS at, {bucket} AS bucket, m.message_id AS mid, "
@@ -5243,10 +5246,17 @@ class Database:
             "TOTAL(ok IS 1 AND at IS NULL) AS undated, "
             "TOTAL(ok IS 1 AND inventory_known IS NOT TRUE) AS unknown_inventory "
             f"FROM k GROUP BY {keys}), "
+            "p AS MATERIALIZED (SELECT * FROM g ORDER BY n DESC, value IS NULL, value, "
+            "period IS NULL, period LIMIT ? OFFSET ?), "
+            # Cap sender memberships before occurrence expansion. Both sides
+            # can be attacker-controlled; a small page must not count every
+            # address x attachment combination in the whole population.
+            "kp AS MATERIALIZED (SELECT k.* FROM p CROSS JOIN k "
+            f"WHERE {page_membership} AND k.ok IS 1 AND k.current = 1 AND k.att = 1), "
             f"ga AS (SELECT value, {period_sql} AS period, "
             "COUNT(DISTINCT a.attachment_id) AS attachment_ids "
-            "FROM k JOIN attachments a ON a.claimant_id = k.cid "
-            f"WHERE k.ok IS 1 AND k.current = 1 AND k.att = 1 GROUP BY {keys}), "
+            "FROM kp CROSS JOIN attachments a ON a.claimant_id = kp.cid "
+            f"GROUP BY {keys}), "
             "t AS (SELECT TOTAL(ok IS 1) AS matches, TOTAL(ok IS NULL) AS undecided, "
             f"(SELECT COUNT(*) FROM g) AS ngroups, {incomplete_sql} AS incomplete, "
             "TOTAL(ok IS 1 AND at IS NULL) AS undated, "
@@ -5254,12 +5264,11 @@ class Database:
             "SELECT t.matches, t.undecided AS total_undecided, t.ngroups, pg.*, t.incomplete, "
             "t.undated AS total_undated, t.unknown_inventory AS total_unknown_inventory, "
             "COALESCE(ga.attachment_ids, 0) AS attachment_ids "
-            "FROM t LEFT JOIN (SELECT * FROM g ORDER BY n DESC, value IS NULL, value, "
-            "period IS NULL, period LIMIT ? OFFSET ?) pg ON 1 "
+            "FROM t LEFT JOIN p pg ON 1 "
             "LEFT JOIN ga ON ga.value IS pg.value AND ga.period IS pg.period "
             "ORDER BY pg.n DESC, pg.value IS NULL, pg.value, pg.period IS NULL, pg.period"
         )
-        params = [*expr_params, *expr_params, *rows_params, *incomplete_params, limit + 1, offset]
+        params = [*expr_params, *expr_params, *rows_params, limit + 1, offset, *incomplete_params]
         with closing(self._connect()) as conn:
             rows = conn.execute(sql, params).fetchall()
         matches, undecided, total_groups = (int(n) for n in rows[0][:3])

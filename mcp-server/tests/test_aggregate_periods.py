@@ -1,8 +1,10 @@
 """Synthetic temporal aggregates and explicit identity/coverage units (#1338)."""
 
 import asyncio
+import hashlib
 import logging
 import sqlite3
+import time
 from contextlib import closing
 
 import pytest
@@ -14,7 +16,7 @@ from tests.test_aggregate_messages import _all_groups, _probe, _server
 from tests.test_evidence_scope import _finish_threads
 from tests.test_retrieval import _handlers, _text
 from tests.test_sqlite import _open_built_db_conn
-from tests.test_structured_output import _call
+from tests.test_structured_output import _call, _wire
 
 
 @pytest.fixture
@@ -302,3 +304,111 @@ def test_lower_bounds_visible_in_prose_and_timing_without_mail(series_db, fake_s
     assert "lower bound" in _text(result)
     assert "attachment_inventory_unknown_messages': 2" in caplog.text
     assert marker not in caplog.text
+
+
+def test_explicit_null_clock_is_rejected_on_the_wire(series_db, caplog):
+    server = _server(series_db)
+    result = _wire(server, "aggregate_messages", {"group_by": "folder", "date_basis": None})
+    assert result.is_error
+    assert "date_basis must be a string" in _text(result)
+    assert "aggregate_messages.date_basis" in caplog.text
+
+
+@pytest.mark.parametrize("basis", ["effective", "sent", "occurred"])
+def test_clock_is_reported_separately_from_population_filters(series_db, basis):
+    out = _call(_server(series_db), "aggregate_messages", group_by="folder", date_basis=basis)
+    assert out["date_basis"] == basis and out["filters"] == []
+    scoped = _call(
+        _server(series_db),
+        "aggregate_messages",
+        group_by="folder",
+        date_basis=basis,
+        sender="a@series.test",
+    )
+    assert [f["filter"] for f in scoped["filters"]] == ["sender"]
+
+
+def _wide_inventory(tmp_path, count):
+    conn, path = _open_built_db_conn(tmp_path, f"wide-{count}.db")
+    _insert_message(
+        conn,
+        message_id="w" * 950 + "@test.example",
+        thread_id="wide",
+        sent_at="2024-01-01T00:00:00+00:00",
+        from_=[f"Name {i} <sender{i:05d}@group{i:05d}.test>" for i in range(count)],
+        has_attachments=True,
+        body="ordinary synthetic words with realistic text density " * 5,
+    )
+    for i in range(count):
+        _insert_attachment(
+            conn,
+            message_id="w" * 950 + "@test.example",
+            thread_id="wide",
+            attachment_id=hashlib.sha256(f"payload{i}".encode()).hexdigest(),
+            filename=f"part{i}.txt",
+        )
+    _finish_threads(conn)
+    conn.close()
+    return Database(str(path))
+
+
+@pytest.mark.parametrize("dimension", ["sender_address", "sender_domain"])
+@pytest.mark.parametrize("breakdown", [False, True])
+def test_sender_and_attachment_expansion_is_capped_before_counting(
+    tmp_path, monkeypatch, dimension, breakdown
+):
+    visits = []
+    for size in (40, 400):
+        db = _wide_inventory(tmp_path, size)
+        connect = db._connect
+        count = 0
+        connections = 0
+        statements = []
+
+        def counted():
+            nonlocal count, connections
+            conn = connect()
+            connections += 1
+
+            def probe(value):
+                nonlocal count
+                count += 1
+                return value
+
+            conn.create_function("attachment_visit", 1, probe)
+            conn.set_trace_callback(statements.append)
+
+            class Connection:
+                def execute(self, sql, params):
+                    return conn.execute(
+                        sql.replace(
+                            "COUNT(DISTINCT a.attachment_id)",
+                            "COUNT(DISTINCT attachment_visit(a.attachment_id))",
+                        ),
+                        params,
+                    )
+
+                def close(self):
+                    conn.close()
+
+            return Connection()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(db, "_connect", counted)
+            page = db.aggregate_messages(group_by=dimension, period_breakdown=breakdown, limit=2)
+        assert page.total_groups == size and len(page.groups) == 2 and page.has_more
+        assert all(g.distinct_attachment_ids == size for g in page.groups)
+        assert connections == 1 and len(statements) == 1
+        assert count == 3 * size  # two returned groups plus the has_more lookahead
+        visits.append(count)
+    assert visits[1] == 10 * visits[0]  # both input dimensions grew tenfold, not a hundredfold
+
+
+@pytest.mark.serial
+def test_full_shape_sender_attachment_input_has_bounded_plain_time(tmp_path):
+    db = _wide_inventory(tmp_path, 3000)
+    start = time.perf_counter()
+    page = db.aggregate_messages(group_by="sender_address", limit=100)
+    assert time.perf_counter() - start < 15
+    assert page.total_groups == 3000 and len(page.groups) == 100
+    assert all(g.messages == 1 and g.distinct_attachment_ids == 3000 for g in page.groups)

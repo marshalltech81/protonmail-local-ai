@@ -1975,7 +1975,6 @@ def register_retrieval_tools(server, db):
             "folder": folder,
             "date_from": date_from,
             "date_to": date_to,
-            "date_basis": date_basis,
             "has_attachments": has_attachments,
             "authority_class": authority_class,
             "seen": seen,
@@ -1990,6 +1989,7 @@ def register_retrieval_tools(server, db):
             {
                 "group_by": group_by,
                 **args,
+                "date_basis": date_basis,
                 "period": period,
                 "period_breakdown": period_breakdown,
                 "where": where,
@@ -1999,8 +1999,9 @@ def register_retrieval_tools(server, db):
         )
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_AGGREGATE_GROUPS)
         try:
+            if date_basis is None:
+                raise InvalidFilterError("date_basis", "date_basis must be a string")
             date_basis = normalize_date_basis(date_basis)
-            args["date_basis"] = date_basis
             lower, upper = validate_date_range(date_from, date_to)
             bounds = (
                 QueryDateBounds(date_from=lower, date_to=upper, date_basis=date_basis)
@@ -2011,6 +2012,7 @@ def register_retrieval_tools(server, db):
             page = await asyncio.to_thread(
                 db.aggregate_messages,
                 group_by=group_by,
+                date_basis=date_basis,
                 period=period,
                 period_breakdown=period_breakdown,
                 **args,
