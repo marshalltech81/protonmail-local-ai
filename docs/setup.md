@@ -953,7 +953,12 @@ it yet.
   the hardening of `docker-compose.yml`'s `mbsync` and only its own
   password secret, Maildir and state volumes and network; the account at
   `/maildir` keeps the names `mbsync`, `bridge_pass`, `maildir-volume`,
-  `mbsync-state` and `bridge-net`. It also names the model API-key files.
+  `mbsync-state` and `bridge-net`; any other collector also names
+  mbsync's non-root user, `1001:1001`. It also names the model API-key
+  files. CI scans this file, generated from synthetic configurations,
+  with the Semgrep rules and the Compose hardening checks
+  (`scripts/tests/semgrep_generated_test.sh`,
+  `scripts/tests/compose_test.sh`).
 - `config/identity.toml` and `config/authority.toml`: the files the
   indexer reads today, from the `/maildir` account's
   `identity.addresses` and from `global.classification.authority`; each

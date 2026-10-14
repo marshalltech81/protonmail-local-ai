@@ -70,6 +70,9 @@ IDENTITY_MAX_BYTES = 64 * 1024
 IDENTITY_MAX_ADDRESSES = 1_000
 
 LEGACY_ROOT = "/maildir"
+# The mbsync image's user (mbsync/Dockerfile), named on every collector
+# docker-compose.yml does not define.
+MBSYNC_USER = "1001:1001"
 # Credentials with a fixed place, which no configured secret path may name:
 # the MCP bearer token (and the header file an older setup left), read by
 # the client helpers and mounted in mcp-server only.
@@ -1455,8 +1458,13 @@ def render_compose(config: dict[str, Any]) -> str:
             out.append(f"      - {names.secret}")
         else:
             out += [f"      - source: {names.secret}", "        target: bridge_pass"]
+        out.append(f"    container_name: {names.service}")
+        # A service docker-compose.yml does not define names its non-root
+        # user (scripts/tests/compose_test.sh, #1608): mbsync's UID and GID
+        # (mbsync/Dockerfile).
+        if not legacy:
+            out.append(f'    user: "{MBSYNC_USER}"')
         out += [
-            f"    container_name: {names.service}",
             "    restart: unless-stopped",
             "    init: true",
             "    read_only: true",
