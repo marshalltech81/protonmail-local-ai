@@ -212,6 +212,100 @@ class TestWatcherDestinationAdmission:
         finally:
             box.close()
 
+    def test_a_repeatedly_renamed_unindexed_file_resets_its_queue_state_each_time(self, tmp_path):
+        """A path that never makes it past Case 2 — never indexed, so
+        never gets an active occurrence — gets a fresh ``attempts=0``
+        queued row on every rename event, even though its bytes never
+        change. This is intended (#1612/#1627 panel): ``Queue.enqueue``
+        (``INSERT OR REPLACE``) always resets prior state, so the total
+        number of retries such a path can accumulate is bounded only by
+        how many times it is renamed, never by ``max_attempts`` — that
+        only bounds failures between one admission and the next. A
+        ``DO NOTHING`` admission here (as ``queue_enqueue_if_absent``
+        uses for the content backstop) would instead leave a
+        dead-lettered destination stuck dead when fresh bytes land on it
+        (see the next test)."""
+        box = Box(tmp_path)
+        try:
+            raw = _eml("flapping@example.test")
+            path = box.put("INBOX/cur/g1:2,S", raw)
+            queue = IndexingQueue(box.db, max_attempts=3, base_backoff_seconds=0)
+            handler = main.MaildirHandler(box.db, queue)
+
+            queue.enqueue(str(path), REASON_ON_CREATED)
+            queue.mark_failed(str(path), stage="parse", error="boom: transient")
+            queue.mark_failed(str(path), stage="parse", error="boom: transient")
+            attempts = box.db._conn.execute(
+                "SELECT attempts FROM indexing_jobs WHERE filepath = ?", (str(path),)
+            ).fetchone()[0]
+            assert attempts == 2  # one short of max_attempts=3; not yet dead
+
+            # Renamed away, same bytes: Case 2 (no active occurrence, not
+            # indexed at the source) resets the destination's row.
+            dest = box.root / "INBOX/cur/g1:2,RS"
+            path.rename(dest)
+            with patch.object(main, "MAILDIR_PATH", box.root):
+                handler.on_moved(_moved(path, dest))
+            row = dict(
+                box.db._conn.execute(
+                    "SELECT status, attempts FROM indexing_jobs WHERE filepath = ?", (str(dest),)
+                ).fetchone()
+            )
+            assert row == {"status": "queued", "attempts": 0}
+
+            # Burn attempts again at the new name, then rename back to
+            # the original name: a second rename event resets a second
+            # time. Nothing requires exhausting max_attempts in between.
+            queue.mark_failed(str(dest), stage="parse", error="boom: transient")
+            queue.mark_failed(str(dest), stage="parse", error="boom: transient")
+            dest.rename(path)
+            with patch.object(main, "MAILDIR_PATH", box.root):
+                handler.on_moved(_moved(dest, path))
+            row = dict(
+                box.db._conn.execute(
+                    "SELECT status, attempts FROM indexing_jobs WHERE filepath = ?", (str(path),)
+                ).fetchone()
+            )
+            assert row == {"status": "queued", "attempts": 0}
+        finally:
+            box.close()
+
+    def test_new_bytes_onto_a_dead_lettered_path_are_retried_from_a_clean_state(self, tmp_path):
+        """A destination whose queue row is already ``dead`` (a prior
+        attempt under that path name failed permanently) is not left
+        dead when a rename delivers new content onto it: Case 2's
+        ``queue.enqueue`` resets it to a fresh ``queued`` row, so the
+        replacement is retried instead of silently staying unindexed
+        behind a stale dead letter (#1612/#1627 panel). Contrast
+        ``TestStaleQueueAdmissionPreservesState``, where the content
+        backstop's ``queue_enqueue_if_absent`` must NOT disturb an
+        existing dead letter — the two admission paths have opposite
+        requirements by design."""
+        box = Box(tmp_path)
+        try:
+            path = box.put("INBOX/cur/h1:2,S", _eml("willdie@example.test", "too big"))
+            queue = IndexingQueue(box.db, max_attempts=3, base_backoff_seconds=0)
+            handler = main.MaildirHandler(box.db, queue)
+            queue.enqueue(str(path), REASON_ON_CREATED)
+            queue.mark_dead_terminal(str(path), stage="parse", error="oversized: too large")
+            assert box.db.queue_get_status(str(path)) == "dead"
+
+            # New content replaces the file under the same path name,
+            # delivered as a rename from a temp file (mbsync's own
+            # delivery pattern): the destination is never re-read here,
+            # only its current on-disk bytes matter.
+            path.write_bytes(_eml("replacement@example.test", "normal size now"))
+            tmp_src = box.root / "INBOX" / "tmp" / "incoming"
+            tmp_src.parent.mkdir(parents=True, exist_ok=True)
+            tmp_src.write_bytes(b"placeholder")
+            with patch.object(main, "MAILDIR_PATH", box.root):
+                handler.on_moved(_moved(tmp_src, path))
+
+            assert box.db.queue_get_status(str(path)) == "queued"
+            assert queue.has_pending_row(str(path))
+        finally:
+            box.close()
+
 
 class TestWatcherRenameVerification:
     """main.py's on_moved Case 1 (~1281): an active occurrence's claimant

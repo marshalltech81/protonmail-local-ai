@@ -287,6 +287,20 @@ class IndexingQueue:
         should retry from a clean state. ``INSERT OR REPLACE`` is the
         minimum write that expresses that semantics without a manual
         SELECT / UPDATE / INSERT dance.
+
+        ``max_attempts`` bounds how many failures one admission tolerates
+        before the row goes ``dead`` again, never the total retries a
+        path accumulates over its lifetime: a path repeatedly renamed
+        (``MaildirHandler.on_moved``'s Case 2, #1612/#1627 panel) gets a
+        fresh ``attempts=0`` on every such event, so the true bound on
+        total attempts is the number of rename events the path
+        undergoes — which the indexer's read-only ``/maildir`` mount
+        means only mbsync, never the indexer itself, can generate. This
+        is intended: a ``DO NOTHING`` admission here would leave new
+        bytes delivered onto a dead-lettered destination stuck dead
+        instead of retried (contrast ``queue_enqueue_if_absent``, used
+        only by the content backstop, which must not disturb a pending
+        retry or a dead letter it did not itself cause).
         """
         now_iso = _now_iso()
         self.db.queue_enqueue(
