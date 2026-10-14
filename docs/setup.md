@@ -948,9 +948,9 @@ account may be *enabled* until per-account collectors exist (#1605); a
 second enabled account is refused there, even though the translator
 itself (and the Compose hardening tests below) accept several. `docker
 compose up` itself is unchanged: it still reads `.env` and the fixed
-secret paths in `docker-compose.yml`, in both modes, until a follow-up
-issue wires `compose.env` into it with `--env-file` and stops reading
-`.env`, as the owner approved (#1353's decision). `make migrate-config`
+secret paths in `docker-compose.yml`, in both modes, until #1638 wires
+`compose.env` into it with `--env-file` and stops reading `.env`, as
+the owner approved (#1353's decision). `make migrate-config`
 and TOML mode are therefore safe to adopt for validation today, but
 changing `config/config.toml` does not yet change what the running
 containers see — keep `.env` and `config/config.toml` describing the
