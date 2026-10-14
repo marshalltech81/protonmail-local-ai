@@ -4541,6 +4541,17 @@ _CAP_SHAPES = {
             len(msg.to_addrs) == 2 and msg.participant_names == [("to", "bob@example.test", "Bob")]
         ),
     ),
+    "bcc_participant_names": (
+        _addresses(b"Bob <bob@example.test>, SYNTHETIC_HEADER_MARKER <bob@example.test>").replace(
+            b"To:", b"Bcc:"
+        ),
+        {"MAX_EXTRA_PARTICIPANT_NAMES": 0},
+        "bcc_participant_names=1",
+        lambda msg: (
+            len(msg.bcc_addrs) == 2
+            and msg.participant_names == [("bcc", "bob@example.test", "Bob")]
+        ),
+    ),
     # #902: the header caps. The subject is cut to ``SUBJECT_MAX_CHARS``;
     # an In-Reply-To or References entry over ``MESSAGE_ID_MAX_CHARS`` is
     # dropped and threading sees the rest.
@@ -4656,6 +4667,7 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     "address_unparsed": {"to_addresses_complete"},
     # Covered by ``participant_names_complete`` (#1140), not by these.
     "participant_names": set(),
+    "bcc_participant_names": set(),
     "subject_length": {"subject_complete"},
     # Threading input only; no filter reads them.
     "in_reply_to_length": set(),

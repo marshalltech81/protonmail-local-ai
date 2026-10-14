@@ -1268,3 +1268,40 @@ superseded entries keep their number and one line.
     encoded-word clarification. No migration, reparse, authority or ranking
     change. Cost: normalization of requested metadata over the evaluated
     population; synthetic 5k/50k actual-reader work gates cover it.
+
+59. **Observed Bcc, staged (#1090, owner, 2026-10-14):** after the
+    Opus 5.5/GPT-6.1 Sol high-effort panel agreed, the owner approved
+    bounded last-role Bcc capture, schema17 migration/reparse, shared
+    observed-header output/counts and explicit bcc/recipient/any roles.
+    Every unmatched new Bcc-inclusive predicate stays unknown on all
+    copies; visible roles, flat filters and contact discovery stay
+    unchanged. External observed Bcc can establish claimed outbound;
+    self, definite negatives and effective completeness require the
+    separately tracked exhaustive source-bound provenance in #1644,
+    blocked by #1598/#1584. #1090 stays open. No live-account run or
+    folder/header heuristic is approved.
+
+60. **Complete decoded body sources (#1362, #1388, owner, 2026-10-14):**
+    the owner approved a separate full-body prerequisite PR for literal
+    phrases and future complete-reading jobs. Preserve every inline decoded
+    MIME text rendering, selection/topology and loss evidence before stripping
+    or whitespace normalization. Store it outside current FTS, chunks and
+    embeddings, keyed by claimant ID, with its own v18 migration and queued
+    reparse. Unchanged retrieval chunks are not re-embedded. Source generation
+    and original codepoint offsets bind internal bounded reads; interior
+    fragments are exactly 8192 codepoints, final fragments at most 8192, gap-free
+    within one source. Independent source 64MiB/logical metadata 64MiB guards,
+    200 text sources, 10,000 nodes/fragments, one-million classified lines and
+    65,536 ranges reduce coverage visibly when exhausted. Metadata charges
+    include repeated claimant keys; actual SQLite pages and WAL can be larger.
+    Classification uses existing rules on original text as a separate heuristic,
+    with an unknown suffix after work/range caps, not an embedding-equivalence
+    claim. Reads return at most 8 fragments/256KiB or 256 fixed metadata/range rows.
+    After the concrete Opus 5.5/GPT-6.1 Sol panel reached three rounds without
+    formal consensus on the HTML protocol, the owner chose an independent
+    unstripped HTML child pass, preserving every legacy control/result and
+    using only the original parse's remaining deadline. Cost: another bounded
+    HTML conversion (up to 75 seconds when the original deadline permits), extra
+    private local source storage and a reparse; the measured completion reserve
+    is 16 seconds. The future phrase index and public phrase contract remain in
+    #1388, separately approved and measured.

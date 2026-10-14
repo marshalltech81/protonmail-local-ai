@@ -312,6 +312,7 @@ _MESSAGE_FIELDS = [
     "attachments",
     "has_attachments",
     "from_addrs",
+    "bcc_addrs",
     "size",
     "mtime_ns",
     "content_hash",
@@ -327,9 +328,11 @@ _MESSAGE_FIELDS = [
     "from_addresses_complete",
     "to_addresses_complete",
     "cc_addresses_complete",
+    "bcc_addresses_complete",
     "attachments_manifest_complete",
     "body_complete",
     "parse_caps",
+    "full_body",
 ]
 
 _SOURCE = parser.SourceMetadata(
@@ -631,6 +634,7 @@ class TestParserIgnoresIdentityHeaders:
                 from_addresses_complete=plain.from_addresses_complete,
                 to_addresses_complete=plain.to_addresses_complete,
                 cc_addresses_complete=plain.cc_addresses_complete,
+                bcc_addresses_complete=plain.bcc_addresses_complete,
                 parse_caps={k: v for k, v in tagged.parse_caps.items() if k != "address_fields"},
             ),
             tagged_raw,

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from . import vector_sums
+from . import full_body, vector_sums
 from .account import AccountConfig, register_account_functions, verified_account_id
 from .chunker import l2_normalize, truncate_to_tokens
 from .entities import (
@@ -185,7 +185,8 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # v15 (#1338): whether attachment occurrence rows belong to the current parse,
 # committed in phase 2c; NULL while pending, 0 when extraction was disabled.
 # v16 (#1123): partial clock/claimant indexes for selected-clock listing pages.
-SCHEMA_VERSION = 16
+# v17 (#1090): observed Bcc participants and nullable parse-capture completeness.
+SCHEMA_VERSION = 18
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -838,6 +839,9 @@ class Database:
         # leaves it open for the stamp.
         try:
             self._run_initial_schema_script(cur)
+            for statement in full_body.SCHEMA_SQL.split(";"):
+                if statement.strip():
+                    cur.execute(statement)
             # The configured account, registered with the schema (#1596).
             cur.execute(
                 "INSERT INTO accounts (scope_uuid, provider, created_at) VALUES (?, ?, ?)",
@@ -1131,7 +1135,7 @@ class Database:
                 -- default; mcp-server reads NULL as "can't tell".
                 sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
                 -- 1 when the parser's display-name stage stored every
-                -- distinct name in ``message_participant_names``, 0 when
+                -- distinct From/To/Cc name in ``message_participant_names``, 0 when
                 -- its per-message budget dropped one (#1140); NULL = not
                 -- yet known (a row from before v4 the reparse has not
                 -- reached). It covers that stage only: it does not
@@ -1155,9 +1159,14 @@ class Database:
                 from_addresses_complete INTEGER CHECK (from_addresses_complete IN (0, 1)),
                 to_addresses_complete INTEGER CHECK (to_addresses_complete IN (0, 1)),
                 cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
+                -- Header capture only; no exhaustive original-recipient claim (#1090).
+                bcc_addresses_complete INTEGER CHECK (bcc_addresses_complete IN (0, 1)),
                 attachments_manifest_complete INTEGER
                     CHECK (attachments_manifest_complete IN (0, 1)),
                 body_complete INTEGER CHECK (body_complete IN (0, 1)),
+                full_body_complete INTEGER CHECK (full_body_complete IN (0, 1)),
+                full_body_generation TEXT,
+                full_body_version INTEGER,
                 attachment_rows_current INTEGER CHECK (attachment_rows_current IN (0, 1)),
                 -- The parse's nonzero ``PARSE_CAPS`` counts as a JSON
                 -- object of fixed names to integers, never content;
@@ -1203,12 +1212,12 @@ class Database:
             CREATE INDEX idx_message_headers_name_claimant
                 ON message_headers(name_normalized, claimant_id);
 
-            -- Normalized From / To / Cc. ``address`` is the canonical
+            -- Normalized From / To / Cc / observed Bcc. ``address`` is the canonical
             -- lowercased bare address, so "every message from/to X" is an
             -- indexed lookup rather than a scan of JSON participant lists.
             CREATE TABLE message_participants (
                 claimant_id TEXT NOT NULL,
-                role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
+                role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc', 'bcc')),
                 address     TEXT NOT NULL,
                 name        TEXT,
                 PRIMARY KEY (claimant_id, role, address),
@@ -3417,6 +3426,7 @@ class Database:
             "EXISTS (SELECT 1 FROM message_participants p "
             "JOIN messages m ON m.claimant_id = p.claimant_id "
             "WHERE m.thread_id = ? AND m.sender_ambiguous = 0 "
+            "AND p.role IN ('from', 'to', 'cc') "
             "AND p.address IN (SELECT value FROM json_each(?)))"
         )
         row = self._conn.execute(
@@ -4219,10 +4229,15 @@ class Database:
         # ``from_addrs`` holds every author; ``from_addr`` alone for callers
         # that build a Message by hand.
         authors = msg.from_addrs or [msg.from_addr]
-        roles = [("from", authors), ("to", msg.to_addrs), ("cc", msg.cc_addrs)]
+        roles = [
+            ("from", authors),
+            ("to", msg.to_addrs),
+            ("cc", msg.cc_addrs),
+            ("bcc", msg.bcc_addrs),
+        ]
         # Every distinct display name per (role, address) (#1140), within
-        # the parser's per-message budget, and whether that budget kept
-        # them all. A Message built without parsing derives both here.
+        # the parser's per-message budget; completeness covers From/To/Cc
+        # names only. A Message built without parsing derives both here.
         names = msg.participant_names
         complete = msg.participant_names_complete
         if names is None:
@@ -4237,10 +4252,10 @@ class Database:
                  sent_at_status, occurred_at, in_reply_to, references_json, has_attachments,
                  size_bytes, content_hash, indexed_at, first_indexed_at, seen, flagged,
                  replied, sender_ambiguous, participant_names_complete, subject_complete,
-                 from_addresses_complete, to_addresses_complete, cc_addresses_complete,
+                 from_addresses_complete, to_addresses_complete, cc_addresses_complete, bcc_addresses_complete,
                  attachments_manifest_complete, body_complete, caps_json, headers_complete)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, NULL, ?, ?)
+                    ?, ?, ?, NULL, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
@@ -4272,6 +4287,7 @@ class Database:
                 from_addresses_complete = excluded.from_addresses_complete,
                 to_addresses_complete = excluded.to_addresses_complete,
                 cc_addresses_complete = excluded.cc_addresses_complete,
+                bcc_addresses_complete = excluded.bcc_addresses_complete,
                 attachments_manifest_complete = excluded.attachments_manifest_complete,
                 -- Not known until phase 2c commits this parse's chunks.
                 body_complete = NULL,
@@ -4305,6 +4321,7 @@ class Database:
                 int(msg.from_addresses_complete),
                 int(msg.to_addresses_complete),
                 int(msg.cc_addresses_complete),
+                int(msg.bcc_addresses_complete),
                 int(msg.attachments_manifest_complete),
                 caps_json,
                 int(msg.headers_complete) if msg.headers_complete is not None else None,
@@ -4312,6 +4329,7 @@ class Database:
         )
         # The parsed file is this message's occurrence at its path (#1566).
         self._bind_occurrence(cur, msg.claimant_id, msg.filepath, provenance="parse")
+        full_body.store(cur, msg.claimant_id, msg.full_body)
         cur.execute("DELETE FROM message_headers WHERE claimant_id = ?", (msg.claimant_id,))
         cur.executemany(
             "INSERT INTO message_headers "

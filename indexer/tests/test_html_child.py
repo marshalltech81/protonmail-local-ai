@@ -164,7 +164,7 @@ class TestDifferentialCatalogue:
         sources = [_SHAPES[s] for s in sorted(_SHAPES)]
         before = _runner.process_launches()
         msg, _ = _parse(tmp_path, _message(*(("text/html; charset=utf-8", s) for s in sources)))
-        assert _runner.process_launches() - before == 1
+        assert _runner.process_launches() - before == 2
         assert msg.body_text == _expected_body(*sources)
         assert msg.parse_caps == {}
 
@@ -247,7 +247,9 @@ class TestOneChildPerMessage:
         sources = [b"<p>one</p>", b"<p>two \xc3\xa9</p>", b""]
         msg, _ = _parse(tmp_path, _message(*(("text/html; charset=utf-8", s) for s in sources)))
         assert msg.body_text == "one\n\ntwo é"
-        [(argv, payload)] = seen
+        [(argv, payload), (full_argv, full_payload)] = seen
+        assert full_argv[-4:] == ["html_full_body", "10", "13", "0"]
+        assert full_payload == b"".join(sources)
         assert argv[-4:] == ["html", "10", "13", "0"]
         assert payload == b"".join(sources)
 
@@ -255,7 +257,7 @@ class TestOneChildPerMessage:
         calls = stub_child_output(monkeypatch, b"T 5\n3:abc")
         msg, _ = _parse(tmp_path, _message(("text/html", b"<p>abc</p>")))
         assert msg.body_text == "abc"
-        [call] = calls
+        call = next(call for call in calls if "html" in call["argv"])
         assert {k: v for k, v in call.items() if k != "argv"} == {
             "timeout_seconds": html.CHILD_TIMEOUT_SECONDS,
             "max_output_bytes": html._MAX_OUTPUT_BYTES,
@@ -454,7 +456,7 @@ class TestLimitHit:
         started = time.monotonic()
         msg, path = _parse(tmp_path, _message(("text/html", source), plain="kept"))
         elapsed = time.monotonic() - started
-        assert _runner.process_launches() - before == 1
+        assert _runner.process_launches() - before == 2
         assert elapsed < 8
         assert msg.body_text == "kept"
         assert msg.parse_caps == {"html_body": 1}
@@ -614,7 +616,7 @@ class TestChildCost:
         (``docs/architecture.md`` has the measured time), not one per part."""
         before = _runner.process_launches()
         _parse(tmp_path, _message(*(("text/html", b"<p>p%d</p>" % i) for i in range(20))))
-        assert _runner.process_launches() - before == 1
+        assert _runner.process_launches() - before == 2
 
 
 @pytest.fixture(autouse=True)

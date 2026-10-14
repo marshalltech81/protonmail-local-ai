@@ -31,14 +31,18 @@ def _v15(db):
 
 
 def test_fresh_clock_indexes(db):
-    assert SCHEMA_VERSION == 16
+    assert SCHEMA_VERSION == 18
     assert _indexes(db._conn) == {
         "idx_messages_sent": (["sent_at", "claimant_id"], "sent_at_status = 'parsed'"),
         "idx_messages_occurred": (["occurred_at", "claimant_id"], "(occurred_at IS NOT NULL) = 1"),
     }
 
 
-def test_v15_migration_preserves_rows_and_queue_and_matches_fresh(tmp_path):
+def test_v15_migration_preserves_rows_and_queue_and_matches_fresh(tmp_path, monkeypatch):
+    # Isolate v16 from later parser migrations that legitimately queue reparse.
+    from src import database
+
+    monkeypatch.setattr(database, "SCHEMA_VERSION", 16)
     path = tmp_path / "old.db"
     db = Database(path, account=TEST_ACCOUNT)
     message = make_message(message_id="synthetic-clock@test.example")

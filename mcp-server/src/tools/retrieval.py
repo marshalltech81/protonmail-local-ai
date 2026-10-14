@@ -237,6 +237,7 @@ def _header_lines(m: MessageRecord) -> list[str]:
         ("From", m.from_, m.from_count),
         ("To", m.to, m.to_count),
         ("Cc", m.cc, m.cc_count),
+        ("Bcc (observed)", m.bcc, m.bcc_count),
     ):
         if people:
             headers.append((label, _format_participants(people, total=count)))
@@ -374,6 +375,7 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
         ("from", "From", m.from_, m.from_count),
         ("to", "To", m.to, m.to_count),
         ("cc", "Cc", m.cc, m.cc_count),
+        ("bcc", "Bcc (observed)", m.bcc, m.bcc_count),
     ):
         if people and shown(name):
             lines.append(f"   {label}: {_format_participants(people, total=count)}")
@@ -434,12 +436,17 @@ _INDETERMINATE_CAUSES: tuple[tuple[str, frozenset[str], str], ...] = (
     (
         "direction",
         frozenset({"direction"}),
-        "identity unconfigured, sender evidence incomplete or ambiguous, or own sender without known external visible recipients",
+        "identity unconfigured, sender evidence incomplete or ambiguous, or own sender without an observed external recipient or exhaustive Bcc provenance",
     ),
     (
         "list_metadata",
         frozenset(),
         "normalized header evidence malformed, conflicting, incomplete, unassessed or over budget",
+    ),
+    (
+        "bcc_provenance",
+        frozenset(),
+        "observed Bcc does not establish an exhaustive original recipient list",
     ),
     ("headers", frozenset(), "header evidence incomplete or not yet assessed"),
     ("attachment_text", frozenset(), "attachment text incomplete, unavailable, or not yet indexed"),
@@ -482,7 +489,9 @@ def _where_cause_keys(where: list[WhereLeaf]) -> set[str]:
             continue
         role, _ = w.leaf.value
         keys.add("address_list")
-        if role == "from":
+        if role in {"bcc", "recipient", "any"}:
+            keys.add("bcc_provenance")
+        if role in {"from", "any"}:
             keys.add("sender_ambiguous")
         if ADDRESS_LEAF_READS_NAMES[w.leaf.name]:
             keys.add(_NAMES_CAUSE)
@@ -816,7 +825,7 @@ def register_retrieval_tools(server, db):
 
         Returns:
             Thread metadata, then the page's messages oldest first: its own
-            Message-ID, subject, From / To / Cc, send date and (when
+            Message-ID, subject, From / To / Cc / observed Bcc, send date and (when
             known) delivery date (UTC), folder, reply headers,
             attachment flag, and indexed body
             (the text after quoted-reply stripping). When no message
@@ -981,7 +990,7 @@ def register_retrieval_tools(server, db):
         that exceeds the requested or approved scope, ask before this call;
         a message ID or body offset does not prevent the context fallback.
 
-        Headers come from the message itself: subject, From / To / Cc,
+        Headers come from the message itself: subject, From / To / Cc / observed Bcc,
         send date and (when known) delivery date (UTC), folder,
         In-Reply-To, References, and the attachment flag. Headers are
         sender-controlled, so at most 10 entries per recipient role and
@@ -1484,7 +1493,11 @@ def register_retrieval_tools(server, db):
                    {"all": [{"leaf": ..., "role": ..., "value": ...,
                    "id": ...}, ...]}. address_is: a full address,
                    exactly. address_contains: a case-insensitive
-                   substring of the address only.
+                   substring of the address only. Roles: from, to, cc, bcc,
+                   visible_recipient (To/Cc), recipient (To/Cc/Bcc), any
+                   (From/To/Cc/Bcc). New Bcc-inclusive roles retain observed
+                   positives; every no-match is unknown, including under NOT.
+                   Bcc headers do not prove the original list is exhaustive.
                    display_name_contains: of one display name only.
                    address_or_name_contains: of either (how
                    ``sender`` matches a name). domain_is: the
@@ -1501,8 +1514,7 @@ def register_retrieval_tools(server, db):
                    Header names hold 1 to 128 ASCII token characters and
                    values at most 500 characters. attachment_text_words: the same words over
                    attachment chunks; absence needs a complete manifest
-                   and complete text for every occurrence. Roles: from, to,
-                   cc, visible_recipient (To or Cc). ``role`` is
+                   and complete text for every occurrence. ``role`` is
                    required on the five address leaves and refused,
                    null included, on non-address leaves. An ``all`` item
                    may be {"any": [leaf, ...]}, true when one leaf is;
@@ -1525,7 +1537,7 @@ def register_retrieval_tools(server, db):
         Returns:
             The filter interpretation, total_matches, the page's
             messages newest first by that time (send and delivery
-            date, folder, subject, From / To / Cc, Message-ID, Thread
+            date, folder, subject, From / To / Cc / observed Bcc, Message-ID, Thread
             ID), and paging state. ``indeterminate``, stated whenever
             non-zero, counts messages the filters could neither accept
             nor reject (no stored size under a size bound; a sender whose
