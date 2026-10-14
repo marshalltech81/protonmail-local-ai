@@ -277,10 +277,22 @@ class QueriedMessage(ListedMessage):
         description="Claimed direction from configured own addresses; unknown includes own-only visible recipients until Bcc is indexed. Headers are unauthenticated; folders do not classify direction."
     )
 
-    list_id: str | None = None
-    list_id_status: MetadataStatus | None = None
-    precedence: str | None = None
-    precedence_status: MetadataStatus | None = None
+    list_id: str | None = Field(
+        default=None,
+        description="Opt-in normalized claimed List-ID; null needs list_id_status to distinguish known absence from unknown.",
+    )
+    list_id_status: MetadataStatus | None = Field(
+        default=None,
+        description="Opt-in normalization status, also included whenever list_id is selected.",
+    )
+    precedence: str | None = Field(
+        default=None,
+        description="Opt-in claimed bulk/list/junk/unsupported category; null needs precedence_status to distinguish absence from unknown.",
+    )
+    precedence_status: MetadataStatus | None = Field(
+        default=None,
+        description="Opt-in normalization status, also included whenever precedence is selected.",
+    )
 
 
 def queried_message(m: MessageRecord) -> QueriedMessage:
@@ -816,7 +828,7 @@ class QueryMessagesOutput(_Output):
     )
     messages: list[QueriedMessage] = Field(
         description="Newest first by date_basis, with claimant_id breaking ties. With fields, each "
-        "row holds only those fields plus claimant_id and thread_id."
+        "row holds those fields plus claimant_id and thread_id; selected list metadata values also include their status. Default rows omit normalized list metadata."
     )
 
 

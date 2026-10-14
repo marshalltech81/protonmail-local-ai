@@ -1494,6 +1494,10 @@ def register_retrieval_tools(server, db):
                    occurrence. header_contains: name and value, a caseless
                    substring of any decoded occurrence (raw on decode
                    failure); absence is unknown without complete headers.
+                   list_id_is takes a normalized bracketless List-ID;
+                   precedence_is takes bulk, list, junk or unsupported.
+                   Both accept explicit null for known absence; malformed,
+                   conflicting or incomplete evidence stays unknown.
                    Header names hold 1 to 128 ASCII token characters and
                    values at most 500 characters. attachment_text_words: the same words over
                    attachment chunks; absence needs a complete manifest
@@ -1514,7 +1518,9 @@ def register_retrieval_tools(server, db):
             cursor: ``next_cursor`` from the previous page of the same query;
                     keep date_basis unchanged between pages.
             fields: Row fields to return; claimant_id and thread_id are
-                    always kept. Omit for every field.
+                    always kept. Omit for default header fields. Opt in to
+                    list_id / precedence or their *_status fields. Selecting
+                    either value also includes its status.
 
         Returns:
             The filter interpretation, total_matches, the page's
@@ -2004,6 +2010,9 @@ def register_retrieval_tools(server, db):
         groups can repeat IDs. Counts-only calls read no sample subjects.
 
         Takes query_messages' filters and date_basis with the same meaning.
+        For list_id/precedence groups, null means known absence. Unknown
+        memberships are excluded and counted separately for definite and
+        filter-indeterminate messages. Metadata is claimed, not authenticated.
         period selects UTC month or year (default month); active_periods
         counts dated periods with definite matches. period_breakdown=true
         returns paginated sender_address or sender_domain x period cells,
@@ -2057,6 +2066,7 @@ def register_retrieval_tools(server, db):
 
         Args:
             group_by: sender_address, sender_domain, recipient_domain,
+                      direction, list_id, precedence,
                       attachment_content_type, folder, year,
                       month or authority_class (selected evidence clock, UTC).
             sender: As in query_messages.
