@@ -6,12 +6,14 @@ Standard library only, Python 3.11 or later:
 
 from __future__ import annotations
 
+import os
 import shutil
 import stat
 import sys
 import tempfile
 import tomllib
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +69,46 @@ class MigrateConfig(unittest.TestCase):
         config = oc.validate(migrate.build_config(self.paths), self.paths.config.parent)
         self.assertEqual(config["accounts"][0]["provider"], "proton-bridge")
 
+    def test_an_exported_shell_variable_wins_over_env(self) -> None:
+        # Review finding: Compose and env_value() both let a variable
+        # exported in the invoking shell override .env; --get alone
+        # reads only the file, so migrate-config must check os.environ
+        # itself first (#1603 round 1).
+        self.write_env()
+        exported = "11111111-2222-4333-8444-555555555555"
+        with unittest.mock.patch.dict(os.environ, {"ACCOUNT_SCOPE": exported}):
+            config = oc.validate(migrate.build_config(self.paths), self.paths.config.parent)
+        self.assertEqual(config["accounts"][0]["scope_uuid"], exported)
+
+    def test_a_mixed_case_mode_is_normalized_like_the_legacy_validator(self) -> None:
+        # Review finding: normalize_mode() in validate-env.sh accepts
+        # "OpenAI"; the TOML Choice leaf requires the exact lower-case
+        # literal, so migrate-config must normalize it too.
+        self.write_env(
+            BASE_ENV + "INFERENCE_MODE=OpenAI\nINFERENCE_MODEL=m\nINFERENCE_BASE_URL=default\n"
+        )
+        config = oc.validate(migrate.build_config(self.paths), self.paths.config.parent)
+        self.assertEqual(config["global"]["inference"]["mode"], "openai")
+
+    def test_anthropic_mode_with_no_model_takes_the_compose_default(self) -> None:
+        # Review finding: scripts/validate-env.sh lets INFERENCE_MODEL
+        # stay empty only in anthropic mode (Compose's own default,
+        # claude-sonnet-5-5); the TOML schema has no model default at
+        # all, so migrate-config must apply it explicitly.
+        extra = "INFERENCE_MODE=anthropic\nINFERENCE_BASE_URL=default\n"  # pragma: allowlist secret
+        self.write_env(BASE_ENV + extra)
+        config = oc.validate(migrate.build_config(self.paths), self.paths.config.parent)
+        self.assertEqual(config["global"]["inference"]["model"], "claude-sonnet-5-5")
+
+    def test_non_bmp_characters_round_trip_through_the_renderer(self) -> None:
+        # Review finding: json.dumps's default ensure_ascii escapes a
+        # character outside the Basic Multilingual Plane as a UTF-16
+        # surrogate pair, which tomllib refuses to read back.
+        self.write_env(BASE_ENV + "PROTON_FOLDER_EXCLUSIONS=All Mail|Labels/*|Starred|\U0001f600\n")
+        text = migrate.migrate(self.paths)
+        reloaded = oc.validate(tomllib.loads(text), self.paths.config.parent)
+        self.assertIn("\U0001f600", reloaded["accounts"][0]["sync"]["mailboxes"]["exclude"])
+
     def test_an_unset_optional_setting_takes_the_schema_default_not_a_skip_bug(self) -> None:
         self.write_env()  # SYNC_INTERVAL left unset
         config = oc.validate(migrate.build_config(self.paths), self.paths.config.parent)
@@ -116,12 +158,40 @@ class MigrateConfig(unittest.TestCase):
         data = tomllib.loads(self.paths.config.read_text(encoding="utf-8"))
         self.assertEqual(data["accounts"][0]["scope_uuid"], UUID)
 
-    def test_run_refuses_when_config_toml_already_exists(self) -> None:
+    def test_run_refuses_an_invalid_existing_config_toml(self) -> None:
         self.write_env()
         self.paths.config.write_text(MARKER, encoding="utf-8")
         code = migrate.run(self.paths)
         self.assertEqual(code, 1)
         self.assertEqual(self.paths.config.read_text(encoding="utf-8"), MARKER)
+        self.assertFalse(self.paths.mode.exists())
+
+    def test_run_adopts_a_valid_existing_config_toml_without_rewriting_it(self) -> None:
+        # Review finding: scripts/init-config.sh tells an operator whose
+        # config/config.toml predates config/mode to run make
+        # migrate-config; that advice must actually work, not just
+        # refuse again (#1603 round 1).
+        self.write_env()
+        text = migrate.render_toml(
+            oc.validate(migrate.build_config(self.paths), self.paths.config.parent)
+        )
+        os.makedirs(self.paths.config.parent, exist_ok=True)
+        self.paths.config.write_text(text, encoding="utf-8")
+        os.chmod(self.paths.config, 0o600)
+        code = migrate.run(self.paths)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.paths.config.read_text(encoding="utf-8"), text)
+        self.assertEqual(self.paths.mode.read_text(encoding="utf-8").strip(), "toml")
+
+    def test_run_refuses_adopting_an_invalid_existing_config_toml_without_writing_mode(
+        self,
+    ) -> None:
+        self.write_env()
+        (self.paths.config).write_text("schema_version = 1\n", encoding="utf-8")
+        os.chmod(self.paths.config, 0o600)
+        code = migrate.run(self.paths)
+        self.assertEqual(code, 1)
+        self.assertFalse(self.paths.mode.exists())
 
     def test_run_refuses_when_mode_is_already_toml(self) -> None:
         self.write_env()

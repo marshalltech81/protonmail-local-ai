@@ -44,6 +44,12 @@ _API_KEY_FILES = {
     "reranking": "../.secrets/rerank_api_key.txt",
 }
 
+# docker-compose.yml's ${INFERENCE_MODEL:-claude-sonnet-5-5}: the one
+# setting an empty .env value still defaults, and only in anthropic
+# mode (scripts/validate-env.sh). The TOML schema has no model
+# default, so the import applies this one explicitly.
+_ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-5-5"
+
 
 class MigrateError(ValueError):
     """Fixed text: the key, never the value."""
@@ -78,8 +84,14 @@ class Paths:
 
 
 def read_env(paths: Paths, key: str) -> str:
-    """The effective ``.env`` value of ``key``, by the same parser
-    ``make validate-env`` uses (no shell-sourcing)."""
+    """The effective value of ``key``: a variable exported in the
+    invoking shell wins over ``.env``, even when it is empty, exactly
+    as Compose and ``scripts/validate-env.sh``'s own ``env_value``
+    read it (migrate-config runs as a child of that same shell, so
+    ``os.environ`` already sees it). Otherwise, the ``.env`` file, by
+    the same parser ``make validate-env`` uses (no shell-sourcing)."""
+    if key in os.environ:
+        return os.environ[key]
     result = subprocess.run(  # nosec B603 B607 - fixed argv, no shell
         ["bash", str(paths.validate_env), "--get", key],
         capture_output=True,
@@ -121,6 +133,13 @@ def _parse_leaf(leaf: oc.Leaf, key: str, raw: str) -> Any:
             return float(raw.strip())
         except ValueError:
             raise MigrateError(f"{key} must be a number.") from None
+    if isinstance(leaf, oc.Choice):
+        # The legacy validators compare every mode case-insensitively,
+        # trimmed (normalize_mode): EMBED_MODE, INFERENCE_MODE,
+        # RERANK_MODE and SOURCE_MODE all accept "OpenAI" or padding
+        # that the TOML schema's exact-match Choice would otherwise
+        # refuse.
+        return raw.strip().lower()
     if isinstance(leaf, oc.TextList):
         return [item for item in raw.split("|") if item != ""] if raw else []
     # Text, Choice, Uuid: operator_config.validate checks the exact form.
@@ -149,12 +168,11 @@ def _import_mapping(
         if setting.kind not in ("account", "global") or setting.toml is None:
             continue
         raw = read_env(paths, setting.env)
-        if setting.env == "SOURCE_MODE":
-            # mbsync/proton-settings.sh's normalization: trimmed, ASCII
-            # lower case, empty takes the default. accounts[].provider
-            # has no TOML default, so the import applies it explicitly
-            # rather than skipping the key.
-            raw = raw.strip().lower() or oc.PROTON
+        if setting.env == "SOURCE_MODE" and not raw.strip():
+            # accounts[].provider has no TOML default, unlike the shell
+            # layer's own default (mbsync/proton-settings.sh); the
+            # Choice branch below still normalizes case and padding.
+            raw = oc.PROTON
         elif not raw.strip():
             continue
         leaf = oc._leaf(setting.toml)
@@ -196,6 +214,9 @@ def build_config(paths: Paths) -> dict[str, Any]:
     _import_mapping(paths, target_global, target_account)
     for layer, path in _API_KEY_FILES.items():
         target_global.setdefault(layer, {}).setdefault("api_key_file", path)
+    inference = target_global.get("inference", {})
+    if inference.get("mode") == "anthropic" and "model" not in inference:
+        target_global.setdefault("inference", {})["model"] = _ANTHROPIC_DEFAULT_MODEL
     _import_identity(paths, target_account)
     _import_authority(paths, target_global)
     return {"schema_version": 1, "global": target_global, "accounts": [target_account]}
@@ -214,16 +235,26 @@ _PATH_LITERALS = {
 }
 
 
+def _toml_string(value: str) -> str:
+    """``value`` as a TOML basic string: JSON's escaping of control
+    characters, backslashes and quotes is also TOML's, but
+    ``ensure_ascii`` must be off -- its default escapes a character
+    outside the Basic Multilingual Plane (an emoji, say, in a folder
+    exclusion) as a UTF-16 surrogate pair, which is valid JSON but not
+    a valid TOML escape, so ``tomllib`` would refuse the render."""
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _toml_scalar(leaf: oc.Leaf, path: str, value: Any) -> str:
     if isinstance(leaf, oc.FilePath):
-        return json.dumps(_PATH_LITERALS[path])
+        return _toml_string(_PATH_LITERALS[path])
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
         return format(decimal.Decimal(repr(value)), "f")
-    return json.dumps(value)
+    return _toml_string(value)
 
 
 def _emit_table(
@@ -244,7 +275,7 @@ def _emit_table(
             # writing [] -- a real, different, configured value).
             continue
         if isinstance(field, oc.TextList):
-            scalars.append(f"{key} = [{', '.join(json.dumps(v) for v in (value or []))}]")
+            scalars.append(f"{key} = [{', '.join(_toml_string(v) for v in (value or []))}]")
         else:
             scalars.append(f"{key} = {_toml_scalar(field, child_path, value)}")
     lines.extend(scalars)
@@ -304,17 +335,30 @@ def _write_private(path: Path, text: str) -> None:
         raise
 
 
-def run(paths: Paths) -> int:
-    if paths.mode.is_file() and paths.mode.read_text(encoding="utf-8").strip() == "toml":
-        print("ERROR: config/mode is already toml; migrate-config runs once.", file=sys.stderr)
+def _adopt_existing(paths: Paths) -> int:
+    """config/config.toml already exists (hand-written from the
+    example, or left over): validate it and switch config/mode to
+    toml without touching it, rather than importing over it. This is
+    also what makes scripts/init-config.sh's "run make migrate-config"
+    advice, for a stray config.toml found with no config/mode, actually
+    work."""
+    try:
+        data, base = oc.load_file(paths.config)
+        config = oc.validate(data, base)
+        oc.check_single_enabled_account(config)
+    except oc.ConfigError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    if paths.config.exists():
-        print(
-            "ERROR: config/config.toml already exists. migrate-config only imports a fresh "
-            "one from .env; remove it first, or edit it directly and see docs/setup.md.",
-            file=sys.stderr,
-        )
+    try:
+        _write_private(paths.mode, "toml\n")
+    except OSError as exc:
+        print(f"ERROR: could not write config/mode ({type(exc).__name__}).", file=sys.stderr)
         return 1
+    print(f"{paths.config} is valid; set config/mode=toml. Run make validate-env to check it.")
+    return 0
+
+
+def _import_from_env(paths: Paths) -> int:
     try:
         text = migrate(paths)
     except (MigrateError, oc.ConfigError) as exc:
@@ -323,8 +367,8 @@ def run(paths: Paths) -> int:
 
     # Both files or neither: a failure between them must not leave
     # config/config.toml present with config/mode still absent or
-    # legacy, which migrate-config itself would then refuse to retry
-    # (config/config.toml already exists).
+    # legacy, which the next run would then treat as adopting it
+    # instead of retrying the import.
     try:
         _write_private(paths.config, text)
     except OSError as exc:
@@ -342,6 +386,15 @@ def run(paths: Paths) -> int:
         return 1
     print(f"Wrote {paths.config} and set config/mode=toml. Run make validate-env to check it.")
     return 0
+
+
+def run(paths: Paths) -> int:
+    if paths.mode.is_file() and paths.mode.read_text(encoding="utf-8").strip() == "toml":
+        print("ERROR: config/mode is already toml; migrate-config runs once.", file=sys.stderr)
+        return 1
+    if paths.config.exists():
+        return _adopt_existing(paths)
+    return _import_from_env(paths)
 
 
 def main(argv: list[str] | None = None) -> int:

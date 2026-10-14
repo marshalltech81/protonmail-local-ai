@@ -115,7 +115,7 @@ write_config_mode_is_600_and_trimmed() {
     dir="$(mktemp -d "$WORK/d.XXXXXX")"
     write_config_mode "$dir/mode" "$CONFIG_MODE_TOML"
     [[ "$(read_config_mode "$dir/mode")" == "toml" ]] || return 1
-    [[ "$(stat -f '%Lp' "$dir/mode" 2>/dev/null || stat -c '%a' "$dir/mode")" == "600" ]]
+    [[ "$(stat -c '%a' "$dir/mode" 2>/dev/null || stat -f '%Lp' "$dir/mode")" == "600" ]]
 }
 
 check "a missing config/mode file is a problem" a_missing_mode_file_is_a_problem
@@ -138,7 +138,9 @@ setup_init_config() {
 }
 
 run_init_config() {
-    env -i PATH="$PATH" "$BASH" "$ROOT/scripts/init-config.sh" >"$WORK/output" 2>&1 && STATUS=0 || STATUS=$?
+    # Invoked by its own execute bit, as `make init-config` (`@./scripts/init-config.sh`)
+    # does, not through $BASH: that would mask a script committed without +x.
+    env -i PATH="$PATH" "$ROOT/scripts/init-config.sh" >"$WORK/output" 2>&1 && STATUS=0 || STATUS=$?
     cat "$WORK/output"
 }
 
@@ -147,7 +149,7 @@ a_fresh_deployment_gets_legacy_mode() {
     run_init_config
     [[ "$STATUS" -eq 0 ]] || return 1
     [[ "$(read_config_mode "$ROOT/config/mode")" == "legacy" ]] || return 1
-    [[ "$(stat -f '%Lp' "$ROOT/config/mode" 2>/dev/null || stat -c '%a' "$ROOT/config/mode")" == "600" ]]
+    [[ "$(stat -c '%a' "$ROOT/config/mode" 2>/dev/null || stat -f '%Lp' "$ROOT/config/mode")" == "600" ]]
 }
 
 an_existing_mode_file_is_never_replaced() {
@@ -170,6 +172,16 @@ a_stray_config_toml_without_mode_is_refused() {
 check "a fresh deployment gets config/mode=legacy" a_fresh_deployment_gets_legacy_mode
 check "an existing config/mode is never replaced" an_existing_mode_file_is_never_replaced
 check "a stray config.toml without config/mode is refused" a_stray_config_toml_without_mode_is_refused
+
+init_config_is_committed_executable() {
+    [[ -x "$INIT_CONFIG_SCRIPT" ]] || {
+        printf '%s is not executable: make init-config runs it directly, not through bash\n' "$INIT_CONFIG_SCRIPT"
+        return 1
+    }
+}
+
+check "scripts/init-config.sh is committed with its execute bit, as make init-config needs" \
+    init_config_is_committed_executable
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

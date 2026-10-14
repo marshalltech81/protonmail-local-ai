@@ -1405,6 +1405,38 @@ check "TOML mode: an account secret not 600 fails" toml_mode_loose_account_secre
 check "TOML mode: an invalid config.toml is refused with fixed text" \
     toml_mode_invalid_config_toml_is_refused_with_fixed_text
 
+toml_mode_short_mcp_token_fails() {
+    # Review finding: TOML mode must run the same MCP token format
+    # check (length/charset) the legacy body runs, not only
+    # missing-or-empty, or a token mcp-server would reject at startup
+    # passes validate-env (#1603 round 1).
+    setup_toml
+    printf 'x\n' >"$ROOT/.secrets/mcp_auth_token.txt"
+    fails_with 'must be at least 32 characters'
+}
+
+check "TOML mode: a too-short MCP token fails the same format check as legacy mode" \
+    toml_mode_short_mcp_token_fails
+
+toml_mode_mcp_token_in_env_fails() {
+    # Security review finding (round 1): a stale or duplicated secret
+    # in .env is readable by another local account (.env is not mode
+    # 600), and TOML mode's early return skipped reject_secret_in_env
+    # entirely, unlike every legacy case above.
+    setup_toml
+    printf 'MCP_AUTH_TOKEN=placeholder\n' >>"$ROOT/.env"  # pragma: allowlist secret
+    fails_with 'MCP_AUTH_TOKEN must be stored in'
+}
+
+toml_mode_api_key_in_env_fails() {
+    setup_toml
+    printf 'EMBED_API_KEY=placeholder\n' >>"$ROOT/.env"
+    fails_with 'EMBED_API_KEY must be stored in'
+}
+
+check "TOML mode: an MCP token in .env fails, same as legacy mode" toml_mode_mcp_token_in_env_fails
+check "TOML mode: an API key in .env fails, same as legacy mode" toml_mode_api_key_in_env_fails
+
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
     exit 1
