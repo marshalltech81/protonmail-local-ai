@@ -35,6 +35,7 @@ from .predicates import (
     DATE_BASES,
     DEFAULT_DATE_BASIS,
     DEFAULT_EXCLUDED_FOLDERS,
+    DIRECTION_LABEL_SQL,
     EFFECTIVE_EVIDENCE_SQL,
     LEAVES,
     QUERY_DIGEST_FORMAT,
@@ -727,6 +728,7 @@ class MessageRecord:
     from_count: int | None = None
     to_count: int | None = None
     cc_count: int | None = None
+    direction: Literal["inbound", "outbound", "unknown"] = "unknown"
 
 
 # Whether the reconciler tombstoned the message (#794). A tombstone
@@ -1200,6 +1202,7 @@ AGGREGATE_DIMENSIONS = (
     "sender_address",
     "sender_domain",
     "recipient_domain",
+    "direction",
     "attachment_content_type",
     "folder",
     "year",
@@ -1604,6 +1607,7 @@ _SAFE_FROM_ROWS = (
 # name on the group's latest match that has one. The SQL is constant
 # except the excluded folders' placeholders, bound in order.
 _GROUP_ROWS: dict[str, str] = {
+    "direction": "SELECT e.*, direction AS value, NULL AS name FROM e",
     # The participant row keeps the first name the message wrote the
     # address with, NULL when that one had none; every name is in
     # ``message_participant_names`` (#1140), whose least is the fallback.
@@ -2222,6 +2226,17 @@ def read_stored_schema_version(path: str) -> str:
         return "none" if row is None else str(int(row[0]))
     except OSError, sqlite3.Error, TypeError, ValueError:
         return "unreadable"
+
+
+def _identity_digest(conn: sqlite3.Connection, digest: str) -> str:
+    """Bind direction classifier v1 to the identity in this read snapshot."""
+    row = conn.execute("SELECT state, address_digest FROM operator_identity WHERE id=1").fetchone()
+    identity = list(row) if row is not None else ["unconfigured", ""]
+    return hashlib.sha256(json.dumps(["direction-v1", digest, identity]).encode()).hexdigest()[:16]
+
+
+def _uses_identity(leaves: Sequence[Leaf], where: Sequence[WhereLeaf]) -> bool:
+    return any(LEAVES[leaf.name].identity_dependent for leaf in [*leaves, *(w.leaf for w in where)])
 
 
 class Database:
@@ -4726,6 +4741,30 @@ class Database:
             )
             stats["index_schema_version"] = version[0] if version else None
             stats["query_capabilities"] = query_capabilities(conn)
+            identity_columns = {
+                r[0]
+                for r in conn.execute("SELECT name FROM pragma_table_xinfo('operator_identity')")
+            }
+            if {"id", "state", "address_count"} <= identity_columns:
+                identity = conn.execute(
+                    "SELECT state, address_count FROM operator_identity WHERE id=1"
+                ).fetchone()
+                stats["operator_identity"] = {
+                    "state": identity[0] if identity else "unconfigured",
+                    "address_count": identity[1] if identity else 0,
+                    "sent_conflicts": None,
+                }
+                if stats["query_capabilities"]["direction_is"]["status"] != "unavailable":
+                    stats["operator_identity"]["sent_conflicts"] = conn.execute(
+                        f"SELECT COUNT(*) FROM messages m WHERE m.folder='Sent' AND ({DIRECTION_LABEL_SQL})='inbound'"  # nosec B608
+                    ).fetchone()[0]
+            else:
+                stats["operator_identity"] = {
+                    "state": "unavailable",
+                    "address_count": None,
+                    "sent_conflicts": None,
+                }
+
             header = stats["query_capabilities"]["header_exists"]
             # Preserve the legacy header summary's distinction: assessed
             # but incomplete evidence still has status "supported".
@@ -4898,6 +4937,7 @@ class Database:
         seen: bool | None = None,
         flagged: bool | None = None,
         replied: bool | None = None,
+        direction: str | None = None,
         size_min: int | None = None,
         size_max: int | None = None,
         date_basis: str | None = None,
@@ -4976,6 +5016,7 @@ class Database:
             seen=seen,
             flagged=flagged,
             replied=replied,
+            direction=direction,
             size_min=size_min,
             size_max=size_max,
             date_basis=basis.name,
@@ -4996,19 +5037,20 @@ class Database:
             where_sql, params, basis, leaves, where=where, has_cursor=bool(cursor)
         )
         offset = 0
-        if cursor:
-            last_at, last_id, offset = _decode_cursor(cursor, digest)
-            # Row-value form: SQLite seeks idx_messages_effective to the
-            # cursor; the equivalent OR expansion sorted every earlier row.
-            # Selected clocks have composite indexes including the claimant tie-break.
-            page_where_sql += f" AND ({clock}, m.claimant_id) < (?, ?)"
-            page_params += [last_at, last_id]
 
         with closing(self._connect()) as conn:
             # One read transaction: the count, the page, and its
             # participants come from the same snapshot even while the
             # indexer commits.
             conn.execute("BEGIN")
+            digest = _identity_digest(conn, digest)
+            if cursor:
+                last_at, last_id, offset = _decode_cursor(cursor, digest)
+                # Row-value form: SQLite seeks idx_messages_effective to the
+                # cursor; the equivalent OR expansion sorted every earlier row.
+                # Selected clocks have composite indexes including the claimant tie-break.
+                page_where_sql += f" AND ({clock}, m.claimant_id) < (?, ?)"
+                page_params += [last_at, last_id]
             total = conn.execute(
                 "SELECT COUNT(*) FROM messages m WHERE " + where_sql,  # nosec B608
                 params,
@@ -5032,13 +5074,15 @@ class Database:
                 ).fetchone()[0]
             leaf_results = _leaf_results(conn, where, where_sql, params) if where else []
             rows = conn.execute(
-                f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE "  # nosec B608
+                f"SELECT {_MESSAGE_COLUMNS}, {DIRECTION_LABEL_SQL} AS direction FROM messages m WHERE "  # nosec B608
                 + page_where_sql
                 + f" ORDER BY {clock} DESC, m.claimant_id DESC LIMIT ?",
                 [*page_params, limit + 1],
             ).fetchall()
             has_more = len(rows) > limit
             records = [_row_to_message_record(r) for r in rows[:limit]]
+            for record, row in zip(records, rows):
+                record.direction = row["direction"] or "unknown"
             _attach_participants(conn, records)
             conn.rollback()
 
@@ -5072,6 +5116,7 @@ class Database:
         seen: bool | None = None,
         flagged: bool | None = None,
         replied: bool | None = None,
+        direction: str | None = None,
         size_min: int | None = None,
         size_max: int | None = None,
         where: Sequence[WhereLeaf] = (),
@@ -5097,6 +5142,7 @@ class Database:
             seen=seen,
             flagged=flagged,
             replied=replied,
+            direction=direction,
             size_min=size_min,
             size_max=size_max,
         )
@@ -5104,7 +5150,7 @@ class Database:
         digest = hashlib.sha256(
             json.dumps(["query_threads", leaf_digest(leaves, where=where)]).encode()
         ).hexdigest()[:16]
-        last_id, offset = _decode_thread_cursor(cursor, digest) if cursor else (None, 0)
+        last_id, offset = None, 0
         # Materialize the expression once per claimant. Ranking definite matches
         # first identifies their newest claimant without a correlated scan per thread.
         # Whole-thread metadata is enriched only for the capped page IDs.
@@ -5141,6 +5187,10 @@ class Database:
             "LEFT JOIN meta ON meta.tid=pg.tid LEFT JOIN people ON people.tid=pg.tid ORDER BY pg.tid"
         )
         with closing(self._connect()) as conn:
+            if _uses_identity(leaves, where):
+                conn.execute("BEGIN")
+                digest = _identity_digest(conn, digest)
+            last_id, offset = _decode_thread_cursor(cursor, digest) if cursor else (None, 0)
             rows = conn.execute(sql, [*params, last_id, last_id, limit + 1]).fetchall()
         totals = [int(n) for n in rows[0][:4]]
         records = [
@@ -5194,6 +5244,7 @@ class Database:
         seen: bool | None = None,
         flagged: bool | None = None,
         replied: bool | None = None,
+        direction: str | None = None,
         size_min: int | None = None,
         size_max: int | None = None,
         where: Sequence[WhereLeaf] = (),
@@ -5281,12 +5332,13 @@ class Database:
             seen=seen,
             flagged=flagged,
             replied=replied,
+            direction=direction,
             size_min=size_min,
             size_max=size_max,
         )
         expr, expr_params = _message_expression(leaves, where)
         digest = _aggregate_digest(group_by, leaves, where, basis.name, period, period_breakdown)
-        offset = _decode_aggregate_cursor(cursor, digest) if cursor else 0
+        offset = 0
         rows_params = list(AUTHORITY_EXCLUDED_FOLDERS) if group_by == "authority_class" else []
         # Review round 3 (owner, 2026-10-08): for a sender dimension,
         # the messages not rejected whose sender is safe but whose From
@@ -5379,7 +5431,8 @@ class Database:
             "m.to_addresses_complete AS tc, m.cc_addresses_complete AS cc, "
             "m.attachment_rows_current AS current, "
             f"({ATTACHMENT_INVENTORY_KNOWN_SQL}) AS inventory_known, "
-            f"({expr}) AS ok FROM messages m WHERE ({expr}) IS NOT 0), "
+            + (f"{DIRECTION_LABEL_SQL} AS direction, " if group_by == "direction" else "")
+            + f"({expr}) AS ok FROM messages m WHERE ({expr}) IS NOT 0), "  # nosec B608
             f"k AS MATERIALIZED ({rows_sql}), "
             f"g AS MATERIALIZED (SELECT value, {period_sql} AS period, TOTAL(ok IS 1) AS n, "
             "COUNT(DISTINCT CASE WHEN ok IS 1 THEN tid END) AS threads, "
@@ -5397,8 +5450,7 @@ class Database:
             # Cap sender memberships before occurrence expansion. Both sides
             # can be attacker-controlled; a small page must not count every
             # address x attachment combination in the whole population.
-            + sample_ctes
-            + "kp AS MATERIALIZED (SELECT k.* FROM p CROSS JOIN k "  # nosec B608
+             + sample_ctes + "kp AS MATERIALIZED (SELECT k.* FROM p CROSS JOIN k "  # nosec B608
             f"WHERE {page_membership} AND k.ok IS 1 AND k.current = 1 AND k.att = 1), "
             f"ga AS (SELECT value, {period_sql} AS period, "
             "COUNT(DISTINCT a.attachment_id) AS attachment_ids "
@@ -5421,16 +5473,20 @@ class Database:
             + sample_join
             + "ORDER BY pg.n DESC, pg.value IS NULL, pg.value, pg.period IS NULL, pg.period"
         )
-        params = [
-            *expr_params,
-            *expr_params,
-            *rows_params,
-            limit + 1,
-            offset,
-            *sample_params,
-            *incomplete_params,
-        ]
         with closing(self._connect()) as conn:
+            if group_by == "direction" or _uses_identity(leaves, where):
+                conn.execute("BEGIN")
+                digest = _identity_digest(conn, digest)
+            offset = _decode_aggregate_cursor(cursor, digest) if cursor else 0
+            params = [
+                *expr_params,
+                *expr_params,
+                *rows_params,
+                limit + 1,
+                offset,
+                *sample_params,
+                *incomplete_params,
+            ]
             rows = conn.execute(sql, params).fetchall()
         if sample_per_group and rows[0]["sample_requested"] > 100:
             raise InvalidFilterError(

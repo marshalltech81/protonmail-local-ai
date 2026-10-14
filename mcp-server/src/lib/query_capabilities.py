@@ -36,6 +36,19 @@ def query_capabilities(conn: sqlite3.Connection) -> dict:
                 "condition": "Restore required schema through indexer upgrade and migrations, "
                 "or rebuild a damaged index; reparse existing mail.",
             }
+        elif (
+            kind.identity_dependent
+            and not conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM operator_identity WHERE id=1 AND state='configured')"
+            ).fetchone()[0]
+        ):
+            result[name] = {
+                "status": "unavailable",
+                "available_messages": None,
+                "unassessed_messages": None,
+                "missing_messages": None,
+                "condition": "Configure explicit own addresses in config/identity.toml and restart the indexer.",
+            }
         else:
             rules[name] = (complete, unassessed)
     expressions = ["COUNT(*)"]
@@ -44,7 +57,8 @@ def query_capabilities(conn: sqlite3.Connection) -> dict:
             f"TOTAL(({complete}) IS TRUE)",
             f"TOTAL(({complete}) IS NOT TRUE AND ({unassessed}) IS TRUE)",
         ]
-    # One flags-only message scan; attachment occurrences are grouped once,
+    # One message scan, with indexed participant probes for direction;
+    # attachment occurrences are grouped once,
     # without reading filenames, extracted text, FTS tables or payloads.
     join = ""
     if any("a." in complete + unassessed for complete, unassessed in rules.values()):

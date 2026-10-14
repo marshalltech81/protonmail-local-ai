@@ -581,8 +581,8 @@ have been checked on real mail.
 
 List the addresses you send from in `config/identity.toml`, so the index
 can tell mail you sent from mail you received (message direction,
-#824). The indexer stores the list today; the MCP tools that use it
-are not built yet. Without the file your addresses are unconfigured.
+#824). The deterministic query tools use this set for claimed direction. Without
+the file, direction is unknown and direction filters are indeterminate.
 
 ```bash
 install -m 600 config/identity.toml.example config/identity.toml
@@ -613,7 +613,12 @@ empty or malformed file (invalid TOML, a key other than `addresses`, an
 entry that is not a bare `name@domain` address, an address listed
 twice, more than 1,000 addresses or more than 64 KiB) stops the indexer
 at startup with an error naming the entry's position. Removing the file
-clears the stored addresses at the next start.
+clears the stored addresses at the next start. Status reports configuration
+and address counts, never addresses. The indexer logs count-only Sent
+conflicts at startup and on the reconcile interval; a complete single external
+From in Sent can indicate an omitted alias. Folder membership does not classify
+direction. Restart message pagination after changing identity: existing
+message cursors and direction-sensitive thread/group cursors are rejected.
 
 ### Pointing at a different embedder provider
 

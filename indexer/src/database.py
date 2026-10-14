@@ -4452,6 +4452,29 @@ class Database:
             )
 
     @_synchronized
+    def report_direction_conflicts(self) -> int:
+        """Count-only diagnostic at startup and the periodic reconcile interval."""
+        count = self._conn.execute(
+            "SELECT COUNT(*) FROM messages m WHERE m.folder='Sent' "
+            "AND (SELECT state FROM operator_identity WHERE id=1)='configured' "
+            "AND m.sender_ambiguous=0 AND m.from_addresses_complete=1 "
+            "AND (SELECT COUNT(*) FROM (SELECT 1 FROM message_participants p "
+            "WHERE p.claimant_id=m.claimant_id AND p.role='from' LIMIT 2))=1 "
+            "AND NOT EXISTS (SELECT 1 FROM message_participants p JOIN operator_addresses oa "
+            "ON oa.address=p.address WHERE p.claimant_id=m.claimant_id AND p.role='from')"
+        ).fetchone()[0]
+        previous = getattr(self, "_direction_conflicts", None)
+        if count != previous:
+            write = log.warning if count and (previous is None or count > previous) else log.info
+            write(
+                "Direction identity: Sent conflicts=%d (previous=%s); check configured own aliases",
+                count,
+                previous,
+            )
+            self._direction_conflicts = count
+        return count
+
+    @_synchronized
     def update_filepath(
         self,
         old_path: str,

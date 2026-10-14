@@ -259,6 +259,16 @@ class ListedMessage(MessageHeaders):
     )
 
 
+class QueriedMessage(ListedMessage):
+    direction: Literal["inbound", "outbound", "unknown"] = Field(
+        description="Claimed direction from configured own addresses; unknown includes own-only visible recipients until Bcc is indexed. Headers are unauthenticated; folders do not classify direction."
+    )
+
+
+def queried_message(m: MessageRecord) -> QueriedMessage:
+    return QueriedMessage(**listed_message(m).model_dump(), direction=m.direction)
+
+
 def message_headers(m: MessageRecord) -> MessageHeaders:
     """``m``'s headers: at most ``MAX_LISTED`` entries per role and
     References are listed and values are cut at ``HEADER_CHAR_LIMIT``."""
@@ -774,7 +784,7 @@ class QueryMessagesOutput(_Output):
     next_cursor: str | None = Field(
         description="Pass with the same filters for the next page; null when has_more is false."
     )
-    messages: list[ListedMessage] = Field(
+    messages: list[QueriedMessage] = Field(
         description="Newest first by date_basis, with claimant_id breaking ties. With fields, each "
         "row holds only those fields plus claimant_id and thread_id."
     )
@@ -785,7 +795,7 @@ def query_messages_output_schema() -> dict[str, Any]:
     ``thread_id`` required in a row, since ``fields`` (#990) leaves the
     others out."""
     schema = QueryMessagesOutput.model_json_schema()
-    schema["$defs"]["ListedMessage"]["required"] = ["claimant_id", "thread_id"]
+    schema["$defs"]["QueriedMessage"]["required"] = ["claimant_id", "thread_id"]
     return schema
 
 
@@ -1203,7 +1213,16 @@ class QueryCapability(_Output):
     condition: str | None
 
 
+class OperatorIdentityStatus(_Output):
+    state: Literal["configured", "unconfigured", "unavailable"]
+    address_count: int | None
+    sent_conflicts: int | None = Field(
+        description="Sent messages with complete unambiguous single external From: possible omitted own aliases, not authenticated direction. Null when unavailable."
+    )
+
+
 class MailboxStatusOutput(_Output):
+    operator_identity: OperatorIdentityStatus
     server_version: str = Field(
         description="MCP server's deployed source commit, with -dirty for local changes; "
         "unknown when build identity is unavailable. Not the MCP protocol or database schema version."

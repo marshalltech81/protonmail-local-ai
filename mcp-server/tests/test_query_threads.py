@@ -320,6 +320,7 @@ def test_query_error_is_type_only(thread_db, monkeypatch, caplog):
 
 
 _LEAF_CATALOGUE = [
+    {"leaf": "direction_is", "value": "inbound"},
     {"leaf": "address_is", "role": "from", "value": "ann@one.test"},
     {"leaf": "address_contains", "role": "from", "value": "one.test"},
     {"leaf": "display_name_contains", "role": "from", "value": "ann"},

@@ -130,7 +130,8 @@ def test_schema_version_and_empty_population(tmp_path):
     assert status.index_schema_version == 14
     assert all(
         entry.status == "supported" and entry.available_messages == 0
-        for entry in status.query_capabilities.values()
+        for name, entry in status.query_capabilities.items()
+        if name != "direction_is"
     )
     assert "Index schema version: 14" in _render(status)
     conn.close()
@@ -267,6 +268,7 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
         "bool": (True,),
         "bytes": (1,),
         "class": ("unclassified",),
+        "direction": ("inbound", "outbound", "self"),
     }
     tables = (
         "messages",
@@ -276,6 +278,8 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
         "message_chunks",
         "attachments",
         "entities",
+        "operator_identity",
+        "operator_addresses",
     )
     for table in tables:
         columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]

@@ -75,6 +75,7 @@ from .outputs import (
     listed_message,
     message_headers,
     project_rows,
+    queried_message,
     query_messages_output_schema,
     read_only,
     reaped_source,
@@ -97,6 +98,7 @@ _MAX_AGGREGATE_GROUPS = 100
 # value on the dimension (``Database.aggregate_messages``); folder, year
 # and month have a value for every message.
 _NO_VALUE_LABELS = {
+    "direction": "unknown direction",
     "sender_address": "(no attributable sender)",
     "sender_domain": "(no attributable sender)",
     "recipient_domain": "(no observed recipient domain)",
@@ -356,6 +358,8 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
     ):
         if on and shown(name):
             head.append(word)
+    if shown("direction"):
+        head.append(f"direction {m.direction}")
     lines = [f"{i}. " + " | ".join(head) if head else f"{i}."]
     if shown("subject"):
         lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
@@ -420,6 +424,11 @@ _INDETERMINATE_CAUSES: tuple[tuple[str, frozenset[str], str], ...] = (
         "attachment list incomplete (a parse cap), or not yet checked",
     ),
     ("attachment_inventory", frozenset(), "current attachment inventory is not known exhaustive"),
+    (
+        "direction",
+        frozenset({"direction"}),
+        "identity unconfigured, sender evidence incomplete or ambiguous, or own sender without known external visible recipients",
+    ),
     ("headers", frozenset(), "header evidence incomplete or not yet assessed"),
     ("attachment_text", frozenset(), "attachment text incomplete, unavailable, or not yet indexed"),
     ("size", frozenset({"size_min", "size_max"}), "no stored size"),
@@ -438,6 +447,9 @@ def _where_cause_keys(where: list[WhereLeaf]) -> set[str]:
     incomplete display names when it reads them."""
     keys = set()
     for w in where:
+        if w.leaf.name == "direction_is":
+            keys.add("direction")
+            continue
         if w.leaf.name == "body_words":
             keys.add("body")
             continue
@@ -513,7 +525,7 @@ def _describe_where(where: list[WhereLeaf]) -> list[str]:
         elif w.leaf.name == "header_contains":
             name, value = w.leaf.value
             parts.append(f"{prefix}header_contains({name!r}, {value!r})")
-        elif w.leaf.name in {"subject_contains", "attachment_content_type_is"}:
+        elif w.leaf.name in {"subject_contains", "attachment_content_type_is", "direction_is"}:
             parts.append(f"{prefix}{w.leaf.name}({w.leaf.value!r})")
         else:
             role, value = w.leaf.value
@@ -1260,6 +1272,7 @@ def register_retrieval_tools(server, db):
         seen: bool | None = None,
         flagged: bool | None = None,
         replied: bool | None = None,
+        direction: Literal["inbound", "outbound", "self"] | None = None,
         size_min: SizeBound = None,
         size_max: SizeBound = None,
         where: Where | None = None,
@@ -1499,6 +1512,7 @@ def register_retrieval_tools(server, db):
             "seen": seen,
             "flagged": flagged,
             "replied": replied,
+            "direction": direction,
             "size_min": size_min,
             "size_max": size_max,
         }
@@ -1619,7 +1633,7 @@ def register_retrieval_tools(server, db):
             offset=page.offset,
             has_more=page.has_more,
             next_cursor=page.next_cursor,
-            messages=[listed_message(m) for m in page.messages],
+            messages=[queried_message(m) for m in page.messages],
         )
         parts = [_describe_filters(uses, none=""), *_describe_where(where_leaves)]
         none = (
@@ -1704,6 +1718,7 @@ def register_retrieval_tools(server, db):
         seen: bool | None = None,
         flagged: bool | None = None,
         replied: bool | None = None,
+        direction: Literal["inbound", "outbound", "self"] | None = None,
         size_min: SizeBound = None,
         size_max: SizeBound = None,
         where: Where | None = None,
@@ -1775,6 +1790,7 @@ def register_retrieval_tools(server, db):
             "seen": seen,
             "flagged": flagged,
             "replied": replied,
+            "direction": direction,
             "size_min": size_min,
             "size_max": size_max,
         }
@@ -1886,6 +1902,7 @@ def register_retrieval_tools(server, db):
             "sender_address",
             "sender_domain",
             "recipient_domain",
+            "direction",
             "attachment_content_type",
             "folder",
             "year",
@@ -1908,6 +1925,7 @@ def register_retrieval_tools(server, db):
         seen: bool | None = None,
         flagged: bool | None = None,
         replied: bool | None = None,
+        direction: Literal["inbound", "outbound", "self"] | None = None,
         size_min: SizeBound = None,
         size_max: SizeBound = None,
         where: Where | None = None,
@@ -2029,6 +2047,7 @@ def register_retrieval_tools(server, db):
             "seen": seen,
             "flagged": flagged,
             "replied": replied,
+            "direction": direction,
             "size_min": size_min,
             "size_max": size_max,
         }

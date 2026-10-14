@@ -309,9 +309,9 @@ class TestLogToolCall:
         """The logging allowlist is the row model's own field names, so a
         new row field cannot be accepted by the tool but withheld here."""
         from src.lib.security import QUERY_MESSAGE_FIELDS
-        from src.tools.outputs import ListedMessage
+        from src.tools.outputs import QueriedMessage
 
-        schema = ListedMessage.model_json_schema(by_alias=True)
+        schema = QueriedMessage.model_json_schema(by_alias=True)
         assert list(QUERY_MESSAGE_FIELDS) == list(schema["properties"])
 
     def test_valid_metadata_values_are_logged(self, caplog):
