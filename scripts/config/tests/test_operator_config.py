@@ -807,6 +807,23 @@ class Refusals(unittest.TestCase):
                         "each secret goes only where it belongs.",
                     )
 
+    def test_config_mode_is_not_an_api_key_file(self) -> None:
+        # Review round 2 (#1603): config/mode (the legacy/toml selector,
+        # #1603) is mode 600 with non-whitespace content ("toml" or
+        # "legacy"), so without this check check-secrets/validate-env
+        # would pass a layer whose api_key_file points at it, and the
+        # service would receive the selector string as its credential.
+        self.assertIn("config/mode", oc.RESERVED_DATA_FILES)
+        data = fixture()
+        data["global"].setdefault("inference", {})
+        data["global"]["inference"]["api_key_file"] = "mode"  # pragma: allowlist secret
+        self.assert_refused(
+            data,
+            "global.inference.api_key_file is a configuration, data or private-key file "
+            f"({', '.join(oc.RESERVED_DATA_FILES)}, or *.pem, *.key, *.p12, *.pfx): "
+            "each secret goes only where it belongs.",
+        )
+
     def test_role_checks_also_read_the_configuration_root(self) -> None:
         # Review round 7: with the configuration outside this checkout,
         # its own ../.secrets and config/ files are the conventional ones.

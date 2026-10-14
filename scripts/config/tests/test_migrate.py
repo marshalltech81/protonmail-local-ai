@@ -141,6 +141,28 @@ class MigrateConfig(unittest.TestCase):
             ["contractor.example"],
         )
 
+    def test_an_unrecognized_authority_class_fails_closed_not_silently_dropped(self) -> None:
+        # Review round 2 (#1603): a comprehension that kept only known
+        # classes silently dropped a misspelled or unknown one instead
+        # of refusing, unlike load_authority_rules (indexer/src/entities.py),
+        # which the indexer itself fails startup on for the same input.
+        self.write_env()
+        (self.root / "config" / "authority.toml").write_text(
+            '[councel]\ndomains = ["lawfirm.example"]\n', encoding="utf-8"
+        )
+        with self.assertRaises(oc.ConfigError) as caught:
+            oc.validate(migrate.build_config(self.paths), self.paths.config.parent)
+        self.assertIn("councel", str(caught.exception))
+
+    def test_an_unrecognized_identity_key_fails_closed_not_silently_dropped(self) -> None:
+        self.write_env()
+        (self.root / "config" / "identity.toml").write_text(
+            'adresses = ["me@mail.example"]\n', encoding="utf-8"
+        )
+        with self.assertRaises(oc.ConfigError) as caught:
+            oc.validate(migrate.build_config(self.paths), self.paths.config.parent)
+        self.assertIn("adresses", str(caught.exception))
+
     def test_render_toml_round_trips(self) -> None:
         self.write_env()
         text = migrate.migrate(self.paths)

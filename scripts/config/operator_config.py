@@ -92,6 +92,7 @@ RESERVED_DATA_FILES = (
     "config/config.toml",
     "config/identity.toml",
     "config/authority.toml",
+    "config/mode",
     ".generated/compose.env",
     ".generated/compose.accounts.yml",
     ".generated/config/identity.toml",

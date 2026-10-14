@@ -187,18 +187,29 @@ def _import_identity(paths: Paths, account: dict[str, Any]) -> None:
     if not paths.identity.is_file():
         return
     data = tomllib.loads(paths.identity.read_text(encoding="utf-8"))
-    addresses = data.get("addresses")
-    if addresses:
-        account["identity"] = {"addresses": addresses}
+    if data:
+        # The identity Table in operator_config.validate accepts only
+        # "addresses": passing the parsed file through unfiltered,
+        # rather than selecting "addresses" out of it, makes an
+        # unrecognized key (a typo, say) fail closed there instead of
+        # being silently dropped.
+        account["identity"] = data
 
 
 def _import_authority(paths: Paths, config_global: dict[str, Any]) -> None:
     if not paths.authority.is_file():
         return
     data = tomllib.loads(paths.authority.read_text(encoding="utf-8"))
-    authority = {cls: data[cls] for cls in oc.AUTHORITY_CLASSES if cls in data}
-    if authority:
-        config_global.setdefault("classification", {})["authority"] = authority
+    if data:
+        # The authority Table in operator_config.validate accepts only
+        # the known classes (AUTHORITY_CLASSES): passing the parsed
+        # file through unfiltered, rather than selecting recognized
+        # classes out of it, makes an unrecognized top-level table (a
+        # misspelled or unknown class) fail closed there instead of
+        # being silently dropped by a comprehension -- which would
+        # otherwise migrate with those classification rules missing
+        # and no error.
+        config_global.setdefault("classification", {})["authority"] = data
 
 
 def build_config(paths: Paths) -> dict[str, Any]:
