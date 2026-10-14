@@ -4249,13 +4249,28 @@ class Database:
         destination needs re-checking here — only that the occurrence
         itself has not moved or retired since it was read (the same
         ``state = 'active' AND relative_path = ?`` guard every other
-        occurrence write uses). Returns False, changing nothing, when it
-        has, or when ``filepath`` lies outside the account's Maildir
-        root."""
+        occurrence write uses), and that ``filepath`` itself (the
+        occurrence's exact *source* path, not its Maildir uniq — a
+        mismatched candidate sharing that uniq is the whole reason this
+        path exists, so ``resolve_current_path``'s uniq-wide search
+        would wrongly see the proven mismatch itself as "still there"
+        and refuse every call) is still absent now (#1612 round 16): the
+        watcher's own rename observation makes that true by
+        construction, but the periodic scan's missed-rename case reads
+        it well before this transaction, and the exact source can be
+        restored in between. Returns False, changing nothing, when
+        either has changed, or when ``filepath`` lies outside the
+        account's Maildir root."""
         with self.transaction():
             try:
                 where = locate(filepath, self.account.maildir_root)
             except OccurrenceLocatorError:
+                return False
+            try:
+                restored = Path(self._absolute(where.relative_path)).exists()
+            except OSError:
+                return False
+            if restored:
                 return False
             cur = self._conn.execute(
                 "UPDATE message_occurrences SET state = 'retired', retired_at = ? "

@@ -331,7 +331,7 @@ generation_setup() {
     GENERATION_FILE="$STATE_DIR/sync-generation"
     MAILDIR_PATH="$WORK/maildir-gen-$1"
     SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
-    load stamp_generation next_success_generation
+    load stamp_generation generation_in_range next_success_generation
 }
 
 first_generation_is_1() {
@@ -481,6 +481,45 @@ a_missing_stamp_does_not_seed_the_counter() {
     printf '1\n' >"$GENERATION_FILE"
     # No stamp written at all: the common, non-recovery case.
     [[ "$(next_success_generation 2>/dev/null)" == "2" ]] || return 1
+}
+
+# --- generation bounded before Bash arithmetic (#1612 round 16, P2) -------
+#
+# An all-digit counter or stamp generation above Bash's signed 64-bit
+# range must be refused before next_success_generation does arithmetic
+# on it: evaluating it first wraps "current + 1" negative, which the
+# indexer then rejects as non-positive forever (record_successful_sync
+# keeps reporting the sync as successful on a stamp that can never be
+# acknowledged).
+
+an_oversized_counter_is_refused_and_kept() {
+    generation_setup oversized-counter
+    mkdir -p "$STATE_DIR"
+    # One past generation_in_range's upper bound (INT64_MAX - 1):
+    # INT64_MAX itself, still all digits and still within int64, but
+    # one more than the counter could ever safely add 1 to.
+    printf '9223372036854775807\n' >"$GENERATION_FILE"
+    if next_success_generation; then
+        echo "a generation was allocated over an out-of-range counter"
+        return 1
+    fi
+    [[ "$(cat "$GENERATION_FILE")" == "9223372036854775807" ]] || return 1
+}
+
+an_oversized_retained_stamp_generation_is_refused() {
+    local err
+    generation_setup oversized-stamp
+    mkdir -p "$STATE_DIR" "$MAILDIR_PATH"
+    printf '5\n' >"$GENERATION_FILE"
+    printf '{"completed_at": "2026-10-01T00:00:00Z", "sync_interval_secs": 60, "attempt_id": "0123456789ab-1", "generation": 9223372036854775807}\n' \
+        >"$SYNC_STAMP_FILE"
+    err="$WORK/oversized-stamp-err"
+    if next_success_generation 2>"$err"; then
+        echo "a generation was allocated from an out-of-range retained stamp"
+        return 1
+    fi
+    [[ "$(cat "$GENERATION_FILE")" == "5" ]] || return 1
+    grep -q "out of range" "$err" || return 1
 }
 
 # --- collection status setup (#1592) ------------------------------------------
@@ -2770,6 +2809,10 @@ check "a legacy stamp does not seed the counter" \
     a_legacy_stamp_does_not_seed_the_counter
 check "a missing stamp does not seed the counter" \
     a_missing_stamp_does_not_seed_the_counter
+check "an oversized counter is refused and kept" \
+    an_oversized_counter_is_refused_and_kept
+check "an oversized retained stamp generation is refused" \
+    an_oversized_retained_stamp_generation_is_refused
 check "sync succeeds when mbsync and the repair succeed" \
     sync_succeeds_when_mbsync_and_repair_succeed
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync

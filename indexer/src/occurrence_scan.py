@@ -367,7 +367,18 @@ def scan_occurrences(
         if scope.parts and PurePosixPath(relative).parts[: len(scope.parts)] != scope.parts:
             continue
         old = account_root / relative
-        candidates = [c for c in by_uniq.get((o["folder"], o["uniq"]), []) if c not in held]
+        same_uniq = by_uniq.get((o["folder"], o["uniq"]), [])
+        candidates = [c for c in same_uniq if c not in held]
+        # A same-uniq file already held by another claimant (parsed
+        # under its own identity before this scan) was excluded above so
+        # it is never moved into or its occurrence overwritten — but
+        # left unchecked, it also makes retire_vanished_occurrence
+        # refuse below (the uniq still resolves to a file), so a missed
+        # rename whose destination raced another claimant's parse would
+        # never retire its stale occurrence (#1612 round 16). Verify it
+        # the same way as an unheld candidate, without ever moving ``o``
+        # to it.
+        held_candidates = [c for c in same_uniq if c in held]
         moved = False
         mismatched = False
         for candidate in sorted(candidates):
@@ -395,6 +406,19 @@ def scan_occurrences(
                 break
         if moved:
             continue
+        if not mismatched:
+            for candidate in sorted(held_candidates):
+                identity = file_identity(files[candidate])
+                if identity is None or o["content_hash"] is None:
+                    continue
+                verified = _verify(db, old, files[candidate], o["content_hash"], counts)
+                if verified is False:
+                    mismatched = True
+                    break
+                # A match (another claimant's held file is byte-
+                # identical to ``o``) or an inconclusive read is left
+                # for a later pass, the same as an unverified candidate:
+                # it is never moved or retired here.
         if mismatched:
             # retire_vanished_occurrence would refuse (the uniq still
             # resolves to some file), leaving the vanished claimant
@@ -406,7 +430,7 @@ def scan_occurrences(
                 counts.retired += 1
             else:
                 counts.unreachable += 1
-        elif candidates:
+        elif candidates or held_candidates:
             # A file with its uniq is there, but not with its bytes (or
             # the move was refused): not a removal the scan can establish.
             counts.unverified += 1

@@ -387,6 +387,32 @@ class TestMissedRenames:
         assert (counts["renamed"], counts["retired"], counts["unverified"]) == (0, 0, 1)
         assert box.active() == [("INBOX/cur/m2:2,S", 0)]
 
+    def test_a_restored_original_is_not_retired_as_a_scan_mismatch(self, box, monkeypatch):
+        """#1612 round 16: between ``_walk()`` recording the original
+        path absent and ``retire_mismatched_rename``'s own transaction,
+        the exact original file can come back (restored) rather than
+        staying gone. The same-uniq candidate this scan already proved
+        mismatched must not retire the restored claimant; a later pass
+        re-evaluates it instead."""
+        original = _eml("same3@example.test")
+        path = box.put("INBOX/cur/m3:2,S", original)
+        box.index(path)
+        path.unlink()
+        box.put("INBOX/cur/m3:2,FS", _eml("different3@example.test"))
+
+        real_retire = box.db.retire_mismatched_rename
+
+        def _restore_then_retire(occurrence_id, filepath):
+            # Simulates a restore landing between the scan's absence
+            # check and this call's own transaction.
+            path.write_bytes(original)
+            return real_retire(occurrence_id, filepath)
+
+        monkeypatch.setattr(box.db, "retire_mismatched_rename", _restore_then_retire)
+        counts = box.reconciler.sweep()
+        assert (counts["renamed"], counts["retired"], counts["unreachable"]) == (0, 0, 1)
+        assert box.active() == [("INBOX/cur/m3:2,S", 0)]
+
     def test_an_unmapped_copy_moved_across_folders_keeps_the_message(self, tmp_path):
         """#1141: the copy no occurrence held moves; the watcher binds its
         destination, so removing the other copy reaps nothing."""

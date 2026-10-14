@@ -1401,26 +1401,32 @@ class MaildirHandler(FileSystemEventHandler):
             "cur",
             "new",
         ) and self._is_reaped_or_deleted(dest_path)
-        if stale_occurrence is not None and trashed_destination and rename_mismatch:
-            # This destination is skipped below, so nothing else will
-            # ever revisit this rename: the periodic reconciliation scan
-            # only retires an occurrence whose uniq resolves to no file
-            # at all, never one whose uniq still resolves to *some*
-            # file, however mismatched (#1612 round 13). Gated on
-            # ``rename_mismatch``, not merely on ``not take_case_1``
-            # (#1612 round 14): the watcher confirmed, by actually
-            # reading the destination's bytes, that they are not this
-            # occurrence's claimant — an inconclusive check (an
-            # unreadable destination, or metadata alone) proves nothing
-            # and is left for a later reconciliation pass instead, the
-            # same as any other unverified rename. On a confirmed
-            # mismatch, retire the stale occurrence now rather than
-            # leaving it active at a path that no longer exists, and
-            # tombstone its claimant if that was its last live
-            # occurrence (``Reconciler.handle_moved``'s own rule for an
-            # ordinary trashed rename, #1612 round 14): without this,
-            # the deletion grace period would not start until the next
-            # reconciliation sweep, up to an hour by default.
+        if stale_occurrence is not None and rename_mismatch:
+            # Whatever this destination turns out to be (trashed, below,
+            # or a live new delivery), nothing else will ever revisit
+            # this rename: the periodic reconciliation scan only retires
+            # an occurrence whose uniq resolves to no file at all, never
+            # one whose uniq still resolves to *some* file, however
+            # mismatched (#1612 round 13). Gated on ``rename_mismatch``,
+            # not merely on ``not take_case_1`` (#1612 round 14): the
+            # watcher confirmed, by actually reading the destination's
+            # bytes, that they are not this occurrence's claimant — an
+            # inconclusive check (an unreadable destination, or metadata
+            # alone) proves nothing and is left for a later
+            # reconciliation pass instead, the same as any other
+            # unverified rename. On a confirmed mismatch, retire the
+            # stale occurrence now rather than leaving it active at a
+            # path that no longer exists — not only when the destination
+            # is also trashed (#1612 round 16): a verified mismatch to a
+            # readable, live destination is just as proven, and the
+            # occurrence would otherwise stay active and searchable
+            # indefinitely. ``mark_lost_messages`` tombstones the
+            # claimant only if this was its last live occurrence
+            # (``Reconciler.handle_moved``'s own rule for an ordinary
+            # trashed rename, #1612 round 14), so mirror retention is
+            # still respected: without this, the deletion grace period
+            # would not start until the next reconciliation sweep, up to
+            # an hour by default.
             try:
                 if self.db.retire_mismatched_rename(stale_occurrence["id"], src_path):
                     self.db.mark_lost_messages(stale_occurrence["claimant_id"])

@@ -1215,12 +1215,32 @@ stamp_generation() {
 # always allocated and persisted before a stamp names it), so raising
 # the counter to match an already-published generation never regresses
 # or reorders anything the indexer has already acknowledged.
+
+# Whether all-digit value "$1" is small enough for next_success_
+# generation to add 1 to without wrapping Bash's signed 64-bit
+# arithmetic: at most INT64_MAX - 1 (so the increment itself still
+# fits), 9223372036854775806. An all-digit value above this (a restored
+# or corrupted counter or stamp) must be rejected before any ``(( ))``
+# evaluation touches it — evaluating it first would already have
+# wrapped (#1612 round 16). Pure string comparison: arithmetic on a
+# value this large would already have overflowed, so length and, for a
+# tie, lexicographic order (equivalent to numeric order for equal-
+# length digit strings) decide it instead.
+generation_in_range() {
+    local value="$1" max="9223372036854775806"
+    ((${#value} < ${#max})) && return 0
+    ((${#value} > ${#max})) && return 1
+    # shellcheck disable=SC2071 # deliberate lexicographic string compare, equal-length digits only
+    [[ "$value" < "$max" || "$value" == "$max" ]]
+}
+
 next_success_generation() {
     local current=0 raw next tmp retained
 
     if [[ -f "$GENERATION_FILE" ]]; then
-        if ! IFS= read -r raw <"$GENERATION_FILE" || [[ ! "$raw" =~ ^[0-9]+$ ]]; then
-            echo ">>> ERROR: the success generation at ${GENERATION_FILE} is not a non-negative integer — refusing to record this sync as successful." >&2
+        if ! IFS= read -r raw <"$GENERATION_FILE" || [[ ! "$raw" =~ ^[0-9]+$ ]] ||
+            ! generation_in_range "$raw"; then
+            echo ">>> ERROR: the success generation at ${GENERATION_FILE} is not a non-negative integer within range — refusing to record this sync as successful." >&2
             return 1
         fi
         current="$raw"
@@ -1229,9 +1249,15 @@ next_success_generation() {
         return 1
     fi
     retained="$(stamp_generation)"
-    if [[ -n "$retained" ]] && ((retained > current)); then
-        echo ">>> WARNING: the success generation counter at ${GENERATION_FILE} (${current}) is behind the retained sync stamp's generation (${retained}); seeding it forward (mbsync-state was likely recreated or restored from an older backup)." >&2
-        current="$retained"
+    if [[ -n "$retained" ]]; then
+        if ! generation_in_range "$retained"; then
+            echo ">>> ERROR: the retained sync stamp's generation (${retained}) is out of range — refusing to record this sync as successful." >&2
+            return 1
+        fi
+        if ((retained > current)); then
+            echo ">>> WARNING: the success generation counter at ${GENERATION_FILE} (${current}) is behind the retained sync stamp's generation (${retained}); seeding it forward (mbsync-state was likely recreated or restored from an older backup)." >&2
+            current="$retained"
+        fi
     fi
     next=$((current + 1))
     if ! tmp="$(mktemp "${GENERATION_FILE}.XXXXXX")"; then
