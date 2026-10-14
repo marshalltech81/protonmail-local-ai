@@ -60,15 +60,22 @@ class RuntimeListMetadata(unittest.TestCase):
             conn.execute("PRAGMA temp_store=MEMORY")
             stamp = "2024-01-01T00:00:00+00:00"
             conn.executemany(
-                "INSERT INTO messages (claimant_id,message_id,thread_id,filepath,folder,subject,"
+                "INSERT INTO messages (claimant_id,message_id,thread_id,subject,"
                 "sent_at,sent_at_status,references_json,has_attachments,indexed_at,first_indexed_at,"
                 "sender_ambiguous,from_addresses_complete,to_addresses_complete,cc_addresses_complete,"
                 "attachments_manifest_complete,attachment_rows_current,body_complete,subject_complete,headers_complete) "
-                "VALUES (?,?,?,?,'INBOX','synthetic',?,'parsed','[]',0,?,?,0,1,1,1,1,1,1,1,1)",
-                (
-                    (f"c{i:06}", f"m{i:06}", f"t{i:06}", f"/synthetic/{i}", stamp, stamp, stamp)
-                    for i in range(size)
-                ),
+                "VALUES (?,?,?,'synthetic',?,'parsed','[]',0,?,?,0,1,1,1,1,1,1,1,1)",
+                ((f"c{i:06}", f"m{i:06}", f"t{i:06}", stamp, stamp, stamp) for i in range(size)),
+            )
+            # Folder and the file locator live on message_occurrences
+            # since the occurrence cutover (#1567, #1568), not on
+            # ``messages`` directly.
+            conn.executemany(
+                "INSERT INTO message_occurrences (account_id, folder, uniq, claimant_id, "
+                "relative_path, seen, flagged, replied, trashed, first_observed_at, "
+                "last_observed_at, state, provenance) "
+                "VALUES (1, 'INBOX', ?, ?, ?, 0, 0, 0, 0, ?, ?, 'active', 'parse')",
+                ((f"m{i:06}", f"c{i:06}", f"/synthetic/{i}", stamp, stamp) for i in range(size)),
             )
             conn.executemany(
                 "INSERT INTO threads VALUES (?, 'synthetic')", ((f"t{i:06}",) for i in range(size))

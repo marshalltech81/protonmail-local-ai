@@ -71,6 +71,12 @@ from .chunker import (
     estimate_tokens,
     truncate_to_tokens,
 )
+from .collection_status import (
+    COLLECTION_STATUS_NAME,
+    CollectionStatus,
+    Unknown,
+    read_collection_status,
+)
 from .database import EMBEDDING_DIM, SCHEMA_VERSION, CompletenessClearing, Database
 from .embed_identity import (
     CalibrationRequestError,
@@ -116,12 +122,12 @@ from .maildir import (
     parse_sync_stamp_rename,
     read_sync_stamp,
 )
+from .occurrence_scan import verify_rename_bytes
 from .parser import (
     Attachment,
     Message,
     MessageNestingError,
     OversizedMessageError,
-    _derive_folder,
     message_sort_time,
     parse_email,
 )
@@ -850,6 +856,20 @@ class _IngestionStateRecorder:
 
     Writes at most once per ``interval_secs``; mcp-server's staleness
     thresholds are minutes.
+
+    It also keeps mbsync's latest collection outcome (#1592), read from
+    the collection status file at startup (``read_collection``), before
+    every write, and on each rename of the file, under the same lock as
+    the acknowledgements, and records it per account in the same
+    transaction as ``ingestion_state``. After a failed attempt the
+    failure stays unrecovered (and the index not current) until a later
+    success is delivered: the last success in the file is the sync named
+    by the acknowledged stamp, matched by attempt ID, which mbsync writes
+    identically into both (never by completion time — two different
+    attempts can publish the same one across a clock rollback, #1621
+    thread, 2026-10-13). The file's records are taken in
+    publication order (the file always holds the newest), never ordered
+    by their times.
     """
 
     def __init__(self, db: Database, maildir_root: Path, interval_secs: float = 30):
@@ -865,6 +885,14 @@ class _IngestionStateRecorder:
         self._covered = 0
         self._reported = 0
         self._held: SyncStamp | None = None
+        # The collection status last read (None before the first read),
+        # the failed attempt not yet followed by a delivered success (kept
+        # across restarts in the account's row), and the last unknown
+        # reason and failed attempt logged, so each is logged once.
+        self._collection: CollectionStatus | Unknown | None = None
+        self._unrecovered: str | None = None
+        self._logged_reason: str | None = None
+        self._logged_failure: str | None = None
 
     def read_stamp(self) -> SyncStamp | None:
         """The stamp on disk now, for acknowledging after a walk."""
@@ -886,8 +914,9 @@ class _IngestionStateRecorder:
         with self._lock:
             if self._overflows > self._covered:
                 # Keep the last one handled: watchdog dispatches stamps
-                # in sync order, so it is the newest sync even when a
-                # clock rollback makes its time sort earlier.
+                # in sync order, so it is the newest sync — held by a
+                # plain overwrite, never compared, so it is acknowledged
+                # once the walk completes whatever it carries.
                 self._held = stamp
                 return
             self._acknowledge(stamp)
@@ -941,30 +970,147 @@ class _IngestionStateRecorder:
     def _acknowledge(self, stamp: SyncStamp | None) -> None:
         # Called with ``_lock`` held, from the watcher thread and the
         # main thread; keep the newest so a walk that read an older stamp
-        # cannot move it back.
-        # Timestamps share one UTC ISO format, so they compare as strings.
-        # An acknowledged stamp ahead of our clock (the clock rolled back)
-        # yields to any new one; otherwise every later sync would sort
-        # earlier and be dropped until the clock caught up (#332).
+        # cannot move it back. Ordering is the durable success
+        # generation mbsync allocates once per successful sync, never
+        # wall-clock time (#1621 thread, 2026-10-13): two different
+        # attempts could publish the same completed_at across a clock
+        # rollback, which is exactly the identity gap #332's clock-ahead
+        # tolerance papered over without closing. A stamp with no
+        # generation (written before this fix, or any other legacy
+        # shape) proves no ordering and can never move the
+        # acknowledgement forward or back.
         acked = self._acked
-        if stamp is None:
+        if stamp is None or stamp.generation is None:
             return
-        if (
-            acked is None
-            or stamp.completed_at > acked.completed_at
-            or datetime.fromisoformat(acked.completed_at) > datetime.now(UTC)
-        ):
+        if acked is None or acked.generation is None or stamp.generation > acked.generation:
             self._acked = stamp
+
+    def read_collection(self) -> None:
+        """Read mbsync's collection status file now (startup, each write,
+        each rename onto it). Serialized with the acknowledgements and
+        other reads, so the newest publication read is the one kept."""
+        with self._lock:
+            if self._collection is None:
+                # First read: an unrecovered failure recorded before a
+                # restart still holds, and is not logged again. Called
+                # from the watcher thread too, so a database error must
+                # not escape: the read waits for the next heartbeat.
+                try:
+                    stored = self.db.get_collection_state()
+                except sqlite3.Error as e:
+                    warn_rate_limited(
+                        log,
+                        "reading the stored collection state failed: %s",
+                        type(e).__name__,
+                        attachment=False,
+                    )
+                    return
+                if stored is not None:
+                    self._unrecovered = stored["unrecovered_failure_attempt_id"]
+                    self._logged_failure = self._unrecovered
+            status = read_collection_status(self.maildir_root, self.db.account.scope_uuid)
+            self._observe_collection(status)
+
+    def _success_delivered(self, status: CollectionStatus) -> bool:
+        # Called with ``_lock`` held. Delivery is proven by attempt ID
+        # equality, never by comparing completion times: mbsync writes
+        # the same attempt ID into the collection status file's
+        # last_success and the acknowledged stamp for one sync, but two
+        # different attempts can publish the same completed_at across a
+        # clock rollback (#1621 thread, 2026-10-13). A legacy stamp
+        # (``attempt_id`` ``None``) can never prove delivery of a later
+        # attempt, so it is never a match.
+        success = status.last_success
+        return (
+            success is not None
+            and self._acked is not None
+            and self._acked.attempt_id is not None
+            and success.attempt_id == self._acked.attempt_id
+        )
+
+    def _observe_collection(self, status: CollectionStatus | Unknown) -> None:
+        # Called with ``_lock`` held. Logs each change once: an unknown
+        # status (by its fixed reason), a readable one again, a newly seen
+        # failed attempt, and the recovery from it.
+        self._collection = status
+        if isinstance(status, Unknown):
+            if status.reason != self._logged_reason:
+                self._logged_reason = status.reason
+                log.warning(
+                    "mbsync collection status unavailable (reason=%s); get_mailbox_status "
+                    "reports the latest collection outcome as unknown",
+                    status.reason,
+                )
+            return
+        if self._logged_reason is not None:
+            self._logged_reason = None
+            log.info("mbsync collection status is readable again")
+        terminal = status.last_terminal
+        if terminal is not None and terminal.outcome == "failed":
+            self._unrecovered = terminal.attempt_id
+            if terminal.attempt_id != self._logged_failure:
+                self._logged_failure = terminal.attempt_id
+                withheld = terminal.withheld_far_side_folders
+                log.warning(
+                    "mbsync collection attempt failed (failure_class=%s, "
+                    "withheld_far_side_folders=%s); the index is not current until a later "
+                    "successful sync is delivered",
+                    terminal.failure_class,
+                    "unknown" if withheld is None else withheld,
+                )
+        elif self._unrecovered is not None and self._success_delivered(status):
+            self._unrecovered = None
+            log.info(
+                "mbsync collection recovered: a successful sync after the failed attempt "
+                "was delivered to the index"
+            )
+
+    def _collection_row(self) -> dict[str, object] | None:
+        # Called with ``_lock`` held: the account's row as last read, or
+        # None before the first read.
+        status = self._collection
+        if status is None:
+            return None
+        if isinstance(status, Unknown):
+            return {
+                "status": "unknown",
+                "unknown_reason": status.reason,
+                "unrecovered_failure_attempt_id": self._unrecovered,
+            }
+        terminal, success = status.last_terminal, status.last_success
+        return {
+            "status": "known",
+            "run_deadline_secs": status.run_deadline_secs,
+            "sync_interval_secs": status.sync_interval_secs,
+            "attempt_id": status.attempt_id,
+            "attempt_started_at": status.attempt_started_at,
+            "attempt_outcome": status.attempt_outcome,
+            "terminal_attempt_id": terminal.attempt_id if terminal else None,
+            "terminal_completed_at": terminal.completed_at if terminal else None,
+            "terminal_outcome": terminal.outcome if terminal else None,
+            "terminal_withheld_folders": terminal.withheld_far_side_folders if terminal else None,
+            "terminal_failure_class": terminal.failure_class if terminal else None,
+            "success_attempt_id": success.attempt_id if success else None,
+            "success_completed_at": success.completed_at if success else None,
+            "success_delivered": int(self._success_delivered(status)) if success else None,
+            "unrecovered_failure_attempt_id": self._unrecovered,
+        }
 
     def maybe_record(self, now: float) -> None:
         if self._last_write is not None and now - self._last_write < self.interval_secs:
             return
-        acked = self._acked
+        # The heartbeat's read of the collection status, then one snapshot
+        # of it and the acknowledged sync for the write.
+        self.read_collection()
+        with self._lock:
+            acked = self._acked
+            collection = self._collection_row()
         try:
             self.db.record_ingestion_state(
                 sync_completed_at=acked.completed_at if acked else None,
                 sync_interval_secs=acked.sync_interval_secs if acked else None,
                 seen_at=datetime.now(UTC).isoformat(),
+                collection=collection,
             )
         except sqlite3.Error as e:
             # Retried on every heartbeat until a write succeeds.
@@ -1125,49 +1271,107 @@ class MaildirHandler(FileSystemEventHandler):
                 self.sync_completed.set()
             return
 
-        if self.db.is_indexed(src_path):
-            # Case 1: rename of an existing indexed message. Flag renames
-            # stay in one folder; a move across folders also carries the
-            # new folder, recorded atomically with the locator. If that
-            # write fails it rolls back whole: the destination stays
-            # unindexed and the periodic Maildir walk re-indexes it.
-            dest_folder = _derive_folder(dest_path_obj, MAILDIR_PATH)
-            folder_change = (
-                dest_folder if dest_folder != _derive_folder(Path(src_path), MAILDIR_PATH) else None
+        # mbsync published its collection status (#1592): read the file as
+        # it is now (the newest publication), in order with the stamp's
+        # rename. It acknowledges nothing.
+        if dest_path_obj.name == COLLECTION_STATUS_NAME and dest_path_obj.parent == MAILDIR_PATH:
+            if self.ingestion_state is not None:
+                self.ingestion_state.read_collection()
+            return
+
+        occurrence = self.db.find_active_occurrence(src_path)
+        # Case 1: rename of an indexed file or of an occurrence (a copy
+        # the reconciliation scan bound without indexing it). An active
+        # occurrence's claimant is verified against the destination's
+        # bytes before it is trusted (#1612): a stale occurrence record
+        # must not carry a changed file forward as if it were the same
+        # message. A path indexed but with no active occurrence (a
+        # retired-vanished stray) has nothing to verify here —
+        # ``_move_occurrence`` checks that case itself, from
+        # ``indexed_files``. A verification failure takes Case 2 below,
+        # whatever ``is_indexed(src_path)`` says: the occurrence's
+        # claimant is what this rename event is about, and a stray
+        # indexed_files record alongside it does not make the mismatch
+        # less real.
+        verified_identity = None
+        stale_occurrence: sqlite3.Row | None = None
+        # Set only when ``verify_rename_bytes`` actually read the
+        # destination's bytes and proved they are not the source
+        # occurrence's claimant (#1612 round 14): a caller reading
+        # ``stale_occurrence`` alone cannot tell that proven case apart
+        # from an inconclusive one (an unreadable destination, or
+        # metadata that alone ruled out trusting it without reading
+        # anything), which must not be treated as a confirmed mismatch.
+        rename_mismatch = False
+        if occurrence is not None:
+            verification = verify_rename_bytes(
+                self.db, src_path, dest_path, occurrence["claimant_id"]
             )
+            verified_identity = verification.identity
+            take_case_1 = verified_identity is not None
+            if not take_case_1:
+                stale_occurrence = occurrence
+                rename_mismatch = verification.mismatch
+                warn_rate_limited(
+                    log,
+                    "on_moved: %d rename's destination bytes did not match the "
+                    "source occurrence's claimant; treating as new mail"
+                    if rename_mismatch
+                    else "on_moved: %d rename's destination bytes could not be verified "
+                    "against the source occurrence's claimant; treating as new mail",
+                    1,
+                    level=logging.WARNING,
+                    attachment=False,
+                )
+        else:
+            take_case_1 = self.db.is_indexed(src_path)
+        if take_case_1:
+            bound_claimant: str | None = None
             if self.reconciler is not None:
                 try:
-                    self.reconciler.handle_moved(src_path, dest_path, folder=folder_change)
+                    bound_claimant = self.reconciler.handle_moved(
+                        src_path, dest_path, verified_identity=verified_identity
+                    )
                 except Exception as e:
                     log.error("reconciler on_moved failed: %s", type(e).__name__)
+                    return
             else:
                 # Archive mode has no reconciler; still move the
-                # indexed_files / message_thread_map filepath forward so
-                # future lookups find the current on-disk name. A rename
-                # that drops the T flag restores the message, so clear a
-                # tombstone an earlier mirror-mode run left on it (same
-                # rule as ``Reconciler.handle_moved``) rather than carry
-                # it to the live name, where it would report the message
-                # as pending deletion for ever (#860). Archive mode never
-                # reaps, so a leftover tombstone otherwise outlives the
-                # restore. The lookup stays inside the error boundary:
-                # watchdog does not catch handler exceptions, and one
-                # escaping here would end the observer thread.
+                # indexed_files row and the occurrence forward so future
+                # lookups find the current on-disk name. A rename that
+                # drops the T flag restores the message, and the move
+                # clears a tombstone an earlier mirror-mode run left on
+                # it (same rule as ``Reconciler.handle_moved``), where it
+                # would otherwise report the message as pending deletion
+                # for ever (#860). Archive mode never reaps, so a
+                # leftover tombstone otherwise outlives the restore. The
+                # lookup stays inside the error boundary: watchdog does
+                # not catch handler exceptions, and one escaping here
+                # would end the observer thread.
                 restored = not is_trashed(dest_path_obj)
                 try:
                     leftover_tombstone = restored and self.db.has_pending_deletion(src_path)
-                    self.db.update_filepath(
+                    # An observed rename event: the occurrence follows (#1566).
+                    bound_claimant = self.db.update_filepath(
                         src_path,
                         dest_path,
-                        folder=folder_change,
-                        clear_tombstone=restored,
-                        # An observed rename event: the occurrence follows (#1566).
                         move_occurrence=True,
+                        verified_identity=verified_identity,
                     )
+                    if bound_claimant is None:
+                        # Nothing moved or bound (a stale indexed_files
+                        # record whose path was reused for different
+                        # bytes, or a verify race): dest_path may
+                        # already carry its own active occurrence from
+                        # elsewhere (a concurrent scan), the same
+                        # fallback ``Reconciler.handle_moved`` applies.
+                        entry = self.db.find_active_occurrence(dest_path)
+                        if entry is not None:
+                            bound_claimant = entry["claimant_id"]
                 except Exception as e:
                     log.error("update_filepath failed on rename: %s", type(e).__name__)
                     return
-                if leftover_tombstone:
+                if leftover_tombstone and bound_claimant is not None:
                     # One line per restore, within the indexer's shared
                     # per-window budget: a folder restored at once fires
                     # one event per message, and the rest are counted on
@@ -1179,15 +1383,59 @@ class MaildirHandler(FileSystemEventHandler):
                         level=logging.INFO,
                         attachment=False,
                     )
-            return
+            if bound_claimant is not None:
+                return
+            # _move_occurrence (via update_filepath / Reconciler.handle_
+            # moved) found nothing to bind or move: a retired path's
+            # stale indexed_files record was reused for different bytes,
+            # or a verify race left the rename uncarried (#1612 round
+            # 10 review). Nothing was actually moved, so dest_path is
+            # unindexed and must not wait for the periodic Maildir
+            # rescan — fall through to Case 2 below, the same as a path
+            # that was never ``take_case_1`` at all.
 
         # Case 2: new delivery — enqueue for the worker. A flag rename
         # of an already-reaped file also lands here (its source is no
         # longer indexed) and must not be mistaken for new mail.
+        trashed_destination = dest_path_obj.parent.name in (
+            "cur",
+            "new",
+        ) and self._is_reaped_or_deleted(dest_path)
+        if stale_occurrence is not None and rename_mismatch:
+            # Whatever this destination turns out to be (trashed, below,
+            # or a live new delivery), nothing else will ever revisit
+            # this rename: the periodic reconciliation scan only retires
+            # an occurrence whose uniq resolves to no file at all, never
+            # one whose uniq still resolves to *some* file, however
+            # mismatched (#1612 round 13). Gated on ``rename_mismatch``,
+            # not merely on ``not take_case_1`` (#1612 round 14): the
+            # watcher confirmed, by actually reading the destination's
+            # bytes, that they are not this occurrence's claimant — an
+            # inconclusive check (an unreadable destination, or metadata
+            # alone) proves nothing and is left for a later
+            # reconciliation pass instead, the same as any other
+            # unverified rename. On a confirmed mismatch, retire the
+            # stale occurrence now rather than leaving it active at a
+            # path that no longer exists — not only when the destination
+            # is also trashed (#1612 round 16): a verified mismatch to a
+            # readable, live destination is just as proven, and the
+            # occurrence would otherwise stay active and searchable
+            # indefinitely. ``mark_lost_messages`` tombstones the
+            # claimant only if this was its last live occurrence
+            # (``Reconciler.handle_moved``'s own rule for an ordinary
+            # trashed rename, #1612 round 14), so mirror retention is
+            # still respected: without this, the deletion grace period
+            # would not start until the next reconciliation sweep, up to
+            # an hour by default.
+            try:
+                if self.db.retire_mismatched_rename(stale_occurrence["id"], src_path):
+                    self.db.mark_lost_messages(stale_occurrence["claimant_id"])
+            except Exception as e:
+                log.error("retire_mismatched_rename failed: %s", type(e).__name__)
         if (
             dest_path_obj.parent.name in ("cur", "new")
-            and not self.db.is_indexed(dest_path)
-            and not self._is_reaped_or_deleted(dest_path)
+            and not self.db.is_indexed_and_fresh(dest_path)
+            and not trashed_destination
         ):
             self.queue.enqueue(dest_path, REASON_ON_MOVED)
 
@@ -1212,6 +1460,13 @@ SUMMARY_MAX_INTERVAL_SECS = 300.0
 OUTCOMES_LOG_MIN_INTERVAL_SECS = 60.0
 _last_outcomes_log: float | None = None
 _monotonic = time.monotonic
+
+# Content-backstop / unindexed-file hash cache for every ``sweep_paths``
+# call this process makes (#1612): archive mode has no ``Reconciler`` to
+# hold one (mirror mode's lives on ``Reconciler._hash_cache``), so this
+# module-level dict is the one it keeps across calls, keyed by path,
+# size, mtime and inode exactly as ``occurrence_scan`` keys it.
+_sweep_hash_cache: dict[tuple[str, int, int, int], str] = {}
 
 
 def _log_attachment_outcomes(*, force: bool = False) -> None:
@@ -2580,7 +2835,7 @@ def _drain_queue_batched(
         batch: list[_BatchedMsg] = []
         for row in rows:
             if skip_trashed and is_trashed(row["filepath"]):
-                if db.find_message_entry_by_filepath(row["filepath"]) is None:
+                if db.find_active_occurrence(row["filepath"]) is None:
                     queue.mark_skipped(row["filepath"], reason="trashed")
                 else:
                     queue.defer(
@@ -3152,15 +3407,21 @@ def _enqueue_unindexed_messages(
     backstop for any file whose event was missed (a restart, event
     coalescing, a delivery while the observer was not running).
 
-    Skips files that are already indexed, dead-lettered, or already
-    queued. ``enqueue`` is ``INSERT OR REPLACE``, so re-enqueueing a
-    queued row would reset an in-flight retry cascade to zero attempts
-    — repeated walks could then retry a failing file forever without
-    it ever reaching the dead-letter state. Dead rows are left for the
-    operator: the walk only proves the file exists on disk, not that
-    anything about it changed since the last failure. (Watchdog
-    ``on_created`` / ``on_moved`` events still go through ``enqueue``
-    and DO reset prior state, because those signal a real change.)
+    Skips files that are already indexed AND fresh (``is_indexed_and_
+    fresh``: the ``indexed_files`` record's size and mtime still match,
+    #1612), dead-lettered, or already queued. A stale record — the
+    file's bytes changed without an observed rename — falls through
+    these same gates rather than being silently skipped forever: dead
+    or already-queued still hold it back (below), but it is otherwise
+    treated like any newly-discovered file. ``enqueue`` is ``INSERT OR
+    REPLACE``, so re-enqueueing a queued row would reset an in-flight
+    retry cascade to zero attempts — repeated walks could then retry a
+    failing file forever without it ever reaching the dead-letter
+    state. Dead rows are left for the operator: the walk only proves
+    the file exists on disk, not that anything about it changed since
+    the last failure. (Watchdog ``on_created`` / ``on_moved`` events
+    still go through ``enqueue`` and DO reset prior state, because
+    those signal a real change.)
 
     ``skip_trashed`` must be True whenever deletion reconciliation is
     enabled. A T-flagged file is then deleted upstream: after the
@@ -3193,7 +3454,7 @@ def _enqueue_unindexed_messages(
     for filepath in _iter_maildir_messages(root):
         seen += 1
         path_str = str(filepath)
-        if db.is_indexed(path_str):
+        if db.is_indexed_and_fresh(path_str):
             continue
         if skip_trashed and is_trashed(filepath):
             continue
@@ -3263,7 +3524,7 @@ def _refresh_folder_watches(
     folder_watches.refresh()
     if not folder_watches.recovery_pending:
         return False
-    sweep_paths(db, maildir_root=MAILDIR_PATH)
+    sweep_paths(db, maildir_root=MAILDIR_PATH, hash_cache=_sweep_hash_cache)
     _enqueue_unindexed_messages(db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed)
     folder_watches.recovery_pending = False
     return True
@@ -3659,12 +3920,17 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> bool
                 brake = "ok"
             log.info(
                 "maintenance pass=reconcile ms=%d tombstoned=%d cleared=%d renamed=%d "
-                "missing=%d threads_reaped=%d threads_rebuilt=%d blocked_threads=%d brake=%s",
+                "retired=%d bound=%d stale=%d backstop_deferred=%d scan=%s threads_reaped=%d "
+                "threads_rebuilt=%d blocked_threads=%d brake=%s",
                 (_monotonic() - started) * 1000,
                 swept.get("tombstoned", 0),
                 swept.get("cleared", 0),
                 swept.get("renamed", 0),
-                swept.get("missing", 0),
+                swept.get("retired", 0),
+                swept.get("bound", 0),
+                swept.get("stale", 0),
+                swept.get("backstop_deferred", 0),
+                "complete" if swept.get("complete", True) else "partial",
                 reaped.get("threads_reaped", 0),
                 reaped.get("threads_rebuilt", 0),
                 reaped.get("blocked_threads", 0),
@@ -3696,7 +3962,7 @@ def _run_periodic_rescan(
     which the walk skips because the copy is already marked indexed. In
     archive mode nothing else revisits that while the indexer runs."""
     try:
-        sweep_paths(db, maildir_root=MAILDIR_PATH)
+        sweep_paths(db, maildir_root=MAILDIR_PATH, hash_cache=_sweep_hash_cache)
     except Exception as e:
         # The walk below still runs: it finds missed new mail in every
         # readable folder, whatever stopped the sweep.
@@ -3850,6 +4116,9 @@ def main():
     global _ingestion_state
     ingestion_state = _IngestionStateRecorder(db, MAILDIR_PATH)
     _ingestion_state = ingestion_state
+    # mbsync's collection status as it is at startup (#1592); a rebuilt
+    # index recovers it from the file at the first write.
+    ingestion_state.read_collection()
     sync_completed = threading.Event()
     directory_created = threading.Event()
     handler = MaildirHandler(
@@ -3885,8 +4154,16 @@ def main():
     # initial walk so a renamed file's new path is already recorded as
     # indexed: otherwise the walk reprocesses every file renamed while
     # the indexer was down as new mail.
+    #
+    # In mirror mode, Reconciler.sweep() runs its own scan_occurrences
+    # moments later (below); sharing its _hash_cache here instead of the
+    # module-level one avoids re-hashing the same held paths twice under
+    # the backstop's per-pass budget (#1612 round 15). Archive mode has
+    # no reconciler, so it keeps the module-level cache across all three
+    # sweep_paths call sites.
+    sweep_hash_cache = reconciler._hash_cache if reconciler is not None else _sweep_hash_cache
     try:
-        sweep_paths(db, maildir_root=MAILDIR_PATH)
+        sweep_paths(db, maildir_root=MAILDIR_PATH, hash_cache=sweep_hash_cache)
     except Exception as e:
         log.error("startup rename sweep failed: %s", type(e).__name__)
 

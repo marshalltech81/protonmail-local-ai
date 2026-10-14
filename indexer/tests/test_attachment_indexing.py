@@ -34,6 +34,7 @@ from src.parser import Attachment
 
 from tests.conftest import (
     TEST_ACCOUNT,
+    lose_message,
     make_message,
     make_mock_embedder,
     make_ole2,
@@ -1343,7 +1344,7 @@ def test_payload_re_arriving_after_its_last_carrier_was_reaped_is_re_extracted(
     _prepare_and_apply(claimant_id="first@x", **kwargs)
     assert db.get_attachment_extraction(attachment.content_hash, _module(attachment)) is not None
 
-    db.add_pending_deletion("/m/first", "first@x", "t-rearrive")
+    lose_message(db, "first@x")
     db.reap_thread_messages(
         make_thread(messages=[keep], thread_id="t-rearrive"), [0.0] * EMBEDDING_DIM, ["first@x"]
     )

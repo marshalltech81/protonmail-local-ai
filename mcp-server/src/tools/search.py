@@ -359,7 +359,8 @@ def register_search_tools(
                              "vendor", "government", "personal",
                              "other", or "unclassified" (no rule
                              matched). A filter only; it never changes
-                             ranking. Spam-folder messages never count.
+                             ranking. Spam and Recovered Messages
+                             copies never count.
                              find_contact shows a sender's class.
 
         Returns:

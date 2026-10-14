@@ -1729,6 +1729,7 @@ class GeneratedCollectorFixture(unittest.TestCase):
         account = checked(fixture())["accounts"][0]
         expected = {
             "SOURCE_MODE": "proton-bridge",
+            "ACCOUNT_SCOPE": "00000000-0000-4000-8000-000000000001",
             "BRIDGE_USER": "synthetic@example.com",
             "BRIDGE_IMAP_PORT": "1143",
             "BRIDGE_CERT_FINGERPRINT": "a" * 64,

@@ -1069,7 +1069,7 @@ _EMBEDDER = (
 # fmt: off
 MAPPING: tuple[Setting, ...] = (
     Setting("SOURCE_MODE", "account", "accounts[].provider", "mbsync, indexer, mcp-server", "recreate all three; recorded in the index with the UUID"),
-    Setting("ACCOUNT_SCOPE", "account", "accounts[].scope_uuid", "indexer, mcp-server", "never changed: a different UUID is a different account (#1596)"),
+    Setting("ACCOUNT_SCOPE", "account", "accounts[].scope_uuid", "mbsync, indexer, mcp-server", "never changed: a different UUID is a different account (#1596)"),
     Setting("BRIDGE_USER", "account", "accounts[].connection.username", "mbsync (mbsyncrc User)", _RECREATE_MBSYNC),
     Setting("BRIDGE_IMAP_PORT", "account", "accounts[].connection.port", "mbsync (Tunnel, probes)", _RECREATE_MBSYNC, "proton-settings.sh"),
     Setting("BRIDGE_CERT_FINGERPRINT", "account", "accounts[].proton_bridge.certificate_fingerprint", "mbsync (certificate check)", _RECREATE_MBSYNC, "64 hex digits"),
@@ -1431,12 +1431,13 @@ class Collector:
 
 def collector_env(account: dict[str, Any]) -> dict[str, str]:
     """The environment of an account's collector: today's mbsync settings,
-    from that account only. Pin rotation is a one-run command, not
-    configuration (#1609)."""
+    from that account only, including the account's own scope UUID, which
+    the collector checks and writes into its collection status (#1592).
+    Pin rotation is a one-run command, not configuration (#1609)."""
     return {
         s.env: _format(_lookup({}, s.toml, account))
         for s in MAPPING
-        if s.kind == "account" and s.toml is not None and s.env != "ACCOUNT_SCOPE"
+        if s.kind == "account" and s.toml is not None
     }
 
 

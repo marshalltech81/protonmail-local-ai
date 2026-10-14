@@ -54,6 +54,11 @@ mbsync container
     `<folder>` or `<path>` in its place (#570), matched under the
     configured channel and store names; a channel line it cannot match
     is cut whole (#1498)
+  - Before and after every sync attempt, publishes its collection status
+    (`.mbsync-collection-status.json`) at the Maildir root: the latest
+    attempt, the last terminal outcome with its withheld far-side folder
+    count and failure class, and the last success, as counts and fixed
+    tokens (#1592; see [Collection status](#collection-status))
   - Healthcheck is liveness only: healthy while the sync loop is alive
     (a heartbeat touched around every attempt is fresh, or an mbsync or
     its permission repair walk is running, up to that run's deadline),
@@ -72,7 +77,8 @@ indexer container
   - Groups messages into threads via In-Reply-To / References headers
   - Calls EMBED_BASE_URL for vector embeddings
   - Writes to SQLite (FTS5 keyword index + sqlite-vec vector index)
-  - Records mbsync's last sync and its own liveness in `ingestion_state`
+  - Records mbsync's last sync and its own liveness in `ingestion_state`,
+    and mbsync's latest collection outcome in `account_collection_state`
         │                              │
         │  embed API                   │  writes
         ▼                              ▼
@@ -84,7 +90,8 @@ embedder (operator-supplied)  sqlite-volume
     by current schema            - attachments + attachments_fts,
                                    attachment_extractions
                                  - indexed_files, indexing_jobs,
-                                   ingestion_state
+                                   ingestion_state,
+                                   account_collection_state
                                  - pending_deletions, reaped_messages
                                    (reconciler)
                                  - entities, entity_aliases
@@ -145,7 +152,7 @@ MCP client (host machine; Claude Desktop via the repo's stdio adapter)
 | Volume | Contents | Back up? |
 |---|---|---|
 | `maildir-volume` | Raw email in Maildir format | Optional for mail still in Proton, which mbsync can re-sync. Mail and folders deleted in Proton are kept only here (`Expunge None`), so back it up if you rely on them, as archive mode does |
-| `mbsync-state` | mbsync's pinned Bridge certificate fingerprint | No — re-pinned from `BRIDGE_CERT_FINGERPRINT` |
+| `mbsync-state` | mbsync's pinned Bridge certificate fingerprint and durable success-generation counter (*Index currency*) | No — the fingerprint is re-pinned from `BRIDGE_CERT_FINGERPRINT`, and the generation counter self-seeds forward from the retained stamp in `maildir-volume` on next use |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
 
 ### Maildir layout
@@ -234,9 +241,10 @@ No container is reachable from outside the machine.
 ## Health and Readiness Signals
 
 "Bridge is healthy" does not mean "mail is syncing". The path from
-Proton to a searchable index passes through six states, each reported
+Proton to a searchable index passes through seven states, each reported
 by a different signal, and each later state depends on the earlier
-ones (#274):
+ones (#274). The last row, Bridge's own currency with Proton, is not
+observed at all (#1317, #1592):
 
 | State | Meaning | Reported by | Not proven by it |
 | --- | --- | --- | --- |
@@ -245,7 +253,9 @@ ones (#274):
 | Bridge authenticated | An account is logged in to Bridge and accepts mbsync's `LOGIN` | No dedicated signal. Bridge listens, completes TLS and greets with no account logged in. The first proof is a successful sync; a rejected login is a failed sync in mbsync's log | — |
 | mbsync syncing | mbsync's sync loop is alive | mbsync container health (liveness: a heartbeat touched around every attempt, or a sync or its permission repair running, up to the run's deadline) | That any sync succeeded: the loop is healthy between failed attempts until five consecutive failures exit it and Docker restarts it |
 | Last successful sync | mbsync completed a sync | The success stamp `.mbsync-last-sync.json` at the Maildir root, written by mbsync. `get_mailbox_status` cannot read Maildir; its `last_sync_at` (and the reason `no successful mail sync has been recorded` or `last successful mail sync was ... ago`) is the last sync the indexer has acknowledged, after queuing that sync's mail, so it can lag the stamp | The stamp alone: that the indexer has read it. `last_sync_at`: that the queued mail is indexed yet |
-| Index current | The indexer has acknowledged a recent sync, has reported within the last 10 minutes, and has no pending, retrying, deferred or extraction-deferred jobs (parked trashed files do not count) | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
+| Latest collection outcome | How mbsync's latest attempt to collect from the Bridge app ended: succeeded, succeeded with far-side folders it could not open (a count), or failed (a class) | mbsync's collection status file, recorded by the indexer and reported as `get_mailbox_status` `collection` (see [Collection status](#collection-status)) | Which folders were withheld (names are never recorded). That mbsync is running: an attempt `in_progress` only says it started and nothing ended it. Anything about Bridge's own state |
+| Index current | The indexer has acknowledged a recent sync, has reported within the last 10 minutes, has no pending, retrying, deferred or extraction-deferred jobs (parked trashed files do not count), and no failed collection waits for a later success delivered to it | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
+| Upstream currency | Bridge has synchronized with Proton and serves current, complete content | Nothing: `get_mailbox_status` `upstream_currency` is always `unknown`. Bridge exposes no supported signal for it, and mail Bridge never delivers or delivers degraded is invisible here (#1317) | — |
 
 mbsync's own startup checks TLS and the pin with an error that names
 the cause, and its sync results and stamp report the rest. No
@@ -502,7 +512,9 @@ each refuse a missing or malformed value, and `SOURCE_MODE` under the
 rule of `mbsync/proton-settings.sh`, with fixed text naming the setting
 and the fix, never the value. Compose passes `${ACCOUNT_SCOPE}` bare, as
 a required setting (`indexer/src/account.py`,
-`mcp-server/src/lib/account.py`).
+`mcp-server/src/lib/account.py`). mbsync gets it too and refuses a
+missing or malformed value the same way: it names the account in its
+collection status (#1592; see *Collection status*).
 
 A fresh index inserts the row in its initial-schema transaction. An
 existing index binds it in the v14 migration: the indexer registers
@@ -958,13 +970,15 @@ per-message record.
 `Message` and reads nothing from disk; `parse_email(path)`, the Maildir
 adapter, reads the file under the size cap and builds the
 `SourceMetadata` it hands over: the folder, the Maildir flags, the
-file's size and mtime, and its path, which only names the message in
-log lines and the `filepath` record. Everything below the parser
+file's size and mtime, and its path, which names the message in log
+lines and the `indexed_files` record and locates its occurrence.
+Everything below the parser
 (threading, chunking, extraction, the database writer) sees the
 `Message`, so another source (an mbox import, say) would plug in at
 `parse_email_bytes` with its own adapter. Read state is the exception:
-the writer still takes it from the Maildir flags in `filepath`
-(`maildir.message_state`), and `SourceMetadata.flags` is not read yet.
+the writer takes it from the Maildir flags in the file's path
+(`maildir.message_state`) onto its occurrence, and
+`SourceMetadata.flags` is not read yet.
 
 **Claimant IDs.** A Message-ID is set by the sender, so two different
 files can claim the same one, by accident or to overwrite another
@@ -1013,16 +1027,16 @@ Each indexed message gets one row — its own
 subject (cut to `SUBJECT_MAX_CHARS`, 2,000 decoded characters, at parse
 time, #541), `sent_at` (`Date:` header, NULL when it is missing or
 unparseable) with `sent_at_status`, `occurred_at` (the top `Received:`
-header's date, or NULL), `first_indexed_at` (see Message time), folder,
+header's date, or NULL), `first_indexed_at` (see Message time),
 `in_reply_to` /
-references, attachment flag, read state, and its source: `filepath` (the Maildir
-locator, kept current across flag renames; when a rename crosses
-folders the new `folder` is written in the same transaction, so a failed
-update rolls back whole and the Maildir walk re-indexes the file) plus
-`size_bytes` and
-`content_hash` (SHA-256 of the raw `.eml`). The MCP server returns
-these as `source_file` on every message, evidence chunk, and attachment
-result (see `docs/mcp-tools.md`). `message_participants`
+references, attachment flag, and its bytes' `size_bytes` and
+`content_hash` (SHA-256 of the raw `.eml`). Its folders, file locators
+and read state are its copies' (see *Mailbox occurrences*; v17 dropped
+the row's own `filepath`, `folder`, `seen`, `flagged` and `replied` and
+`message_thread_map.filepath`, #1568). The MCP server returns the
+representative copy's locator with the hash and size as `source_file`
+on every message, evidence chunk, and attachment result (see
+`docs/mcp-tools.md`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.
@@ -1207,21 +1221,22 @@ decodes to nothing is kept as sent too, so the part stays an
 attachment. Filenames stored before this are corrected only when their
 message is re-indexed.
 
-**Read state.** `seen`, `flagged` and `replied` are the `S`, `F` and
-`R` flags in `filepath`'s `:2,<flags>` suffix (`maildir.message_state`,
-built on the same `parse_flags` as the `T` trash check; other letters
-are ignored, and a file without the suffix is unread). mbsync is
-pull-only, but it mirrors a read, star or reply made in Proton by
-renaming the file (`:2,` → `:2,S`, and `new/` → `cur/`), so the flags
-are written wherever `filepath` is: by `upsert_thread` from the parsed
-file's path, and by `update_filepath` in the same `UPDATE` as the new
-locator. Every rename path — the watchdog's `on_moved`, the
-reconciler's `handle_moved` and sweep, and the startup `sweep_paths`
-that heals renames made while the indexer was down — goes through
-`update_filepath`, so a state change is one row update with no reparse
-or re-embed, and the state cannot disagree with the stored path.
+**Read state.** Each occurrence's `seen`, `flagged`, `replied` and
+`trashed` are the `S`, `F`, `R` and `T` flags in its file's `:2,<flags>`
+suffix (`maildir.message_state`, built on the same `parse_flags` as the
+`T` trash check; other letters are ignored, and a file without the
+suffix is unread). mbsync is pull-only, but it mirrors a read, star or
+reply made in Proton by renaming the file (`:2,` → `:2,S`, and `new/` →
+`cur/`), so the flags are written wherever the occurrence's path is: by
+the ingest binding from the parsed file's path, and by an observed or
+verified rename in the same `UPDATE` as the new locator (see *Mailbox
+occurrences*), so a state change is one row update with no reparse or
+re-embed, and the state cannot disagree with the stored path.
 Thread-level questions (`list_threads(filter_type="unread")`) are
-answered from these rows at query time; nothing per-thread is stored.
+answered from these rows at query time, per copy; nothing per-thread is
+stored. `threads.folder` stays the folder the thread's first message
+was filed in when it was first indexed: a representative label, not
+membership.
 An index on `(address, role)` makes "every message from / to X" an
 exact indexed lookup — the basis for exhaustive enumeration, as
 opposed to relevance search. The MCP server's `query_messages`
@@ -1251,7 +1266,10 @@ the attachment, read, flagged and replied flags, the size bounds,
 `authority_class`) is a leaf of one
 predicate module, `mcp-server/src/lib/predicates.py` (#1084): each
 leaf has a name, a value shape, one SQL compiler over a `messages` row
-and an evaluability rule, and adapters build the leaf list for
+or, for the folder, flag, default-scope and Spam terms, over one
+occurrence (all of a query's occurrence terms are conjoined in a single
+`EXISTS`, so they hold on the same copy, #1568), and an evaluability
+rule, and adapters build the leaf list for
 `query_messages` (conjoined on one message, with the keyset cursor
 bound to a digest of the list), for the evidence-scope labels (the
 same, as a label per message) and for `search_emails`' thread filters
@@ -1264,8 +1282,8 @@ predicates", lists the leaves.
 Each Maildir copy of a message is its own occurrence
 (`message_occurrences`, #1566, PLAN.md decision 47), so two
 byte-identical files in different folders keep their own folder, flags
-and observation times instead of sharing the one path, folder and flag
-state the `messages` row holds. An active occurrence is keyed by the
+and observation times; since v17 the `messages` row holds none of them
+(#1568). An active occurrence is keyed by the
 account (`accounts`, see *Account registry*), its folder relative to the
 account, the file's Maildir uniq (the name before `:2,`, which flag
 renames and `new`/`cur` moves keep; `maildir.get_uniq`) and the claimant
@@ -1289,26 +1307,73 @@ to. Relocating the root alone keeps every occurrence.
   `new`/`cur` move keeps it (path, flags and last observation updated);
   a move to another folder, or any change of uniq, retires it and
   creates the destination's for the same claimant, so the move is
-  atomic. Nothing else moves or retires an occurrence: a sweep that
-  finds a renamed file by its uniq alone has not seen its bytes, a remap
-  to a byte-identical copy (#1102) moves to a file with its own, and a
-  file that vanished is absence a sweep cannot establish (decision 47).
-  Those are missed moves and removals, so an active row can name a path
-  that no longer holds its file until completeness-gated reconciliation
-  (#1567) finds them.
+  atomic. A renamed file that no occurrence held but whose
+  `indexed_files` record carries an indexed message's hash binds the
+  destination to that message, once the destination's size, mtime
+  *and* hashed bytes all match the record (#1141, #1612): size and
+  mtime agreement alone is not proof — mbsync sets mtime from IMAP's
+  INTERNALDATE, so two different messages can legitimately share one.
+  The destination's identity (size, mtime, inode) is captured before
+  the hash and rechecked immediately before the bind (#1612 round 15,
+  the same TOCTOU pattern `move_verified_occurrence` and
+  `bind_found_copy` already use for their own writes): a replacement in
+  the narrow window between a successful hash and the bind is not
+  carried forward either.
+- **Missed renames, found copies, vanished files.** The reconciliation
+  scan (*Occurrence reconciliation* under *Deletion Reconciliation*,
+  #1567) follows a rename the watcher missed once the file's bytes are
+  verified, binds a byte-identical copy no occurrence held (provenance
+  `scan`), and retires an occurrence whose file a complete scan did not
+  find; a partial scan retires nothing. A same-uniq candidate whose
+  bytes are read and *proven* not to be the occurrence's (not merely
+  unreadable or unresolved) retires it directly too (#1612 round 15):
+  the uniq still resolving to some file would otherwise make the
+  vanished-file retirement refuse, leaving the wrong claimant active
+  and searchable indefinitely.
 - **Columns.** `state` (`active` / `retired`) with `retired_at` as the
   retirement mark; a retired row keeps its locator for diagnostics.
   `provenance` records how the row was created (`parse`, an observed
-  `rename`, or the v14 `migration` seed); `first_observed_at` /
+  `rename`, a reconciliation `scan` that verified a found copy's bytes,
+  or the `migration` seed: v14's, and v17's retired row for a message
+  the v14 seed could not bind); `first_observed_at` /
   `last_observed_at` when the indexer saw the file (NULL on a seeded row
   until a parse sees it, so no observation is invented); `internal_at`
   stays NULL, unknown, until #1081 writes it. Rows go with their message
   (`ON DELETE CASCADE`).
 
-Dormant in this release: nothing reads the table. The reconciler, the
-reaper and the MCP tools still read `messages.folder`, `filepath`, the
-flags and `message_thread_map.filepath`, which ingest keeps writing as
-before. #1567, #1568 and #1569 move the readers and drop those columns.
+The reconciler and the reaper read occurrences (#1567): a message is
+live while it has an active occurrence that is not `T`-flagged, and its
+tombstones in `pending_deletions` are keyed by occurrence (see *Deletion
+Reconciliation*). Every message keeps at least one occurrence: v17 gave
+a message the v14 seed could not bind a retired one at its stored path,
+since no file was verified to hold its bytes. A message is re-read (a
+re-extraction sweep, a reap's survivor) from an active occurrence, a
+live one first; a startup sweep queues a message with none at its latest
+retired occurrence's path, its last known one, where the job waits for
+a rename like any missing indexed file. A reap unmarks a retired
+occurrence's path only while `indexed_files` records the message's own
+bytes there, since a freed path can hold another message's file.
+
+The MCP server reads occurrences for every folder, flag and locator
+(#1568): filters match within one active occurrence; the default scope
+(`mcp-server/src/lib/sources.py` `default_scope_sql`) is an active
+occurrence outside the account provider's Trash role, counting only the
+message's live occurrences when it has one; and a message's single
+folder, flags and `source_file` locator are its representative
+occurrence's (active first, then not `T`-flagged, then outside Trash,
+then the oldest). Folder roles (Trash, Spam, Recovered Messages) and
+each occurrence's source category are dispatched by the occurrence's
+account provider (`PROVIDER_POLICIES`). The category (`mailbox`,
+`unsent`, `recovered`, or `unknown` for a folder or provider the policy
+does not name) is derived from the folder at read time and never
+stored, so a policy change needs no migration (#1569, decided in
+#1317): Drafts and Scheduled are unsent evidence whose folder does not
+certify that they are still unsent, and Recovered Messages are
+searchable but untrusted, never counting toward an `authority_class`.
+Folder membership records where mbsync last filed a copy, not its
+current state upstream. Each occurrence is returned with its account,
+category and provenance (`provenance`, `first_observed_at`,
+`last_observed_at`).
 
 ### Top-level header evidence
 
@@ -1762,9 +1827,12 @@ index does not authenticate senders, so spoofed mail claiming an
 address or domain from a classified rule is classified too (see #463).
 Treat the class as a description of who the message says it is from,
 not proof. One guard applies: Proton files most spoofed and
-DMARC-failing mail in Spam, so a message in the `Spam` folder never
-counts toward an `authority_class` filter (`AUTHORITY_EXCLUDED_FOLDERS`
-in `mcp-server/src/lib/predicates.py`). Spoofed mail Proton leaves in the
+DMARC-failing mail in Spam, and Bridge-local recovery mail keeps the
+headers its client wrote (#1317), so a copy in the `Spam` or `Recovered
+Messages` folder never counts toward an `authority_class` filter (the
+provider's roles, `authority_excluded_sql` in
+`mcp-server/src/lib/sources.py`; `AUTHORITY_EXCLUDED_FOLDERS` in
+`predicates.py` names them for prose, #1569). Spoofed mail Proton leaves in the
 inbox still matches; gating on DKIM/DMARC verdict headers is deferred
 until Bridge's headers have been checked on real mail (#463).
 
@@ -1777,8 +1845,8 @@ is unsafe, NULL when not yet assessed (rows from before schema v2,
 until the reparse reaches them). Only 0 qualifies for authority
 (`_compile_authority_class`, `mcp-server/src/lib/predicates.py`): 1
 and NULL are "can't tell", an unknown leaf that `query_messages`
-counts as `indeterminate` outside Spam (#1161; Spam stays a decided
-miss), so the `authority_class` filters are empty straight
+counts as `indeterminate` outside those folders (#1161; a message only
+in them stays a decided miss), so the `authority_class` filters are empty straight
 after the v2 upgrade and fill in as the reparse drains, and a message
 whose job is dead-lettered stays out of them until `make requeue-dead`.
 The `from` participant rows are kept, so sender filters and
@@ -1809,9 +1877,9 @@ sender-supplied domain is unclassified without any lookup.
 
 Authority is metadata, never a ranking weight. The MCP server exposes it
 as an `authority_class` filter on `search_emails`, `query_messages`
-and `aggregate_messages` (a message outside Spam matches when one of
-its From senders carries the class; a thread when one of its non-Spam
-messages does), as an `aggregate_messages` grouping dimension with the
+and `aggregate_messages` (a message with a copy outside Spam and
+Recovered Messages matches when one of its From senders carries the
+class; a thread when one of its messages with such a copy does), as an `aggregate_messages` grouping dimension with the
 same rule, and on `find_contact` results, which stay per contact and
 ignore folders.
 Filtering removes results without reordering or rescoring the rest.
@@ -3315,7 +3383,10 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 18 | `0018_account_collection_state.sql` | `account_collection_state` (#1592; see *Collection status*): mbsync's latest collection outcome per account, empty until the indexer first reads mbsync's collection status file. Nothing the parser produces is added, so no reparse is queued. |
+| 17 | `0017_occurrence_readers.sql` | The readers move to the occurrences (#1567, #1568, #1569). `message_occurrences` is rebuilt, rows and ids unchanged, to accept the `scan` provenance; a message the v14 seed could not bind gets a retired occurrence at its stored path (a WARNING counts them), so every message keeps one; `pending_deletions` is keyed by occurrence, each message's old tombstones carried over as one row with their latest mark, which the next sweep clears for a message that is still live; `messages.content_hash` is indexed; `messages.filepath`, `folder`, `seen`, `flagged` and `replied` and `message_thread_map.filepath` are dropped (each drop rewrites its table once). Nothing the parser produces is added, so no reparse is queued; claimant, chunk and thread IDs and vectors are unchanged. On a synthetic 36,500-message index (14,600 threads, 160 MB) the startup open including the migration took 0.4–0.5 s (three runs, Apple M5 Max). |
 | 16 | `0016_selected_clock_indexes.sql` | Partial send/delivery clock and claimant-ID indexes for definite-match listing pages (#1123). No columns, evidence rows, reparses or embeddings change. |
+| 15 | `0015_attachment_inventory_current.sql` | `messages.attachment_rows_current` (#1338; see the attachment-inventory discussion below): NULL until reparsed, then 1 when extraction is enabled or 0 when disabled, set by phase 2c in the same transaction as the occurrence writes. The migration queues the standard reparse, keeping unchanged chunks and vectors. |
 | 14 | `0014_account_occurrences.sql` | `accounts` (#1596; see *Account registry*): the configured `ACCOUNT_SCOPE` and `SOURCE_MODE` provider, bound in the migration's own transaction through connection-local functions; update and delete triggers. `message_occurrences` (#1566; see *Mailbox occurrences*), seeded with one occurrence per message whose `indexed_files` record carries its content hash, relative to the configured `MAILDIR_PATH`; a stored path outside that root fails the migration closed with fixed text, and a message whose path holds other bytes gets none (a WARNING counts them). The migration ends with the shared reparse statement: the reparse observes each seeded occurrence and binds the files the seed cannot see (an unmapped byte-identical copy), with no embedding call; dead-lettered jobs stay dead. Claimant, chunk and thread IDs and vectors are unchanged. |
 | 13 | `0013_message_headers.sql` | Bounded ordered `message_headers` and nullable `messages.headers_complete` (#1079); existing rows start unknown and a queued reparse fills them. |
 | 12 | `0012_extraction_identifier.sql` | `attachment_extractions.identifier` (#1416; see the `attachment_extractions` row above and *Extractor dispatch*): how the payload's container was certified, `container@<n>` or `none@<n>`, NULL (unknown) on every row cached before it. The bytes are not in the database, so the migration ends with the shared reparse statement (see *Reparse in place*): every occurrence passes through the lookup once, which records `none@<n>` on a row whose payload has neither signature and identifies and re-extracts the rest. Unchanged chunks keep their IDs and vectors; text a re-identified container now yields is new chunks, sent to the configured embedder, so the upgrade embeds the newly readable Office attachments once. A container sent under a `message/*` label is kept as sent from this release, so its occurrence gets a new attachment ID on the reparse: the old occurrence, FTS row, chunks and vectors are removed and the new one is extracted and embedded. The startup sweep's identification arm queues the same rows and clears their occurrences' `text_complete` first, so a message whose extraction continuation the reparse leaves queued refreshes them too. |
@@ -3339,6 +3410,14 @@ Instead, mbsync renames the file to add the IMAP `\Deleted` (Maildir `T`)
 flag. Without reconciliation, the local SQLite index keeps those messages
 forever.
 
+Each Maildir copy of a message is its own occurrence (see *Mailbox
+occurrences*). A message is **live** while it has a live occurrence: an
+active one that is not `T`-flagged. A `T`-flagged copy never counts as
+live, whatever folder it is in, and a Trash copy that is not `T`-flagged
+does (PLAN.md decision 47, #1567). Losing the last live occurrence is
+claimant-wide: it counts every occurrence of the message, in every
+account.
+
 The indexer runs a reconciler that handles this in two phases. It is on
 by default (mirror mode: upstream deletions leave the local index);
 `INDEXER_DELETION_ENABLED=false` turns it off (archive mode: the index is
@@ -3346,35 +3425,50 @@ append-only and keeps deleted mail). An unrecognized value fails indexer
 startup rather than picking a mode.
 
 1. **Tombstone** — a sweep at startup and every
-   `INDEXER_DELETION_SWEEP_INTERVAL_SECS` (default 1 h), plus a live
-   `on_moved` watchdog handler, record each `T`-flagged indexed file in a
-   `pending_deletions` table, unless a live byte-identical copy remains
-   (see *Byte-identical copies*). No primary
-   data is mutated at tombstone time, so the soft-delete is fully reversible
-   if mbsync un-flags the file on a later pull. A tombstone is recorded
-   only for the path `message_thread_map` currently holds for the
-   message, so a sweep that resolved a path before the watcher restored
-   or moved the file cannot leave a stale tombstone for the reaper.
-2. **Reap** — after a configurable grace window
-   (`INDEXER_DELETION_GRACE_DAYS`, default 7 days) the reaper first checks
-   the file each tombstoned message maps to now: if it exists and is not
-   trashed, the tombstone is stale (the file moved away and back during a
-   sweep) and is cleared instead of reaped. This check runs before the
-   mass-delete brake below counts the batch, so stale tombstones cannot
-   hold the brake shut. Otherwise it removes the
-   reaped message's rows from `message_thread_map` / `indexed_files` and
-   any indexing job still queued for its file (in the same transaction,
-   which first re-checks that every message it removes is still
-   tombstoned past the grace window, so a restore — or a restore and a
-   fresh tombstone — after the reaper read its tombstones is left for a
-   later pass), and
-   either rebuilds the parent thread from the surviving messages on disk
-   (re-parsed; the thread vector is the survivors' chunk mean, derived
-   from the stored sums with no re-embedding, #1356) or deletes the
-   thread entirely when nothing remains. Only when no chunk survives does
+   `INDEXER_DELETION_SWEEP_INTERVAL_SECS` (default 1 h) first reconciles
+   the occurrences with the Maildir (*Occurrence reconciliation* below),
+   then records a tombstone in `pending_deletions`, keyed by occurrence,
+   for each occurrence of every message with no live occurrence left,
+   and removes the tombstones of every message that has one again. The
+   live `on_moved` watchdog handler does the same for the message whose
+   file it saw renamed: a rename that adds `T` to its last live copy
+   tombstones it at once, and a rename that drops `T` (a restore)
+   removes its tombstones in the same write. Tombstones exist only while
+   a message has no live occurrence, and a sweep keeps the marks a
+   message already has, so the earliest mark is when the loss was first
+   seen. No primary data is mutated at tombstone time, so the soft-delete
+   is fully reversible if mbsync un-flags the file on a later pull.
+2. **Reap** — once a message's earliest tombstone is older than the grace
+   window (`INDEXER_DELETION_GRACE_DAYS`, default 7 days) and it still has
+   no live occurrence, the reaper removes its rows from
+   `message_thread_map` (its `messages` row, occurrences and tombstones
+   go by cascade), unmarks every path holding its bytes in
+   `indexed_files` (its active occurrences' paths, a retired one's while
+   `indexed_files` still records its bytes there, and every other
+   recorded path with its content hash, so a copy that comes back after a
+   transient outage is re-indexed by the next Maildir walk) and deletes
+   any indexing job still queued for those paths, all in one transaction,
+   which first re-checks that every message it removes still has no live
+   occurrence and a tombstone past the grace window, and that none of
+   those paths, nor a file with the same uniq in its folder's `cur` or
+   `new` (an upstream restore renames it), is back on disk without the
+   `T` flag (`stat` calls first, then the pass's directory listings, each
+   directory listed at most once per pass, #336), so a restore, a copy bound by a sweep, a
+   restore the sweep has not seen yet (logged at INFO), or a restore and
+   a fresh loss after the reaper read its candidates is left for a later
+   pass. It then either rebuilds
+   the parent thread from the surviving messages on disk (re-parsed from
+   an active occurrence, a live one first; the thread vector is the
+   survivors' chunk mean, derived from the stored sums with no
+   re-embedding, #1356) or deletes the thread entirely when nothing
+   remains. A survivor with no active occurrence (it is losing its last
+   copy too, within the grace window) cannot be re-parsed, so its thread
+   waits, visible in the blocked-thread count and WARNING, like a thread
+   whose survivor is unreadable (#1159). Only when no chunk survives does
    the rebuild embed a subject (the first non-empty subject among the
    survivors, oldest first, or `(empty thread)` when none has one); an
-   embedding failure there makes the reaper back off and retry on the next pass.
+   embedding failure there makes the reaper back off and retry on the
+   next pass.
 
 **Reaped-source records.** A citation or search hit from an earlier
 answer can name a message or thread the reaper has since removed. Such
@@ -3408,80 +3502,86 @@ not carried across a rebuild of the index from Maildir (reaped files
 are not reindexed), so after a rebuild an earlier reap reads as "not
 found".
 
-**Byte-identical copies.** Two files with the same bytes share one
-claimant ID (see *Claimant IDs*), so `message_thread_map` holds only
-the path indexed last, while `indexed_files` holds both (#1102). When a
-sweep finds a message's mapped file gone, it first looks for another
-indexed path with the same `content_hash` that still exists, with one
-pass over `indexed_files` per sweep covering every missing message. If
-one exists (a live copy is preferred to a `T`-flagged one), the message
-is remapped to that copy: its locator, folder and S/F/R state move as
-for a rename, and a tombstone or queued job on the gone path moves too
-unless the copy already has its own. The copy's tombstone is kept, but
-with the later of the two marks, or marked now when the gone path had
-none, so the grace period never starts before the message lost its
-last live path; of two queued jobs the runnable one is kept (the copy's, unless it is dead
-and the gone path's is not). The remap is refused when the watcher
-renamed the copy or moved the mapping since the sweep resolved it.
-After a refusal, or when the sweep's cached folder listing shows no
-copy (it can predate a copy coming back), the copies are resolved once
-more through one fresh listing shared by the whole retry phase, so each
-folder is listed at most once more per sweep. The trash rule then
-applies to the copy as to any file, so a `T`-flagged copy is tombstoned
-and a live one clears an earlier tombstone. A mapped file that still
-exists but is `T`-flagged is checked the same way, for a live copy
-only, in the same lookup: when one exists the message moves to it
-instead of being tombstoned, so trashing one copy does not reap a
-message whose other copy is live. The rename sweep (`sweep_paths`),
-which runs at startup, before each periodic rescan's Maildir walk and
-on folder-watch recovery, does the same remap for gone files, so
-archive mode does not keep the gone path, folder and flags. The INFO
-lines of both sweeps count these as `remapped=N`. Only a message with
-no surviving copy is tombstoned as missing (and a trashed one with no
-live copy as trashed), so removing every copy still reaps it as before, and the reap
-then unmarks every path with the message's bytes, not only the mapped
-one (looked up once per reap pass, unmarked by path in each thread's
-reap transaction, with any queue row on those paths): a copy that comes
-back after a transient outage is re-indexed by the next Maildir walk
-instead of staying marked indexed, or held by a dead job, with nothing
-left to repair it. Before a thread is reaped, each tombstoned message's
-copies are checked on disk once more, through a folder listing of its
-own: if mbsync restored one since the sweep, the message moves to it,
-its tombstone is cleared and it stays in the thread (logged at INFO
-with a count). These checks share a budget of 256 directory listings
-per reap pass. A check reserves its copies' distinct folders (each
-copy's directory and its `new`/`cur` sibling) before it runs and is
-charged what it listed, so a pass stays within the budget; the pass's
-first check always runs, even when it alone needs more (logged at INFO
-with the counts), since its cost is bounded by folders, which mail
-cannot grow. Messages past the budget stay tombstoned and are rebuilt
-into the thread as survivors (text, chunks and thread vector included),
-so the index stays consistent, while the checked ones are reaped; the
-next pass checks the rest, so a large thread is reaped over several
-passes. A message whose own file is gone cannot be rebuilt as a
-survivor, so it is checked first; if the budget leaves it unchecked,
-its thread waits, visible in the blocked-thread count and WARNING,
-until a pass reaches it (an unreadable survivor blocks the same way,
-#1159). A copy restored after its check is unmarked with the reaped
-message, and the next Maildir walk indexes it again. A remap the
-database refuses leaves the message tombstoned for the next pass, with
-a counted INFO line. The pass logs one WARNING with the count left, and
-each partial thread reap an INFO line with its counts. A failure of the
-rename sweep before a periodic rescan is logged at WARNING with its
-type and does not stop that rescan's walk, and its recovery is logged
-like the other recurring steps'. Known limitation (#1141): a copy that
-is not the mapped path and is moved to another folder keeps its old
-path in `indexed_files`, so the lookup cannot find it until the next
-periodic rescan indexes the destination.
+**Occurrence reconciliation.** The watcher carries an occurrence
+through every rename it observes. What it misses (renames while the
+indexer was down, a lost event) the reconciliation scan finds
+(`indexer/src/occurrence_scan.py`, #1567). It walks the account's
+Maildir root once and compares the files with the account's active
+occurrences:
+
+- **Missed renames.** An active occurrence whose file is gone, while its
+  folder holds a file with its Maildir uniq (a flag change, a `new`/`cur`
+  move), moves to that file once the file's bytes are verified to be the
+  message's: by the `indexed_files` identity (size and mtime match the
+  record, which a rename keeps, and the recorded hash is the message's),
+  else by hashing the file. A same-uniq file with other bytes is counted
+  as `unverified` and changes nothing.
+- **Found copies.** A file no active occurrence holds, whose bytes are an
+  indexed message's (looked up by `messages.content_hash`), is bound to
+  it as an occurrence with provenance `scan`: a byte-identical copy the
+  migration seed or the parse never bound, such as a `T`-flagged file the
+  drain parks, a dead-lettered job, or a copy moved across folders while
+  no occurrence held it (#1141). Its bytes come from its `indexed_files`
+  record when size and mtime match. Otherwise only a `T`-flagged or
+  dead-lettered file is hashed, once per process for each path, size,
+  mtime and inode, by every caller of the scan that passes a hash cache
+  — every one of them does, mirror mode's periodic sweep and archive
+  mode's rename sweep alike (#1612; before it, archive mode's call
+  sites passed none, so this branch and the content backstop below
+  silently never ran there); any other unindexed file is new mail the
+  Maildir walk queues, and its parse binds it.
+- **Vanished files.** An active occurrence with neither is retired only
+  when the scan is complete: the walk read every directory under the
+  root. An unreadable directory or a missing root makes the scan partial:
+  it retires nothing (the occurrence stays active and is counted as
+  unreachable) and logs a WARNING with the number of unreadable
+  directories. A partial or failed scan never establishes absence, so it
+  cannot start a message's grace period. Completeness is per account: a
+  scan covers one account's root and never touches another account's
+  occurrences.
+- **Content backstop.** A held path (its file did not move this pass,
+  so none of the above read its bytes) is hash-verified against its
+  occurrence's claimant, bounded per pass and cached by exact identity
+  (size, mtime, inode) so a later pass does not re-read an already-
+  verified file — see "The content backstop" below for the budget and
+  its cost. A verified mismatch retires only that occurrence (the file
+  is still there, unlike a vanished one) and requests a reparse,
+  counted `stale`.
+
+Each write re-checks, in its own transaction, that the occurrence or
+path is as the scan saw it, and a retire re-checks the disk for the file
+or a file with its uniq, so a rename the watcher records meanwhile wins.
+A move or bind also re-checks that the file still has the size, mtime
+and inode it had before its bytes were verified, so a file replaced in
+between is refused.
+The rename sweep (`sweep_paths`), which runs at startup, before each
+periodic rescan's Maildir walk and on folder-watch recovery, in archive
+mode too, runs the same scan without tombstoning anything; recording the
+renames first keeps the walk from re-indexing them as new mail.
+Retiring removes a locator, never a message: archive mode retires the
+occurrence of a vanished file but never reaps. The INFO lines of both
+sweeps count what they did (`renamed`, `retired`, `bound`, `unreachable`,
+`unverified`, `stale`, and for the reconciler `tombstoned`, `cleared` and
+`hashed`). A failure of the rename sweep before a periodic rescan is
+logged at WARNING with its type and does not stop that rescan's walk,
+and its recovery is logged like the other recurring steps'.
+
+Byte-identical files share one claimant ID (see *Claimant IDs*), so
+removing one copy retires its occurrence and the message stays indexed
+through the other; trashing one copy marks its occurrence trashed and
+the message stays live while another copy is live. Only when every copy
+is `T`-flagged or gone is the message tombstoned, and the reap then
+unmarks every path with its bytes.
 
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) stops a
-reap pass outright, reaping nothing, when the tombstones past the grace
+reap pass outright, reaping nothing, when the messages past the grace
 window outnumber that fraction of total indexed messages; it does not
-reap a slice. Transient Bridge outages (vault rebuilds, folder renames, auth
-glitches) can cause mbsync to `T`-flag a huge batch at once; the brake
-stops the reaper from acting, while still recording tombstones that will
-clear themselves if mbsync reverts the flags. Up to 10
-tombstones per pass are always allowed regardless of the percentage so
+reap a slice. It counts messages (claimant IDs), however many
+occurrences each lost. Transient Bridge outages (vault rebuilds, folder
+renames, auth glitches) can cause mbsync to `T`-flag a huge batch at
+once; the brake stops the reaper from acting, while still recording
+tombstones that will clear themselves if mbsync reverts the flags. Up to
+10 messages per pass are always allowed regardless of the percentage so
 that routine cleanup on small mailboxes is not gated by the 5% default.
 For an intentional bulk cleanup, `make force-deletion` (#1609) runs one
 pass past the brake: it stops the indexer, runs `src/force_deletion.py`
@@ -3491,7 +3591,16 @@ the configured grace window and `force` set in memory, logged as
 Nothing is stored, so every later pass has the brake on; each thread's
 reap is its own transaction, so a pass that stops midway leaves the rest
 tombstoned. The persistent `INDEXER_DELETION_FORCE` setting was removed,
-and `scripts/validate-env.sh` refuses it.
+and `scripts/validate-env.sh` refuses it. Beside that unchanged global
+brake, a **per-account brake** is computed only while more than one
+account has an active occurrence (#1491 enables several; today the
+registry holds one, #1596): a message belongs to every account holding
+an occurrence of it, and an account whose past-grace messages outnumber
+`max(10, INDEXER_DELETION_MAX_BATCH_PCT` × its messages`)` has all of
+them held back for that pass, logged at ERROR with the account's
+numeric id and the counts, so a mass deletion in a small account is
+caught though the mailbox-wide count stays under the global brake.
+`make force-deletion` overrides it too.
 
 `mbsync` keeps `Expunge None` regardless — the reaper cleans up the local
 index; it does not change mbsync's pull-only, no-destructive-delete posture
@@ -3505,9 +3614,11 @@ completeness*).
 
 **Trash under mirror.** Deleting a message in Proton normally moves it
 to Trash, and mbsync syncs the Trash folder. The INBOX copy is
-`T`-flagged and tombstoned, but a Trash copy with the same Message-ID
-arrives and is indexed, so the message is reaped only after it is
-purged from Trash (plus the grace window). To keep it out of results
+`T`-flagged, so its occurrence is no longer live, but a Trash copy
+arrives and is indexed: with the same bytes it is another occurrence of
+the message and keeps it live; with other bytes it is a message of its
+own, and the INBOX one is tombstoned. Either way the mail is reaped only
+after it is purged from Trash (plus the grace window). To keep it out of results
 meanwhile, the MCP server leaves Trash out of mailbox-wide retrieval
 unless a call names it (`folders=["Trash"]`, or `folder="Trash"` for
 `query_messages`); see *Trash is left out by default* in
@@ -4123,11 +4234,11 @@ reconciliation disabled (archive mode), the index is append-only and
 to archive also re-indexes mail an earlier mirror-mode run reaped,
 whose `T`-flagged files are still in the Maildir. Archive mode writes no
 tombstones and reaps nothing, but it inherits any `pending_deletions`
-row an earlier mirror-mode run left: the watchdog handler and the
-startup rename sweep carry such a tombstone along with flag renames,
-and clear it when a rename drops the `T` flag, so a message restored
-upstream stops reading as pending deletion (`docs/mcp-tools.md`,
-*Pending deletion*; #860). The handler logs one INFO line per restore
+row an earlier mirror-mode run left: the message keeps it through flag
+renames, and loses it when a rename the watchdog handler or the rename
+sweep records drops the `T` flag, or any other write gives the message a
+live occurrence again, so a message restored upstream stops reading as
+pending deletion (`docs/mcp-tools.md`, *Pending deletion*; #860). The handler logs one INFO line per restore
 within the indexer's shared per-window line budget (the rest are
 counted on the queue heartbeat's `suppressed_lines`); the sweep reports
 `tombstones_cleared=N` on its own line.
@@ -4177,11 +4288,17 @@ issue).
 `get_mailbox_status` answers "is the index current?" from SQLite
 alone, because mcp-server mounts neither Maildir nor Bridge. After
 each successful sync, once the new files have been made readable,
-mbsync writes `.mbsync-last-sync.json` (completion time plus
-`SYNC_INTERVAL`) at the Maildir root. It writes a temporary file named
-after that sync (`.mbsync-last-sync.<time>.<interval>.tmp`) and
-renames it into place. The stamp sits outside every `cur`/`new`
-folder, so no Maildir walk or watchdog handler treats it as mail.
+mbsync writes `.mbsync-last-sync.json` (completion time, `SYNC_INTERVAL`,
+the sync's attempt ID — the same one `last_success` below names — and
+a durable success generation, in the `mbsync-state` volume rather than
+SQLite, that mbsync allocates and persists before anything names it)
+at the Maildir root. It writes a temporary file named after that sync
+(`.mbsync-last-sync.<time>.<interval>.<attempt_id>.<generation>.tmp`)
+and renames it into place. The stamp sits outside every `cur`/`new`
+folder, so no Maildir walk or watchdog handler treats it as mail. A
+stamp written before the 2026-10-13 delivery-identity fix (#1621
+thread) carries neither field; the indexer reads it, but never
+acknowledges or orders by it — see below.
 
 A stamp on disk does not prove the indexer has queued that sync's
 mail: the watcher may still be behind on its delivery events. So the
@@ -4202,13 +4319,118 @@ is queued:
 - when a Maildir walk (startup or the periodic rescan) finishes: the
   stamp read before the walk is acknowledged.
 
-Acknowledgements only move forward. With every health heartbeat
-(per message, per embed batch and per attachment page read, at most
-every 30 s), the indexer
+Acknowledgements only move forward, ordered by the stamp's success
+generation (2026-10-13, #1621 thread), never by its completion time: a
+clock rollback could otherwise let two different attempts publish the
+same `completed_at`, closing an identity gap rather than only
+reordering records. A stamp with no generation (the legacy shape) is
+never acknowledged, not even as the first one seen — it cannot be
+ordered. With every health heartbeat (per message, per embed batch and
+per attachment page read, at most every 30 s), the indexer
 upserts the latest acknowledged sync and its own timestamp into the
 one-row `ingestion_state` table. A missed stamp event
 reads as a stale sync until the next rescan; a missed delivery event
 stays invisible to `current` until the rescan queues it.
+
+`next_success_generation` seeds its counter forward from the
+generation already in the retained stamp when that is higher than the
+counter file (`mbsync/entrypoint.sh` `stamp_generation`, #1612 round 8):
+the `mbsync-state` volume can be recreated or restored from an older
+backup while `maildir-volume` keeps a newer stamp, and without this the
+counter would restart below a generation already published, stranding
+the acknowledgement behind it (and an unrecovered collection failure
+unable to clear, see *Collection status* below) until it caught back
+up on its own. The two durable records can only diverge in this
+direction — the counter is always allocated and persisted before a
+stamp names it — so raising it to match an already-published generation
+never regresses or reorders anything already acknowledged. A missing,
+oversized or unparseable stamp (including the legacy shape) seeds
+nothing, leaving the counter's own value as today.
+
+### Collection status
+
+The success stamp cannot tell a clean sync from one that skipped
+folders, and a failed attempt writes none, so mbsync also publishes a
+collection status (#1592; owner decision on the issue). It sits beside
+the stamp, and reading it acknowledges nothing. The stamp's format
+later changed (2026-10-13, #1621 thread) to carry the attempt ID and
+success generation the delivery-identity fix needs — see *Index
+currency* above and the Freshness bullet below.
+
+- **File.** `.mbsync-collection-status.json`, format 1, one JSON line
+  of counts and fixed tokens, never a folder name: `format`,
+  `scope_uuid` (`ACCOUNT_SCOPE`), `run_deadline_secs`,
+  `sync_interval_secs`; `attempt` (its ID, `started_at` and `outcome`);
+  `last_terminal` (attempt ID, `completed_at`, `outcome`,
+  `withheld_far_side_folders`, null when the error filter's counts
+  never arrived, and `failure_class`); `last_success` (attempt ID,
+  `completed_at`). Each publication is written to a unique temporary
+  file in the Maildir root, made mode 0644 and renamed into place.
+- **When.** Before every attempt (`in_progress`) and after it (its
+  terminal outcome). A success is published after its stamp, with the
+  stamp's completion time; when the stamp cannot be written, the
+  success is still published (and is never delivered, since no stamp
+  names it) before mbsync exits for a restart. A caught stop (TERM or
+  INT) before the attempt has a result is published as `failed` with
+  class `interrupted`; one after it publishes that result. A shell
+  killed outright leaves the
+  `in_progress` record until the next start publishes. A start carries
+  the earlier records forward from the file itself, when it is in the
+  written shape and names the configured account; otherwise it warns
+  and starts with none.
+- **Outcomes.** `succeeded`; `succeeded_with_withheld_folders`, the
+  tolerated run whose only errors were far-side folders it could not
+  open (see [troubleshooting](troubleshooting.md#a-proton-folder-was-renamed-or-deleted));
+  `failed`, with the first cause as its class: `deadline` (stopped at
+  `SYNC_DEADLINE_SECONDS`), `killed` (killed after ignoring the stop,
+  or by the kernel), `error` (any other mbsync failure, a far-side
+  failure together with another error included), `permission_repair`
+  (mbsync succeeded, the repair failed) or `interrupted`. An attempt
+  `in_progress` means only "started, no terminal result recorded"; an
+  old one never proves the collector alive or dead.
+- **Order.** Attempt IDs are a per-start random token and a counter;
+  the records follow publication order (the file always holds the
+  newest), never their timestamps, so a clock rollback cannot reorder
+  them.
+- **Reading.** The indexer reads the file at startup, before every
+  `ingestion_state` write and on each rename onto it, under the lock
+  its acknowledgements use. It reads one open descriptor (a rename
+  mid-read leaves the old publication whole), only a regular file, at
+  most 4096 bytes. A missing, legacy (no `format`), malformed,
+  unsupported, unreadable or other-account file reads as `unknown`
+  with that reason and one fixed-text WARNING per change of reason,
+  never as a success.
+- **Storage.** `account_collection_state`, one row per account (v18),
+  replaced in the same transaction as `ingestion_state`, so the
+  acknowledged sync and the outcome are one snapshot. A rebuilt index
+  recovers the row from the file at its first write.
+- **Freshness.** After a failed attempt, `current` stays false through
+  retries until a later success is **delivered**: the file's last
+  success is the sync named by the stamp the indexer has acknowledged,
+  matched by attempt ID, which mbsync writes identically into both
+  (never by completion time — two different attempts can publish the
+  same one across a clock rollback, #1621 thread, 2026-10-13). A stamp
+  with no attempt ID (the legacy shape) is never a match. The failed
+  attempt is kept in the row
+  (`unrecovered_failure_attempt_id`) across restarts until then. A
+  success that withheld folders keeps the existing criteria and shows
+  its count. An `unknown` status leaves `current` to the existing
+  criteria, except that an unrecovered failure still holds it false.
+  Delivery is also checked for a success terminal that was never
+  preceded by an *observed* failure (#1612 round 12): a watcher delayed
+  or behind enough to read a collection publication — a rename event,
+  or `maybe_record`'s periodic heartbeat, which reads the file directly
+  — before processing that same sync's own stamp rename can see a
+  success whose failed predecessor it never observed (the predecessor's
+  publication was already overwritten on disk by the time it was read).
+  `success_delivered` (stored per row, from the same attempt-ID match)
+  is checked on its own for this case; mcp-server reports it as
+  `collection.success_undelivered`, independent of
+  `failure_unrecovered`, so the gap closes whether or not the
+  intervening failure was ever seen. In normal operation this clears
+  within the watcher's own event-processing latency, since mbsync
+  writes the stamp before the collection status that names it as the
+  last success.
 
 ## File Identity on `indexed_files`
 
@@ -4224,24 +4446,178 @@ state intact: a file whose Phase 1 committed but whose Phase 2 is still
 pending is already indexed, so the rename is not re-enqueued, and a job
 left on the old path would be dropped as missing.
 
-`content_hash` is read by one lookup, `find_identical_copies`: when a
-message's mapped file is gone (or, for the reconciler sweep,
-`T`-flagged), the reconciler sweep and the rename sweep (`sweep_paths`:
-at startup, before each periodic rescan and on folder-watch recovery)
-look for another indexed path with the same bytes and
-remap the message to it, and the reaper unmarks every such path of a
-message it removes (see *Byte-identical copies* under *Deletion
-Reconciliation*, #1102). `indexed_files` has no `content_hash` index,
-so the lookup reads the wanted hashes by claimant ID and makes one pass
-over `indexed_files` per sweep or reap pass. `size` and `mtime_ns` are
-not read; they remain for a future pass that tells a flag-only rename
-from a genuine content change.
+The occurrence reconciliation scan (*Occurrence reconciliation* under
+*Deletion Reconciliation*, #1567) reads all three: a file whose size and
+mtime match its record (or, for a missed rename, the record of the path
+it was renamed from, since a rename keeps both) is a candidate to carry
+the recorded `content_hash` forward as its bytes — a fast admission
+shortcut, not proof (mbsync sets mtime from IMAP's INTERNALDATE, so two
+different messages can legitimately share one), so the file is also
+hashed and checked against that recorded hash before it verifies a
+rename or names the message a found copy belongs to (`_recorded_hash`,
+#1612 round 14; `messages.content_hash` is indexed for the found-copy
+lookup); any other file is hashed only
+where the module docstring says. The reaper unmarks every path recorded
+with a removed message's hash (#1102); `indexed_files` has no
+`content_hash` index, so that lookup reads the wanted hashes by claimant
+ID and makes one pass over `indexed_files` per reap pass.
 
 Rows for which `stat` / hash capture failed at parse time carry NULL
-identity values. The lookup skips a message whose own hash is NULL, and
-a NULL row never matches a hash, so such a message is handled as before
-(tombstoned as missing when its file is gone); the columns are
-populated lazily on the next reindex of the file.
+identity values. A NULL row never verifies or binds anything, so the
+scan treats such a file as unknown (a vanished occurrence beside it is
+counted, not retired, only when a same-uniq file is there); the columns
+are populated lazily on the next reindex of the file.
+
+### Freshness: `is_indexed` is existence, not proof
+
+`Database.is_indexed` stays a pure path-existence check (`indexed_files`
+has a row for the path), unchanged, so any caller that only needs "has
+this path been through the pipeline at all" keeps an O(1) lookup.
+`Database.is_indexed_and_fresh` adds the cheap half of the identity
+check on top: the path is indexed **and** its current size and mtime
+still match the recorded row. The Maildir walk
+(`main._enqueue_unindexed_messages`) and the watcher's new-mail gate
+(`MaildirHandler.on_moved`'s Case 2) call this instead of the bare
+check, so a record left stale by an out-of-band content change — bytes
+replaced at a path with no observed rename event — falls through to the
+walk's existing dead-letter and already-queued gates exactly as an
+unindexed file would, rather than being skipped forever (#1612). A
+dead-lettered path still stays dead until `make requeue-dead`; staleness
+only stops the *permanent* skip, not the existing retry/dead-letter
+contract.
+
+A watcher-observed rename (`on_moved`'s Case 1) carries an active
+occurrence's claimant forward only after
+`occurrence_scan.verify_rename_bytes` confirms the destination's bytes
+against it: by the source's `indexed_files` identity when there is one
+— size and mtime agreeing (a rename keeps both) is a fast admission
+shortcut, not proof (mbsync sets mtime from IMAP's INTERNALDATE, so two
+different messages can legitimately share one, #1612 round 12), so the
+destination is also hashed and checked against the recorded
+`content_hash` before it is trusted, the same single bounded hash
+`Database._move_occurrence`'s sibling check (*Mailbox occurrences*
+above) uses — or, for a
+scan-bound occurrence (`bind_found_copy` never writes `indexed_files`,
+so there is no recorded identity or hash to check metadata against),
+by hashing the destination and checking it against the claimant ID's
+embedded hash prefix (the first `CLAIMANT_HASH_CHARS` hex digits after
+the `#`, `parser.claimant_id`). The verified identity is re-checked
+inside the same transaction as the move (`Database._move_occurrence`'s
+`verified_identity` parameter), the same TOCTOU pattern
+`move_verified_occurrence` already uses for the reconciliation scan. A
+mismatch is not carried forward — neither the occurrence nor a stale
+`indexed_files` row under the destination's name (`_rename_rows` gates
+the carry on whether `_move_occurrence` found an actual mismatch, not
+merely on whether it found nothing to say) — and `on_moved` falls
+through to Case 2 as if the destination were new mail.
+
+Falling through leaves the stale occurrence active at the now-missing
+source path for the general case: the reconciliation scan is the
+eventual backstop (it reads the newly-indexed destination created once
+Case 2 enqueues it, on a later pass). In mirror mode, when the same
+rename also added the `T` flag, Case 2's trashed-destination skip means
+nothing ever enqueues the destination, so the scan never gets that
+second occurrence to notice the collision against either — and the
+scan's own "missed renames" check only retires an occurrence whose
+uniq resolves to no file at all under its folder, never one whose uniq
+still resolves to *some* file, however mismatched (`scan_occurrences`,
+module docstring "Missed renames"). `on_moved` closes this one case
+itself: when the active occurrence's verification **proved** a mismatch
+(it read the destination's bytes and they were not this claimant's)
+**and** the destination is about to be skipped as already trashed, it
+retires the occurrence directly (`Database.retire_mismatched_rename`,
+#1612 round 13) and tombstones the claimant if that was its last live
+occurrence (`Database.mark_lost_messages`, #1612 round 14 — the same
+rule `Reconciler.handle_moved` applies to an ordinary trashed rename,
+so the deletion grace period starts at once instead of waiting for the
+next reconciliation sweep), rather than leaving it dangling with no
+path to ever notice. Unlike `retire_mismatched_occurrence` (the content
+backstop's case, where the mismatched file is still at the same
+recorded path) there is nothing left to re-check about the
+destination — `verify_rename_bytes` already hashed it — so the only
+guard is the usual `state = 'active' AND relative_path = ?` check
+against a concurrent move or retire of the same occurrence.
+`verify_rename_bytes` returns a proven mismatch only when it actually
+read the destination's bytes and they disagreed with the expected
+hash; an unreadable destination or one whose metadata alone ruled out
+trusting it without reading anything is inconclusive, not a mismatch
+(#1612 round 14 — the earlier implementation conflated the two, firing
+this retirement on a merely inconclusive check), and is left active for
+a later reconciliation pass like any other unverified rename.
+
+### The content backstop
+
+Metadata agreeing is a fast admission shortcut, not proof: mbsync sets
+a message's mtime from IMAP's INTERNALDATE, so two different messages
+can legitimately share one, and a crafted or coincidental replacement
+could share size and mtime too. `occurrence_scan.scan_occurrences`
+closes that gap for a **held** path — one whose file did not move this
+pass, which the metadata checks above never read — by hashing it and
+comparing the digest to the occurrence's claimant, bounded per pass:
+
+- **Cache.** Once a path's exact identity (size, mtime, inode) is
+  hash-verified, `hash_cache` remembers it, so a later pass skips it in
+  one dict lookup. A different file landing at the same path gets a new
+  inode in the overwhelming case, so this is not merely a one-time
+  check: a changed identity is always a cache miss.
+- **Budget.** Only cache misses cost a read. Each pass hashes at most
+  `_BACKSTOP_MAX_FILES` (500) previously-unverified held paths, or
+  `_BACKSTOP_MAX_BYTES` (100 MB), whichever is hit first; the rest wait
+  for a later pass, which sees the same cache miss. Sized from a plain
+  wall-clock measurement (2026-10-13, Apple Silicon, warm page cache):
+  SHA-256 over a 20 MB file took ~8.7 ms (~2.2 GB/s); a 200 KB file took
+  ~0.1 ms. A cold read over real disk or a mounted volume is slower than
+  a warm page-cache read, so the budget assumes a much more conservative
+  ~20 MB/s: 100 MB at that rate is ~5 seconds, acceptable for a pass that
+  already walks the whole Maildir tree. The file cap guards the
+  per-file open/stat overhead a byte cap alone would not (many tiny
+  files). At the default hourly sweep interval (`INDEXER_DELETION_SWEEP_
+  INTERVAL_SECS`) this backstop-verifies a multi-gigabyte mailbox within
+  a few days of first running — an eventual backstop for the narrow
+  metadata-collision case, not the primary defense (the watcher's
+  rename verification and the walk's freshness check are).
+- **On a verified mismatch**, only that occurrence is retired
+  (`Database.retire_mismatched_occurrence`) — the file is still there,
+  unlike `retire_vanished_occurrence`'s case — and the path is queued
+  for a reparse through `Database.queue_enqueue_if_absent`
+  (`STALE_ENQUEUE_SQL`, `ON CONFLICT DO NOTHING`), both in one
+  transaction (#1612 round 15): a crash or SQLite error between the two
+  writes must not leave the retirement committed with no runnable job
+  for the replacement. Unlike `queue_enqueue`'s `INSERT OR REPLACE` (a
+  watcher event is fresh intent and should reset prior state), a
+  background detection can recur on a later pass before the worker
+  catches up, so admission must not keep resetting a pending retry's
+  attempts and error, or silently resurrect a dead letter — both stay
+  exactly as they are until the worker or the operator
+  (`make requeue-dead`) acts on them (an existing dead row at this path
+  is a known, accepted gap: nothing here resets it).
+- **On an unreadable or unstable file** (a permission error, the file
+  gone again between the walk and the check), the path is counted
+  `unverified`, never retired: the backstop only acts on a positive
+  mismatch it could prove.
+- **On a budget already spent**, the path is left unhashed and counted
+  `backstop_deferred` (#1612 round 10 review), surfaced in the
+  `reconciler sweep` / `startup rename sweep` log lines, so an
+  operator can tell this secondary check is incomplete for those paths
+  this pass rather than it silently never running for them. Ordinary
+  budget exhaustion defers the path to a later pass's fresh budget;
+  a single held file whose own size always exceeds the whole byte
+  budget hits this same return on every pass, never getting hashed at
+  all, which stays an accepted gap in this secondary backstop (the
+  watcher's rename verification and the walk's freshness check are the
+  primary defense).
+
+`reconciler.sweep_paths` always threads a `hash_cache` through to
+`scan_occurrences` now, including from its three archive-mode call
+sites in `main.py`; before #1612 those passed none, so the backstop (and
+the hashing of unindexed `T`-flagged or dead-lettered files it shares
+the cache with) silently never ran outside mirror mode. In mirror mode,
+`main()`'s always-on startup rename sweep shares `Reconciler._hash_cache`
+rather than the module-level cache archive mode keeps (#1612 round 15):
+`Reconciler.sweep()` runs its own `scan_occurrences` moments later, and
+without the shared cache it would re-hash the same held paths the
+startup sweep had just verified, under its own fresh (and separately
+budgeted) backstop pass.
 
 ## Vulnerability Scans
 

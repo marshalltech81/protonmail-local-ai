@@ -44,13 +44,15 @@ evidence chunk (`get_evidence`), and attachment hit
 `fields` projection leaves it out): the raw message file the
 result came from, so an answer can be checked against the original
 bytes. It holds `source_type` (`maildir_message`), `locator` (the
-file's path in the Maildir volume as the indexer sees it, `/maildir/...`,
-kept current across mbsync flag renames), `sha256` and `size_bytes` of
+file's path relative to its account's Maildir root, which the indexer
+mounts at `/maildir`; the [representative copy](#copies-and-one-copy-matching)'s
+when the message has several, kept current across mbsync flag renames),
+`sha256` and `size_bytes` of
 the raw file when it was indexed (null if not recorded), and
 `indexed_at`. For an attachment chunk or hit it is the file of the
 message that carries the attachment. It is read in the same query as
 the result it belongs to. To verify a cited passage, hash the file:
-`docker compose exec indexer sha256sum <locator>`.
+`docker compose exec indexer sha256sum /maildir/<locator>`.
 
 Structured output is bounded because headers are sender-controlled.
 Lists hold at most 10 entries (recipients per role, References, thread
@@ -351,10 +353,32 @@ it is purged from Trash, so without this a deleted message kept
 turning up in search. Spam and every other folder are searched as
 before.
 
+The default scope is a message with a **current copy outside Trash**
+([Copies](#copies-and-one-copy-matching)), where only its live copies
+count when it has any: a live copy is one without the Maildir `T` flag,
+which mbsync sets on a copy deleted in Proton (owner decision on #1568).
+So:
+
+- a message with a live copy outside Trash is in the default scope;
+- a message whose only current copies are `T`-flagged and outside
+  Trash stays in it, in both retention modes, as before copies were
+  tracked (it may be [pending deletion](#pending-deletion));
+- a message whose live copies are all in Trash is left out, even when a
+  `T`-flagged copy of it is still in another folder;
+- a message with no current copy (in archive mode, one whose files are
+  gone from the Maildir) is left out, and matches no folder filter
+  either: it is read only by its ID (`get_message`, `get_thread`).
+
+Naming a folder replaces the default, and a `T`-flagged copy matches a
+filter on its folder. Flag filters are decided on the same copy as the
+scope, so a flag held only by a `T`-flagged copy does not match by
+default while the message has a live copy.
+
 - Thread tools (`search_emails`, `get_evidence` without `thread_id`,
   `ask_mailbox`, `extract_from_emails`, `brief_issue`,
   `check_conclusion`, and `summarize_thread`'s subject-phrase fallback)
-  leave out a thread only when **every** message of it is in Trash.
+  leave out a thread only when **no** message of it is in the default
+  scope.
   This is the per-message membership the `folders` filter uses: a
   thread with one message in Trash and a reply in INBOX stays, and its
   Trash message's passages can still appear as evidence, labelled
@@ -365,9 +389,9 @@ before.
   `ask_mailbox` and `extract_from_emails` resolve `from_name` over the
   same scope, so a sender whose mail is all in Trash is not chosen for a
   default search.
-- Message tools leave out the messages filed in Trash: `query_messages`
-  and `aggregate_messages` without `folder` (pass `folder="Trash"` to
-  list or count them),
+- Message tools leave out the messages outside the default scope:
+  `query_messages`, `query_threads` and `aggregate_messages` without
+  `folder` (pass `folder="Trash"` to list or count the Trash copies),
   `query_attachments` likewise for the attachments those messages
   carry, and `search_attachments`, which has no folder filter.
 - Tools that read one named thread, message or attachment
@@ -380,9 +404,67 @@ before.
   its best match elsewhere. A mailbox with no Trash mail runs the same
   unfiltered search as before.
 
-The excluded folder list is `DEFAULT_EXCLUDED_FOLDERS` in
-`mcp-server/src/lib/predicates.py`, matched exactly as `folders` values
-are.
+The Trash folder is a role of the account's provider (`Trash` for
+`proton-bridge`, `PROVIDER_POLICIES` in `mcp-server/src/lib/sources.py`),
+matched exactly as `folders` values are; `default_scope_sql` there is
+the one definition of the default scope.
+
+## Copies and one-copy matching
+
+A message can have several current copies: mbsync keeps one file per
+folder, so a message filed in INBOX and labelled into another folder,
+or moved to Trash while a copy stays elsewhere, has one copy in each
+(PLAN.md decision 47). Each copy is an occurrence with its own folder,
+`S`/`F`/`R`/`T` flags and file; the message's content, headers and IDs
+are shared. A copy whose file vanished or was replaced is no longer
+current and is never matched or listed.
+
+- **Filters match within one copy.** The `folder` filter, the `seen`,
+  `flagged` and `replied` filters, the default scope and the Spam rule
+  of `authority_class` are decided together on a single copy: `folder:
+  "Archive"` with `flagged: true` matches a message only when one copy
+  is both in Archive and flagged, never a flagged INBOX copy beside an
+  unflagged Archive copy.
+- **Results count messages.** A message matching through two copies
+  is one row, counted once in `total_matches`, `aggregate_messages`
+  groups (a `folder` group counts the message once in each folder of a
+  matching copy) and pages. `list_folders` counts distinct threads per
+  folder, as before.
+- **Outputs show every copy.** Message rows (`get_message`,
+  `get_thread`, `query_messages`) carry `occurrences`: the current
+  copies, at most 10, with `occurrence_count` the full count, each with
+  its account's scope UUID (`account_scope`) and provider, its folder
+  (relative to the account), `locator`, `seen`, `flagged`, `replied`,
+  `trashed` (the `T` flag), its source `category` and its provenance:
+  `provenance` (how the copy was first recorded: `parse`, an observed
+  move `rename`, a reconciliation `scan` that verified its bytes, or
+  `migration`) and `first_observed_at` / `last_observed_at` (when the
+  indexer first and last saw its file, UTC, null when unknown). A flag
+  rename keeps a copy and its provenance; a move to another folder is a
+  new copy with its own. The row's own `folder`, `seen`,
+  `flagged`, `replied` and `source_file` are the **representative**
+  copy's: the first current copy, preferring one that is not
+  `T`-flagged, then one outside Trash, then the oldest. A message with
+  no current copy shows the folder and flags of a former copy, chosen in
+  the same order, and an empty `occurrences`. The prose labels the
+  representative (`Folder: INBOX (representative of 2 copies)`) and
+  lists the copies.
+- **Source categories** (#1317, #1569). A copy's `category` is derived
+  from its folder when it is read, by its account provider's policy
+  (`PROVIDER_POLICIES` in `mcp-server/src/lib/sources.py`); nothing is
+  stored, so a policy change needs no reindex. For `proton-bridge`:
+  `mailbox` (INBOX, Sent, Archive, Spam, Trash and `Folders/...`),
+  `unsent` (Drafts and Scheduled: unsent evidence; the folder does not
+  certify that the message is still unsent or was never sent),
+  `recovered` (Recovered Messages: Bridge-local copies of mail a client
+  failed to upload, searchable but untrusted, since their identity
+  headers are the client's; they never count toward `authority_class`,
+  as Spam does not) and `unknown` for any other folder, or for an
+  account whose provider has no policy, never a default. Folder
+  membership records where mbsync last filed the copy; it does not
+  certify the message's current state in Proton. The prose adds the
+  representative's category beside its folder when it is not `mailbox`
+  (`Folder: Drafts (unsent)`), and each copy's in the copy list.
 
 ## Reaped sources
 
@@ -452,9 +534,9 @@ the experimental tools) carries it as `sender_ambiguous`:
 Only `false` qualifies for the `authority_class` filters: `true` and
 `null` never match any class, `unclassified` included, because the
 author cannot be told. `query_messages` counts such a message outside
-Spam as `indeterminate`, not as a miss
+Spam and Recovered Messages as `indeterminate`, not as a miss
 ([#1161](https://github.com/marshalltech81/protonmail-local-ai/issues/1161));
-a Spam message stays a decided miss. So right after the upgrade the
+a message only there stays a decided miss. So right after the upgrade the
 `authority_class` filters match fewer messages, and none at first,
 until the reparse drains (`get_mailbox_status` shows the queue). The `from` rows are kept,
 but `query_messages`' `sender` filter cannot decide such a message: it
@@ -517,8 +599,8 @@ different filters"), never read against them.
 | `attachment_content_type_is` | MIME type | `query_messages` and `aggregate_messages` `where` | exact declared type on a current occurrence; a miss is unknown unless the current inventory is exhaustive |
 | `attachment_text_words` | words | `query_messages` and `aggregate_messages` `where` | every word occurs in the message's attachment chunks (FTS, stemmed; at most 16 words); a miss is unknown unless the manifest and every occurrence's committed text are complete |
 | `body_words` | words | `query_messages` `text` and `where` | every word occurs in its indexed body (FTS, stemmed; at most 16 words); unknown when one does not and the indexed body is not complete |
-| `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it is filed in one of them |
-| `not_in_folders` | folder names | the default scope, when no folder is named | it is filed in none of them (`Trash`; [Trash](#trash-is-left-out-by-default)) |
+| `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it has an active copy in one of them ([one copy](#copies-and-one-copy-matching)) |
+| `default_scope` | none | the default scope, when no folder is named | it has a current copy outside Trash, counting only its live (not `T`-flagged) copies when it has any ([Trash](#trash-is-left-out-by-default)) |
 | `effective_from` | UTC instant | `date_from` | its effective time is at or after the instant; unknown without a delivery date or a parsed send date |
 | `effective_to` | UTC instant | `date_to` | its effective time is at or before the instant; unknown likewise |
 | `sent_from` | UTC instant | `date_from` with `date_basis="sent"` | its send date (`sent_at`) is at or after the instant; unknown without a parsed one |
@@ -527,12 +609,12 @@ different filters"), never read against them.
 | `occurred_to` | UTC instant | `date_to` with `date_basis="occurred"` | its delivery date is at or before the instant; unknown without one |
 | `dated` | clock name | `date_basis="sent"` or `"occurred"`, even without bounds | it has that clock (a delivery date, or a parsed send date), so it has a place in a page ordered by it; unknown without one |
 | `has_attachments` | bool | `has_attachments` | its own attachment flag equals the value; unknown when it stores no attachment and its attachment list is not complete |
-| `seen` | bool | `query_messages` `seen` | its read flag equals the value |
-| `flagged` | bool | `query_messages` `flagged` | its flagged flag equals the value |
-| `replied` | bool | `query_messages` `replied` | its answered flag (the Maildir `R` flag) equals the value |
+| `seen` | bool | `query_messages` `seen` | the read flag of a copy equals the value |
+| `flagged` | bool | `query_messages` `flagged` | the flagged flag of a copy equals the value |
+| `replied` | bool | `query_messages` `replied` | the answered flag (the Maildir `R` flag) of a copy equals the value |
 | `size_min` | bytes | `query_messages` `size_min` | its local file size is at least the value; unknown without a stored size |
 | `size_max` | bytes | `query_messages` `size_max` | its local file size is at most the value; unknown without a stored size |
-| `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam, and its `sender_ambiguous` is `false`; unknown outside Spam when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)), or when no stored From address carries the class and its From addresses are not complete |
+| `authority_class` | class name | `authority_class` | its From sender carries the class, it has a matching copy outside Spam and Recovered Messages, and its `sender_ambiguous` is `false`; unknown outside them when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)), or when no stored From address carries the class and its From addresses are not complete |
 
 **Explicit address leaves
 ([#1088](https://github.com/marshalltech81/protonmail-local-ai/issues/1088)).**
@@ -569,7 +651,7 @@ indexed before the upgrade, until its reparse). So is `sender` (and the From sid
 message whose `sender_ambiguous` is `true` or `null`, whether or not
 its stored From carries the value, since its author cannot be told
 ([#1153](https://github.com/marshalltech81/protonmail-local-ai/issues/1153)),
-and `authority_class` of such a message outside Spam
+and `authority_class` of such a message outside Spam and Recovered Messages
 ([#1161](https://github.com/marshalltech81/protonmail-local-ai/issues/1161)).
 A `sender`, `recipient` or `participant` value matched as a substring
 (a name or fragment, not a full address) that matches none of a
@@ -606,7 +688,7 @@ that added them until its reparse runs, a dead-lettered message until
 chunks are not committed yet. A stored match still decides a leaf; a
 leaf that finds nothing is false only under `1`, and unknown under `0`
 or `null`. So `subject`, `text`, `has_attachments`, `sender`,
-`recipient`, `participant` and `authority_class` (outside Spam) can
+`recipient`, `participant` and `authority_class` (outside Spam and Recovered Messages) can
 leave a message indeterminate, inside the gates above (`sender` and
 the From side of `participant` and `authority_class` are still unknown
 whenever `sender_ambiguous` is not `false`). `has_attachments` is
@@ -662,7 +744,7 @@ with message references.
 |---|---|---|---|
 | `query` | string | required | Natural language or keyword query |
 | `mode` | string | `hybrid` | `hybrid`, `semantic`, or `keyword` |
-| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
+| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads with no message in the [default scope](#trash-is-left-out-by-default) are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Filter by canonical sender address (or domain like `@example.com`); substring fallback when the value can't canonicalize. Decided on the thread's recorded senders, so a thread matches when any message's primary author matches, while `query_messages` `sender` checks each message's From role ([Filter predicates](#filter-predicates)) |
 | `from_name` | string | none | Filter by sender name; resolved through `find_contact` to a canonical address before applying, matching any display name the address carries in a From header on a thread it primarily sent (the index keeps no author order within one message, so a name written for it as a second author on such a thread also matches). Use when the user names a person but not their email. `from_addr` wins if both are given. |
 | `date_from` | string | none | ISO 8601 date lower bound |
@@ -822,7 +904,7 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 |---|---|---|---|
 | `query` | string | required | The question or topic to gather evidence for |
 | `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `from_name`, `participant`, `date_from`, `date_to`, `has_attachments` or `max_threads`, which select threads |
-| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
+| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads with no message in the [default scope](#trash-is-left-out-by-default) are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Filter by sender address or domain |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound ([date bounds](#search_emails)) |
 | `date_to` | string | none | Inclusive ISO 8601 upper bound; a date-only value covers the whole UTC day |
@@ -1210,47 +1292,53 @@ than `Message not found` ([Reaped sources](#reaped-sources)).
 Every message row (`get_thread`, `get_message`, `query_messages`)
 carries `seen`, `flagged` and `replied`: whether the message is read,
 flagged (starred) and answered in Proton. mbsync mirrors that state into
-the Maildir filename's `:2,` flags (`S`, `F`, `R`) and the indexer
-records it from there, so it is as current as the last sync. A message
+each copy's Maildir filename's `:2,` flags (`S`, `F`, `R`) and the
+indexer records it per copy from there, so it is as current as the last
+sync. The row's values are the representative copy's; each copy's are
+in `occurrences`, and the filters match them per copy
+([Copies](#copies-and-one-copy-matching)). A message
 delivered to `new/` without flags reads as unread. The prose shows it as
 `Status: read, flagged, replied` (or `unread`). The server is
 read-only: nothing here changes the state in Proton.
 
 ### Pending deletion
 
-Under mirror retention a message deleted in Proton (mbsync sets the
-Maildir `T` flag) or whose file went missing is tombstoned by the
-indexer and stays indexed until the grace window
-(`INDEXER_DELETION_GRACE_DAYS`) passes and the reaper removes it
-([Reaped sources](#reaped-sources)). Until then `get_message` and
-`query_messages` still list it, and mark it with
-`pending_deletion: true` (`false` for every other message). The prose
+Under mirror retention a message whose every copy was deleted in Proton
+(mbsync sets the Maildir `T` flag) or went missing has lost its last
+live occurrence; the indexer tombstones it, and it stays indexed until
+the grace window (`INDEXER_DELETION_GRACE_DAYS`) passes and the reaper
+removes it ([Reaped sources](#reaped-sources)). Until then `get_message`
+returns it, and `query_messages` returns it within its retrieval scope:
+by default while a `T`-flagged copy of it is outside Trash, with a
+`folder` filter that one of its copies matches, and never when it has
+no current copy ([Trash](#trash-is-left-out-by-default)). Both mark it
+with `pending_deletion: true` (`false` for every other message). The prose
 shows `Pending deletion: yes` in `get_message` and `| pending deletion`
-on the `query_messages` row. A tombstone counts only while it is on
-the message's current file, so under mirror retention a message
-restored upstream reads as live once the indexer sees the restore. The flag is read at query
-time and changes no totals or paging: an unfiltered `query_messages` count still includes these
-messages, and `query_messages` has no filter on it. Archive mode
+on the `query_messages` row. The flag is derived per message: it is true
+only while the message has no live occurrence (no active copy without
+the `T` flag) and a tombstone, so a message with another live copy, or
+one restored upstream, reads as live once the indexer sees the copy or
+the restore (#1567). The flag is read at query time and changes no
+totals or paging, and `query_messages` has no filter on it. Archive mode
 records no tombstones, so the flag is `false` there, except for
-tombstones left by an earlier mirror-mode run, which archive mode
-never reaps: such a message keeps `pending_deletion: true` until it is
-restored upstream (the `T` flag cleared), when the indexer clears the
-tombstone as it records the rename (live, or at the next startup's
-rename sweep) and the message reads as live. A
-leftover tombstone on a message that stays trashed is kept. `get_thread`
-rows do not carry it.
+tombstones left by an earlier mirror-mode run, which archive mode never
+reaps: such a message keeps `pending_deletion: true` until a copy of it
+is live again (the `T` flag cleared upstream, recorded live or at the
+next rename sweep). `get_thread` rows do not carry it.
 
 ### `list_threads`
 Browse threads in a folder: every thread with at least one message
-filed in it, newest activity first. A thread's `folder` field is its
+with a current copy in it ([Copies](#copies-and-one-copy-matching)),
+`T`-flagged copies included, newest activity first. A thread's `folder` field is its
 representative folder: where the message that started it was filed
 when the thread was first indexed (not updated when messages move). A
 thread listed under `Sent` because of one sent reply can still report
 `INBOX`.
 
-`unread` and `flagged` read each message's [read state](#read-state):
-a thread is listed when one of its messages filed in `folder` is unread
-(or flagged). An unread reply filed elsewhere does not list the thread
+`unread` and `flagged` read each copy's [read state](#read-state):
+a thread is listed when one of its messages has a copy in `folder` that
+is unread (or flagged). An unread reply filed elsewhere, or an unread
+copy of the same message in another folder, does not list the thread
 here. The structured output echoes `filter_type`.
 
 | Parameter | Type | Default | Description |
@@ -1261,9 +1349,9 @@ here. The structured output echoes `filter_type`.
 | `offset` | int | `0` | Pagination offset; clamped to `[0, 1000000]` |
 
 ### `list_folders`
-List every folder holding at least one indexed message, with its
-thread count: the number of distinct threads with a message in that
-folder, the same threads `list_threads(folder=...)` pages through. A
+List every folder holding a current copy of at least one indexed
+message, with its thread count: the number of distinct threads with a
+message with a copy in that folder, the same threads `list_threads(folder=...)` pages through. A
 thread with messages in several folders counts once in each, so the
 counts can sum to more than the total thread count.
 
@@ -1305,8 +1393,9 @@ null for a free-mail provider (see `docs/architecture.md`, Entities);
 it is never inferred from display names. `authority_class` is the
 contact's source-authority class from the operator's rules file
 (`unclassified` when no rule matched), matched against the claimed From
-address rather than a verified sender (Spam-folder mail is excluded
-from the `authority_class` filters, not from this report), and
+address rather than a verified sender (Spam and Recovered Messages
+mail is excluded from the `authority_class` filters, not from this
+report), and
 `authority_rule` the rule
 that set it (`address:<pattern>` or `domain:<pattern>`, null when
 unclassified).
@@ -1353,7 +1442,7 @@ questions.
 | `participant` | string | none | Any role: From, To, or Cc |
 | `subject` | string | none | Unicode caseless substring of the message's own subject (casefolded, so `STRASSE` matches `Straße`); a message whose stored subject was cut or is not checked yet and does not contain it is `indeterminate` |
 | `text` | string | none | Every word must appear in the message's indexed body (FTS word match with stemming; words may be in different chunks). Attachment text and stripped quoted replies are not searched; at most 16 words. A message whose indexed body is not complete and lacks a word is `indeterminate` |
-| `folder` | string | none | Exact folder name. Without it, messages filed in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
+| `folder` | string | none | Exact folder name: messages with a current copy in it, decided on the same copy as the flag filters ([one copy](#copies-and-one-copy-matching)). Without it, messages outside the default scope are left out; pass `"Trash"` to list the Trash copies ([Trash](#trash-is-left-out-by-default)) |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the clock `date_basis` selects |
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. Give an offset for a local-time bound; `date_bounds` echoes the clock and UTC instants applied ([date bounds](#search_emails)) |
 | `date_basis` | string | `effective` | Clock for bounds, order and cursors: `effective` (delivery, else send date), `sent` (Date header), or `occurred` (topmost Received header). Blank uses the default; explicit null and unknown values are errors; `internal` is unavailable |
@@ -1555,12 +1644,12 @@ it is the complete count only when `indeterminate` is 0, so report
 `indeterminate` with any count when it is not. A `sender` filter
 decides only messages whose `sender_ambiguous` is `false`, and a
 `participant` filter decides the others only through To or Cc; an
-`authority_class` filter decides the others only when they are in Spam
-([Sender attribution](#sender-attribution)). Right after the upgrade
+`authority_class` filter decides the others only when they are only in
+Spam or Recovered Messages ([Sender attribution](#sender-attribution)). Right after the upgrade
 that added `sender_ambiguous`, mail indexed before it is `null` until
 its queued reparse runs, so every `sender` filter reports those
 matches as `indeterminate` (and `participant` those it finds only in
-From, and `authority_class` all of them outside Spam) until the reparse drains (`get_mailbox_status` `queue.reparse`);
+From, and `authority_class` all of them outside Spam and Recovered Messages) until the reparse drains (`get_mailbox_status` `queue.reparse`);
 a message whose indexing job is dead-lettered stays indeterminate
 until `make requeue-dead`. Likewise, right after the upgrade that added
 `message_participant_names`
@@ -1594,7 +1683,7 @@ participants are read in one snapshot.
 hundreds of rows rarely needs every field. `fields` lists the row
 fields to return, by their structured-output names (`message_id`,
 `subject`, `sent_at`, `sent_at_status`, `occurred_at`, `folder`, `has_attachments`,
-`seen`, `flagged`, `replied`, `in_reply_to`, `references`,
+`seen`, `flagged`, `replied`, `occurrences`, `occurrence_count`, `in_reply_to`, `references`,
 `references_count`, `from`, `from_count`, `to`, `to_count`, `cc`,
 `cc_count`, `sender_ambiguous`, `source_file`, `pending_deletion`); `claimant_id` and
 `thread_id` are always included, so rows stay addressable. A usual
@@ -2039,7 +2128,8 @@ The group with value `null` holds the messages with no value on the
 dimension. For the sender dimensions: a message whose
 `sender_ambiguous` is not `false`, or with no stored From address
 ([Sender attribution](#sender-attribution)). For `authority_class`,
-also a message in Spam or one whose From addresses have no class. A
+also a message only in Spam or Recovered Messages, or one whose From
+addresses have no class. A
 message with several From addresses counts in the group of each, so
 those groups can sum to more than `total_matches`; `folder`, `year`
 and `month` have one value per message, so their groups sum to
@@ -2060,8 +2150,8 @@ the groups shown, `total_matches` and `indeterminate` are unchanged,
 and a group's `messages` still equals `query_messages`' count for
 `sender=<value>`. It counts messages, not missing addresses, and
 includes a message with no stored From address, which is also in the
-`null` group. For `authority_class` it leaves out Spam, where no class
-matches. The prose states it when not 0, and the timing line carries
+`null` group. For `authority_class` it leaves out Spam and Recovered
+Messages, where no class matches. The prose states it when not 0, and the timing line carries
 it.
 
 Recipient domains count each message once per distinct To/Cc domain, including
@@ -2205,7 +2295,7 @@ by filename and extracted text and stops at 50 results.
 | `sender` | string | none | From of the carrying message, matched as `query_messages` `sender` |
 | `recipient` | string | none | To or Cc of the carrying message, likewise |
 | `participant` | string | none | Any role of the carrying message, likewise |
-| `folder` | string | none | Exact folder name of the carrying message. Without it, attachments on messages in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
+| `folder` | string | none | Exact folder name of a current copy of the carrying message. Without it, attachments on messages outside the default scope are left out; pass `"Trash"` to list the Trash copies' ([Trash](#trash-is-left-out-by-default)) |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the carrying message clock `date_basis` selects |
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. `date_bounds` echoes the clock and UTC instants applied |
 | `date_basis` | string | `effective` | Clock for bounds, order and cursors, with the same choices and validation as `query_messages` |
@@ -2601,7 +2691,7 @@ only. It is null when nothing was left out, sample or not.
 | `participant` | string | none | Scope to threads where this person appears in **any** role — From, To, or Cc, as in `search_emails`. Accepts an address, a domain (`@example.com`), or a name fragment |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound ([date bounds](#search_emails)) |
 | `date_to` | string | none | Inclusive ISO 8601 upper bound; a date-only value covers the whole UTC day |
-| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
+| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads with no message in the [default scope](#trash-is-left-out-by-default) are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `max_threads` | int | `5` | Context threads to use |
 
 **Questions about a person
@@ -2976,7 +3066,7 @@ extracted.
 |---|---|---|---|
 | `query` | string | required | What to search for; also sent to the model as the request, so it can pick which records in a passage are wanted |
 | `schema` | dict | required | JSON schema for extraction |
-| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
+| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads with no message in the [default scope](#trash-is-left-out-by-default) are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound ([date bounds](#search_emails)) |
 | `date_to` | string | none | Inclusive ISO 8601 upper bound; a date-only value covers the whole UTC day |
 | `limit` | int | `20` | Max threads to search |
@@ -3080,8 +3170,9 @@ mail a population run will read; the steps are not sent to clients:
    window the day before the next begins), with `limit=50` (its
    maximum). Run it once per folder
    scope the enumeration used, with `folders` to match
-   (`folders=["Trash"]` for the Trash query: without it, threads filed
-   only in Trash are left out). A call's `threads`
+   (`folders=["Trash"]` for the Trash query: without it, threads with
+   no message in the [default scope](#trash-is-left-out-by-default) are
+   left out). A call's `threads`
    output lists the threads it searched: check that each enumerated
    item's thread is in the output of the call for that item's own
    window and folder scope (another call shows the item only as
@@ -3545,8 +3636,10 @@ and what it holds. Call this when asked which version or build is running.
 | Field | Meaning |
 |---|---|
 | `server_version` | MCP server image's source commit, including `-dirty` for local changes; `unknown` when build identity is unavailable. This identifies the server code, not the MCP protocol or SQLite schema version |
-| `current` | `true` only when all three hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, and no message is pending, retrying, deferred or extraction deferred. A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
+| `current` | `true` only when all four hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, no message is pending, retrying, deferred or extraction deferred, and no mail collection waits for its success to be delivered to the indexer (`collection.failure_unrecovered` after an observed failure, or `collection.success_undelivered` for a success whose delivery is not yet confirmed, including one whose failed predecessor was never observed). A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |
+| `collection` | mbsync's latest collection from the Bridge app (#1592): `outcome` (`succeeded`, `succeeded_with_withheld_folders`, `failed`, or `unknown` with `unknown_reason`: `not_recorded`, `missing`, `legacy`, `malformed`, `unsupported`, `account_mismatch`, `unreadable` or `no_completed_attempt`), `outcome_at`, `withheld_far_side_folders` (how many far-side folders it could not open; null when unknown; never their names), `failure_class` (`deadline`, `killed`, `error`, `permission_repair`, `interrupted`), `latest_attempt` (`outcome`, possibly `in_progress`, and `started_at`), `last_success_at`, `failure_unrecovered`, `success_undelivered` (a success `outcome` whose delivery to the index is not yet confirmed; not evidence of a problem on its own — it clears within the watcher's own event-processing latency) and `observed_at` (when the indexer last read it). `in_progress` only means an attempt started with no recorded end, not that mbsync is running. A success that withheld folders does not change `current` |
+| `upstream_currency` | Always `unknown`: whether Bridge itself has synchronized with Proton and serves current content is not observed |
 | `last_sync_at` / `sync_interval_secs` | mbsync's last successful sync from Bridge, and how often it syncs |
 | `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
 | `queue` | `pending` (found, not yet failed), `retrying` (failed at least once; will retry), `deferred` (postponed by the indexer without a failure of its own: a file it cannot read yet, an embedder outage or configuration error, or a job waiting for a rename; retried without spending attempts), `extraction_deferred` (messages already indexed whose attachment extraction reached the indexer's per-message budget: the rest of their attachments are extracted on later passes, #1236), `parked_trashed` (trashed files already indexed, waiting for the reaper to remove them or for the file to be restored, #1165), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`), `reparse` (of the pending, retrying, deferred and extraction_deferred jobs, those re-reading a message already indexed after an upgrade, #1078: searchable meanwhile, but data the upgrade adds is missing until it runs). `pending`, `retrying`, `deferred` and `extraction_deferred` make `current` false; `parked_trashed` and `dead` do not. A job that had already failed before an embedder outage deferred it counts as `retrying` |
@@ -3618,7 +3711,13 @@ mcp-server never talks to Bridge. mbsync writes a stamp at the Maildir
 root after each successful sync. The indexer acknowledges a sync only
 once every message it delivered is queued, and records it with its own
 liveness in the `ingestion_state` table that this tool reads (see
-"Index currency" in `docs/architecture.md`).
+"Index currency" in `docs/architecture.md`). mbsync also publishes its
+collection status before and after every attempt; the indexer records
+it per account in `account_collection_state`, in the same transaction,
+and this tool reads it as `collection` ("Collection status" there). The
+three are separate: `current` says the index caught up with the local
+Maildir, `collection` how mbsync's latest collection from Bridge ended,
+and `upstream_currency` (unknown) whether Bridge is in step with Proton.
 
 The same helper powers ``make status`` on the host: the Makefile target
 invokes the module-level ``get_mailbox_status`` directly against the

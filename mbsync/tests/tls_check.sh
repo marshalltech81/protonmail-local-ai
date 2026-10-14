@@ -127,6 +127,7 @@ start_mbsync() {
         -e BRIDGE_CERT_HOST="${2:-127.0.0.1}" \
         -e BRIDGE_CERT_FINGERPRINT="${1:-}" \
         -e BRIDGE_USER=synthetic@example.com -e SYNC_INTERVAL=3600 \
+        -e ACCOUNT_SCOPE=00000000-0000-4000-8000-000000000001 \
         -v "$WORK/bridge_pass:/run/secrets/bridge_pass:ro" \
         -v "$maildir:/maildir" -v "$state:/state" \
         "$IMAGE" >/dev/null

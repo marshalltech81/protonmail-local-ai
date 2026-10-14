@@ -175,7 +175,7 @@ def test_served_schema_describes_selected_clock(clock_server, tool, rows):
             "query_messages",
             {
                 "v": 2,
-                "q": "87abdee2e05f7cac",  # pragma: allowlist secret — synthetic query digest
+                "q": "993bbc64eb49298e",  # pragma: allowlist secret — synthetic query digest
                 "s": "2024-06-01T00:00:00+00:00",
                 "m": "e#3f79bb7b435b0532",
                 "o": 1,
@@ -185,7 +185,7 @@ def test_served_schema_describes_selected_clock(clock_server, tool, rows):
             "query_attachments",
             {
                 "v": 3,
-                "q": "5f553cc61687bbf2",  # pragma: allowlist secret — synthetic query digest
+                "q": "da0051a309bd90bc",  # pragma: allowlist secret — synthetic query digest
                 "s": "2024-06-01T00:00:00+00:00",
                 "m": "e#3f79bb7b435b0532",
                 "a": "e#3f79bb7b435b0532:1",
@@ -195,7 +195,13 @@ def test_served_schema_describes_selected_clock(clock_server, tool, rows):
     ],
 )
 def test_pre_change_effective_cursors_remain_valid(clock_server, tool, payload):
-    # Payloads decoded from HEAD's pre-#1150 cursors on this synthetic fixture.
+    # Payloads shaped like HEAD's pre-#1150 cursors on this synthetic
+    # fixture: no date_basis field, only the leaves #1150 predates. The
+    # digest itself is recomputed under this branch's current
+    # QUERY_DIGEST_FORMAT (4, #1568: the default folder scope is the
+    # occurrence-based ``default_scope`` leaf, not ``not_in_folders``),
+    # so this pins today's digest for the unchanged ("effective",
+    # no explicit date_basis) shape, not a value literally decoded pre-#1150.
     cursor = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
     first = _call(clock_server, tool, limit=1)
     if tool == "query_messages":

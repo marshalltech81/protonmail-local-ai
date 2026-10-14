@@ -1053,7 +1053,7 @@ largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
 | `.env.example` setting | TOML key | Default | Validation | Consumer | After a change |
 | --- | --- | --- | --- | --- | --- |
 | `SOURCE_MODE` | `accounts[].provider` | required | one of proton-bridge, imap (imap cannot be enabled until #1606) | mbsync, indexer, mcp-server | recreate all three; recorded in the index with the UUID |
-| `ACCOUNT_SCOPE` | `accounts[].scope_uuid` | required | UUID, canonical lower case; unique | indexer, mcp-server | never changed: a different UUID is a different account (#1596) |
+| `ACCOUNT_SCOPE` | `accounts[].scope_uuid` | required | UUID, canonical lower case; unique | mbsync, indexer, mcp-server | never changed: a different UUID is a different account (#1596) |
 | `BRIDGE_USER` | `accounts[].connection.username` | required | text | mbsync (mbsyncrc User) | recreate mbsync |
 | `BRIDGE_IMAP_PORT` | `accounts[].connection.port` | 1143 (proton-bridge) | integer 1 to 65535; proton-settings.sh | mbsync (Tunnel, probes) | recreate mbsync |
 | `BRIDGE_CERT_FINGERPRINT` | `accounts[].proton_bridge.certificate_fingerprint` | required | text; 64 hex digits | mbsync (certificate check) | recreate mbsync |
@@ -1195,7 +1195,8 @@ Maildir copy of a message as its own occurrence (#1566). Upgrade with
 A plain `docker compose up` without the line starts nothing useful:
 Compose warns that `ACCOUNT_SCOPE` is not set, and the indexer and
 mcp-server exit with "ACCOUNT_SCOPE is not set" before opening the
-index, so nothing is migrated. Run `make up` instead. If a migration is
+index, so nothing is migrated; mbsync, which names the account in its
+collection status (#1592), exits with it too before syncing. Run `make up` instead. If a migration is
 interrupted, the index stays at v13 with no account recorded, and the
 next start retries it (see docs/troubleshooting.md, "Indexer stops
 during a schema migration").

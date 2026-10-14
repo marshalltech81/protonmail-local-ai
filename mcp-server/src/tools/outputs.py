@@ -36,6 +36,7 @@ from ..lib.sqlite import (
     MAX_LISTED_MESSAGE_HEADERS,
     REAPED_RECORD_RETENTION_DAYS,
     MessageRecord,
+    OccurrenceRecord,
     SourceFile,
     ThreadResult,
 )
@@ -94,8 +95,9 @@ class Source(_Output):
         description="What locator points at; an RFC 5322 message file in the Maildir."
     )
     locator: str = Field(
-        description="Path of the raw message file in the Maildir volume, as the "
-        "indexer sees it (/maildir/...). Kept current when mbsync renames the file."
+        description="Path of the raw message file relative to its account's Maildir root "
+        "(the indexer mounts it at /maildir): the representative copy's. Kept current when "
+        "mbsync renames the file."
     )
     sha256: str | None = Field(
         description="SHA-256 of the file's bytes when it was indexed; the file's "
@@ -119,6 +121,52 @@ def source(f: SourceFile | None) -> Source | None:
 
 
 _SOURCE_FILE_DESCRIPTION = "The raw message file this came from; null when none is recorded."
+
+
+class Occurrence(_Output):
+    """One current Maildir copy of a message (#1568)."""
+
+    account_scope: str = Field(description="The account's scope UUID (ACCOUNT_SCOPE).")
+    provider: str = Field(description="The account's provider (SOURCE_MODE).")
+    folder: str = Field(description="Folder, relative to the account.")
+    locator: str = Field(description="File path relative to the account's Maildir root.")
+    seen: bool
+    flagged: bool
+    replied: bool
+    trashed: bool = Field(description="Maildir T flag: deleted in Proton; not a live copy.")
+    category: str = Field(
+        description="Source category from the folder under the provider's policy: mailbox "
+        "(ordinary mail), unsent (Drafts, Scheduled; the folder does not certify it is still "
+        "unsent), recovered (Bridge-local recovery mail, untrusted: its identity headers are "
+        "the client's), or unknown."
+    )
+    provenance: str = Field(
+        description="How the copy was first recorded: parse, rename (an observed move), "
+        "scan (a reconciliation scan that verified its bytes) or migration (an index upgrade)."
+    )
+    first_observed_at: str | None = Field(
+        description="When the indexer first saw this copy's file (UTC); null when unknown."
+    )
+    last_observed_at: str | None = Field(
+        description="When the indexer last saw this copy's file (UTC); null when unknown."
+    )
+
+
+def occurrence(o: OccurrenceRecord) -> Occurrence:
+    return Occurrence(
+        account_scope=o.account_scope,
+        provider=o.provider,
+        folder=o.folder,
+        locator=o.locator,
+        seen=o.seen,
+        flagged=o.flagged,
+        replied=o.replied,
+        trashed=o.trashed,
+        category=o.category,
+        provenance=o.provenance,
+        first_observed_at=o.first_observed_at,
+        last_observed_at=o.last_observed_at,
+    )
 
 
 class Participant(_Output):
@@ -228,11 +276,19 @@ class MessageHeaders(_Output):
             "occurred uses this field without a fallback."
         )
     )
-    folder: str
+    folder: str = Field(
+        description="Folder of the representative copy (an active one, not T-flagged, "
+        "outside Trash first); every copy is in occurrences."
+    )
     has_attachments: bool
-    seen: bool = Field(description="Read in Proton (the file's Maildir S flag).")
-    flagged: bool = Field(description="Starred in Proton (Maildir F flag).")
-    replied: bool = Field(description="Answered in Proton (Maildir R flag).")
+    seen: bool = Field(description="Representative copy read in Proton (Maildir S flag).")
+    flagged: bool = Field(description="Representative copy starred in Proton (Maildir F flag).")
+    replied: bool = Field(description="Representative copy answered in Proton (Maildir R flag).")
+    occurrences: list[Occurrence] = Field(
+        description="The message's current Maildir copies, representative first; may be "
+        "shortened, see occurrence_count."
+    )
+    occurrence_count: int
     in_reply_to: str | None
     references: list[str] = Field(description="References; may be shortened, see references_count.")
     references_count: int
@@ -253,9 +309,9 @@ class ListedMessage(MessageHeaders):
 
     thread_id: str
     pending_deletion: bool = Field(
-        description="Deleted in Proton (the file's Maildir T flag) or its file missing "
-        "locally. Mirror retention removes it from the index after the grace period; archive "
-        "mode never does. Still listed and counted until removed."
+        description="Every copy deleted in Proton (Maildir T flag) or missing locally, and "
+        "tombstoned. Mirror retention removes it from the index after the grace period; archive "
+        "mode never does."
     )
 
 
@@ -333,6 +389,8 @@ def message_headers(m: MessageRecord) -> MessageHeaders:
         seen=m.seen,
         flagged=m.flagged,
         replied=m.replied,
+        occurrences=[occurrence(o) for o in m.occurrences],
+        occurrence_count=(len(m.occurrences) if m.occurrence_count is None else m.occurrence_count),
         in_reply_to=None if m.in_reply_to is None else clip(m.in_reply_to, chars),
         references=[clip(r, chars) for r in m.references[:refs]],
         references_count=len(m.references) if m.references_count is None else m.references_count,
@@ -815,7 +873,8 @@ class QueryMessagesOutput(_Output):
         description="Messages the filters could neither accept nor reject (a filtered size, "
         "date, subject, body, attachment list, address or display name the index does not "
         "hold, holds cut by a parse limit, or has not checked yet; a sender or participant "
-        "filter, or an authority_class filter on a message outside Spam whose sender is "
+        "filter, or an authority_class filter on a message outside Spam and Recovered "
+        "Messages whose sender is "
         "ambiguous or not yet checked; the prose names the causes the given filters can "
         "have), in neither total_matches nor the pages. 0 when every filter could be "
         "decided for every message; when not 0, report it with any count."
@@ -1020,7 +1079,8 @@ class AggregateMessagesOutput(_Output):
         "whose stored From list is not known to be complete, each counted once over the "
         "whole result; further sender groups or memberships may be missing for them. It "
         "counts messages, not missing addresses, and includes a message with no stored "
-        "From address (also in the null group). authority_class leaves out Spam.",
+        "From address (also in the null group). authority_class leaves out Spam and "
+        "Recovered Messages.",
     )
     incomplete_recipient_messages: int | None = Field(
         default=None,
@@ -1193,7 +1253,7 @@ class Contact(_Output):
         "management, vendor, government, personal, other, or unclassified. "
         "Metadata only; it does not affect ranking. It reflects the claimed From "
         "address, not a verified sender; the authority_class search filters skip "
-        "Spam-folder mail."
+        "Spam and Recovered Messages mail."
     )
     authority_rule: str | None = Field(
         description="The rule that assigned authority_class (address:<pattern> or "
@@ -1265,6 +1325,79 @@ class HeaderPredicateCapability(_Output):
     )
 
 
+CollectionOutcome = Literal["succeeded", "succeeded_with_withheld_folders", "failed"]
+
+
+class CollectionAttempt(_Output):
+    outcome: Literal["in_progress", "succeeded", "succeeded_with_withheld_folders", "failed"] = (
+        Field(
+            description="in_progress means only that the attempt started and no terminal "
+            "outcome was recorded for it; it does not show whether mbsync is still running."
+        )
+    )
+    started_at: datetime
+
+
+class CollectionStatus(_Output):
+    outcome: Literal["succeeded", "succeeded_with_withheld_folders", "failed", "unknown"] = Field(
+        description="mbsync's latest completed collection from the Bridge app: "
+        "succeeded; succeeded_with_withheld_folders (the rest synced, but far-side "
+        "folders could not be opened, most likely renamed or deleted in Proton; their "
+        "local copies are kept); failed; or unknown (see unknown_reason). Not Proton's "
+        "or Bridge's own state (upstream_currency)."
+    )
+    outcome_at: datetime | None = Field(description="When that collection ended.")
+    withheld_far_side_folders: int | None = Field(
+        description="How many far-side folders that collection could not open; null when "
+        "unknown. Folder names are never reported."
+    )
+    failure_class: (
+        Literal["deadline", "killed", "error", "permission_repair", "interrupted"] | None
+    ) = Field(
+        description="Why it failed: deadline (stopped at SYNC_DEADLINE_SECONDS), killed "
+        "(killed after ignoring the stop, or by the kernel), error (mbsync failed), "
+        "permission_repair (new mail could not be made readable to the indexer) or "
+        "interrupted (mbsync was stopped); null unless failed."
+    )
+    latest_attempt: CollectionAttempt | None = Field(
+        description="The latest attempt, which may still be in progress."
+    )
+    last_success_at: datetime | None = Field(
+        description="When the last successful collection ended."
+    )
+    failure_unrecovered: bool = Field(
+        description="A failed collection has not yet been followed by a successful one "
+        "delivered to the index; current is false while it is true."
+    )
+    success_undelivered: bool = Field(
+        description="outcome is a success, but the indexer has not yet confirmed its mail "
+        "was delivered to the index (the sync it has acknowledged does not yet name this "
+        "collection): a watcher delayed enough to read this collection's publication "
+        "before processing that sync's own events, not evidence of a problem on its own. "
+        "current is false while it is true."
+    )
+    unknown_reason: (
+        Literal[
+            "not_recorded",
+            "missing",
+            "legacy",
+            "malformed",
+            "unsupported",
+            "account_mismatch",
+            "unreadable",
+            "no_completed_attempt",
+        ]
+        | None
+    ) = Field(
+        description="Why outcome is unknown: not yet recorded by the indexer, mbsync's status "
+        "file missing, written by an older mbsync, malformed, of an unsupported format, "
+        "naming another account or unreadable, or no attempt completed yet; null otherwise."
+    )
+    observed_at: datetime | None = Field(
+        description="When the indexer last read mbsync's collection status."
+    )
+
+
 class QueryCapability(_Output):
     status: Literal[
         "supported",
@@ -1295,11 +1428,21 @@ class MailboxStatusOutput(_Output):
     )
     current: bool = Field(
         description="True only when mail synced from Proton recently, the indexer is "
-        "running, and no message is pending, retrying, deferred or extraction_deferred. "
+        "running, no message is pending, retrying, deferred or extraction_deferred, and no "
+        "failed collection is unrecovered (collection.failure_unrecovered). "
         "Mail that reached Proton "
         "after last_sync_at is not searchable either way."
     )
     not_current_reasons: list[str] = Field(description="Why current is false; empty when true.")
+    collection: CollectionStatus = Field(
+        description="mbsync's latest collection outcome from the Bridge app, apart from "
+        "whether the index has caught up with the local Maildir (current)."
+    )
+    upstream_currency: Literal["unknown"] = Field(
+        default="unknown",
+        description="Whether Bridge has synchronized with Proton and serves current "
+        "content: always unknown, since nothing this server can observe establishes it.",
+    )
     last_sync_at: datetime | None = Field(
         description="When mbsync last completed a successful sync from Proton."
     )

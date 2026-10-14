@@ -450,7 +450,8 @@ class TestAttachmentIndeterminateCount:
         _add(conn, "u5", "t-x", "2024-06-13T00:00:00+00:00", VENDOR, sender_ambiguous=1)
         _add(conn, "u6", "t-x", "2024-06-14T00:00:00+00:00", VENDOR, sender_ambiguous=1)
         conn.execute(
-            "UPDATE messages SET folder = 'Trash' WHERE claimant_id = ?", (claimant_of("u6"),)
+            "UPDATE message_occurrences SET folder = 'Trash' WHERE claimant_id = ?",
+            (claimant_of("u6"),),
         )
         conn.commit()
         conn.close()

@@ -20,7 +20,7 @@ from src import vector_sums
 from src.chunker import MessageChunk, l2_normalize
 from src.database import EMBEDDING_DIM, Database
 
-from tests.conftest import make_message, make_thread
+from tests.conftest import lose_message, make_message, make_thread
 
 MARKER = "SYNTHETIC_VECTOR_SUM_MARKER"
 # At least 20 tokens a chunk, the density real mail has.
@@ -295,13 +295,13 @@ class TestMutationSites:
         _add_message(db, "m2@x", "t1")
         _write(db, "m1@x", "t1", ["c0", "c1"], vecs)
         _write(db, "m2@x", "t1", ["c2", "c3"], vecs, attachment_id="att")
-        db.add_pending_deletion("/maildir/INBOX/cur/m2@x", "m2@x", "t1")
+        lose_message(db, "m2@x")
         reads = ThreadReads(monkeypatch)
         survivor = make_message(message_id="m1@x", filepath="/maildir/INBOX/cur/m1@x")
         removed = db.reap_thread_messages(
             make_thread(messages=[survivor], thread_id="t1"), None, ["m2@x"]
         )
-        assert removed == ["/maildir/INBOX/cur/m2@x"]
+        assert removed == ["m2@x"]
         _assert_exact(db, "t1")
         # The reaped vectors only: no thread-wide read.
         assert reads.take() == (0, 0, 2)
@@ -315,7 +315,7 @@ class TestMutationSites:
         _add_message(db, "m1@x", "t1")
         _add_message(db, "m2@x", "t1")
         _write(db, "m2@x", "t1", ["c0"], vecs)
-        db.add_pending_deletion("/maildir/INBOX/cur/m2@x", "m2@x", "t1")
+        lose_message(db, "m2@x")
         before = (_stored(db, "t1"), _thread_vec(db, "t1"))
         survivor = make_message(message_id="m1@x", filepath="/maildir/INBOX/cur/m1@x")
         assert (
@@ -331,7 +331,7 @@ class TestMutationSites:
         rng = random.Random(6)
         _add_message(db, "m1@x", "t1")
         _write(db, "m1@x", "t1", ["c0"], {"c0": _random_unit(rng)})
-        db.add_pending_deletion("/maildir/INBOX/cur/m1@x", "m1@x", "t1")
+        lose_message(db, "m1@x")
         assert db.delete_thread_completely("t1")
         assert _stored(db, "t1") is None
 

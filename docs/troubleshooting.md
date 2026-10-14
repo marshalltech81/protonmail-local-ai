@@ -339,9 +339,11 @@ open the old name on Bridge, cannot, and logs:
 This is expected and harmless. The rest of the mailbox keeps syncing, the
 sync counts as successful (it does not count toward the restart threshold),
 and the last-sync stamp is still written, so `get_mailbox_status` does not
-report the mailbox as stale: the old folder has nothing left to pull. The
-log holds a count, not the folder names, because folder names are mailbox
-content.
+report the mailbox as stale: the old folder has nothing left to pull. Its
+`collection` block shows the run as `succeeded_with_withheld_folders` with
+`withheld_far_side_folders` set to the count, so it is not read as a clean
+sync, and `current` is unaffected (#1592). The log and the status hold a
+count, not the folder names, because folder names are mailbox content.
 
 The run still counts as a failure, as before, when mbsync reports any other
 error in the same run, exits with any status other than 1, or cannot open
@@ -363,6 +365,35 @@ The warning repeats for as long as the local copy exists. Nothing removes
 it automatically. Removing or moving the folder out of the Maildir yourself
 stops the warning, but its messages then count as deleted for the indexer
 (see [Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)).
+
+## get_mailbox_status reports a failed or unknown mail collection
+
+`get_mailbox_status` `collection` reports mbsync's latest collection
+from the Bridge app (#1592; see
+[architecture](architecture.md#collection-status)).
+
+- `outcome` `failed`: `failure_class` names the first cause, and the
+  mbsync log the details (`docker compose logs mbsync`): `deadline` (see
+  [mbsync stopped a sync at its deadline](#mbsync-stopped-a-sync-at-its-deadline)), `killed`, `error` (mbsync's own
+  errors), `permission_repair` (new mail could not be made readable to
+  the indexer) or `interrupted` (mbsync was stopped, for example by a
+  restart). `current` stays false, through retries, until a later sync
+  succeeds and the indexer has acknowledged it.
+- `outcome` `unknown`: `unknown_reason` says why. `not_recorded`: the
+  indexer has not read mbsync's status yet. `missing`: mbsync has not
+  published one, as before its first attempt or while running an older
+  image (rebuild and recreate it with `make up`). `legacy`, `malformed`
+  or `unsupported`: the file is not one this release reads; the next
+  attempt replaces it. `account_mismatch`: mbsync's `ACCOUNT_SCOPE`
+  differs from the indexer's; both read it from `.env`, so recreate
+  mbsync with `make up` (see [Account scope mismatch](#account-scope-mismatch)). `unreadable`: the
+  file is not a regular file the indexer can open.
+- `latest_attempt` `in_progress` only means an attempt started and has
+  no recorded end; it does not show whether mbsync is still running. Use
+  `docker compose ps mbsync` and its log.
+
+`upstream_currency` is always `unknown`: whether Bridge itself is in step
+with Proton is not observed.
 
 ## Remove mail from a folder you have just excluded
 
@@ -393,9 +424,11 @@ be recalled. To remove the local copy as well:
    ([Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)):
    - **Mirror** (`INDEXER_DELETION_ENABLED=true`, the default): the next
      reconciler sweep (at indexer startup and every
-     `INDEXER_DELETION_SWEEP_INTERVAL_SECS`) tombstones each message
-     whose file is gone, unless a byte-identical copy remains in another
-     folder, in which case the message stays indexed under that copy.
+     `INDEXER_DELETION_SWEEP_INTERVAL_SECS`) retires the occurrence of
+     each file that is gone, once its Maildir scan reads every folder,
+     and tombstones each message left with no live copy; a message with
+     a byte-identical copy in another folder (not `T`-flagged) stays
+     indexed through that copy.
      The reaper removes tombstoned messages from the index after
      `INDEXER_DELETION_GRACE_DAYS`; until then they stay searchable. If
      more are past the grace window at once than
@@ -929,6 +962,16 @@ below it, for example one built under another root; the migration
 stops with nothing applied. Restore the original `MAILDIR_PATH`, or
 rebuild the index. The message never names the path.
 
+v17 (#1567, #1568) moves every folder, path and flag reader to the
+occurrences and drops the per-message copies of them; it queues no
+reparse and takes about half a second on a 36,500-message index. A
+WARNING `Migration v17 found N message(s) with no verified file` counts
+messages the v14 migration could not bind to a file holding their
+bytes: each gets a retired occurrence and is treated as having lost its
+last live copy, so under mirror retention the reconciler tombstones it
+unless the reconciliation scan or a parse first binds a file holding
+its bytes.
+
 ## Reparse or rebuild after an upgrade
 
 Some releases change what the parser stores for each message. Which
@@ -1197,8 +1240,9 @@ deadline failed with a connection error, a timeout, a 5xx, 408 or 429.
 ## Account scope mismatch
 
 The indexer or mcp-server exits at startup with one of these messages
-(see docs/architecture.md, "Account registry"). None of them prints the
-value, so compare `.env` yourself.
+(see docs/architecture.md, "Account registry"); mbsync, which names the
+account in its collection status (#1592), refuses the first two too.
+None of them prints the value, so compare `.env` yourself.
 
 - "ACCOUNT_SCOPE is not set": the service got an empty value. Run
   `make init-secrets` (or `make up`, which runs it), which writes a new
@@ -1302,11 +1346,21 @@ Tombstones and reaper actions can be inspected directly:
 docker exec indexer python -c '
 import os, sqlite3
 db = sqlite3.connect("file:" + os.environ["SQLITE_PATH"] + "?mode=ro", uri=True)
-print(db.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])'
+print(db.execute("SELECT COUNT(DISTINCT claimant_id) FROM pending_deletions").fetchone()[0])'
 ```
 
-The reaper sweeps `pending_deletions` on startup and once per
-`INDEXER_DELETION_SWEEP_INTERVAL_SECS`. If you want a deletion to land
+That counts the messages that lost their last live copy (a tombstone
+is kept per occurrence, #1567). The reaper sweeps `pending_deletions`
+on startup and once per `INDEXER_DELETION_SWEEP_INTERVAL_SECS`.
+
+If the sweep logs `reconciler sweep: the Maildir scan was partial (<n>
+unreadable director(ies)); no occurrence was retired`, a folder under the
+Maildir root is not readable by the indexer (mbsync creates folders
+0700 and opens them in its permission repair) or the root is missing.
+While it lasts no vanished file's occurrence is retired, so no message
+starts a grace period because of a missing file; `T`-flagged files are
+still tombstoned. Fix the folder's permissions (or the mount); the next
+sweep is complete and retires what is really gone. If you want a deletion to land
 immediately for testing, drop the grace window to `0` and recreate the
 indexer as described above.
 
@@ -1629,9 +1683,16 @@ Queue and maintenance (all INFO unless noted):
   queued nothing. `seen` is message files walked, `queued` the ones
   with no event that the rescan picked up.
 - `maintenance pass=reconcile ms=<ms> tombstoned=<n> cleared=<n>
-  renamed=<n> missing=<n> threads_reaped=<n> threads_rebuilt=<n>
-  blocked_threads=<n> brake=<ok|tripped|forced>`, after each deletion
-  reconciliation pass (mirror mode only). `brake=tripped` means the
+  renamed=<n> retired=<n> bound=<n> stale=<n> scan=<complete|partial>
+  threads_reaped=<n> threads_rebuilt=<n> blocked_threads=<n>
+  brake=<ok|tripped|forced>`, after each deletion reconciliation pass
+  (mirror mode only). `tombstoned` and `cleared` count messages that
+  lost their last live copy or got one back; `renamed`, `retired` and
+  `bound` count occurrences the Maildir scan followed, retired or found
+  (`docs/architecture.md`, "Occurrence reconciliation"); `stale` counts
+  occurrences the content backstop retired because a held path's bytes
+  no longer matched (`docs/architecture.md`, "The content backstop");
+  `scan=partial` means it retired nothing. `brake=tripped` means the
   mass-delete brake held this pass's reaps back (see "Deletion
   reconciliation"); `forced` means the one pass of `make force-deletion`
   ran with the brake off.

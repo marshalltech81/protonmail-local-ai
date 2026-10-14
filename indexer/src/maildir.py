@@ -22,10 +22,17 @@ TRASHED_FLAG = "T"
 # Written by mbsync/entrypoint.sh (``record_successful_sync``) at the
 # Maildir root, outside any ``cur``/``new`` folder, so no Maildir walk or
 # watchdog handler treats it as a message. mbsync writes each stamp to a
-# temporary file named after that sync (``_SYNC_STAMP_TMP_RE``) and
-# renames it into place.
+# temporary file named after that sync (``_SYNC_STAMP_TMP_RE``, or the
+# legacy ``_LEGACY_SYNC_STAMP_TMP_RE`` shape a stamp written before the
+# 2026-10-13 delivery-identity fix used) and renames it into place.
 SYNC_STAMP_NAME = ".mbsync-last-sync.json"
-_SYNC_STAMP_TMP_RE = re.compile(r"^\.mbsync-last-sync\.([0-9T:Z-]+)\.(\d+)\.tmp$")
+# An attempt ID is mbsync's per-start random token and attempt count
+# (collection_status.py carries the same shape).
+_ATTEMPT_ID_RE = re.compile(r"[0-9a-f]{12}-[1-9][0-9]*", re.ASCII)
+_SYNC_STAMP_TMP_RE = re.compile(
+    r"^\.mbsync-last-sync\.([0-9T:Z-]+)\.(\d+)\.([0-9a-f]{12}-[1-9][0-9]*)\.([1-9][0-9]*)\.tmp$"
+)
+_LEGACY_SYNC_STAMP_TMP_RE = re.compile(r"^\.mbsync-last-sync\.([0-9T:Z-]+)\.(\d+)\.tmp$")
 
 # Renamed into place at the Maildir root by mbsync/entrypoint.sh
 # (``signal_perms_repaired``) after every permission repair, a failed
@@ -38,22 +45,40 @@ PERMS_REPAIRED_NAME = ".mbsync-perms-repaired"
 class SyncStamp:
     completed_at: str  # ISO 8601, UTC
     sync_interval_secs: int
+    # The attempt ID and durable success generation mbsync allocated to
+    # this sync (2026-10-13, #1621 thread). Both ``None`` on a stamp
+    # written before that fix: such a legacy stamp proves no attempt's
+    # delivery and carries no generation to order by — the caller must
+    # never treat the pair as a match, and never use it to move the
+    # acknowledged generation forward or back.
+    attempt_id: str | None = None
+    generation: int | None = None
 
 
-def _sync_stamp(completed_at: object, interval: object) -> SyncStamp:
+def _sync_stamp(
+    completed_at: object, interval: object, attempt_id: object, generation: object
+) -> SyncStamp:
     completed = datetime.fromisoformat(str(completed_at))
     if completed.tzinfo is None:
         raise ValueError("sync stamp completion time has no timezone")
     if type(interval) is not int or interval < 1:
         raise ValueError("sync stamp interval is not a positive integer")
-    return SyncStamp(completed.astimezone(UTC).isoformat(), interval)
+    if attempt_id is None and generation is None:
+        return SyncStamp(completed.astimezone(UTC).isoformat(), interval)
+    if not isinstance(attempt_id, str) or _ATTEMPT_ID_RE.fullmatch(attempt_id) is None:
+        raise ValueError("sync stamp attempt id is not a valid attempt id")
+    if type(generation) is not int or generation < 1:
+        raise ValueError("sync stamp generation is not a positive integer")
+    return SyncStamp(completed.astimezone(UTC).isoformat(), interval, attempt_id, generation)
 
 
 def read_sync_stamp(root: Path) -> SyncStamp | None:
     """Return mbsync's last successful sync, or ``None`` before the first.
 
     Raises ``ValueError`` when the stamp exists but cannot be read as a
-    timezone-aware completion time plus a positive integer interval.
+    timezone-aware completion time plus a positive integer interval, or
+    carries only one of ``attempt_id``/``generation`` (a stamp mbsync
+    always writes as a pair, never half-written).
     """
     try:
         raw = (root / SYNC_STAMP_NAME).read_text()
@@ -62,17 +87,33 @@ def read_sync_stamp(root: Path) -> SyncStamp | None:
     data = json.loads(raw)  # JSONDecodeError is a ValueError
     if not isinstance(data, dict):
         raise ValueError("sync stamp is not a JSON object")
-    return _sync_stamp(data.get("completed_at"), data.get("sync_interval_secs"))
+    return _sync_stamp(
+        data.get("completed_at"),
+        data.get("sync_interval_secs"),
+        data.get("attempt_id"),
+        data.get("generation"),
+    )
 
 
 def parse_sync_stamp_rename(src_path: Path | str) -> SyncStamp | None:
     """The sync named by the temporary file mbsync renamed onto the stamp,
-    or ``None`` when ``src_path`` is not one."""
-    match = _SYNC_STAMP_TMP_RE.match(Path(src_path).name)
+    or ``None`` when ``src_path`` is not one. Recognizes the legacy
+    (pre-2026-10-13) shape too, as a stamp with no attempt ID or
+    generation: see ``SyncStamp``."""
+    name = Path(src_path).name
+    match = _SYNC_STAMP_TMP_RE.match(name)
+    if match is not None:
+        try:
+            return _sync_stamp(
+                match.group(1), int(match.group(2)), match.group(3), int(match.group(4))
+            )
+        except ValueError:
+            return None
+    match = _LEGACY_SYNC_STAMP_TMP_RE.match(name)
     if match is None:
         return None
     try:
-        return _sync_stamp(match.group(1), int(match.group(2)))
+        return _sync_stamp(match.group(1), int(match.group(2)), None, None)
     except ValueError:
         return None
 

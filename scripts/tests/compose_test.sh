@@ -1822,17 +1822,17 @@ omitted_rerank_and_inference_settings_render_without_a_warning() {
 }
 
 # ACCOUNT_SCOPE (#1596) is a required setting, so Compose keeps it bare
-# and warns when it is unset (validate-env.sh and both services refuse
-# it); SOURCE_MODE is optional. Both reach the indexer and mcp-server.
-account_scope_is_required_and_reaches_both_services() {
+# and warns when it is unset (validate-env.sh and every service refuse
+# it); SOURCE_MODE is optional. Both reach every service: mbsync names
+# the account in its collection status (#1592).
+account_scope_is_required_and_reaches_every_service() {
     local service
     ACCOUNT_SCOPE=00000000-0000-4000-8000-000000000001 EMBED_BASE_URL=default \
         EMBED_MODEL=synthetic-embed render "$BASE"
-    for service in indexer mcp-server; do
+    for service in mbsync indexer mcp-server; do
         expect ".services[\"$service\"].environment.ACCOUNT_SCOPE == \"00000000-0000-4000-8000-000000000001\"" || return 1
         expect ".services[\"$service\"].environment.SOURCE_MODE == \"\"" || return 1
     done
-    expect '.services.mbsync.environment | has("ACCOUNT_SCOPE") | not' || return 1
     EMBED_BASE_URL=default EMBED_MODEL=synthetic-embed render "$BASE"
     grep -E 'ACCOUNT_SCOPE[\\"]* variable is not set' "$WORK/compose.err" >/dev/null
 }
@@ -2018,8 +2018,8 @@ check "generated collectors' service set catches a case-only extra service" \
     generated_collectors_service_set_catches_a_case_only_extra_service
 check "omitted rerank and inference settings render without a warning" \
     omitted_rerank_and_inference_settings_render_without_a_warning
-check "ACCOUNT_SCOPE is required and reaches the indexer and mcp-server" \
-    account_scope_is_required_and_reaches_both_services
+check "ACCOUNT_SCOPE is required and reaches every service" \
+    account_scope_is_required_and_reaches_every_service
 check "every image is built with the source commit" every_image_is_built_with_the_source_commit
 check "make build passes the source commit" make_build_passes_the_source_commit
 

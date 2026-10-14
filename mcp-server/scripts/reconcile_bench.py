@@ -28,8 +28,9 @@ Run it inside the mcp-server image (docs/mcp-tools.md, "Certifying a
 paged run: sizing"). The tables mirror the indexer's ``messages``,
 ``message_participants``, ``message_participant_names``,
 ``message_chunks`` and ``message_chunks_fts``, ``entities``,
-``attachments``, ``attachments_fts``, ``attachment_extractions`` and
-``pending_deletions`` with all their indexes, and hold the rows the
+``attachments``, ``attachments_fts``, ``attachment_extractions``,
+``accounts``, ``message_occurrences`` and ``pending_deletions`` with all
+their indexes, and hold the rows the
 indexer writes for the messages ``render_eml`` describes
 (indexer/tests/test_reconcile_bench_fidelity.py indexes those files
 with the indexer and compares). Other tables (threads, vectors, header evidence, the
@@ -109,8 +110,6 @@ CREATE TABLE messages (
     claimant_id     TEXT PRIMARY KEY,
     message_id      TEXT NOT NULL,
     thread_id       TEXT NOT NULL,
-    filepath        TEXT NOT NULL,
-    folder          TEXT NOT NULL,
     subject         TEXT NOT NULL,
     sent_at         TEXT,
     sent_at_status  TEXT CHECK (sent_at_status IN ('parsed', 'missing', 'invalid')),
@@ -124,9 +123,6 @@ CREATE TABLE messages (
     content_hash    TEXT,
     indexed_at      TEXT NOT NULL,
     first_indexed_at TEXT NOT NULL,
-    seen            INTEGER NOT NULL DEFAULT 0,
-    flagged         INTEGER NOT NULL DEFAULT 0,
-    replied         INTEGER NOT NULL DEFAULT 0,
     sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
     participant_names_complete INTEGER CHECK (participant_names_complete IN (0, 1)),
     subject_complete INTEGER CHECK (subject_complete IN (0, 1)),
@@ -143,13 +139,12 @@ CREATE TABLE messages (
 CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
 CREATE INDEX idx_messages_message_effective ON messages(message_id, effective_at, claimant_id);
 CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
-CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
 CREATE INDEX idx_messages_effective ON messages(effective_at);
+CREATE INDEX idx_messages_content_hash ON messages(content_hash);
 CREATE INDEX idx_messages_sent ON messages(sent_at, claimant_id)
     WHERE sent_at_status = 'parsed';
 CREATE INDEX idx_messages_occurred ON messages(occurred_at, claimant_id)
     WHERE (occurred_at IS NOT NULL) = 1;
-CREATE INDEX idx_messages_filepath ON messages(filepath);
 CREATE TABLE message_participants (
     claimant_id TEXT NOT NULL,
     role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
@@ -243,12 +238,12 @@ CREATE TABLE attachment_extractions (
     PRIMARY KEY (attachment_id, extractor_module)
 );
 CREATE TABLE pending_deletions (
-    filepath    TEXT PRIMARY KEY,
-    claimant_id TEXT NOT NULL,
-    thread_id   TEXT NOT NULL,
-    marked_at   TEXT NOT NULL
+    occurrence_id INTEGER PRIMARY KEY
+                  REFERENCES message_occurrences(id) ON DELETE CASCADE,
+    claimant_id   TEXT NOT NULL,
+    marked_at     TEXT NOT NULL
 );
-CREATE INDEX idx_pending_deletions_thread ON pending_deletions(thread_id);
+CREATE INDEX idx_pending_deletions_claimant ON pending_deletions(claimant_id, marked_at);
 CREATE VIRTUAL TABLE attachments_fts USING fts5(
     filename,
     content_type,
@@ -269,6 +264,34 @@ CREATE TABLE accounts (
 );
 INSERT INTO accounts (id, scope_uuid, provider, created_at)
 VALUES (1, '00000000-0000-4000-8000-00000000be0c', 'proton-bridge', '2026-01-01T00:00:00+00:00');
+-- Each message's mailbox occurrence (#1566), which the server's readers
+-- join for folder, flags and pending deletion (#1567, #1568).
+CREATE TABLE message_occurrences (
+    id                INTEGER PRIMARY KEY,
+    account_id        INTEGER NOT NULL REFERENCES accounts(id),
+    folder            TEXT NOT NULL,
+    uniq              TEXT NOT NULL,
+    claimant_id       TEXT NOT NULL REFERENCES messages(claimant_id) ON DELETE CASCADE,
+    relative_path     TEXT NOT NULL,
+    seen              INTEGER NOT NULL CHECK (seen IN (0, 1)),
+    flagged           INTEGER NOT NULL CHECK (flagged IN (0, 1)),
+    replied           INTEGER NOT NULL CHECK (replied IN (0, 1)),
+    trashed           INTEGER NOT NULL CHECK (trashed IN (0, 1)),
+    first_observed_at TEXT,
+    last_observed_at  TEXT,
+    internal_at       TEXT,
+    state             TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+    retired_at        TEXT,
+    provenance        TEXT NOT NULL
+                      CHECK (provenance IN ('parse', 'rename', 'scan', 'migration')),
+    CHECK ((state = 'retired') = (retired_at IS NOT NULL))
+);
+CREATE UNIQUE INDEX idx_message_occurrences_key
+    ON message_occurrences(account_id, folder, uniq, claimant_id) WHERE state = 'active';
+CREATE UNIQUE INDEX idx_message_occurrences_path
+    ON message_occurrences(account_id, relative_path) WHERE state = 'active';
+CREATE INDEX idx_message_occurrences_claimant
+    ON message_occurrences(claimant_id);
 """
 
 # Longest Message-ID the indexer accepts (indexer/src/parser.py
@@ -716,13 +739,13 @@ def _record(
 
 
 _INSERT_MESSAGE = (
-    "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
+    "INSERT INTO messages (claimant_id, message_id, thread_id, "
     "subject, sent_at, sent_at_status, occurred_at, in_reply_to, references_json, "
     "has_attachments, size_bytes, content_hash, indexed_at, first_indexed_at, "
-    "seen, flagged, replied, sender_ambiguous, participant_names_complete, "
+    "sender_ambiguous, participant_names_complete, "
     "subject_complete, from_addresses_complete, to_addresses_complete, "
     "cc_addresses_complete, attachments_manifest_complete, body_complete, attachment_rows_current, caps_json, headers_complete) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, "
+    "VALUES (?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, 0, "
     "1, 1, 1, 1, 1, 1, ?, ?, ?, ?)"
 )
 
@@ -733,13 +756,12 @@ _INSERT_MESSAGE = (
 # ``body_complete`` until phase 2c sets it again.
 _UPSERT_MESSAGE = _INSERT_MESSAGE + (
     " ON CONFLICT(claimant_id) DO UPDATE SET thread_id = excluded.thread_id, "
-    "filepath = excluded.filepath, folder = excluded.folder, subject = excluded.subject, "
+    "subject = excluded.subject, "
     "sent_at = excluded.sent_at, sent_at_status = excluded.sent_at_status, "
     "occurred_at = excluded.occurred_at, in_reply_to = excluded.in_reply_to, "
     "references_json = excluded.references_json, has_attachments = excluded.has_attachments, "
     "size_bytes = excluded.size_bytes, content_hash = excluded.content_hash, "
-    "indexed_at = excluded.indexed_at, seen = excluded.seen, flagged = excluded.flagged, "
-    "replied = excluded.replied, sender_ambiguous = excluded.sender_ambiguous, "
+    "indexed_at = excluded.indexed_at, sender_ambiguous = excluded.sender_ambiguous, "
     "participant_names_complete = excluded.participant_names_complete, "
     "subject_complete = excluded.subject_complete, "
     "from_addresses_complete = excluded.from_addresses_complete, "
@@ -757,8 +779,6 @@ def _message_values(rec: _Record, now: str, body_complete: int | None) -> tuple:
         rec.cid,
         rec.mid,
         rec.tid,
-        rec.path,
-        rec.folder,
         rec.shape["subject"],
         rec.at,
         None if rec.folder == "Sent" else rec.at,
@@ -769,7 +789,6 @@ def _message_values(rec: _Record, now: str, body_complete: int | None) -> tuple:
         hashlib.sha256(rec.raw).hexdigest(),
         now,
         now,
-        rec.i % 2,
         body_complete,
         body_complete,  # fixture inventory committed, or phase 1 pending
         "{}" if rec.headers_complete else json.dumps({"headers_budget": 1}),
@@ -955,6 +974,7 @@ def build(
             cid, tid, shape = rec.cid, rec.tid, rec.shape
             conn.execute("BEGIN")
             conn.execute(_INSERT_MESSAGE, _message_values(rec, now, 1))
+            _bind_occurrence(conn, rec, now)
             # One participant row per (role, address), named by its first
             # display name; every distinct name in the name rows.
             conn.executemany(
@@ -1675,11 +1695,9 @@ CREATE TABLE IF NOT EXISTS message_thread_map (
     claimant_id TEXT PRIMARY KEY,
     message_id  TEXT NOT NULL,
     thread_id   TEXT NOT NULL,
-    filepath    TEXT NOT NULL,
     FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
 );
 CREATE INDEX IF NOT EXISTS idx_message_thread_map_message ON message_thread_map(message_id);
-CREATE INDEX IF NOT EXISTS idx_message_thread_map_filepath ON message_thread_map(filepath);
 CREATE INDEX IF NOT EXISTS idx_message_thread_map_thread ON message_thread_map(thread_id);
 CREATE TABLE IF NOT EXISTS indexed_files (
     filepath     TEXT PRIMARY KEY,
@@ -1711,31 +1729,6 @@ CREATE TABLE IF NOT EXISTS indexing_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_indexing_jobs_status_next
     ON indexing_jobs(status, next_attempt_at);
-CREATE TABLE IF NOT EXISTS message_occurrences (
-    id                INTEGER PRIMARY KEY,
-    account_id        INTEGER NOT NULL REFERENCES accounts(id),
-    folder            TEXT NOT NULL,
-    uniq              TEXT NOT NULL,
-    claimant_id       TEXT NOT NULL REFERENCES messages(claimant_id) ON DELETE CASCADE,
-    relative_path     TEXT NOT NULL,
-    seen              INTEGER NOT NULL CHECK (seen IN (0, 1)),
-    flagged           INTEGER NOT NULL CHECK (flagged IN (0, 1)),
-    replied           INTEGER NOT NULL CHECK (replied IN (0, 1)),
-    trashed           INTEGER NOT NULL CHECK (trashed IN (0, 1)),
-    first_observed_at TEXT,
-    last_observed_at  TEXT,
-    internal_at       TEXT,
-    state             TEXT NOT NULL CHECK (state IN ('active', 'retired')),
-    retired_at        TEXT,
-    provenance        TEXT NOT NULL CHECK (provenance IN ('parse', 'rename', 'migration')),
-    CHECK ((state = 'retired') = (retired_at IS NOT NULL))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_message_occurrences_key
-    ON message_occurrences(account_id, folder, uniq, claimant_id) WHERE state = 'active';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_message_occurrences_path
-    ON message_occurrences(account_id, relative_path) WHERE state = 'active';
-CREATE INDEX IF NOT EXISTS idx_message_occurrences_claimant
-    ON message_occurrences(claimant_id);
 """
 WRITER_TABLES = (
     "message_headers",
@@ -1748,7 +1741,6 @@ WRITER_TABLES = (
     "entity_aliases",
     "message_chunks_vec",
     "indexing_jobs",
-    "message_occurrences",
 )
 
 
@@ -1756,7 +1748,8 @@ def _bind_occurrence(conn: sqlite3.Connection, rec, now: str) -> None:
     """indexer/src/database.py ``_bind_occurrence`` (#1566): the file's
     mailbox occurrence under the benchmark's one account, its path
     relative to the Maildir root ``maildir_path`` uses: any other active
-    row at the path retired, then the row for its key upserted."""
+    row at the path retired, then the row for its key upserted, and the
+    message's tombstones removed when the file is live (#1567)."""
     relative = rec.path.removeprefix("/maildir/")
     name = relative.rpartition("/")[2]
     uniq, _sep, flags = name.partition(":2,")
@@ -1789,6 +1782,8 @@ def _bind_occurrence(conn: sqlite3.Connection, rec, now: str) -> None:
         "last_observed_at = excluded.last_observed_at",
         (*values, now, now),
     )
+    if "T" not in flags:
+        conn.execute("DELETE FROM pending_deletions WHERE claimant_id = ?", (rec.cid,))
 
 
 # Each WAL configuration runs on a fresh copy of the built index at this
@@ -2133,10 +2128,10 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
             (rec.tid, SUM_ENCODING_VERSION, b""),
         )
     conn.execute(
-        "INSERT INTO message_thread_map (claimant_id, message_id, thread_id, filepath) "
-        "VALUES (?, ?, ?, ?) ON CONFLICT(claimant_id) DO UPDATE SET "
-        "thread_id = excluded.thread_id, filepath = excluded.filepath",
-        (rec.cid, rec.mid, rec.tid, rec.path),
+        "INSERT INTO message_thread_map (claimant_id, message_id, thread_id) "
+        "VALUES (?, ?, ?) ON CONFLICT(claimant_id) DO UPDATE SET "
+        "thread_id = excluded.thread_id",
+        (rec.cid, rec.mid, rec.tid),
     )
     conn.execute(
         "INSERT OR REPLACE INTO indexed_files (filepath, indexed_at, size, mtime_ns, "

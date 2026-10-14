@@ -162,7 +162,11 @@ class TestIngestionStateRecovery:
             if calls["n"] <= 3:
                 raise sqlite3.OperationalError(MARKER)
 
-        db = SimpleNamespace(record_ingestion_state=record)
+        db = SimpleNamespace(
+            record_ingestion_state=record,
+            get_collection_state=lambda: None,
+            account=SimpleNamespace(scope_uuid="00000000-0000-4000-8000-000000000001"),
+        )
         recorder = main._IngestionStateRecorder(db, tmp_path, interval_secs=30)  # type: ignore[arg-type]
         for i in range(3):
             recorder.maybe_record(now=float(i))
@@ -209,7 +213,14 @@ class _FakeReconciler:
         err = self.outcomes.pop(0)
         if err is not None:
             raise err
-        return {"tombstoned": 2, "cleared": 1, "renamed": 3, "missing": 0}
+        return {
+            "tombstoned": 2,
+            "cleared": 1,
+            "renamed": 3,
+            "retired": 4,
+            "bound": 5,
+            "complete": False,
+        }
 
     def reap(self):
         return {"threads_reaped": 1, "threads_rebuilt": 0, "aborted": False, "blocked_threads": 0}
@@ -699,8 +710,9 @@ class TestReconcileSummary:
         (line,) = _messages(caplog, "maintenance pass=reconcile")
         assert line.levelno == logging.INFO
         assert re.fullmatch(
-            rf"maintenance pass=reconcile {_MS} tombstoned=2 cleared=1 renamed=3 missing=0 "
-            r"threads_reaped=1 threads_rebuilt=0 blocked_threads=0 brake=ok",
+            rf"maintenance pass=reconcile {_MS} tombstoned=2 cleared=1 renamed=3 retired=4 "
+            r"bound=5 stale=0 backstop_deferred=0 scan=partial threads_reaped=1 "
+            r"threads_rebuilt=0 blocked_threads=0 brake=ok",
             line.getMessage(),
         )
         db.close()
@@ -887,7 +899,7 @@ class TestOnMovedFailureLogsTypeOnly:
             calls.append(a)
             raise sqlite3.OperationalError(MARKER)
 
-        db = SimpleNamespace(is_indexed=lambda _p: True)
+        db = SimpleNamespace(is_indexed=lambda _p: True, find_active_occurrence=lambda _p: None)
         reconciler = SimpleNamespace(handle_moved=handle_moved)
         handler = main.MaildirHandler(db, None, reconciler=reconciler)  # type: ignore[arg-type]
 
@@ -909,6 +921,7 @@ class TestOnMovedFailureLogsTypeOnly:
 
         db = SimpleNamespace(
             is_indexed=lambda _p: True,
+            find_active_occurrence=lambda _p: None,
             has_pending_deletion=lambda _p: False,
             update_filepath=update_filepath,
         )
@@ -935,6 +948,7 @@ class TestOnMovedFailureLogsTypeOnly:
 
         db = SimpleNamespace(
             is_indexed=lambda _p: True,
+            find_active_occurrence=lambda _p: None,
             has_pending_deletion=has_pending_deletion,
             update_filepath=lambda *a, **_kw: calls.append(a),
         )

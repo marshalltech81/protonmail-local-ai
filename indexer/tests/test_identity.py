@@ -251,6 +251,9 @@ def test_sent_conflict_diagnostic_warns_and_recovers_without_mail(db, caplog):
             message_id=f"synthetic-{i}@example.com",
             from_addr=f"{MARKER}@other.example",
             folder="Sent",
+            # The occurrence's folder comes from the filepath, not this
+            # kwarg, post-occurrence-cutover (#1568).
+            filepath=f"/Sent/cur/sent_msg{i}",
         )
         db.upsert_thread(make_thread(messages=[msg], thread_id=f"t{i}"), _vec())
     with caplog.at_level(logging.INFO, logger="indexer.database"):
@@ -258,7 +261,12 @@ def test_sent_conflict_diagnostic_warns_and_recovers_without_mail(db, caplog):
         before = len(caplog.records)
         assert db.report_direction_conflicts() == 2
         assert len(caplog.records) == before
-        db._conn.execute("UPDATE messages SET folder='INBOX' WHERE thread_id='t0'")
+        # ``messages.folder`` no longer exists post-occurrence-cutover
+        # (#1568); move the active occurrence instead.
+        db._conn.execute(
+            "UPDATE message_occurrences SET folder='INBOX' WHERE claimant_id IN "
+            "(SELECT claimant_id FROM messages WHERE thread_id='t0') AND state='active'"
+        )
         db._conn.commit()
         assert db.report_direction_conflicts() == 1
         db.set_operator_identity(OperatorIdentity(addresses=frozenset({f"{MARKER}@other.example"})))

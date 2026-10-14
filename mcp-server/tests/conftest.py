@@ -88,8 +88,7 @@ VALUES (1, 'unconfigured', 0,
         CREATE TABLE message_thread_map (
             claimant_id TEXT PRIMARY KEY,
             message_id  TEXT NOT NULL,
-            thread_id   TEXT NOT NULL,
-            filepath    TEXT NOT NULL
+            thread_id   TEXT NOT NULL
         );
 
         -- Per-message records behind query_messages and find_contact.
@@ -97,8 +96,6 @@ VALUES (1, 'unconfigured', 0,
             claimant_id     TEXT PRIMARY KEY,
             message_id      TEXT NOT NULL,
             thread_id       TEXT NOT NULL,
-            filepath        TEXT NOT NULL,
-            folder          TEXT NOT NULL,
             subject         TEXT NOT NULL,
             sent_at         TEXT,
             sent_at_status  TEXT CHECK (sent_at_status IN ('parsed', 'missing', 'invalid')),
@@ -112,9 +109,6 @@ VALUES (1, 'unconfigured', 0,
             content_hash    TEXT,
             indexed_at      TEXT NOT NULL,
             first_indexed_at TEXT NOT NULL,
-            seen            INTEGER NOT NULL DEFAULT 0,
-            flagged         INTEGER NOT NULL DEFAULT 0,
-            replied         INTEGER NOT NULL DEFAULT 0,
             sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
             participant_names_complete INTEGER
                 CHECK (participant_names_complete IN (0, 1)),
@@ -135,13 +129,12 @@ VALUES (1, 'unconfigured', 0,
         CREATE INDEX idx_messages_message_effective
             ON messages(message_id, effective_at, claimant_id);
         CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
-        CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
         CREATE INDEX idx_messages_effective ON messages(effective_at);
+        CREATE INDEX idx_messages_content_hash ON messages(content_hash);
         CREATE INDEX idx_messages_sent ON messages(sent_at, claimant_id)
             WHERE sent_at_status = 'parsed';
         CREATE INDEX idx_messages_occurred ON messages(occurred_at, claimant_id)
             WHERE (occurred_at IS NOT NULL) = 1;
-        CREATE INDEX idx_messages_filepath ON messages(filepath);
 
         CREATE TABLE message_headers (
             claimant_id TEXT NOT NULL,
@@ -279,15 +272,74 @@ VALUES (1, 'unconfigured', 0,
             indexer_seen_at    TEXT NOT NULL
         );
 
-        -- Reconciler tombstones (indexer schema): files T-flagged or
-        -- missing, awaiting the reaper under mirror retention.
-        CREATE TABLE pending_deletions (
-            filepath    TEXT PRIMARY KEY,
-            claimant_id TEXT NOT NULL,
-            thread_id   TEXT NOT NULL,
-            marked_at   TEXT NOT NULL
+        -- The account registry and mailbox occurrences (indexer schema,
+        -- #1596, #1566): one account; each message's Maildir copies.
+        CREATE TABLE accounts (
+            id         INTEGER PRIMARY KEY,
+            scope_uuid TEXT NOT NULL UNIQUE,
+            provider   TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );
-        CREATE INDEX idx_pending_deletions_thread ON pending_deletions(thread_id);
+        INSERT INTO accounts VALUES
+            (1, '00000000-0000-4000-8000-000000000001', 'proton-bridge',
+             '2024-01-01T00:00:00+00:00');
+        -- mbsync's latest collection outcome per account (indexer
+        -- schema v18, #1592).
+        CREATE TABLE account_collection_state (
+            account_id                     INTEGER PRIMARY KEY REFERENCES accounts(id),
+            status                         TEXT NOT NULL,
+            unknown_reason                 TEXT,
+            run_deadline_secs              INTEGER,
+            sync_interval_secs             INTEGER,
+            attempt_id                     TEXT,
+            attempt_started_at             TEXT,
+            attempt_outcome                TEXT,
+            terminal_attempt_id            TEXT,
+            terminal_completed_at          TEXT,
+            terminal_outcome               TEXT,
+            terminal_withheld_folders      INTEGER,
+            terminal_failure_class         TEXT,
+            success_attempt_id             TEXT,
+            success_completed_at           TEXT,
+            success_delivered              INTEGER,
+            unrecovered_failure_attempt_id TEXT,
+            observed_at                    TEXT NOT NULL
+        );
+        CREATE TABLE message_occurrences (
+            id                INTEGER PRIMARY KEY,
+            account_id        INTEGER NOT NULL REFERENCES accounts(id),
+            folder            TEXT NOT NULL,
+            uniq              TEXT NOT NULL,
+            claimant_id       TEXT NOT NULL,
+            relative_path     TEXT NOT NULL,
+            seen              INTEGER NOT NULL CHECK (seen IN (0, 1)),
+            flagged           INTEGER NOT NULL CHECK (flagged IN (0, 1)),
+            replied           INTEGER NOT NULL CHECK (replied IN (0, 1)),
+            trashed           INTEGER NOT NULL CHECK (trashed IN (0, 1)),
+            first_observed_at TEXT,
+            last_observed_at  TEXT,
+            internal_at       TEXT,
+            state             TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+            retired_at        TEXT,
+            provenance        TEXT NOT NULL
+                              CHECK (provenance IN ('parse', 'rename', 'scan', 'migration')),
+            CHECK ((state = 'retired') = (retired_at IS NOT NULL))
+        );
+        CREATE UNIQUE INDEX idx_message_occurrences_key
+            ON message_occurrences(account_id, folder, uniq, claimant_id) WHERE state = 'active';
+        CREATE UNIQUE INDEX idx_message_occurrences_path
+            ON message_occurrences(account_id, relative_path) WHERE state = 'active';
+        CREATE INDEX idx_message_occurrences_claimant ON message_occurrences(claimant_id);
+
+        -- Reconciler tombstones (indexer schema), keyed by occurrence
+        -- (#1567): written while a message has no live occurrence,
+        -- awaiting the reaper under mirror retention.
+        CREATE TABLE pending_deletions (
+            occurrence_id INTEGER PRIMARY KEY,
+            claimant_id   TEXT NOT NULL,
+            marked_at     TEXT NOT NULL
+        );
+        CREATE INDEX idx_pending_deletions_claimant ON pending_deletions(claimant_id, marked_at);
 
         -- Identifier-only records of reaped messages (indexer schema).
         CREATE TABLE reaped_messages (
@@ -323,7 +375,6 @@ VALUES (1, 'unconfigured', 0,
         CREATE INDEX idx_threads_subject_folder
             ON threads(subject, folder, date_last, thread_id);
         CREATE INDEX idx_message_thread_map_message ON message_thread_map(message_id);
-        CREATE INDEX idx_message_thread_map_filepath ON message_thread_map(filepath);
         CREATE INDEX idx_message_thread_map_thread ON message_thread_map(thread_id);
         CREATE INDEX idx_attachments_attachment_id ON attachments(attachment_id);
         CREATE INDEX idx_attachments_thread ON attachments(thread_id);
@@ -345,9 +396,13 @@ def write_ingestion(
     sync_interval_secs: int | None = None,
     indexer_seen_at: str | None = None,
     jobs: tuple[tuple[str | int | None, ...], ...] = (),
+    collection: dict | None = None,
 ) -> None:
     """Write the indexer-owned ``ingestion_state`` row (when
-    ``indexer_seen_at`` is given) and ``indexing_jobs`` rows as
+    ``indexer_seen_at`` is given), the account's
+    ``account_collection_state`` row (when ``collection`` is given: its
+    columns other than ``account_id``, ``observed_at`` defaulting to
+    ``indexer_seen_at``) and ``indexing_jobs`` rows as
     ``(status, attempts, last_error_class[, reason[, last_stage[, last_error]]])``
     into a fixture database (reason ``x`` when omitted, stage and error
     NULL)."""
@@ -357,6 +412,13 @@ def write_ingestion(
             conn.execute(
                 "INSERT INTO ingestion_state VALUES (1, ?, ?, ?)",
                 (sync_completed_at, sync_interval_secs, indexer_seen_at),
+            )
+        if collection is not None:
+            row = {"account_id": 1, "observed_at": indexer_seen_at or "", **collection}
+            conn.execute(
+                f"INSERT INTO account_collection_state ({', '.join(row)}) "  # nosec B608 - test column names
+                f"VALUES ({', '.join('?' for _ in row)})",
+                tuple(row.values()),
             )
         for i, job in enumerate(jobs):
             status, attempts, error_class, reason, last_stage, last_error = (
@@ -642,19 +704,17 @@ def _insert_message_record(
     cur.execute(
         f"""
         INSERT INTO messages
-            (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
+            (claimant_id, message_id, thread_id, subject, sent_at,
              sent_at_status, occurred_at, in_reply_to, references_json, has_attachments,
-             size_bytes, content_hash, indexed_at, first_indexed_at, seen, flagged, replied,
+             size_bytes, content_hash, indexed_at, first_indexed_at,
              sender_ambiguous, participant_names_complete, {", ".join(flags)}, caps_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 {", ".join("?" * len(flags))}, '{{}}')
         """,  # nosec B608
         (
             claimant_of(message_id, variant),
             message_id,
             thread_id,
-            f"/maildir/{folder}/cur/{message_id}{variant}",
-            folder,
             subject,
             sent_at,
             sent_at_status,
@@ -666,13 +726,19 @@ def _insert_message_record(
             source_sha256(message_id, variant),
             "2024-01-01T00:00:00+00:00",
             first_indexed_at,
-            int(seen),
-            int(flagged),
-            int(replied),
             sender_ambiguous,
             participant_names_complete,
             *flags.values(),
         ),
+    )
+    insert_occurrence(
+        cur,
+        claimant_of(message_id, variant),
+        folder,
+        f"{folder}/cur/{message_id}{variant}",
+        seen=seen,
+        flagged=flagged,
+        replied=replied,
     )
     for role, value in participants:
         name, address = _split_address(value)
@@ -690,6 +756,49 @@ def _insert_message_record(
                 (claimant_of(message_id, variant), role, address, name),
             )
         _insert_entity(cur, address, name)
+
+
+def insert_occurrence(
+    cur: sqlite3.Cursor | sqlite3.Connection,
+    claimant_id: str,
+    folder: str,
+    relative_path: str,
+    *,
+    seen: bool = False,
+    flagged: bool = False,
+    replied: bool = False,
+    trashed: bool = False,
+    state: str = "active",
+    account_id: int = 1,
+    provenance: str = "parse",
+) -> int:
+    """One mailbox occurrence of a message, as the indexer binds a parsed
+    file (#1566): its folder, path relative to the account's Maildir root
+    and Maildir flags. Returns its id."""
+    uniq = relative_path.rpartition("/")[2].split(":2,")[0]
+    row = cur.execute(
+        "INSERT INTO message_occurrences (account_id, folder, uniq, claimant_id, "
+        "relative_path, seen, flagged, replied, trashed, first_observed_at, "
+        "last_observed_at, state, retired_at, provenance) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            account_id,
+            folder,
+            uniq,
+            claimant_id,
+            relative_path,
+            int(seen),
+            int(flagged),
+            int(replied),
+            int(trashed),
+            "2024-01-01T00:00:00+00:00",
+            "2024-01-01T00:00:00+00:00",
+            state,
+            None if state == "active" else "2024-01-02T00:00:00+00:00",
+            provenance,
+        ),
+    )
+    return int(row.lastrowid or 0)
 
 
 def _insert_entity(cur: sqlite3.Cursor, address: str, name: str | None) -> None:
@@ -796,8 +905,8 @@ def _insert_message(
         (json.dumps([*json.loads(row.fetchone()[0]), claimant]), thread_id),
     )
     cur.execute(
-        "INSERT INTO message_thread_map VALUES (?, ?, ?, ?)",
-        (claimant, message_id, thread_id, f"/maildir/{folder}/cur/{message_id}{variant}"),
+        "INSERT INTO message_thread_map VALUES (?, ?, ?)",
+        (claimant, message_id, thread_id),
     )
     participants = (
         [("from", v) for v in from_ or []]
@@ -908,8 +1017,8 @@ def _insert_thread(
     roles = [("from" if _split_address(p)[1] in sender_keys else "to", p) for p in participants]
     for i, mid in enumerate(message_ids or [thread_id]):
         cur.execute(
-            "INSERT INTO message_thread_map VALUES (?, ?, ?, ?)",
-            (claimant_of(mid), mid, thread_id, f"/maildir/{folder}/cur/{mid}"),
+            "INSERT INTO message_thread_map VALUES (?, ?, ?)",
+            (claimant_of(mid), mid, thread_id),
         )
         _insert_message_record(
             cur,

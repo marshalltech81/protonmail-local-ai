@@ -172,7 +172,7 @@ class TestAttachmentCarrierSender:
     def test_trash_stays_left_out(self, tmp_path):
         conn, path = _open_built_db_conn(tmp_path, "trash.db")
         _add(conn, "v1", "t", "2024-01-10T00:00:00+00:00", VENDOR)
-        conn.execute("UPDATE messages SET folder = 'Trash'")
+        conn.execute("UPDATE message_occurrences SET folder = 'Trash'")
         conn.commit()
         conn.close()
         assert _ids(Database(str(path)).search_attachments(sender="vendor@example.com")) == set()

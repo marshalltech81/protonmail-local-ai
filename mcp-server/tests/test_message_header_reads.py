@@ -111,8 +111,12 @@ def test_batched_headers_keep_order_counts_and_empty_roles_per_claimant(messages
         for message_id, count in (("m1", 23), ("m2", 17)):
             claimant = claimant_of(message_id)
             writer.execute(
-                "UPDATE messages SET folder = 'Header tests', references_json = ? WHERE claimant_id = ?",
+                "UPDATE messages SET references_json = ? WHERE claimant_id = ?",
                 (json.dumps(references if message_id == "m1" else []), claimant),
+            )
+            writer.execute(
+                "UPDATE message_occurrences SET folder = 'Header tests' WHERE claimant_id = ?",
+                (claimant,),
             )
             writer.execute("DELETE FROM message_participants WHERE claimant_id = ?", (claimant,))
             writer.executemany(

@@ -161,12 +161,16 @@ class TestTool:
 
     def test_served_text_states_the_spam_exception(self, fake_server, authority_db):
         """#1207: every client-facing description of
-        an authority filter's indeterminate count says "outside Spam"."""
+        an authority filter's indeterminate count says "outside Spam" (and
+        Recovered Messages, #1569)."""
         register_retrieval_tools(fake_server, authority_db)
         doc = " ".join((fake_server.tools["query_messages"].__doc__ or "").split())
         description = QueryMessagesOutput.model_fields["indeterminate"].description or ""
         for text in (doc, " ".join(description.split())):
-            assert "authority_class filter on a message outside Spam whose sender" in text
+            assert (
+                "authority_class filter on a message outside Spam and Recovered Messages "
+                "whose sender" in text
+            )
 
     def test_no_marker_reaches_the_log(self, fake_server, authority_db, caplog):
         caplog.set_level(logging.DEBUG)

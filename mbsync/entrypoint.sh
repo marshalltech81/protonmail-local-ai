@@ -61,6 +61,19 @@ readonly SYNC_STAMP_FILE="${MAILDIR_PATH}/.mbsync-last-sync.json"
 # repair opened (#524). Read by indexer/src/maildir.py
 # ``PERMS_REPAIRED_NAME``; not a sign of a successful sync.
 readonly PERMS_REPAIRED_FILE="${MAILDIR_PATH}/.mbsync-perms-repaired"
+# The collection status (#1592), format 1: the latest attempt, the last
+# terminal outcome with its withheld far-side folder count and failure
+# class, and the last success. Published before and after every sync
+# attempt (publish_collection_status) and read by the indexer
+# (indexer/src/collection_status.py) for get_mailbox_status. It holds
+# counts and fixed tokens only, never a folder name, and reading it never
+# acknowledges a sync: the success stamp above does that.
+readonly COLLECTION_STATUS_FILE="${MAILDIR_PATH}/.mbsync-collection-status.json"
+readonly COLLECTION_STATUS_FORMAT=1
+# The account the status is published for (#1596): a canonical lower-case
+# UUID, checked by require_prerequisites. The indexer reads the status as
+# unknown unless it names the account the index is registered to.
+readonly ACCOUNT_SCOPE="${ACCOUNT_SCOPE:-}"
 
 # Owner-only umask for the runtime tmp dir (config + cert material).
 # mbsync itself ignores umask for Maildir writes — it explicitly passes
@@ -143,12 +156,17 @@ readonly PIN_ROTATION_RUN
 readonly PROTON_FOLDER_EXCLUSIONS="${PROTON_FOLDER_EXCLUSIONS:-$PROTON_DEFAULT_FOLDER_EXCLUSIONS}"
 readonly BRIDGE_PASS_FILE="/run/secrets/bridge_pass"
 readonly CERT_FILE="${RUNTIME_DIR}/bridge-cert.pem"
-# State directory persists the pinned Bridge cert fingerprint across
-# container restarts. The directory is backed by a named volume so it
-# survives `docker compose down` / rebuilds but is cleared by `make
-# clean`, giving the operator a clean way to start over if needed.
+# State directory persists the pinned Bridge cert fingerprint and the
+# success generation counter across container restarts. The directory
+# is backed by a named volume so it survives `docker compose down` /
+# rebuilds but is cleared by `make clean`, giving the operator a clean
+# way to start over if needed.
 readonly STATE_DIR="/state"
 readonly PIN_FILE="${STATE_DIR}/bridge-cert.fingerprint"
+# The durable, monotonically increasing counter next_success_generation
+# allocates: one per successful sync, in the state volume rather than
+# the index, so no schema change is needed (#1621 thread, 2026-10-13).
+readonly GENERATION_FILE="${STATE_DIR}/sync-generation"
 readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 
 validate_proton_settings() {
@@ -421,6 +439,26 @@ warn_if_pin_rotation_enabled() {
 }
 # --- Proton provider integration: end ---
 
+# The exact shapes publish_collection_status and finish_collection_attempt
+# write; load_collection_records carries the records of a status file in
+# these shapes only. An attempt ID is its start's boot token and attempt
+# count. Numbers are not bounded here: the indexer reads any value up to
+# Bash's 64-bit limit, as this start may write it.
+readonly COLLECTION_ATTEMPT_ID_RE='[0-9a-f]{12}-[1-9][0-9]*'
+readonly COLLECTION_TIME_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+readonly COLLECTION_TERMINAL_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(succeeded|succeeded_with_withheld_folders|failed)\", \"withheld_far_side_folders\": (null|0|[1-9][0-9]*), \"failure_class\": (null|\"(deadline|killed|error|permission_repair|interrupted)\")\\}\$"
+readonly COLLECTION_SUCCESS_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\"\\}\$"
+# The success stamp's shape (record_successful_sync), read back only by
+# stamp_generation below to guard next_success_generation against the
+# state volume regressing behind an already-published generation.
+readonly SYNC_STAMP_RE="^\\{\"completed_at\": \"${COLLECTION_TIME_RE}\", \"sync_interval_secs\": [1-9][0-9]*, \"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"generation\": ([1-9][0-9]*)\\}\$"
+
+account_scope_is_canonical() {
+    # A canonical lower-case UUID, compared byte by byte.
+    local LC_ALL=C
+    [[ "$ACCOUNT_SCOPE" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+}
+
 require_prerequisites() {
     # First: nothing is rendered or connected with a refused value.
     validate_proton_settings || exit 1
@@ -446,6 +484,17 @@ require_prerequisites() {
         exit 1
     fi
 
+    # The account the collection status names (#1592, #1596), with
+    # scripts/validate-env.sh's fixed text, which never repeats the value.
+    if [[ -z "$ACCOUNT_SCOPE" ]]; then
+        printf '>>> ERROR: %s\n' 'ACCOUNT_SCOPE is not set. Run make init-secrets, which writes a new one to .env when none is there, or restore the value this index was built with; see docs/setup.md and docs/troubleshooting.md "Account scope mismatch".' >&2
+        exit 1
+    fi
+    if ! account_scope_is_canonical; then
+        printf '>>> ERROR: %s\n' 'ACCOUNT_SCOPE must be a UUID in canonical lower-case form (8-4-4-4-12 hexadecimal digits). Restore the value this index was built with; see docs/troubleshooting.md "Account scope mismatch".' >&2
+        exit 1
+    fi
+
     validate_bridge_endpoint || exit 1
 }
 
@@ -456,9 +505,10 @@ log_startup_identity() {
     # over the non-secret settings named below: the source selector, the
     # endpoint, Proton's folder exclusions, isync's
     # account, store and channel names, the sync timing, the expected certificate fingerprint (not secret; in the
-    # form verify_expected_fingerprint compares). A rotate-bridge-pin run
-    # is an argument, not a setting, and announces itself with its own
-    # warning. BRIDGE_USER and the password are not inputs. It runs before
+    # form verify_expected_fingerprint compares) and the account the
+    # collection status names (ACCOUNT_SCOPE, a UUID that is not secret). A
+    # rotate-bridge-pin run is an argument, not a setting, and announces
+    # itself with its own warning. BRIDGE_USER and the password are not inputs. It runs before
     # validation: values are hashed as configured, never parsed or printed,
     # so nothing here can fail on a malformed setting. An endpoint value
     # with an "@" (userinfo, which validation would refuse) is hashed as a
@@ -482,11 +532,11 @@ log_startup_identity() {
     [[ "$port" != *@* ]] || port="<value-with-credentials>"
     [[ "$cert_host" != *@* ]] || cert_host="<value-with-credentials>"
     boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
-    config="$(printf 'SOURCE_MODE=%s\nBRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nPROTON_FOLDER_EXCLUSIONS=%s\nPROTON_IMAP_ACCOUNT_NAME=%s\nPROTON_REMOTE_STORE_NAME=%s\nPROTON_LOCAL_STORE_NAME=%s\nPROTON_CHANNEL_NAME=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\n' \
+    config="$(printf 'SOURCE_MODE=%s\nBRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nPROTON_FOLDER_EXCLUSIONS=%s\nPROTON_IMAP_ACCOUNT_NAME=%s\nPROTON_REMOTE_STORE_NAME=%s\nPROTON_LOCAL_STORE_NAME=%s\nPROTON_CHANNEL_NAME=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nACCOUNT_SCOPE=%s\n' \
         "$SOURCE_MODE" "$host" "$port" "$cert_host" "$exclusions" \
         "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" \
         "$PROTON_LOCAL_STORE_NAME" "$PROTON_CHANNEL_NAME" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
-        "$(expected_fingerprint)" | sha256sum)"
+        "$(expected_fingerprint)" "$ACCOUNT_SCOPE" | sha256sum)"
     printf '>>> Startup identity: service=mbsync commit=%s boot=%s config=%s\n' \
         "$commit" "$boot" "${config:0:12}"
 }
@@ -622,6 +672,19 @@ signal_perms_repaired() {
 # PID of the child run_child is waiting on, if any.
 child_pid=""
 
+# The collection status's records (publish_collection_status): this
+# start's boot token and attempt count, the attempt in progress (empty
+# between attempts), whether run_sync has left that attempt's result
+# (1) or not (0), and the last terminal and last success records as
+# JSON objects, or null.
+collection_boot=""
+collection_count=0
+collection_attempt_id=""
+collection_result_ready=0
+collection_attempt_started_at=""
+collection_last_terminal="null"
+collection_last_success="null"
+
 run_child() {
     # Run a command in the background and wait for it, so a stop signal
     # interrupts the wait and stop_on_signal can pass it on. Returns the
@@ -642,6 +705,16 @@ stop_on_signal() {
     if [[ -n "${child_pid:-}" ]]; then
         kill -TERM "$child_pid" 2>/dev/null || true
         wait "$child_pid" || true
+    fi
+    # A stop during a sync attempt is its outcome (#1592), unless run_sync
+    # has already left the attempt's result, which is then published (a
+    # success with the stamp's time once the stamp was written).
+    if [[ -n "${collection_attempt_id:-}" ]]; then
+        if [[ "${collection_result_ready:-0}" == 1 ]]; then
+            record_collection_outcome
+        else
+            finish_collection_attempt failed null interrupted "$(collection_now)"
+        fi
     fi
     echo ">>> Received SIG${signal} — stopping." >&2
     exit "$status"
@@ -897,6 +970,110 @@ read_mbsync_error_counts() {
     return 1
 }
 
+collection_now() {
+    # The format the success stamp uses, so a success's completion time
+    # in the status file is the stamp's, character for character.
+    date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+load_collection_records() {
+    # Picks this start's boot token, then carries the last terminal and
+    # last success records of the status file an earlier start published
+    # into this start's first publication: the status file is their only
+    # store. A missing file is a first start. A file in any other shape
+    # than publish_collection_status writes (at most 4096 bytes read), or
+    # one naming another account, is set aside with a warning and the
+    # records start empty (null): the status then shows no earlier
+    # outcome, never a made-up one. An earlier attempt left in_progress
+    # (its shell was killed) is not carried: only its records are.
+    local LC_ALL=C line="" terminal success attempt re
+    collection_boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+    if [[ ! -e "$COLLECTION_STATUS_FILE" && ! -L "$COLLECTION_STATUS_FILE" ]]; then
+        return 0
+    fi
+    terminal="${COLLECTION_TERMINAL_RE#^}"
+    terminal="${terminal%\$}"
+    success="${COLLECTION_SUCCESS_RE#^}"
+    success="${success%\$}"
+    attempt="\\{\"id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"started_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(in_progress|succeeded|succeeded_with_withheld_folders|failed)\"\\}"
+    re="^\\{\"format\": ${COLLECTION_STATUS_FORMAT}, \"scope_uuid\": \"${ACCOUNT_SCOPE}\", \"run_deadline_secs\": [1-9][0-9]*, \"sync_interval_secs\": [1-9][0-9]*, \"attempt\": ${attempt}, \"last_terminal\": (null|${terminal}), \"last_success\": (null|${success})\\}\$"
+    if [[ -f "$COLLECTION_STATUS_FILE" ]] \
+        && IFS= read -r -n 4096 line <"$COLLECTION_STATUS_FILE" \
+        && [[ "$line" =~ $re ]]; then
+        terminal="${line#*\"last_terminal\": }"
+        collection_last_terminal="${terminal%, \"last_success\": *}"
+        success="${line##*\"last_success\": }"
+        collection_last_success="${success%\}}"
+        return 0
+    fi
+    echo ">>> WARNING: the collection status at ${COLLECTION_STATUS_FILE} could not be read, or names another account; it starts again without an earlier outcome." >&2
+}
+
+publish_collection_status() {
+    # Publishes the status file (format 1) for the current attempt with
+    # outcome $1: written to a unique temporary file in the Maildir root,
+    # made world-readable (the indexer runs as another UID) and renamed
+    # into place, so a reader sees one whole publication. Every value is
+    # a validated setting, a generated token, a time or a count. A failure
+    # is warned and never changes the sync's result; the indexer keeps
+    # reading the previous publication.
+    local tmp=""
+    if ! tmp="$(mktemp "${COLLECTION_STATUS_FILE}.XXXXXX")" \
+        || ! printf '{"format": %d, "scope_uuid": "%s", "run_deadline_secs": %d, "sync_interval_secs": %d, "attempt": {"id": "%s", "started_at": "%s", "outcome": "%s"}, "last_terminal": %s, "last_success": %s}\n' \
+            "$COLLECTION_STATUS_FORMAT" "$ACCOUNT_SCOPE" "$SYNC_DEADLINE_SECONDS" "$SYNC_INTERVAL" \
+            "$collection_attempt_id" "$collection_attempt_started_at" "$1" \
+            "$collection_last_terminal" "$collection_last_success" >"$tmp" \
+        || ! chmod 644 "$tmp" || ! mv -f "$tmp" "$COLLECTION_STATUS_FILE"; then
+        [[ -z "$tmp" ]] || rm -f "$tmp"
+        echo ">>> WARNING: could not publish the collection status (outcome $1); get_mailbox_status shows the previous one." >&2
+    fi
+}
+
+begin_collection_attempt() {
+    # A new attempt, published as in_progress: "started, no terminal
+    # result recorded". It proves nothing about whether mbsync is still
+    # running; a shell killed outright leaves it in place until the next
+    # start publishes.
+    collection_count=$((collection_count + 1))
+    collection_attempt_id="${collection_boot}-${collection_count}"
+    collection_attempt_started_at="$(collection_now)"
+    collection_result_ready=0
+    publish_collection_status in_progress
+}
+
+finish_collection_attempt() {
+    # The current attempt's terminal outcome: $1 succeeded,
+    # succeeded_with_withheld_folders or failed; $2 the withheld far-side
+    # folder count, or null when it is not known; $3 the failure class
+    # (deadline, killed, error, permission_repair, interrupted), or null
+    # for a success; $4 the completion time. The records follow
+    # publication order, never their times.
+    local class="null"
+    [[ -n "$collection_attempt_id" ]] || return 0
+    [[ "$3" == null ]] || class="\"$3\""
+    collection_last_terminal="$(printf '{"attempt_id": "%s", "completed_at": "%s", "outcome": "%s", "withheld_far_side_folders": %s, "failure_class": %s}' \
+        "$collection_attempt_id" "$4" "$1" "$2" "$class")"
+    if [[ "$1" != failed ]]; then
+        collection_last_success="$(printf '{"attempt_id": "%s", "completed_at": "%s"}' \
+            "$collection_attempt_id" "$4")"
+    fi
+    publish_collection_status "$1"
+    collection_attempt_id=""
+}
+
+record_collection_outcome() {
+    # Publishes the outcome run_sync left in sync_outcome, sync_withheld
+    # and sync_failure_class. A success is recorded after
+    # record_successful_sync, with the stamp's completion time: the
+    # indexer treats a success as delivered once the stamp it has
+    # acknowledged names that time, and handles the stamp's rename first.
+    local completed_at="${sync_completed_at:-}"
+    if [[ "$sync_outcome" == failed || -z "$completed_at" ]]; then
+        completed_at="$(collection_now)"
+    fi
+    finish_collection_attempt "$sync_outcome" "$sync_withheld" "$sync_failure_class" "$completed_at"
+}
+
 run_sync() {
     # Fails when mbsync or the permission repair fails: a sync whose mail
     # the indexer cannot read must not be recorded as successful. The
@@ -917,8 +1094,22 @@ run_sync() {
     # mbsync runs under timeout(1) with the per-run deadline (#282). A run
     # stopped there fails like any other, so the loop's failure limit
     # applies and no success stamp is written.
-    local rc=0 counts="" withheld=0 other=0 started duration
+    #
+    # The attempt is published as in_progress first, and its result left
+    # for record_collection_outcome (#1592): sync_outcome, sync_withheld
+    # (the withheld far-side folder count, null when the error filter's
+    # counts never arrived) and sync_failure_class, the first cause of a
+    # failure: deadline (stopped at SYNC_DEADLINE_SECONDS), killed (KILLed
+    # after the grace, or by the kernel), error (any other mbsync failure,
+    # far-side folders together with another error included) or
+    # permission_repair (mbsync succeeded, the repair failed).
+    local rc=0 counts="" withheld=0 other=0 started duration class=""
+    sync_outcome=failed
+    sync_withheld=null
+    sync_failure_class=error
+    sync_completed_at=""
     rm -f "$MBSYNC_ERROR_COUNTS_FILE" "$MBSYNC_NOTICES_DONE_FILE"
+    begin_collection_attempt
     mark_sync_activity
     # Both streams go through the filters as they are written; run_child
     # waits on (and signals) timeout, which passes a stop on to mbsync.
@@ -931,8 +1122,10 @@ run_sync() {
     # 124: stopped by TERM at the deadline; 137: KILLed, after ignoring
     # TERM for the grace (or by the kernel, which timeout cannot tell).
     if ((rc == 124)); then
+        class=deadline
         echo ">>> ERROR: mbsync did not finish within SYNC_DEADLINE_SECONDS=${SYNC_DEADLINE_SECONDS} and was stopped; counting this sync as failed (see docs/troubleshooting.md)." >&2
     elif ((rc == 137)); then
+        class=killed
         echo ">>> ERROR: mbsync was killed: it ignored the stop at SYNC_DEADLINE_SECONDS=${SYNC_DEADLINE_SECONDS} for ${SYNC_KILL_GRACE_SECONDS}s, or the kernel killed it; counting this sync as failed." >&2
     fi
     if ! wait_for_mbsync_filter "$MBSYNC_NOTICES_DONE_FILE"; then
@@ -942,6 +1135,7 @@ run_sync() {
     # Missing counts leave withheld at 0, so nothing is tolerated.
     if counts="$(read_mbsync_error_counts)"; then
         read -r withheld other <<<"$counts"
+        sync_withheld="$withheld"
     fi
     rm -f "$MBSYNC_ERROR_COUNTS_FILE"
     if ((withheld > 0)); then
@@ -951,9 +1145,13 @@ run_sync() {
             rc=0
         fi
     fi
+    if ((rc != 0)) && [[ -z "$class" ]]; then
+        class=error
+    fi
     if ! relax_new_maildir_perms; then
         echo ">>> ERROR: could not make new Maildir entries readable to the indexer." >&2
         rc=1
+        [[ -n "$class" ]] || class=permission_repair
     fi
     # After every repair pass, even a failed one, which may still have
     # opened some folders. Missing it only delays the indexer's re-watch
@@ -966,24 +1164,155 @@ run_sync() {
     # so the deadline can be tuned from this line (#879).
     if ((rc == 0)); then
         printf '>>> Sync ok in %ds (deadline %ds)\n' "$duration" "$SYNC_DEADLINE_SECONDS"
+        sync_failure_class=null
+        sync_outcome=succeeded
+        if ((withheld > 0)); then
+            sync_outcome=succeeded_with_withheld_folders
+        fi
+    else
+        sync_failure_class="$class"
     fi
+    collection_result_ready=1
     return "$rc"
+}
+
+# The generation already published in the retained Maildir-volume stamp
+# (read back only to guard next_success_generation below; the stamp and
+# its acknowledgement are otherwise unchanged). Prints nothing on a
+# missing, oversized (>4096 bytes) or unparseable stamp — including the
+# legacy shape with no generation field — and never fails the caller.
+stamp_generation() {
+    local LC_ALL=C line
+    [[ -f "$SYNC_STAMP_FILE" ]] || return 0
+    IFS= read -r -n 4096 line <"$SYNC_STAMP_FILE" || return 0
+    [[ "$line" =~ $SYNC_STAMP_RE ]] || return 0
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
+# A durable, monotonically increasing counter: the generation
+# record_successful_sync allocates to a success stamp, in the state
+# volume (never SQLite — no schema change). Ordering an acknowledged
+# stamp by this generation, rather than by its wall-clock completion
+# time, closes the identity gap a clock rollback could open: two
+# different attempts could otherwise publish the same completed_at
+# (#1621 thread, 2026-10-13). First boot starts at 0 ("no generation
+# allocated yet") and prints the next one, persisted before anything
+# names it. A corrupt or unwritable counter is a failure, never a
+# reused or skipped number, so the caller must not report the sync as
+# acknowledged.
+#
+# The counter is seeded forward from the retained stamp's own
+# generation when that is higher (review finding, #1612 round 8): the
+# state volume (mbsync-state, documented in docs/architecture.md
+# "Docker Volumes" as unnecessary to back up before this counter
+# existed) can be recreated or restored from an older backup while the
+# Maildir volume keeps a newer stamp. Without this, the counter would
+# restart below a generation already published, and the indexer's
+# forward-only, generation-ordered acknowledgement would never again
+# move past that old stamp — ignoring every later successful sync and
+# leaving an unrecovered collection failure unable to clear. The two
+# durable records can only diverge in this direction (the counter is
+# always allocated and persisted before a stamp names it), so raising
+# the counter to match an already-published generation never regresses
+# or reorders anything the indexer has already acknowledged.
+
+# Whether all-digit value "$1" is small enough for next_success_
+# generation to add 1 to without wrapping Bash's signed 64-bit
+# arithmetic: at most INT64_MAX - 1 (so the increment itself still
+# fits), 9223372036854775806. An all-digit value above this (a restored
+# or corrupted counter or stamp) must be rejected before any ``(( ))``
+# evaluation touches it — evaluating it first would already have
+# wrapped (#1612 round 16). Pure string comparison: arithmetic on a
+# value this large would already have overflowed, so length and, for a
+# tie, lexicographic order (equivalent to numeric order for equal-
+# length digit strings) decide it instead.
+generation_in_range() {
+    local value="$1" max="9223372036854775806"
+    ((${#value} < ${#max})) && return 0
+    ((${#value} > ${#max})) && return 1
+    # shellcheck disable=SC2071 # deliberate lexicographic string compare, equal-length digits only
+    [[ "$value" < "$max" || "$value" == "$max" ]]
+}
+
+next_success_generation() {
+    local current=0 raw next tmp retained
+
+    if [[ -f "$GENERATION_FILE" ]]; then
+        if ! IFS= read -r raw <"$GENERATION_FILE" || [[ ! "$raw" =~ ^[0-9]+$ ]] ||
+            ! generation_in_range "$raw"; then
+            echo ">>> ERROR: the success generation at ${GENERATION_FILE} is not a non-negative integer within range — refusing to record this sync as successful." >&2
+            return 1
+        fi
+        current="$raw"
+    elif [[ -e "$GENERATION_FILE" ]]; then
+        echo ">>> ERROR: ${GENERATION_FILE} is not a regular file — refusing to record this sync as successful." >&2
+        return 1
+    fi
+    retained="$(stamp_generation)"
+    if [[ -n "$retained" ]]; then
+        if ! generation_in_range "$retained"; then
+            echo ">>> ERROR: the retained sync stamp's generation (${retained}) is out of range — refusing to record this sync as successful." >&2
+            return 1
+        fi
+        if ((retained > current)); then
+            echo ">>> WARNING: the success generation counter at ${GENERATION_FILE} (${current}) is behind the retained sync stamp's generation (${retained}); seeding it forward (mbsync-state was likely recreated or restored from an older backup)." >&2
+            current="$retained"
+        fi
+    fi
+    next=$((current + 1))
+    if ! tmp="$(mktemp "${GENERATION_FILE}.XXXXXX")"; then
+        return 1
+    fi
+    if ! printf '%s\n' "$next" >"$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$GENERATION_FILE"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    printf '%s' "$next"
 }
 
 record_successful_sync() {
     # Written only after relax_new_maildir_perms, so every message this
     # sync delivered is already on disk and readable. The temporary name
-    # carries this sync's time and interval: the indexer acknowledges the
-    # sync named by the rename event it sees, which its watcher handles
-    # only after this sync's delivery events. Replaced atomically via
-    # rename; world-readable because the indexer runs as a different UID.
-    local completed_at tmp
-    completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    tmp="${MAILDIR_PATH}/.mbsync-last-sync.${completed_at}.${SYNC_INTERVAL}.tmp"
-    printf '{"completed_at": "%s", "sync_interval_secs": %d}\n' \
-        "$completed_at" "$SYNC_INTERVAL" >"$tmp"
-    chmod 644 "$tmp"
-    mv -f "$tmp" "$SYNC_STAMP_FILE"
+    # carries this sync's identity: its completion time and interval (as
+    # before), the attempt ID collection_status also names it by, and the
+    # durable generation next_success_generation allocates. The indexer
+    # acknowledges the sync named by the rename event it sees, which its
+    # watcher handles only after this sync's delivery events, orders
+    # acknowledgements by the generation (never wall-clock time, #1621
+    # thread), and proves a later success delivered by the attempt ID
+    # matching — never by a completion time a clock rollback could repeat
+    # across two different attempts. Replaced atomically via rename;
+    # world-readable because the indexer runs as a different UID. The
+    # completion time is kept in sync_completed_at for
+    # record_collection_outcome. Called as a condition (errexit is off),
+    # so every step is checked: a failure removes the temporary file and
+    # keeps the previous stamp, and the generation is allocated and
+    # persisted before anything names it, so a failure allocating it
+    # never reports the sync as acknowledged.
+    local completed_at tmp generation
+    completed_at="$(collection_now)"
+    sync_completed_at="$completed_at"
+    if ! generation="$(next_success_generation)"; then
+        echo ">>> ERROR: could not allocate the durable success generation — refusing to record this sync as successful." >&2
+        return 1
+    fi
+    tmp="${MAILDIR_PATH}/.mbsync-last-sync.${completed_at}.${SYNC_INTERVAL}.${collection_attempt_id}.${generation}.tmp"
+    if ! printf '{"completed_at": "%s", "sync_interval_secs": %d, "attempt_id": "%s", "generation": %d}\n' \
+        "$completed_at" "$SYNC_INTERVAL" "$collection_attempt_id" "$generation" >"$tmp" \
+        || ! chmod 644 "$tmp" || ! mv -f "$tmp" "$SYNC_STAMP_FILE"; then
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+stamp_write_failed() {
+    # The sync succeeded but its stamp could not be written. Its outcome
+    # is still published (#1592): the success is never delivered, since no
+    # stamp names it, so it does not end an unrecovered failure. Then exit
+    # for a container restart, as before.
+    record_collection_outcome
+    echo ">>> ERROR: could not write the success stamp ${SYNC_STAMP_FILE}; exiting for container restart." >&2
+    exit 1
 }
 
 # =============================================================================
@@ -1004,6 +1333,9 @@ require_prerequisites
 if [[ "$PIN_ROTATION_RUN" != "true" ]]; then
     check_maildir_layout || exit 1
 fi
+# The collection status's earlier records and this start's boot token
+# (#1592).
+load_collection_records
 
 warn_if_pin_rotation_enabled
 
@@ -1047,8 +1379,10 @@ fi
 consecutive_sync_failures=0
 echo ">>> Running initial sync..."
 if run_sync; then
-    record_successful_sync
+    record_successful_sync || stamp_write_failed
+    record_collection_outcome
 else
+    record_collection_outcome
     consecutive_sync_failures=1
     echo ">>> Initial sync returned a non-zero status (${consecutive_sync_failures}/${MAX_CONSECUTIVE_SYNC_FAILURES})." >&2
 fi
@@ -1066,9 +1400,11 @@ while true; do
     echo ">>> Syncing..."
     if run_sync; then
         consecutive_sync_failures=0
-        record_successful_sync
+        record_successful_sync || stamp_write_failed
+        record_collection_outcome
         continue
     fi
+    record_collection_outcome
 
     ((consecutive_sync_failures += 1))
     echo ">>> Sync failed (${consecutive_sync_failures}/${MAX_CONSECUTIVE_SYNC_FAILURES} consecutive failures)." >&2

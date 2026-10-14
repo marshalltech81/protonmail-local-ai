@@ -150,9 +150,7 @@ def _count_calls(monkeypatch, cls, name: str) -> list[int]:
 
 
 def _claimant(p: StalePipeline, path: str) -> str:
-    return p.db._conn.execute(
-        "SELECT claimant_id FROM messages WHERE filepath = ?", (path,)
-    ).fetchone()[0]
+    return p.db.find_active_occurrence(path)["claimant_id"]
 
 
 class TestStaleSibling:

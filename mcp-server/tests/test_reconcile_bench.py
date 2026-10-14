@@ -672,7 +672,9 @@ def test_worst_records_carry_the_full_nested_maildir_path(bench, tmp_path):
     db = tmp_path / "paths.db"
     bench.build(db, 20, 1, "typical", "worst")
     with closing(sqlite3.connect(db)) as conn:
-        folder, filepath = conn.execute("SELECT folder, filepath FROM messages LIMIT 1").fetchone()
+        folder, filepath = conn.execute(
+            "SELECT folder, '/maildir/' || relative_path FROM message_occurrences LIMIT 1"
+        ).fetchone()
     assert len(folder.encode()) > 3_000 and folder.count("/") == 13
     assert filepath.startswith(f"/maildir/{bench.disk_folder(folder)}/cur/")
     assert len(filepath.encode()) < 4_096  # Linux PATH_MAX
@@ -1214,7 +1216,9 @@ def test_writer_indexes_each_batch_into_its_folders(bench, tmp_path):
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         added = conn.execute(
-            "SELECT folder, body_complete, thread_id FROM messages WHERE rowid > 8"
+            "SELECT o.folder, m.body_complete, m.thread_id FROM messages m "
+            "JOIN message_occurrences o ON o.claimant_id = m.claimant_id "
+            "WHERE m.rowid > 8 ORDER BY m.rowid"
         ).fetchall()
         assert [(f, c) for f, c, _ in added] == [(bench._folder(i), 1) for i in (8, 9, 10)]
         assert {t for _, _, t in added} == {bench.message_id(8, "typical")}

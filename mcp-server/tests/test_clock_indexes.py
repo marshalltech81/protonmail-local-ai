@@ -65,6 +65,19 @@ def test_real_cursor_page_seeks_through_large_timestamp_ties(tmp_path, monkeypat
                 for i in range(size)
             ],
         )
+        # Each bulk row needs an active occurrence too: query_messages's
+        # default scope (#1567) only returns a message with one.
+        conn.executemany(
+            "INSERT INTO message_occurrences (account_id, folder, uniq, claimant_id, "
+            "relative_path, seen, flagged, replied, trashed, first_observed_at, "
+            "last_observed_at, state, retired_at, provenance) "
+            "VALUES (1, 'INBOX', ?, ?, ?, 0, 0, 0, 0, '2024-01-01T00:00:00+00:00', "
+            "'2024-01-01T00:00:00+00:00', 'active', NULL, 'parse')",
+            [
+                (f"claim-{i:06d}", f"claim-{i:06d}", f"INBOX/cur/claim-{i:06d}:2,S")
+                for i in range(size)
+            ],
+        )
         conn.commit()
         conn.close()
         db = Database(str(path))
@@ -95,7 +108,12 @@ def test_real_cursor_page_seeks_through_large_timestamp_ties(tmp_path, monkeypat
             work.append(len(steps))
     # A cursor near the bottom of one huge tie must not walk all earlier IDs.
     assert work[1] <= work[0] + 2
-    assert work[1] < 100
+    # The occurrence join every default-scoped query now carries (#1567)
+    # adds a small, size-independent amount of per-row work (measured
+    # ~100-103 with it, vs ~100 without): bounded above the measured
+    # figure with headroom, not loosened to paper over a real regression
+    # (an unbounded scan would far exceed this for 50,000 rows).
+    assert work[1] < 150
 
 
 @pytest.mark.parametrize("basis", ["sent", "occurred"])
