@@ -5246,6 +5246,7 @@ class Database:
             "people AS (SELECT m.thread_id AS tid, COUNT(DISTINCT p.address) AS n "
             "FROM pg JOIN messages m ON m.thread_id=pg.tid "
             "LEFT JOIN message_participants p ON p.claimant_id=m.claimant_id "
+            "AND p.role IN ('from','to','cc') "
             "GROUP BY m.thread_id) "
             "SELECT t.threads, t.matches, t.undecided, t.unknown_threads, pg.tid, "
             "COALESCE(th.subject, ''), pg.matches, pg.undecided, meta.total, "

@@ -85,6 +85,9 @@ def test_shared_outputs_direction_visible_roles_and_contacts(bcc_db):
     records = {m.message_id: m for m in bcc_db.query_messages(limit=100).messages}
     msg = records["sent"]
     assert msg.direction == "outbound"
+    threads = {t.thread_id: t for t in bcc_db.query_threads(limit=100).threads}
+    assert threads["sent"].participant_count == 1
+    assert threads["visible"].participant_count == 2
     assert message_headers(msg).model_dump()["bcc_count"] == 1
     assert message_headers(msg).model_dump()["bcc"][0]["address"] == "target@example.test"
     assert bcc_db.get_message_view(msg.claimant_id).record.bcc_count == 1
