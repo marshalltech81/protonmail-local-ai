@@ -1202,6 +1202,16 @@ superseded entries keep their number and one line.
     that reuses unchanged embeddings. Neither technical identity establishes
     distinct reports; subject grouping and samples remain separate work.
 
+56. **Recipient and MIME aggregates (2026-10-14, #1337):** the owner
+    approved recipient-domain and declared-MIME message groups after the
+    Opus 5.5/GPT-6.1 Sol panel reached consensus. Current partial attachment
+    observations count; stale rows do not. Eligible-population counters
+    disclose missing group memberships. MIME payload identities are scoped
+    to the group type, and an exact MIME predicate selects its messages.
+    Full MIME values define groups, but their displayed labels are bounded
+    and explicitly marked when clipped. Period breakdown remains sender-only;
+    the existing schema supplies the evidence.
+
 ## Notes for Agents
 
 - Read `AGENTS.md` before making changes.

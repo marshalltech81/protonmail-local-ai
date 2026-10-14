@@ -140,6 +140,10 @@ def _group_filters(group_by: str, value: str, filters: dict, where_items: list) 
         items.append({"leaf": "address_is", "role": "from", "value": value})
     elif group_by == "sender_domain":
         items.append({"leaf": "domain_is", "role": "from", "value": value})
+    elif group_by == "recipient_domain":
+        items.append({"leaf": "domain_is", "role": "visible_recipient", "value": value})
+    elif group_by == "attachment_content_type":
+        items.append({"leaf": "attachment_content_type_is", "value": value})
     elif group_by == "folder":
         filters["folder"] = value
     elif group_by == "year":
@@ -617,6 +621,7 @@ class TestTool:
         assert out["returned"] == 2 and out["has_more"] is True and out["next_cursor"]
         assert out["groups"][0] == {
             "value": "ann@one.test",
+            "value_clipped": False,
             "messages": 4,
             "threads": 2,
             "first_at": "2023-05-02T09:00:00+00:00",

@@ -713,6 +713,7 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
             "indeterminate": 0,
             "groups": 1,
             "returned": 1,
+            "clipped_values": 0,
             "incomplete_from_messages": 0,
             "undated_messages": 0,
             "attachment_inventory_unknown_messages": 0,

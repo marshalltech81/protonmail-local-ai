@@ -142,6 +142,7 @@ class TestModel:
             "body_words",
             "subject_contains",
             "attachment_text_words",
+            "attachment_content_type_is",
             "header_exists",
             "header_contains",
         )

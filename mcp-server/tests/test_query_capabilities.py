@@ -260,6 +260,7 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
         "header name, text": (("subject", "synthetic"),),
         "text": ("synthetic",),
         "words": (("synthetic",),),
+        "MIME type": ("application/pdf",),
         "folders": (("INBOX",),),
         "instant": ("2024-01-01T00:00:00+00:00",),
         "basis": tuple(DATE_BASES),

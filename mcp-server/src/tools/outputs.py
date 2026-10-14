@@ -841,9 +841,14 @@ class QueryThreadsOutput(_Output):
 
 
 class MessageGroupRow(_Output):
+    value_clipped: bool = Field(
+        default=False,
+        description="MIME grouping only: display differs from full stored type; not an exact selector. "
+        "Full types sharing a displayed prefix remain separate groups.",
+    )
     value: str | None = Field(
         description="The group's address, domain, folder, year (YYYY), month (YYYY-MM) or "
-        "authority class; null for the messages with no value on the dimension."
+        "authority class or declared MIME display label; null for no observed value."
     )
     messages: int = Field(description="Messages the filters definitely match in this group.")
     threads: int = Field(description="Distinct threads of those messages.")
@@ -876,7 +881,7 @@ class MessageGroupRow(_Output):
         description="Distinct stored Message-ID strings among definite matches; sender controlled, not distinct reports."
     )
     distinct_attachment_ids: int = Field(
-        description="Distinct payload identities from current occurrence rows on definite matches. A lower bound when attachment_inventory_unknown_messages is nonzero; not distinct reports."
+        description="Distinct payload identities from current occurrence rows on definite matches; MIME groups scope these to their type. A lower bound when attachment_inventory_unknown_messages is nonzero; not distinct reports."
     )
     eligible_total: int = Field(
         description="messages + indeterminate in this group. Sender groups can overlap."
@@ -921,6 +926,16 @@ class AggregateMessagesOutput(_Output):
         "whole result; further sender groups or memberships may be missing for them. It "
         "counts messages, not missing addresses, and includes a message with no stored "
         "From address (also in the null group). authority_class leaves out Spam.",
+    )
+    incomplete_recipient_messages: int | None = Field(
+        default=None,
+        description="recipient_domain only: eligible messages whose To/Cc lists "
+        "are not known complete, once globally; further memberships may be missing.",
+    )
+    incomplete_attachment_type_messages: int | None = Field(
+        default=None,
+        description="attachment_content_type only: eligible messages with unknown "
+        "exhaustive current inventories, once globally; further types may be missing.",
     )
     returned: int
     offset: int = Field(description="Groups returned by earlier pages.")
