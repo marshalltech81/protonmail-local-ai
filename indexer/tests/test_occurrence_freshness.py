@@ -360,6 +360,56 @@ class TestWatcherRenameVerification:
         finally:
             box.close()
 
+    def test_a_same_size_same_mtime_replacement_is_hashed_before_being_carried_forward(
+        self, tmp_path, caplog
+    ):
+        """Fresh evidence beyond the metadata-mismatch case above (round
+        12): the replacement can also match the source's recorded size
+        *and* mtime (mbsync sets mtime from IMAP's INTERNALDATE, so two
+        different messages can legitimately share one — the same
+        reasoning ``occurrence_scan``'s content backstop and
+        ``_move_occurrence``'s #1612 sibling fix (d8f11362) both rest
+        on). A metadata-only check cannot tell the replacement apart
+        from the old claimant's bytes, so the content hash must be
+        checked before the occurrence is carried forward."""
+        box = Box(tmp_path)
+        try:
+            old_raw = _eml("before@example.test")
+            path = box.put("INBOX/cur/r3:2,S", old_raw)
+            box.index(path)
+            stat_before = path.stat()
+
+            new_raw = _eml("after@example.test", body="a completely different payload")
+            pad = len(old_raw) - len(new_raw)
+            new_raw = (
+                new_raw[:-2] + b" " * pad + new_raw[-2:]
+                if pad > 0
+                else new_raw[: pad - 2] + new_raw[-2:]
+            )
+            assert len(new_raw) == len(old_raw) and new_raw != old_raw
+            path.write_bytes(new_raw)
+            os.utime(path, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+
+            dest = box.root / "INBOX/cur/r3:2,RS"
+            path.rename(dest)
+
+            queue = IndexingQueue(box.db, max_attempts=3, base_backoff_seconds=0)
+            handler = main.MaildirHandler(box.db, queue)
+            with patch.object(main, "MAILDIR_PATH", box.root):
+                handler.on_moved(_moved(path, dest))
+
+            # Not carried forward: the occurrence stays at the old,
+            # now-nonexistent path rather than being trusted onto dest
+            # on a size/mtime match alone.
+            assert box.db.find_active_occurrence(str(path)) is not None
+            assert box.db.find_active_occurrence(str(dest)) is None
+            # Treated as new mail instead.
+            assert queue.has_pending_row(str(dest))
+            assert "did not match" in caplog.text
+            assert MARKER not in caplog.text
+        finally:
+            box.close()
+
     def test_a_mismatch_with_no_indexed_files_record_is_checked_by_claimant_hash(self, tmp_path):
         """A scan-bound occurrence (``bind_found_copy`` never writes
         ``indexed_files``) is verified by hashing the destination and

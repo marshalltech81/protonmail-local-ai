@@ -238,6 +238,17 @@ def verify_rename_bytes(
     claimant ID's embedded hash prefix — the case for a scan-bound
     occurrence, since ``bind_found_copy`` never writes ``indexed_files``.
 
+    Size and mtime agreement with the recorded identity is a fast
+    admission shortcut, not proof (mbsync sets mtime from IMAP's
+    INTERNALDATE, so two different messages can legitimately share one —
+    the same reasoning ``occurrence_scan``'s content backstop and
+    ``Database._move_occurrence``'s sibling check both rest on): once
+    size and mtime agree, ``new_path`` is also hashed and checked against
+    the recorded ``content_hash`` before it is trusted. A record with no
+    recorded hash (none expected for current rows, but the column is
+    nullable) falls through to the claimant-hash-prefix check below, the
+    same as having no prior record at all.
+
     Returns ``new_path``'s identity (size, mtime, inode) captured at
     verification time, for the caller to pass into
     ``Database.update_filepath`` as ``verified_identity`` for the
@@ -251,9 +262,15 @@ def verify_rename_bytes(
         return None
     prior = db.file_identity(old_path)
     if prior is not None:
-        if (identity[0], identity[1]) == (prior["size"], prior["mtime_ns"]):
+        if (identity[0], identity[1]) != (prior["size"], prior["mtime_ns"]):
+            return None
+        if prior["content_hash"] is not None:
+            try:
+                if _sha256(Path(new_path)) != prior["content_hash"]:
+                    return None
+            except OSError:
+                return None
             return identity
-        return None
     expected = _claimant_hash_prefix(claimant_id)
     if expected is None:
         return None

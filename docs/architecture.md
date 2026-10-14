@@ -4419,19 +4419,26 @@ A watcher-observed rename (`on_moved`'s Case 1) carries an active
 occurrence's claimant forward only after
 `occurrence_scan.verify_rename_bytes` confirms the destination's bytes
 against it: by the source's `indexed_files` identity when there is one
-(a rename keeps size and mtime, so this is the same cheap metadata
-check), or, for a scan-bound occurrence (`bind_found_copy` never writes
-`indexed_files`), by hashing the destination and checking it against
-the claimant ID's embedded hash prefix (the first `CLAIMANT_HASH_CHARS`
-hex digits after the `#`, `parser.claimant_id`). The verified identity
-is re-checked inside the same transaction as the move
-(`Database._move_occurrence`'s `verified_identity` parameter), the same
-TOCTOU pattern `move_verified_occurrence` already uses for the
-reconciliation scan. A mismatch is not carried forward — neither the
-occurrence nor a stale `indexed_files` row under the destination's name
-(`_rename_rows` gates the carry on whether `_move_occurrence` found an
-actual mismatch, not merely on whether it found nothing to say) — and
-`on_moved` falls through to Case 2 as if the destination were new mail.
+— size and mtime agreeing (a rename keeps both) is a fast admission
+shortcut, not proof (mbsync sets mtime from IMAP's INTERNALDATE, so two
+different messages can legitimately share one, #1612 round 12), so the
+destination is also hashed and checked against the recorded
+`content_hash` before it is trusted, the same single bounded hash
+`Database._move_occurrence`'s sibling check (*Mailbox occurrences*
+above) uses — or, for a
+scan-bound occurrence (`bind_found_copy` never writes `indexed_files`,
+so there is no recorded identity or hash to check metadata against),
+by hashing the destination and checking it against the claimant ID's
+embedded hash prefix (the first `CLAIMANT_HASH_CHARS` hex digits after
+the `#`, `parser.claimant_id`). The verified identity is re-checked
+inside the same transaction as the move (`Database._move_occurrence`'s
+`verified_identity` parameter), the same TOCTOU pattern
+`move_verified_occurrence` already uses for the reconciliation scan. A
+mismatch is not carried forward — neither the occurrence nor a stale
+`indexed_files` row under the destination's name (`_rename_rows` gates
+the carry on whether `_move_occurrence` found an actual mismatch, not
+merely on whether it found nothing to say) — and `on_moved` falls
+through to Case 2 as if the destination were new mail.
 
 ### The content backstop
 
