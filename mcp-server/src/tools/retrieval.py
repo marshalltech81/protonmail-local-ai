@@ -1925,7 +1925,11 @@ def register_retrieval_tools(server, db):
 
         sample_per_group (strict integer 0..10, default 0) optionally returns
         bounded subjects and exact IDs from each group's definite matches.
-        Subjects reach the calling model. Samples are spread through chronological
+        Subjects reach the calling model. Before enabling sampling, call with
+        sample_per_group=0 to count the page, then tell the user how many sample subjects
+        you expect to read: sum(min(N, messages)) over its returned groups. Choose the
+        smallest sufficient sample and disclose before each sampled page; a fresh
+        snapshot can change the actual count. Samples are spread through chronological
         order, not statistically representative, a series classification or an
         exhaustive read. Each group returns min(sample_per_group, messages).
         The actual page is rejected above 100 sample membership rows; reduce limit

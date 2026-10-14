@@ -2081,8 +2081,11 @@ Each sample contains exact `claimant_id`, `thread_id`, nullable selected-clock `
 and `subject` bounded to 500 characters by reading at most 2,001 UTF-8 bytes.
 `subject_clipped` describes display truncation; `subject_complete` independently
 reports stored parsing completeness (null means unassessed). No body, address list
-or attachment text is fetched for sampling. Subjects reach the calling model;
-disclose the number of samples before bulk sampling and read only what the task needs.
+or attachment text is fetched for sampling. Subjects reach the calling model.
+Before enabling sampling, make a counts-only call (`sample_per_group=0`), calculate
+`sum(min(N, messages))` across its returned groups, and tell the user how many sample
+subjects you expect to read. Choose the smallest sufficient sample and disclose
+before each sampled page; a fresh snapshot can change the actual count.
 Use exact claimant IDs for bounded follow-up reads. Samples are evidence for a
 hypothesis, never a series classification or proof of semantic completeness.
 

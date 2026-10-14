@@ -316,3 +316,14 @@ def test_tool_rejects_non_strict_sample_counts(fake_server, sample_db, value):
     handler = _handlers(fake_server, sample_db)["aggregate_messages"]
     result = _error(handler(group_by="folder", sample_per_group=value))
     assert "sample_per_group" in result
+
+
+def test_served_description_requires_disclosure_before_first_sample(sample_db):
+    from tests.test_aggregate_messages import _server
+    from tests.test_structured_output import _tools
+
+    description = " ".join(_tools(_server(sample_db))["aggregate_messages"].description.split())
+    assert "Before enabling sampling" in description
+    assert "sample_per_group=0" in description
+    assert "tell the user how many sample subjects" in description
+    assert "smallest sufficient sample" in description
