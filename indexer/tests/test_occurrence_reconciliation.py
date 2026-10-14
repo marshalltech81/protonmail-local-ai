@@ -403,6 +403,39 @@ class TestMissedRenames:
         box.handle_moved(str(old), str(dest))
         assert box.active() == []
 
+    def test_a_reused_path_with_the_same_size_and_mtime_is_hashed_before_binding(self, box):
+        """Fresh evidence beyond the case above: the replacement can also
+        match the stale ``indexed_files`` record's size *and* mtime
+        (mbsync sets mtime from IMAP's INTERNALDATE, so two different
+        messages can legitimately share one — the same reasoning
+        ``occurrence_scan``'s content backstop was built on). A
+        metadata-only check cannot tell the replacement apart from the
+        old claimant's bytes, so the content hash must be checked before
+        binding; this must not be bound to the old claimant."""
+        old_raw = _eml("old@example.test")
+        old = box.put("INBOX/cur/r1:2,S", old_raw)
+        box.index(old)
+        box.db._conn.execute(
+            "UPDATE message_occurrences SET state = 'retired', retired_at = '2026-01-01' "
+            "WHERE relative_path = 'INBOX/cur/r1:2,S'"
+        )
+        box.db._conn.commit()
+        stat_before = old.stat()
+        new_raw = _eml("new@example.test", body="a completely different payload")
+        pad = len(old_raw) - len(new_raw)
+        new_raw = (
+            new_raw[:-2] + b" " * pad + new_raw[-2:]
+            if pad > 0
+            else new_raw[: pad - 2] + new_raw[-2:]
+        )
+        assert len(new_raw) == len(old_raw) and new_raw != old_raw
+        old.write_bytes(new_raw)
+        os.utime(old, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+        dest = box.root / "INBOX/cur/r1:2,FS"
+        old.rename(dest)
+        box.handle_moved(str(old), str(dest))
+        assert box.active() == []
+
     def test_an_unmapped_copy_moved_in_archive_mode_keeps_its_occurrence(self, box):
         raw = _eml("archived@example.test")
         inbox = box.put("INBOX/cur/o1:2,S", raw)

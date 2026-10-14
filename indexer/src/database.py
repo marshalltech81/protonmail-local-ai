@@ -5,6 +5,7 @@ Thread-level indexing: one row per thread, updated as new messages arrive.
 """
 
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -84,6 +85,24 @@ def _same_file(filepath: str, identity: tuple[int, int, int]) -> bool:
     except OSError:
         return False
     return (st.st_size, st.st_mtime_ns, st.st_ino) == identity
+
+
+# Bytes read per call when hashing a single already-identified file (as
+# ``occurrence_scan._sha256``) — this is a one-file read at a bind
+# decision, not a sweep over many files, so no further byte budget
+# applies (``occurrence_scan``'s ``_BACKSTOP_MAX_BYTES`` bounds its own
+# per-pass sweep instead).
+_HASH_CHUNK_BYTES = 1 << 20
+
+
+def _sha256(filepath: str) -> str:
+    """``filepath``'s SHA-256, read in bounded chunks rather than loaded
+    whole into memory."""
+    digest = hashlib.sha256()
+    with open(filepath, "rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _restore_names(path: Path) -> list[Path]:
@@ -4605,16 +4624,21 @@ class Database:
         carries the content hash of an indexed message (a byte-identical
         copy no occurrence held yet) binds the destination to that
         message instead (#1141); any other such path changes nothing.
-        When that record's size and mtime no longer match ``new_path``,
-        or ``new_path`` cannot be read, the mismatch is reported so the
-        record is not carried under the new name either — it is as stale
-        as the occurrence it failed to bind. A path whose
-        ``indexed_files`` record names no current message's content
-        (migration-era tracking data no message claims) has nothing to
-        verify, so it is not a mismatch; the caller's indexed_files carry
-        is unaffected either way, since it is pure bookkeeping there, not
-        an identity claim. The caller removes the message's tombstones
-        when the move leaves it live.
+        Size and mtime agreement alone is a fast admission shortcut, not
+        proof (mbsync sets mtime from IMAP's INTERNALDATE, so two
+        different messages can legitimately share one, the same
+        reasoning ``occurrence_scan``'s content backstop rests on): the
+        destination is hashed and checked against the record's content
+        hash before it is trusted. When that record's size, mtime or
+        hash no longer match ``new_path``, or ``new_path`` cannot be
+        read, the mismatch is reported so the record is not carried
+        under the new name either — it is as stale as the occurrence it
+        failed to bind. A path whose ``indexed_files`` record names no
+        current message's content (migration-era tracking data no
+        message claims) has nothing to verify, so it is not a mismatch;
+        the caller's indexed_files carry is unaffected either way, since
+        it is pure bookkeeping there, not an identity claim. The caller
+        removes the message's tombstones when the move leaves it live.
 
         An active occurrence at ``old_path`` is carried forward only when
         ``verified_identity`` (size, mtime, inode, captured by the caller
@@ -4636,7 +4660,7 @@ class Database:
         now = datetime.now(UTC).isoformat()
         if row is None:
             prior = cur.execute(
-                "SELECT m.claimant_id, f.size, f.mtime_ns FROM indexed_files f "
+                "SELECT m.claimant_id, f.size, f.mtime_ns, f.content_hash FROM indexed_files f "
                 "JOIN messages m ON m.content_hash = f.content_hash "
                 "WHERE f.filepath = ? ORDER BY m.claimant_id LIMIT 1",
                 (old_path,),
@@ -4644,15 +4668,22 @@ class Database:
             if prior is None:
                 return None, False
             # The record may be stale: a retired path reused by another
-            # file whose creation was missed. Bind only a destination with
-            # the size and mtime recorded for it (the file identity the
-            # Maildir walk trusts; a rename keeps both), else leave it to
+            # file whose creation was missed. Size and mtime agreement is
+            # a fast admission shortcut, not proof (mbsync sets mtime from
+            # IMAP's INTERNALDATE, so two different messages can
+            # legitimately share one) — a bound destination's bytes are
+            # hashed and checked against the record too, else leave it to
             # the parse, which binds it to its own claimant.
             try:
                 st = os.stat(new_path)
             except OSError:
                 return None, True
             if (st.st_size, st.st_mtime_ns) != (prior["size"], prior["mtime_ns"]):
+                return None, True
+            try:
+                if _sha256(new_path) != prior["content_hash"]:
+                    return None, True
+            except OSError:
                 return None, True
             self._bind_occurrence(cur, prior["claimant_id"], new_path, provenance="rename")
             return str(prior["claimant_id"]), False

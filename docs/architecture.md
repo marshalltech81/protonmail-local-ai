@@ -1309,7 +1309,10 @@ to. Relocating the root alone keeps every occurrence.
   creates the destination's for the same claimant, so the move is
   atomic. A renamed file that no occurrence held but whose
   `indexed_files` record carries an indexed message's hash binds the
-  destination to that message (#1141).
+  destination to that message, once the destination's size, mtime
+  *and* hashed bytes all match the record (#1141, #1612): size and
+  mtime agreement alone is not proof — mbsync sets mtime from IMAP's
+  INTERNALDATE, so two different messages can legitimately share one.
 - **Missed renames, found copies, vanished files.** The reconciliation
   scan (*Occurrence reconciliation* under *Deletion Reconciliation*,
   #1567) follows a rename the watcher missed once the file's bytes are
