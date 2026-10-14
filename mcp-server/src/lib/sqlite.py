@@ -5592,7 +5592,8 @@ class Database:
         # once each, before a message is spread over its groups: further
         # sender groups or memberships may be missing for them. Spam has
         # no class either way, so authority_class leaves it out.
-        incomplete_sql, incomplete_params = "NULL", []
+        incomplete_sql = "NULL"
+        incomplete_params: list = []
         if group_by in _SENDER_DIMENSIONS:
             incomplete_sql = "TOTAL(sa = 0 AND fc IS NOT 1"
             if group_by == "authority_class":

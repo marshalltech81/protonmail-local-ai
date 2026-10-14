@@ -541,8 +541,8 @@ collection_setup() {
     collection_last_success="null"
     load collection_now load_collection_records \
         publish_collection_status begin_collection_attempt finish_collection_attempt \
-        record_collection_outcome stamp_generation next_success_generation record_successful_sync \
-        stamp_write_failed
+        record_collection_outcome stamp_generation generation_in_range next_success_generation \
+        record_successful_sync stamp_write_failed
     load_collection_records
 }
 
