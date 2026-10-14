@@ -11,7 +11,6 @@ FIELD_BYTES = 16 * 1024
 FIELD_COUNT = 256
 TOTAL_BYTES = 1024 * 1024
 COMMENT_DEPTH = 32
-KNOWN_STATUSES = ("valid", "duplicate", "unsupported", "absent")
 _ATEXT = frozenset(string.ascii_letters + string.digits + "!#$%&'*+-/=?^_`{|}~")
 
 
