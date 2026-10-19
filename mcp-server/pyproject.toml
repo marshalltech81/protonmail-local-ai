@@ -11,7 +11,7 @@ dependencies = [
     # directly, so pin the version fastmcp 4.1.0 resolves.
     "mcp==2.3.0",
     "uvicorn==0.54.0",
-    "starlette==1.7.0",
+    "starlette==1.8.0",
     "sqlite-vec==0.1.9",
     # Inference, embed, and rerank SDKs. ``openai`` covers both
     # ``INFERENCE_MODE=openai`` (chat completions) and ``EMBED_MODE=openai``
