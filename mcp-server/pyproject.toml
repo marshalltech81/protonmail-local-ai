@@ -26,7 +26,7 @@ dependencies = [
     # Output models for structured tool results (``src/tools/outputs.py``).
     # Pinned to a version ``fastmcp`` and ``mcp`` accept; declared
     # because the tool code imports it directly.
-    "pydantic==2.14.0",
+    "pydantic==2.14.1",
     # The HTTP client fastmcp's Streamable HTTP transport uses; already
     # locked through ``fastmcp``. Declared at that version because
     # ``src/stdio_adapter.py`` builds its client directly.
