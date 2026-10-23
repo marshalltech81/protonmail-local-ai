@@ -373,14 +373,14 @@ class TestMissedRenames:
         path = box.put("INBOX/cur/m2:2,S", _eml("same2@example.test"))
         box.index(path)
         path.unlink()
-        candidate = box.put("INBOX/cur/m2:2,FS", _eml("different2@example.test"))
+        candidate = box.put("INBOX/cur/m2:2,FS", _eml("other@example.test"))
 
         real_sha256 = scan_module._sha256
 
-        def _raise_for_candidate(p):
+        def _raise_for_candidate(p, identity=None):
             if p == candidate:
                 raise OSError("synthetic: candidate unreadable at verification time")
-            return real_sha256(p)
+            return real_sha256(p, identity)
 
         monkeypatch.setattr(scan_module, "_sha256", _raise_for_candidate)
         counts = box.reconciler.sweep()
@@ -402,11 +402,11 @@ class TestMissedRenames:
 
         real_retire = box.db.retire_mismatched_rename
 
-        def _restore_then_retire(occurrence_id, filepath):
+        def _restore_then_retire(occurrence_id, filepath, **kwargs):
             # Simulates a restore landing between the scan's absence
             # check and this call's own transaction.
             path.write_bytes(original)
-            return real_retire(occurrence_id, filepath)
+            return real_retire(occurrence_id, filepath, **kwargs)
 
         monkeypatch.setattr(box.db, "retire_mismatched_rename", _restore_then_retire)
         counts = box.reconciler.sweep()
@@ -518,8 +518,8 @@ class TestMissedRenames:
 
         real_sha256 = database_module._sha256
 
-        def _hash_then_replace(filepath):
-            digest = real_sha256(filepath)
+        def _hash_then_replace(filepath, identity=None):
+            digest = real_sha256(filepath, identity)
             if filepath == str(dest):
                 # The race: a different message, same size as the
                 # genuine rename's, replaces dest right after its
@@ -1016,8 +1016,8 @@ class TestReviewRound1:
         copy = box.put("Trash/cur/r2:2,ST", raw)
         real = scan_occurrences.__globals__["_sha256"]
 
-        def hash_then_replace(path):
-            digest = real(path)
+        def hash_then_replace(path, identity=None):
+            digest = real(path, identity)
             if path == copy:
                 swap = copy.with_name("swap")
                 swap.write_bytes(_eml("other@example.test"))
@@ -1037,10 +1037,10 @@ class TestReviewRound1:
         os.utime(new, ns=(1, 1))  # the recorded identity no longer matches: hash it
         real = scan_occurrences.__globals__["_sha256"]
 
-        def hash_then_replace(path):
-            digest = real(path)
+        def hash_then_replace(path, identity=None):
+            digest = real(path, identity)
             swap = path.with_name("swap")
-            swap.write_bytes(_eml("other@example.test"))
+            swap.write_bytes(_eml("intrude@example.test"))
             os.replace(swap, path)
             return digest
 

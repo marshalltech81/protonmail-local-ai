@@ -2357,11 +2357,14 @@ or ZIP file runs the extractor its contents name whatever its label, so
 the extractor that ran is in `extractor`, #1416), the claimant, Message-ID and thread IDs, the filename and
 MIME type (each cut at 500 characters, with `filename_clipped` /
 `content_type_clipped` set when the stored value is longer), the size,
-the carrying message's folder, `sent_at`, `sent_at_status`,
+the carrying message's representative folder (`folder_is_representative:
+true`), `sent_at`, `sent_at_status`,
 `occurred_at` and `source_file`, and the extraction's status, extractor, time and
 `ocr_pages_skipped` (all null when none is recorded; for a `deferred`
 occurrence the status is `deferred` and the other three are null). The
-counts and the page are read in one snapshot.
+counts and the page are read in one snapshot. `folder` and `source_file`
+refer to the same representative copy, which may differ from the copy
+that matched the folder filter; `get_message` lists the message's copies.
 
 It returns no attachment text. To read a listed attachment's stored
 text, pass its `attachment_occurrence_id` to
@@ -3638,7 +3641,7 @@ and what it holds. Call this when asked which version or build is running.
 | `server_version` | MCP server image's source commit, including `-dirty` for local changes; `unknown` when build identity is unavailable. This identifies the server code, not the MCP protocol or SQLite schema version |
 | `current` | `true` only when all four hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, no message is pending, retrying, deferred or extraction deferred, and no mail collection waits for its success to be delivered to the indexer (`collection.failure_unrecovered` after an observed failure, or `collection.success_undelivered` for a success whose delivery is not yet confirmed, including one whose failed predecessor was never observed). A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |
-| `collection` | mbsync's latest collection from the Bridge app (#1592): `outcome` (`succeeded`, `succeeded_with_withheld_folders`, `failed`, or `unknown` with `unknown_reason`: `not_recorded`, `missing`, `legacy`, `malformed`, `unsupported`, `account_mismatch`, `unreadable` or `no_completed_attempt`), `outcome_at`, `withheld_far_side_folders` (how many far-side folders it could not open; null when unknown; never their names), `failure_class` (`deadline`, `killed`, `error`, `permission_repair`, `interrupted`), `latest_attempt` (`outcome`, possibly `in_progress`, and `started_at`), `last_success_at`, `failure_unrecovered`, `success_undelivered` (a success `outcome` whose delivery to the index is not yet confirmed; not evidence of a problem on its own — it clears within the watcher's own event-processing latency) and `observed_at` (when the indexer last read it). `in_progress` only means an attempt started with no recorded end, not that mbsync is running. A success that withheld folders does not change `current` |
+| `collection` | mbsync's last recorded collection outcome from the Bridge app (#1592): `outcome` (`succeeded`, `succeeded_with_withheld_folders`, `failed`, or `unknown` with `unknown_reason`: `not_recorded`, `missing`, `legacy`, `malformed`, `unsupported`, `account_mismatch`, `unreadable` or `no_completed_attempt`), `outcome_at`, `withheld_far_side_folders` (how many far-side folders it could not open; null when unknown; never their names), `failure_class` (`deadline`, `killed`, `error`, `permission_repair`, `interrupted`), `latest_attempt` (`outcome`, possibly `in_progress`, and `started_at`), `last_success_at`, `failure_unrecovered`, `success_undelivered` (a success `outcome` whose delivery to the index is not yet confirmed; not evidence of a problem on its own — it clears within the watcher's own event-processing latency) and `observed_at` (when the indexer last read it). `in_progress` only means an attempt started with no recorded end, not that mbsync is running. A success that withheld folders does not change `current`. A later delivered sync can clear `failure_unrecovered` even if publication of its outcome failed: the tool still labels the retained failure as the last recorded outcome and explains the recovery |
 | `upstream_currency` | Always `unknown`: whether Bridge itself has synchronized with Proton and serves current content is not observed |
 | `last_sync_at` / `sync_interval_secs` | mbsync's last successful sync from Bridge, and how often it syncs |
 | `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
@@ -3716,7 +3719,7 @@ collection status before and after every attempt; the indexer records
 it per account in `account_collection_state`, in the same transaction,
 and this tool reads it as `collection` ("Collection status" there). The
 three are separate: `current` says the index caught up with the local
-Maildir, `collection` how mbsync's latest collection from Bridge ended,
+Maildir, `collection` how mbsync's last recorded collection from Bridge ended,
 and `upstream_currency` (unknown) whether Bridge is in step with Proton.
 
 The same helper powers ``make status`` on the host: the Makefile target

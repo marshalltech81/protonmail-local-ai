@@ -368,7 +368,7 @@ stops the warning, but its messages then count as deleted for the indexer
 
 ## get_mailbox_status reports a failed or unknown mail collection
 
-`get_mailbox_status` `collection` reports mbsync's latest collection
+`get_mailbox_status` `collection` reports mbsync's last recorded collection
 from the Bridge app (#1592; see
 [architecture](architecture.md#collection-status)).
 
@@ -378,7 +378,12 @@ from the Bridge app (#1592; see
   errors), `permission_repair` (new mail could not be made readable to
   the indexer) or `interrupted` (mbsync was stopped, for example by a
   restart). `current` stays false, through retries, until a later sync
-  succeeds and the indexer has acknowledged it.
+  succeeds and the indexer has acknowledged it. If the later outcome
+  could not be published, `outcome` still names the last recorded failure,
+  but `failure_unrecovered` clears when generation ordering proves the
+  later sync was delivered; the tool explains that recovery. Format-1
+  status has no such ordering proof and remains conservative until a
+  newer status is published.
 - `outcome` `unknown`: `unknown_reason` says why. `not_recorded`: the
   indexer has not read mbsync's status yet. `missing`: mbsync has not
   published one, as before its first attempt or while running an older
@@ -1696,6 +1701,10 @@ Queue and maintenance (all INFO unless noted):
   mass-delete brake held this pass's reaps back (see "Deletion
   reconciliation"); `forced` means the one pass of `make force-deletion`
   ran with the brake off.
+- `reaper: <n> blocked thread(s) no longer have pending deletions`
+  (INFO): the deletion obligations were canceled or removed, so those
+  threads no longer contribute to the blocked count. Threads whose
+  deletions remain in grace or behind a brake keep their blocked state.
 - `maintenance pass=watch_refresh ms=<ms> watches=<n>`, after each
   periodic Maildir watch refresh; `watches` is the number of
   directories readable when the watch was last scheduled.

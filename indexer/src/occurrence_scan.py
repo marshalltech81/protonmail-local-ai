@@ -1,93 +1,48 @@
-"""Completeness-gated occurrence reconciliation (#1567, PLAN.md decision 47).
+"""Reconcile mailbox copies using bounded, identity-bound byte evidence.
 
-The watcher carries an occurrence through every rename it observes
-(``Database.update_filepath``). What it misses, while the indexer is
-down or when an event is lost, this scan finds by walking the account's
-Maildir root and comparing it with the account's active occurrences:
+One complete traversal supplies all same-uniq candidates and directory
+inventories. Proofs are prepared before occurrence writes. Every scan
+hash shares a 500-file/100MiB admission budget; failed attempts spend it,
+reads cannot exceed the captured size, and a rotating admission point
+prevents unreadable early paths from starving later ones. Individually
+oversized files remain visibly unverified under the existing cap.
 
-- **Missed renames.** An active occurrence whose file is gone but whose
-  folder holds a file with its Maildir uniq (a flag change, a
-  ``new``/``cur`` move) moves to that file, once its bytes are verified
-  to be the message's (``_verify``): a size/mtime match with the
-  recorded file identity is checked, then hashed before it is trusted
-  (``_recorded_hash``, #1612 round 14) — a metadata match alone is
-  never proof — else the candidate is hashed directly. A candidate
-  whose bytes are read and proven not to be the occurrence's (not
-  merely unreadable or unresolved) retires it directly (#1612 round
-  15): the uniq still resolving to some file would otherwise make
-  ``retire_vanished_occurrence`` refuse, leaving the vanished claimant
-  active and searchable indefinitely.
-- **Found copies.** A file no active occurrence holds whose bytes are an
-  indexed message's is bound to it as an occurrence with provenance
-  ``scan``: a byte-identical copy the migration seed or the parse never
-  bound (a ``T``-flagged file the drain parks, a dead-lettered job, an
-  unmapped copy moved across folders, #1141). Its bytes are confirmed
-  against its own ``indexed_files`` record (metadata match, then
-  hashed) when it has one, else, only for a ``T``-flagged or dead-
-  lettered file and with a ``hash_cache``, from hashing it; any other
-  unindexed file is left to the Maildir walk, whose parse binds it.
-- **Vanished files.** An active occurrence with no such file is retired
-  only by a complete scan: the walk read every directory under the root.
-  A partial scan (an unreadable directory, a missing root) establishes
-  no absence, so it retires nothing; the occurrence stays active and is
-  counted as unreachable. Retiring removes a locator, never a message:
-  whether the message is reaped is mirror retention's reaper's call
-  (``reconciler``), and archive retention never reaps.
-- **Content backstop.** A metadata match (size and mtime unchanged) is a
-  fast admission shortcut, not proof: mbsync sets a message's mtime from
-  IMAP's INTERNALDATE, so two different messages can legitimately share
-  one. For a held path whose file did not move this pass (so nothing
-  above read its bytes), a bounded number of still-unverified ones per
-  pass (``_BACKSTOP_MAX_FILES`` / ``_BACKSTOP_MAX_BYTES``, sized from a
-  measured hash throughput, docs/architecture.md "File Identity") are
-  hashed and checked against the occurrence's claimant. Once a path's
-  exact identity (size, mtime, inode) has been hash-verified, it is
-  cached (``hash_cache``) and skipped on every later pass until that
-  identity changes again — a genuinely different file landing at the
-  same path gets a new inode in the overwhelming case, so this is not
-  merely a one-time check. A verified mismatch retires only that
-  occurrence (its file is still there, so this is distinct from a
-  vanished file) and requests a parse of the new content; an unreadable
-  or unstable file is left unverified, not retired. A path the
-  per-pass budget leaves unhashed (``_BACKSTOP_MAX_FILES`` /
-  ``_BACKSTOP_MAX_BYTES`` already spent, or the file's own size always
-  exceeds the byte budget) counts as ``backstop_deferred`` and is
-  surfaced in the pass's log line, so an operator can tell this
-  secondary check is incomplete rather than silently never running for
-  that path.
+Stable digests, including mismatches, are cached by path, size, mtime,
+inode, ctime and device. A changed identity is never a cache hit; stale
+locators are pruned after a complete traversal. Metadata alone never
+proves equality. A different authoritative message size proves inequality.
 
-Every write re-checks, in its own transaction, that the occurrence or
-path is as the scan saw it, so a rename the watcher records meanwhile
-wins, and that the file is still the one whose bytes were verified (its
-size, mtime and inode taken before the verification), so a file
-replaced in between is not bound to the message. The scan covers one account: occurrences of other accounts, and
-of this one outside the walked root, are left alone.
+A missed rename follows a verified matching file. A mismatch retires its
+old occurrence only when every current same-uniq candidate is proved
+not to hold that claimant, including held copies. Unknown reads, changed
+proofs and mutated directory inventories defer the decision. The write
+transaction rechecks file identities and the inventory; each directory
+is listed once per pass. A partial traversal establishes no absence.
+
+Held paths receive the same byte backstop. Retirement and parse admission
+are atomic, preserving existing queued retries and dead letters. Only
+mirror retention tombstones messages; this scan never removes a message.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
-import re
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .database import Database
+from .file_evidence import MAX_HASH_BYTES, MAX_HASH_FILES, FolderInventory, read_digest
+from .file_evidence import file_identity as file_identity
 from .maildir import is_trashed
 from .occurrences import OccurrenceLocatorError, locate
-from .parser import CLAIMANT_HASH_CHARS
 from .queue import REASON_STALE_CONTENT
 
 log = logging.getLogger("indexer.occurrence_scan")
 
-# Bytes read per call when hashing a file.
-_HASH_CHUNK_BYTES = 1 << 20
-
 # Per-pass budget for the content backstop's hashing of held paths whose
 # identity has not been verified before (cache misses only — a path
-# already verified at its current size/mtime/inode costs one dict lookup,
+# already verified at its current size/mtime/inode/ctime/device costs one dict lookup,
 # not a read). Sized from a plain wall-clock measurement on this
 # project's own hardware (2026-10-13, Apple Silicon, warm page cache):
 # SHA-256 over a 20 MB file took ~8.7 ms (~2.2 GB/s); a typical mail
@@ -101,23 +56,11 @@ _HASH_CHUNK_BYTES = 1 << 20
 # within a few days of first running — an eventual backstop for a narrow
 # metadata-collision case, not the primary defense (the watcher's own
 # rename verification and the Maildir walk's freshness check are).
-_BACKSTOP_MAX_FILES = 500
-_BACKSTOP_MAX_BYTES = 100 * 1024 * 1024
-
-# A claimant ID is "<Message-ID>#<hash prefix>" (parser.claimant_id); the
-# hash prefix is CLAIMANT_HASH_CHARS lowercase hex digits of the file's
-# SHA-256, at the end of the string. A Message-ID is attacker-controlled
-# and may itself contain "#", so only a trailing token of the right shape
-# is trusted as the embedded hash.
-_CLAIMANT_HASH_RE = re.compile(rf"#([0-9a-f]{{{CLAIMANT_HASH_CHARS}}})$")
-
-
-def _claimant_hash_prefix(claimant_id: str) -> str | None:
-    """The hash prefix ``claimant_id`` embeds, or ``None`` when it has
-    none (a ``Message`` built without file identity, only in tests, or a
-    Message-ID that happens to end the same way)."""
-    match = _CLAIMANT_HASH_RE.search(claimant_id)
-    return match.group(1) if match is not None else None
+_BACKSTOP_MAX_FILES = MAX_HASH_FILES
+_BACKSTOP_MAX_BYTES = MAX_HASH_BYTES
+# One configured account per process; retain the next admission point across passes.
+_scan_next: dict[tuple[str, str], str] = {}
+_scan_first: dict[str, str] = {}
 
 
 @dataclass
@@ -131,6 +74,7 @@ class ScanCounts:
     unreachable: int = 0
     unverified: int = 0
     hashed: int = 0
+    hash_deferred: int = 0
     unreadable: int = 0
     # A held path's content backstop found its bytes no longer match its
     # occurrence's claimant (#1612): that occurrence was retired and a
@@ -146,119 +90,84 @@ class ScanCounts:
     complete: bool = True
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(_HASH_CHUNK_BYTES):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _sha256(path: Path, identity=None) -> str:
+    identity = identity if identity is not None else file_identity(path)
+    if identity is None:
+        raise FileNotFoundError("file unavailable")
+    return read_digest(path, identity)
 
 
-def _walk(root: Path, account_root: Path, counts: ScanCounts) -> dict[str, Path]:
-    """Every message file under ``root`` (a file in a ``cur`` or ``new``
-    directory, at any depth), keyed by its path relative to
-    ``account_root``. Marks ``counts`` partial when ``root`` is not a
-    readable directory or a directory under it cannot be read; a
-    directory that vanished mid-walk is gone, not unreadable."""
-    files: dict[str, Path] = {}
-    if not root.is_dir():
-        counts.complete = False
-        counts.unreadable += 1
-        return files
+class _ScanHashes:
+    """One budget for every scan read, including failed attempts."""
 
-    def _on_error(exc: OSError) -> None:
-        if not isinstance(exc, FileNotFoundError) or Path(str(exc.filename)) == root:
-            counts.unreadable += 1
-            counts.complete = False
+    def __init__(self, cache, counts):
+        self.cache = cache if cache is not None else {}
+        self.counts = counts
+        self.files = 0
+        self.bytes = 0
+        self.preparing = True
+        self.attempted = set()
+        self.attempted_paths = set()
+        self.deferred_paths = set()
 
-    for dirpath, _dirnames, filenames in os.walk(root, onerror=_on_error):
-        if os.path.basename(dirpath) not in ("cur", "new"):
-            continue
-        for name in filenames:
-            path = Path(dirpath, name)
-            try:
-                files[locate(path, account_root).relative_path] = path
-            except OccurrenceLocatorError:
-                # Outside the account's root (a root that is not the
-                # account's): nothing can be said about it.
-                counts.complete = False
-    return files
-
-
-def file_identity(path: Path) -> tuple[int, int, int] | None:
-    """``path``'s size, mtime and inode, or ``None`` when it cannot be
-    read: taken before its bytes are verified and checked again inside
-    the write (``Database.move_verified_occurrence``,
-    ``bind_found_copy``), so a file replaced in between is refused."""
-    try:
-        st = path.stat()
-    except OSError:
-        return None
-    return st.st_size, st.st_mtime_ns, st.st_ino
-
-
-def _stat_identity(path: Path) -> tuple[int, int] | None:
-    try:
-        st = path.stat()
-    except OSError:
-        return None
-    return st.st_size, st.st_mtime_ns
-
-
-def _recorded_hash(db: Database, recorded_at: Path, path: Path, counts: ScanCounts) -> str | None:
-    """The content hash ``indexed_files`` records for ``recorded_at``,
-    once ``path``'s current bytes are confirmed to hold it: a size and
-    mtime match with the identity recorded with it (the file identity
-    the Maildir walk trusts, docs/architecture.md "File Identity on
-    ``indexed_files``") is a fast admission shortcut, not proof — the
-    same reasoning the content backstop and ``verify_rename_bytes``
-    rest on, extended here (#1612 round 14) to this scan's own rename-
-    matching and found-copy binding, which previously trusted the
-    metadata match alone and never read ``path`` at all. Once the
-    metadata agrees, ``path`` is hashed and checked against the
-    recorded hash before it is trusted. Returns ``None`` on a metadata
-    mismatch, no recorded hash, an unreadable file, or a hash mismatch;
-    the caller's own fallback covers a genuine mismatch."""
-    identity = db.file_identity(str(recorded_at))
-    if identity is None or identity["content_hash"] is None:
-        return None
-    if _stat_identity(path) != (identity["size"], identity["mtime_ns"]):
-        return None
-    try:
-        counts.hashed += 1
-        if _sha256(path) != identity["content_hash"]:
+    def digest(self, path, identity):
+        key = (str(path), *identity)
+        if key in self.cache:
+            return self.cache[key]
+        if key in self.attempted:
             return None
-    except OSError:
-        return None
-    return str(identity["content_hash"])
+        if not self.preparing:
+            if str(path) not in self.attempted_paths:
+                self.counts.hash_deferred += 1
+            return None
+        if self.files >= _BACKSTOP_MAX_FILES or self.bytes + identity[0] > _BACKSTOP_MAX_BYTES:
+            self.deferred_paths.add(str(path))
+            return None
+        self.attempted.add(key)
+        self.attempted_paths.add(str(path))
+        self.files += 1
+        self.bytes += identity[0]
+        self.counts.hashed += 1
+        try:
+            digest = _sha256(path, identity)
+        except OSError:
+            return None
+        self.cache[key] = digest
+        return digest
 
 
-def _verify(
-    db: Database, old: Path, candidate: Path, content_hash: str, counts: ScanCounts
-) -> bool | None:
-    """Whether ``candidate`` holds the bytes whose hash is
-    ``content_hash``: by the identity recorded for ``old`` (the file
-    before the rename) or ``candidate``, else by hashing it directly.
-    Returns ``None``, not ``False``, when ``candidate`` could not be
-    read for the direct hash: inconclusive, not a proven mismatch
-    (#1612 round 15) — a caller must not retire an occurrence on this
-    result the way it would on a hash-proven ``False``."""
-    for recorded_at in (old, candidate):
-        recorded = _recorded_hash(db, recorded_at, candidate, counts)
-        if recorded is not None:
-            return recorded == content_hash
-    try:
-        counts.hashed += 1
-        return _sha256(candidate) == content_hash
-    except OSError:
-        return None
+def _walk(
+    root: Path, account_root: Path, counts: ScanCounts, inventory: FolderInventory
+) -> dict[str, Path]:
+    """One traversal also captures the inventories used at write boundaries."""
+    files: dict[str, Path] = {}
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            before = file_identity(directory)
+            with os.scandir(directory) as entries:
+                children = list(entries)
+            if directory.name in {"cur", "new"}:
+                inventory.seed(directory, before, [Path(e.path) for e in children])
+            for entry in children:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                elif directory.name in {"cur", "new"}:
+                    path = Path(entry.path)
+                    files[locate(path, account_root).relative_path] = path
+        except (OSError, OccurrenceLocatorError) as exc:
+            if not isinstance(exc, FileNotFoundError) or directory == root:
+                counts.complete = False
+                counts.unreadable += 1
+    return files
 
 
 @dataclass(frozen=True)
 class RenameVerification:
     """The result of checking whether ``new_path`` still holds a
     claimant's bytes after a watcher-observed rename (#1612 round 14).
-    ``identity`` is ``new_path``'s size, mtime and inode, captured at
+    ``identity`` is ``new_path``'s size, mtime, inode, ctime and device, captured at
     verification time, present only when the bytes are proven to
     match — the caller passes it into ``Database.update_filepath`` as
     ``verified_identity`` for the in-transaction recheck
@@ -271,75 +180,56 @@ class RenameVerification:
     as a confirmed mismatch (conflating the two let a trashed-rename
     retirement fire on a merely inconclusive check)."""
 
-    identity: tuple[int, int, int] | None
+    identity: tuple[int, int, int, int, int] | None
     mismatch: bool = False
+    mismatch_identity: tuple[int, int, int, int, int] | None = None
 
 
 def verify_rename_bytes(
     db: Database, old_path: str, new_path: str, claimant_id: str
 ) -> RenameVerification:
-    """Whether ``new_path`` still holds ``claimant_id``'s bytes after a
-    watcher-observed rename from ``old_path`` (#1612): by ``old_path``'s
-    ``indexed_files`` identity (a rename keeps size and mtime) when there
-    is one, else by hashing ``new_path`` and checking it against the
-    claimant ID's embedded hash prefix — the case for a scan-bound
-    occurrence, since ``bind_found_copy`` never writes ``indexed_files``.
+    """Verify against the claimant's full hash and size, never a reused path's hash.
 
-    Size and mtime agreement with the recorded identity is a fast
-    admission shortcut, not proof (mbsync sets mtime from IMAP's
-    INTERNALDATE, so two different messages can legitimately share one —
-    the same reasoning ``occurrence_scan``'s content backstop and
-    ``Database._move_occurrence``'s sibling check both rest on): once
-    size and mtime agree, ``new_path`` is also hashed and checked against
-    the recorded ``content_hash`` before it is trusted. A record with no
-    recorded hash (none expected for current rows, but the column is
-    nullable) falls through to the claimant-hash-prefix check below, the
-    same as having no prior record at all.
-
-    Returns a ``RenameVerification``: a caller that observed only a
-    pre-check, not this return value, must not trust the rename.
+    A different size proves a mismatch without reading; otherwise the
+    descriptor-bound hash reads at most that size. Unknown or changed
+    files provide no proof. Both outcomes carry identity evidence for
+    the caller's transaction guard.
     """
     identity = file_identity(Path(new_path))
     if identity is None:
         return RenameVerification(None)
-    prior = db.file_identity(old_path)
-    if prior is not None:
-        if (identity[0], identity[1]) != (prior["size"], prior["mtime_ns"]):
-            return RenameVerification(None)
-        if prior["content_hash"] is not None:
-            try:
-                matches = _sha256(Path(new_path)) == prior["content_hash"]
-            except OSError:
-                return RenameVerification(None)
-            return RenameVerification(identity if matches else None, mismatch=not matches)
-    expected = _claimant_hash_prefix(claimant_id)
-    if expected is None:
+    expected = db.message_content(claimant_id)
+    if expected is None or expected["content_hash"] is None or expected["size_bytes"] is None:
         return RenameVerification(None)
+    if expected["size_bytes"] is not None and identity[0] != expected["size_bytes"]:
+        return RenameVerification(None, True, identity)
     try:
-        digest = _sha256(Path(new_path))
+        digest = _sha256(Path(new_path), identity)
     except OSError:
         return RenameVerification(None)
-    matches = digest[: len(expected)] == expected
-    return RenameVerification(identity if matches else None, mismatch=not matches)
+    if digest == expected["content_hash"]:
+        return RenameVerification(identity)
+    return RenameVerification(None, True, identity)
 
 
 def scan_occurrences(
     db: Database,
     root: Path,
     *,
-    hash_cache: dict[tuple[str, int, int, int], str] | None = None,
+    hash_cache: dict[tuple[str, int, int, int, int, int], str] | None = None,
 ) -> ScanCounts:
     """Reconcile the account's active occurrences under ``root`` with
     the files there (see the module docstring) and return the counts.
 
     ``hash_cache`` enables hashing of unindexed ``T``-flagged or
     dead-lettered files, and the content backstop of held paths whose
-    file did not move this pass, keyed by path, size, mtime and inode so
+    file did not move this pass, keyed by path, size, mtime, inode, ctime and device so
     each distinct file identity is read once per process.
     """
     counts = ScanCounts()
     account_root = db.account.maildir_root
-    files = _walk(root, account_root, counts)
+    inventory = FolderInventory()
+    files = _walk(root, account_root, counts, inventory)
     try:
         scope = PurePosixPath(root).relative_to(PurePosixPath(account_root))
     except ValueError:
@@ -354,51 +244,129 @@ def scan_occurrences(
 
     occurrences = db.active_occurrences()
     held = {o["relative_path"] for o in occurrences}
-    # Occurrences whose file is still exactly where it was recorded: the
-    # only ones the content backstop (second loop) needs to check, since
-    # a moved-to or freshly-bound path is verified by the logic around
-    # it, in this same pass.
-    unmoved_at: dict[str, sqlite3.Row] = {}
+    hashes = _ScanHashes(hash_cache, counts)
+    needed = set()
+    backstop = set()
     for o in occurrences:
         relative = o["relative_path"]
         if relative in files:
-            unmoved_at[relative] = o
+            identity = file_identity(files[relative])
+            if (
+                hash_cache is not None
+                and identity is not None
+                and (o["size_bytes"] is None or identity[0] == o["size_bytes"])
+            ):
+                backstop.add(relative)
+        else:
+            for candidate in by_uniq.get((o["folder"], o["uniq"]), []):
+                identity = file_identity(files[candidate])
+                if identity is not None and (
+                    o["size_bytes"] is None or identity[0] == o["size_bytes"]
+                ):
+                    needed.add(candidate)
+    for relative, path in files.items():
+        if relative not in held and (
+            db.is_indexed(str(path))
+            or (
+                hash_cache is not None
+                and (is_trashed(path) or db.queue_get_status(str(path)) == "dead")
+            )
+        ):
+            needed.add(relative)
+    # Startup follows renames before the initial walk can reparse them;
+    # routine held-path verification spends only the remaining budget.
+    groups = [("copies", needed), ("backstop", backstop - needed)]
+    if _scan_first.get(str(root)) == "backstop":
+        groups.reverse()
+    pending_groups = set()
+    for group, candidates in groups:
+        ordered = sorted(candidates)
+        if not ordered:
             continue
+        if hashes.files >= _BACKSTOP_MAX_FILES or hashes.bytes >= _BACKSTOP_MAX_BYTES:
+            pending_groups.add(group)
+            continue
+        cursor = str(root), group
+        start = _scan_next.get(cursor, "")
+        pivot = next((i for i, name in enumerate(ordered) if name >= start), 0)
+        ordered = ordered[pivot:] + ordered[:pivot]
+        next_start = None
+        for i, relative in enumerate(ordered):
+            path = files[relative]
+            identity = file_identity(path)
+            if identity is not None:
+                if hashes.digest(path, identity) is None:
+                    pending_groups.add(group)
+                if (
+                    str(path) in hashes.deferred_paths
+                    and identity[0] <= _BACKSTOP_MAX_BYTES
+                    and next_start is None
+                ):
+                    next_start = relative
+            if hashes.files >= _BACKSTOP_MAX_FILES or hashes.bytes >= _BACKSTOP_MAX_BYTES:
+                if i + 1 < len(ordered):
+                    pending_groups.add(group)
+                if next_start is None:
+                    next_start = ordered[(i + 1) % len(ordered)]
+                break
+        if next_start is not None:
+            _scan_next[cursor] = next_start
+    if len(pending_groups) == 2:
+        _scan_first[str(root)] = "backstop" if groups[0][0] == "copies" else "copies"
+    elif pending_groups:
+        _scan_first[str(root)] = next(iter(pending_groups))
+    hashes.preparing = False
+    # Warm inventories before byte verification, so mutation during a
+    # proof cannot become a newly accepted absence at the write boundary.
+    for o in occurrences:
+        inventory.candidates(account_root / o["relative_path"])
+    for o in occurrences:
+        relative = o["relative_path"]
         if scope.parts and PurePosixPath(relative).parts[: len(scope.parts)] != scope.parts:
             continue
         old = account_root / relative
+        if relative in files:
+            if hash_cache is not None and o["content_hash"] is not None:
+                identity = file_identity(old)
+                if identity is None:
+                    counts.unverified += 1
+                    continue
+                before = counts.hash_deferred
+                size_mismatch = o["size_bytes"] is not None and identity[0] != o["size_bytes"]
+                digest = None if size_mismatch else hashes.digest(old, identity)
+                counts.backstop_deferred += counts.hash_deferred - before
+                if digest is None and not size_mismatch and counts.hash_deferred == before:
+                    counts.unverified += 1
+                if size_mismatch or (digest is not None and digest != o["content_hash"]):
+                    with db.transaction():
+                        retired = db.retire_mismatched_occurrence(
+                            o["id"], relative, identity=identity
+                        )
+                        if retired:
+                            db.queue_enqueue_if_absent(str(old), REASON_STALE_CONTENT)
+                    if retired:
+                        counts.stale += 1
+                    else:
+                        counts.unreachable += 1
+            continue
         same_uniq = by_uniq.get((o["folder"], o["uniq"]), [])
-        candidates = [c for c in same_uniq if c not in held]
-        # A same-uniq file already held by another claimant (parsed
-        # under its own identity before this scan) was excluded above so
-        # it is never moved into or its occurrence overwritten — but
-        # left unchecked, it also makes retire_vanished_occurrence
-        # refuse below (the uniq still resolves to a file), so a missed
-        # rename whose destination raced another claimant's parse would
-        # never retire its stale occurrence (#1612 round 16). Verify it
-        # the same way as an unheld candidate, without ever moving ``o``
-        # to it.
-        held_candidates = [c for c in same_uniq if c in held]
+        proven = {}
         moved = False
-        mismatched = False
-        for candidate in sorted(candidates):
-            identity = file_identity(files[candidate])
+        for candidate in sorted(same_uniq):
+            path = files[candidate]
+            identity = file_identity(path)
             if identity is None or o["content_hash"] is None:
                 continue
-            verified = _verify(db, old, files[candidate], o["content_hash"], counts)
-            if verified is None:
+            if o["size_bytes"] is not None and identity[0] != o["size_bytes"]:
+                proven[str(path)] = identity
                 continue
-            if not verified:
-                # A candidate's bytes were read and proven not to be
-                # this occurrence's (#1612 round 15), not merely
-                # unreadable or unresolved: distinguish this from the
-                # inconclusive case below, which retire_vanished_
-                # occurrence would refuse anyway (the uniq still
-                # resolves to a file).
-                mismatched = True
+            digest = hashes.digest(path, identity)
+            if digest is None:
                 continue
-            if db.move_verified_occurrence(
-                o["id"], relative, str(files[candidate]), identity=identity
+            if digest != o["content_hash"]:
+                proven[str(path)] = identity
+            elif candidate not in held and db.move_verified_occurrence(
+                o["id"], relative, str(path), identity=identity
             ):
                 held.add(candidate)
                 counts.renamed += 1
@@ -406,164 +374,49 @@ def scan_occurrences(
                 break
         if moved:
             continue
-        if not mismatched:
-            for candidate in sorted(held_candidates):
-                identity = file_identity(files[candidate])
-                if identity is None or o["content_hash"] is None:
-                    continue
-                verified = _verify(db, old, files[candidate], o["content_hash"], counts)
-                if verified is False:
-                    mismatched = True
-                    break
-                # A match (another claimant's held file is byte-
-                # identical to ``o``) or an inconclusive read is left
-                # for a later pass, the same as an unverified candidate:
-                # it is never moved or retired here.
-        if mismatched:
-            # retire_vanished_occurrence would refuse (the uniq still
-            # resolves to some file), leaving the vanished claimant
-            # active and searchable indefinitely; retire it directly,
-            # the sibling of on_moved's trashed-destination retire
-            # (round 13) for a watcher-missed rename instead of an
-            # observed one.
-            if db.retire_mismatched_rename(o["id"], str(old)):
+        if proven and len(proven) == len(same_uniq):
+            if db.retire_mismatched_rename(o["id"], str(old), proven=proven, inventory=inventory):
                 counts.retired += 1
             else:
                 counts.unreachable += 1
-        elif candidates or held_candidates:
-            # A file with its uniq is there, but not with its bytes (or
-            # the move was refused): not a removal the scan can establish.
+        elif same_uniq:
             counts.unverified += 1
         elif counts.complete:
-            if db.retire_vanished_occurrence(o["id"], relative):
+            if db.retire_vanished_occurrence(o["id"], relative, inventory=inventory):
                 counts.retired += 1
             else:
                 counts.unreachable += 1
         else:
             counts.unreachable += 1
 
-    backstop_budget = {"files": 0, "bytes": 0}
     for relative, path in sorted(files.items()):
         if relative in held:
-            occurrence = unmoved_at.get(relative)
-            if occurrence is not None:
-                _backstop_check(db, occurrence, path, hash_cache, counts, backstop_budget)
             continue
         identity = file_identity(path)
         if identity is None:
             continue
-        content_hash = _recorded_hash(db, path, path, counts)
-        if content_hash is None and hash_cache is not None:
-            content_hash = _hash_unindexed(db, path, identity, hash_cache, counts)
-        if content_hash is None:
+        recorded = db.file_identity(str(path))
+        # Ordinary new mail belongs to the parser. The scan also binds
+        # copies parked by retention or dead-lettered before parsing.
+        if recorded is None and (
+            hash_cache is None
+            or (not is_trashed(path) and db.queue_get_status(str(path)) != "dead")
+        ):
             continue
-        claimant_id = db.claimant_for_content(content_hash)
+        digest = hashes.digest(path, identity)
+        if digest is None:
+            continue
+        claimant_id = db.claimant_for_content(digest)
         if claimant_id is not None and db.bind_found_copy(
             claimant_id, str(path), identity=identity
         ):
             held.add(relative)
             counts.bound += 1
+    if hash_cache is not None and counts.complete:
+        # A changed identity replaces its previous cache entry; vanished
+        # locators do not accumulate indefinitely across flag renames.
+        current = {str(path): file_identity(path) for path in files.values()}
+        for key in list(hash_cache):
+            if current.get(key[0]) != key[1:]:
+                del hash_cache[key]
     return counts
-
-
-def _backstop_check(
-    db: Database,
-    occurrence: sqlite3.Row,
-    path: Path,
-    hash_cache: dict[tuple[str, int, int, int], str] | None,
-    counts: ScanCounts,
-    budget: dict[str, int],
-) -> None:
-    """The content backstop for a held path whose file did not move this
-    pass (module docstring, "Content backstop"). A metadata match alone
-    is never trusted here — that is exactly the blind spot this guards.
-    Hashes ``path``, within the pass's ``budget``, only when its current
-    identity (size, mtime, inode) has not been hash-verified before;
-    retires the occurrence on a verified mismatch and requests a parse
-    of the new content. ``hash_cache`` is required: with none, the
-    backstop is skipped entirely (archive mode's startup-recovery call,
-    before #1612, passed none; ``reconciler.sweep_paths`` now always
-    does, #1612 point 5)."""
-    if hash_cache is None or occurrence["content_hash"] is None:
-        return
-    identity = file_identity(path)
-    if identity is None:
-        # Unreadable or gone between the walk and here: unstable, not a
-        # removal the scan can establish on its own.
-        counts.unverified += 1
-        return
-    key = (str(path), *identity)
-    if key in hash_cache:
-        return
-    if (
-        budget["files"] >= _BACKSTOP_MAX_FILES
-        or budget["bytes"] + identity[0] > _BACKSTOP_MAX_BYTES
-    ):
-        # Checked against the prospective total, not only bytes already
-        # consumed (#1612 round 8 review): the latter let the very first
-        # held path through untouched whenever it alone exceeded the
-        # whole per-pass budget (0 is never >= a positive cap), hashing
-        # it in full regardless of size. Left for a later pass, which
-        # will see the same cache miss (nothing here has changed its
-        # identity) — including a file whose own size always exceeds the
-        # budget, an accepted gap in this secondary backstop (module
-        # docstring: the watcher's rename verification and the walk's
-        # freshness check are the primary defense). Counted rather than
-        # left silent (#1612 round 10 review), so an operator can tell
-        # stale-content detection is incomplete this pass.
-        counts.backstop_deferred += 1
-        return
-    try:
-        digest = _sha256(path)
-    except OSError:
-        counts.unverified += 1
-        return
-    counts.hashed += 1
-    budget["files"] += 1
-    budget["bytes"] += identity[0]
-    if digest == occurrence["content_hash"]:
-        hash_cache[key] = digest
-        return
-    # One transaction (#1612 round 15): a crash or SQLite error between
-    # the retire and the admission must not leave the retirement
-    # committed with no runnable job for the replacement -- both happen
-    # or neither does.
-    with db.transaction():
-        retired = db.retire_mismatched_occurrence(
-            occurrence["id"], occurrence["relative_path"], identity=identity
-        )
-        if retired:
-            db.queue_enqueue_if_absent(str(path), REASON_STALE_CONTENT)
-    if retired:
-        counts.stale += 1
-    else:
-        # The occurrence moved or retired since active_occurrences() read
-        # it, or the file changed again before the retire's transaction
-        # (the identity captured above no longer matches): not this
-        # scan's call to make any more.
-        counts.unreachable += 1
-
-
-def _hash_unindexed(
-    db: Database,
-    path: Path,
-    identity: tuple[int, int, int],
-    hash_cache: dict[tuple[str, int, int, int], str],
-    counts: ScanCounts,
-) -> str | None:
-    """The content hash of a file the walk never indexes on its own: a
-    ``T``-flagged one (mirror retention parks it) or one whose job is
-    dead-lettered. Any other unindexed file is new mail the walk queues,
-    and its parse binds it. Cached by path and ``identity`` (size, mtime
-    and inode, as the bind re-checks), so a replacement with the same
-    size and mtime is hashed again (review round 2 on #1612)."""
-    if not is_trashed(path) and db.queue_get_status(str(path)) != "dead":
-        return None
-    key = (str(path), *identity)
-    if key not in hash_cache:
-        try:
-            counts.hashed += 1
-            hash_cache[key] = _sha256(path)
-        except OSError:
-            return None
-    return hash_cache[key]

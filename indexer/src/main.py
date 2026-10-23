@@ -863,13 +863,12 @@ class _IngestionStateRecorder:
     the acknowledgements, and records it per account in the same
     transaction as ``ingestion_state``. After a failed attempt the
     failure stays unrecovered (and the index not current) until a later
-    success is delivered: the last success in the file is the sync named
-    by the acknowledged stamp, matched by attempt ID, which mbsync writes
-    identically into both (never by completion time — two different
-    attempts can publish the same one across a clock rollback, #1621
-    thread, 2026-10-13). The file's records are taken in
-    publication order (the file always holds the newest), never ordered
-    by their times.
+    success is delivered: format-2 generations prove that an acknowledged
+    sync is later than a failure's floor or a recorded success. Equal
+    success generations also require equal attempt IDs; format 1 retains
+    conservative attempt-ID matching. Wall-clock times never prove
+    delivery or recovery, including across clock rollback. The outcome
+    stays the last recorded one when a later publication failed.
     """
 
     def __init__(self, db: Database, maildir_root: Path, interval_secs: float = 30):
@@ -1012,20 +1011,26 @@ class _IngestionStateRecorder:
             self._observe_collection(status)
 
     def _success_delivered(self, status: CollectionStatus) -> bool:
-        # Called with ``_lock`` held. Delivery is proven by attempt ID
-        # equality, never by comparing completion times: mbsync writes
-        # the same attempt ID into the collection status file's
-        # last_success and the acknowledged stamp for one sync, but two
-        # different attempts can publish the same completed_at across a
-        # clock rollback (#1621 thread, 2026-10-13). A legacy stamp
-        # (``attempt_id`` ``None``) can never prove delivery of a later
-        # attempt, so it is never a match.
-        success = status.last_success
+        # A newer acknowledged generation proves an older success was
+        # delivered; equal generations additionally require equal attempt
+        # IDs. Format-1 records retain the conservative equality check.
+        success, acked = status.last_success, self._acked
+        if success is None or acked is None or acked.attempt_id is None:
+            return False
+        if success.generation is not None and acked.generation is not None:
+            return acked.generation > success.generation or (
+                acked.generation == success.generation and acked.attempt_id == success.attempt_id
+            )
+        return success.attempt_id == acked.attempt_id
+
+    def _failure_recovered(self, status: CollectionStatus) -> bool:
+        terminal, acked = status.last_terminal, self._acked
         return (
-            success is not None
-            and self._acked is not None
-            and self._acked.attempt_id is not None
-            and success.attempt_id == self._acked.attempt_id
+            terminal is not None
+            and terminal.generation_floor is not None
+            and acked is not None
+            and acked.generation is not None
+            and acked.generation > terminal.generation_floor
         )
 
     def _observe_collection(self, status: CollectionStatus | Unknown) -> None:
@@ -1046,7 +1051,11 @@ class _IngestionStateRecorder:
             self._logged_reason = None
             log.info("mbsync collection status is readable again")
         terminal = status.last_terminal
-        if terminal is not None and terminal.outcome == "failed":
+        if (
+            terminal is not None
+            and terminal.outcome == "failed"
+            and not self._failure_recovered(status)
+        ):
             self._unrecovered = terminal.attempt_id
             if terminal.attempt_id != self._logged_failure:
                 self._logged_failure = terminal.attempt_id
@@ -1058,7 +1067,14 @@ class _IngestionStateRecorder:
                     terminal.failure_class,
                     "unknown" if withheld is None else withheld,
                 )
-        elif self._unrecovered is not None and self._success_delivered(status):
+        elif self._unrecovered is not None and (
+            self._failure_recovered(status)
+            or (
+                terminal is not None
+                and terminal.outcome != "failed"
+                and self._success_delivered(status)
+            )
+        ):
             self._unrecovered = None
             log.info(
                 "mbsync collection recovered: a successful sync after the failed attempt "
@@ -1303,6 +1319,7 @@ class MaildirHandler(FileSystemEventHandler):
         # metadata that alone ruled out trusting it without reading
         # anything), which must not be treated as a confirmed mismatch.
         rename_mismatch = False
+        mismatch_identity = None
         if occurrence is not None:
             verification = verify_rename_bytes(
                 self.db, src_path, dest_path, occurrence["claimant_id"]
@@ -1312,6 +1329,7 @@ class MaildirHandler(FileSystemEventHandler):
             if not take_case_1:
                 stale_occurrence = occurrence
                 rename_mismatch = verification.mismatch
+                mismatch_identity = verification.mismatch_identity
                 warn_rate_limited(
                     log,
                     "on_moved: %d rename's destination bytes did not match the "
@@ -1428,8 +1446,18 @@ class MaildirHandler(FileSystemEventHandler):
             # would not start until the next reconciliation sweep, up to
             # an hour by default.
             try:
-                if self.db.retire_mismatched_rename(stale_occurrence["id"], src_path):
-                    self.db.mark_lost_messages(stale_occurrence["claimant_id"])
+                with self.db.transaction():
+                    if (
+                        self.db.retire_mismatched_rename(
+                            stale_occurrence["id"],
+                            src_path,
+                            proven={dest_path: mismatch_identity}
+                            if mismatch_identity is not None
+                            else {},
+                        )
+                        and self.reconciler is not None
+                    ):
+                        self.db.mark_lost_messages(stale_occurrence["claimant_id"])
             except Exception as e:
                 log.error("retire_mismatched_rename failed: %s", type(e).__name__)
         if (
@@ -1465,8 +1493,8 @@ _monotonic = time.monotonic
 # call this process makes (#1612): archive mode has no ``Reconciler`` to
 # hold one (mirror mode's lives on ``Reconciler._hash_cache``), so this
 # module-level dict is the one it keeps across calls, keyed by path,
-# size, mtime and inode exactly as ``occurrence_scan`` keys it.
-_sweep_hash_cache: dict[tuple[str, int, int, int], str] = {}
+# size, mtime, inode, ctime and device exactly as ``occurrence_scan`` keys it.
+_sweep_hash_cache: dict[tuple[str, int, int, int, int, int], str] = {}
 
 
 def _log_attachment_outcomes(*, force: bool = False) -> None:
@@ -1782,13 +1810,9 @@ PERMISSION_DEFER_SECS = 60
 # deletion reconciliation decides its message (see ``_drain_queue_batched``).
 TRASHED_DEFER_SECS = 60 * 60
 PERMISSION_DEFER_WINDOW_SECS = 24 * 60 * 60
-# A job whose file vanished while its path is still indexed waits once,
-# this long, for the watcher to record the rename (see
-# ``_phase1_commit_thread``). A file still missing after that wait is
-# dropped with reason ``file_missing``; a rename the watcher records
-# later than that still loses the job. The error text is persisted in
-# ``last_error`` (it marks the wait as spent) and matched by the MCP
-# server's status, so it never changes.
+# Missing-source refresh work remains deferred until a verified copy can
+# run it, or the message is reaped. Keep the persisted error token stable:
+# MCP uses it to report unfinished source work rather than claiming currency.
 RENAME_DEFER_SECS = 60
 RENAME_DEFERRED_ERROR = "FileNotFoundError: deferred until the rename is recorded"
 # ``last_error`` for a message the stdlib parser cannot parse without
@@ -1834,16 +1858,18 @@ def _phase1_commit_thread(
         # ``on_moved`` then only moves the file's records (and its job,
         # through ``update_filepath``) and enqueues nothing, so dropping
         # the job before the rename is recorded would lose its work.
-        # Wait for it once, without spending an attempt (#1143, #1145);
-        # a file still missing after that wait is dropped.
-        if row["last_error"] != RENAME_DEFERRED_ERROR and db.is_indexed(filepath):
-            queue.defer(
-                filepath,
-                stage=STAGE_PARSE,
-                error=RENAME_DEFERRED_ERROR,
-                error_class=ERROR_CLASS_RETRYABLE,
-                delay_seconds=RENAME_DEFER_SECS,
-            )
+        # Keep the obligation without spending an attempt; a verified
+        # current copy can take the job when the old locator is retired.
+        queue.end_attempt(filepath)
+        if db.retain_or_retarget_missing_job(filepath):
+            if queue.has_pending_row(filepath):
+                queue.defer(
+                    filepath,
+                    stage=STAGE_PARSE,
+                    error=RENAME_DEFERRED_ERROR,
+                    error_class=ERROR_CLASS_RETRYABLE,
+                    delay_seconds=RENAME_DEFER_SECS,
+                )
             return None
         queue.mark_skipped(filepath, reason="file_missing")
         return None
@@ -3920,7 +3946,7 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> bool
                 brake = "ok"
             log.info(
                 "maintenance pass=reconcile ms=%d tombstoned=%d cleared=%d renamed=%d "
-                "retired=%d bound=%d stale=%d backstop_deferred=%d scan=%s threads_reaped=%d "
+                "retired=%d bound=%d stale=%d backstop_deferred=%d hash_deferred=%d scan=%s threads_reaped=%d "
                 "threads_rebuilt=%d blocked_threads=%d brake=%s",
                 (_monotonic() - started) * 1000,
                 swept.get("tombstoned", 0),
@@ -3930,6 +3956,7 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> bool
                 swept.get("bound", 0),
                 swept.get("stale", 0),
                 swept.get("backstop_deferred", 0),
+                swept.get("hash_deferred", 0),
                 "complete" if swept.get("complete", True) else "partial",
                 reaped.get("threads_reaped", 0),
                 reaped.get("threads_rebuilt", 0),

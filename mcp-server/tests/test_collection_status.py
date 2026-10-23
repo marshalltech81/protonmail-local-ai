@@ -148,6 +148,15 @@ def test_a_failure_makes_the_index_not_current(fake_server, seeded_db, failure_c
     assert f"Mail collection: failed ({failure_class})" in text
 
 
+def test_a_later_delivered_sync_recovers_a_stale_failed_publication(fake_server, seeded_db):
+    data, text = _status(fake_server, seeded_db, _failed(unrecovered_failure_attempt_id=None))
+    assert data["collection"]["outcome"] == "failed"
+    assert data["collection"]["failure_unrecovered"] is False
+    assert data["current"] is True
+    assert data["not_current_reasons"] == []
+    assert "recovered by a later delivered sync" in text
+
+
 def test_a_retry_in_progress_keeps_the_failure(fake_server, seeded_db):
     data, text = _status(
         fake_server,

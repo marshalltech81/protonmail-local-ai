@@ -1313,7 +1313,7 @@ to. Relocating the root alone keeps every occurrence.
   *and* hashed bytes all match the record (#1141, #1612): size and
   mtime agreement alone is not proof — mbsync sets mtime from IMAP's
   INTERNALDATE, so two different messages can legitimately share one.
-  The destination's identity (size, mtime, inode) is captured before
+  The destination's identity (size, mtime, inode, ctime, device) is captured before
   the hash and rechecked immediately before the bind (#1612 round 15,
   the same TOCTOU pattern `move_verified_occurrence` and
   `bind_found_copy` already use for their own writes): a replacement in
@@ -1340,6 +1340,22 @@ to. Relocating the root alone keeps every occurrence.
   until a parse sees it, so no observation is invented); `internal_at`
   stays NULL, unknown, until #1081 writes it. Rows go with their message
   (`ON DELETE CASCADE`).
+
+Retirement and restore decisions use one validated inventory per pass,
+retaining every path with a Maildir uniq in both `cur` and `new`. A
+changed or unreadable directory invalidates its evidence for that pass;
+it is never repeatedly enumerated per message. Before reaping, all
+historical occurrence locators are checked separately from the paths
+eligible for destructive unmarking. Reused paths must be byte-verified:
+a proven mismatch does not retain the old claimant, while a matching or
+unverified live candidate prevents removal. Hash proofs are prepared
+before the write and rechecked with directory and file identity inside it.
+Restore hashing shares a 500-file/100-MiB budget across the reap pass,
+including failed reads, and reuses stable scan digests. A deferred pass
+rotates its starting thread after brake filtering so unreadable early
+threads cannot starve independent ones. Unknown verification logs
+`restore verification incomplete`; the pass reports an aggregate
+`restore hash verification deferred` count rather than claiming a restore.
 
 The reconciler and the reaper read occurrences (#1567): a message is
 live while it has an active occurrence that is not `T`-flagged, and its
@@ -3542,7 +3558,7 @@ occurrences:
 - **Content backstop.** A held path (its file did not move this pass,
   so none of the above read its bytes) is hash-verified against its
   occurrence's claimant, bounded per pass and cached by exact identity
-  (size, mtime, inode) so a later pass does not re-read an already-
+  (size, mtime, inode, ctime, device) so a later pass does not re-read an already-
   verified file — see "The content backstop" below for the budget and
   its cost. A verified mismatch retires only that occurrence (the file
   is still there, unlike a vanished one) and requests a reparse,
@@ -4256,11 +4272,19 @@ Two stage outcomes short-circuit the retry path entirely:
   indexed gets no fresh event: `on_moved` only moves the file's records
   and its job (`update_filepath`). So a job for an indexed file
   (`reparse`, `reextract`, `recovery`, or a retry whose Phase 2 had not
-  finished) is first deferred once, 60 s and without spending an
-  attempt (counted under `parse=` in the heartbeat's deferrals), and
-  the rename carries it to the new path (#1145). A file still missing
-  after that wait is dropped as above, so a rename the watcher records
-  only after the wait still loses the job.
+  finished) remains deferred in 60-second steps without spending an
+  attempt (counted under `parse=` in the heartbeat). This also applies to
+  scan-bound occurrences that have no `indexed_files` marker. Each retry
+  can transfer the obligation to a verified active, non-trashed copy of
+  the same claimant once the old occurrence is retired. Verification
+  admits at most 500 files and 100 MiB per retry, including failed reads;
+  unchanged mismatch digests are cached, and admission resumes at a
+  deferred candidate so unreadable early copies cannot starve later ones.
+  Transfer and removal of the absent old marker/job are atomic; a destination's
+  existing queued retry or dead letter is preserved. With no readable
+  copy, archive mode honestly retains unfinished work; mirror mode's
+  normal reap removes it with the message. A late rename carries the
+  retained job to its current locator.
 - `PermissionError` at parse is deferred (60 s) without spending an
   attempt. mbsync `chmod go+r`s new files only after its whole sync
   finishes, so during a long sync a delivered file stays unreadable to
@@ -4332,20 +4356,16 @@ one-row `ingestion_state` table. A missed stamp event
 reads as a stale sync until the next rescan; a missed delivery event
 stays invisible to `current` until the rescan queues it.
 
-`next_success_generation` seeds its counter forward from the
-generation already in the retained stamp when that is higher than the
-counter file (`mbsync/entrypoint.sh` `stamp_generation`, #1612 round 8):
-the `mbsync-state` volume can be recreated or restored from an older
-backup while `maildir-volume` keeps a newer stamp, and without this the
-counter would restart below a generation already published, stranding
-the acknowledgement behind it (and an unrecovered collection failure
-unable to clear, see *Collection status* below) until it caught back
-up on its own. The two durable records can only diverge in this
-direction — the counter is always allocated and persisted before a
-stamp names it — so raising it to match an already-published generation
-never regresses or reorders anything already acknowledged. A missing,
-oversized or unparseable stamp (including the legacy shape) seeds
-nothing, leaving the counter's own value as today.
+`next_success_generation` seeds its counter forward from validated
+retained stamp and collection-status ordering evidence when either is
+higher than the counter file. The state volume can be recreated or
+restored from an older backup while the Maildir keeps newer evidence,
+including a success whose stamp could not be published. Seeding prevents
+reusing a generation the indexer may already have observed. The counter
+is persisted before any stamp or status names its generation. Invalid
+counter integers, leading zeros, and values outside the signed 64-bit
+allocation range fail closed before Bash arithmetic. Missing or invalid
+retained evidence seeds nothing; no timestamp is used to infer order.
 
 ### Collection status
 
@@ -4357,20 +4377,22 @@ later changed (2026-10-13, #1621 thread) to carry the attempt ID and
 success generation the delivery-identity fix needs — see *Index
 currency* above and the Freshness bullet below.
 
-- **File.** `.mbsync-collection-status.json`, format 1, one JSON line
+- **File.** `.mbsync-collection-status.json`, format 2 (legacy 1 is read), one JSON line
   of counts and fixed tokens, never a folder name: `format`,
   `scope_uuid` (`ACCOUNT_SCOPE`), `run_deadline_secs`,
   `sync_interval_secs`; `attempt` (its ID, `started_at` and `outcome`);
   `last_terminal` (attempt ID, `completed_at`, `outcome`,
   `withheld_far_side_folders`, null when the error filter's counts
-  never arrived, and `failure_class`); `last_success` (attempt ID,
-  `completed_at`). Each publication is written to a unique temporary
+  never arrived, `failure_class`, and `generation_floor`, null if
+  unknown); `last_success` (attempt ID, `completed_at`, and `generation`,
+  null if allocation failed). Each publication is written to a unique temporary
   file in the Maildir root, made mode 0644 and renamed into place.
 - **When.** Before every attempt (`in_progress`) and after it (its
   terminal outcome). A success is published after its stamp, with the
   stamp's completion time; when the stamp cannot be written, the
-  success is still published (and is never delivered, since no stamp
-  names it) before mbsync exits for a restart. A caught stop (TERM or
+  success is still published before mbsync exits for a restart. That
+  attempt has no stamp to acknowledge; a later delivered generation can
+  prove the state was delivered. A caught stop (TERM or
   INT) before the attempt has a result is published as `failed` with
   class `interrupted`; one after it publishes that result. A shell
   killed outright leaves the
@@ -4404,33 +4426,26 @@ currency* above and the Freshness bullet below.
   replaced in the same transaction as `ingestion_state`, so the
   acknowledged sync and the outcome are one snapshot. A rebuilt index
   recovers the row from the file at its first write.
-- **Freshness.** After a failed attempt, `current` stays false through
-  retries until a later success is **delivered**: the file's last
-  success is the sync named by the stamp the indexer has acknowledged,
-  matched by attempt ID, which mbsync writes identically into both
-  (never by completion time — two different attempts can publish the
-  same one across a clock rollback, #1621 thread, 2026-10-13). A stamp
-  with no attempt ID (the legacy shape) is never a match. The failed
-  attempt is kept in the row
-  (`unrecovered_failure_attempt_id`) across restarts until then. A
-  success that withheld folders keeps the existing criteria and shows
-  its count. An `unknown` status leaves `current` to the existing
-  criteria, except that an unrecovered failure still holds it false.
-  Delivery is also checked for a success terminal that was never
-  preceded by an *observed* failure (#1612 round 12): a watcher delayed
-  or behind enough to read a collection publication — a rename event,
-  or `maybe_record`'s periodic heartbeat, which reads the file directly
-  — before processing that same sync's own stamp rename can see a
-  success whose failed predecessor it never observed (the predecessor's
-  publication was already overwritten on disk by the time it was read).
-  `success_delivered` (stored per row, from the same attempt-ID match)
-  is checked on its own for this case; mcp-server reports it as
-  `collection.success_undelivered`, independent of
-  `failure_unrecovered`, so the gap closes whether or not the
-  intervening failure was ever seen. In normal operation this clears
-  within the watcher's own event-processing latency, since mbsync
-  writes the stamp before the collection status that names it as the
-  last success.
+- **Freshness.** Delivery is ordered by durable success generations,
+  never wall-clock time. A success is delivered when the acknowledged
+  generation is newer, or equal with the same attempt ID. Each terminal
+  record carries the highest allocated generation at its completion
+  (`generation_floor`, null if unavailable). A failed terminal is
+  recovered only by an acknowledged generation strictly above that
+  floor. This handles a newer stamp whose status publication failed,
+  without clearing a later failure using an older success. Equal
+  generations with different attempt IDs prove nothing. Allocation is
+  seeded from both retained stamp and status evidence after state
+  restore; missing ordering evidence never invents recovery. Legacy
+  format-1 records retain the prior conservative attempt-ID check.
+- **Reported outcome.** MCP retains the last recorded outcome and its
+  counts even if a later stamp proves recovery. `failure_unrecovered`
+  controls whether that failure still prevents `current`; the prose
+  labels recovery without inventing a newer outcome or withheld count.
+  `success_undelivered` independently prevents currency until delivery
+  is proven, including when no preceding failure was observed. The
+  failed attempt remains durable in the existing SQLite row until
+  recovery. This format change needs no SQLite migration.
 
 ## File Identity on `indexed_files`
 
@@ -4444,7 +4459,7 @@ clearing it, because the file contents on disk are unchanged. It moves
 the file's `indexing_jobs` row in the same transaction, retry or dead
 state intact: a file whose Phase 1 committed but whose Phase 2 is still
 pending is already indexed, so the rename is not re-enqueued, and a job
-left on the old path would be dropped as missing.
+left on the old path would otherwise stay deferred as missing.
 
 The occurrence reconciliation scan (*Occurrence reconciliation* under
 *Deletion Reconciliation*, #1567) reads all three: a file whose size and
@@ -4488,62 +4503,32 @@ contract.
 
 A watcher-observed rename (`on_moved`'s Case 1) carries an active
 occurrence's claimant forward only after
-`occurrence_scan.verify_rename_bytes` confirms the destination's bytes
-against it: by the source's `indexed_files` identity when there is one
-— size and mtime agreeing (a rename keeps both) is a fast admission
-shortcut, not proof (mbsync sets mtime from IMAP's INTERNALDATE, so two
-different messages can legitimately share one, #1612 round 12), so the
-destination is also hashed and checked against the recorded
-`content_hash` before it is trusted, the same single bounded hash
-`Database._move_occurrence`'s sibling check (*Mailbox occurrences*
-above) uses — or, for a
-scan-bound occurrence (`bind_found_copy` never writes `indexed_files`,
-so there is no recorded identity or hash to check metadata against),
-by hashing the destination and checking it against the claimant ID's
-embedded hash prefix (the first `CLAIMANT_HASH_CHARS` hex digits after
-the `#`, `parser.claimant_id`). The verified identity is re-checked
-inside the same transaction as the move (`Database._move_occurrence`'s
-`verified_identity` parameter), the same TOCTOU pattern
-`move_verified_occurrence` already uses for the reconciliation scan. A
-mismatch is not carried forward — neither the occurrence nor a stale
-`indexed_files` row under the destination's name (`_rename_rows` gates
-the carry on whether `_move_occurrence` found an actual mismatch, not
-merely on whether it found nothing to say) — and `on_moved` falls
-through to Case 2 as if the destination were new mail.
+`occurrence_scan.verify_rename_bytes` checks the destination against the
+message's authoritative full `content_hash` and `size_bytes`. This works
+for parsed and scan-bound occurrences, including ones with no
+`indexed_files` marker. A different size proves inequality without reading;
+a same-size candidate needs a descriptor-bound digest. Unknown expected
+identity, unreadable bytes or a changed file provide no proof. The verified
+size, mtime, inode, ctime and device are rechecked inside the move transaction.
+An unheld indexed source's sibling check in `Database._move_occurrence`
+also verifies its full hash before binding it.
 
-Falling through leaves the stale occurrence active at the now-missing
-source path for the general case: the reconciliation scan is the
-eventual backstop (it reads the newly-indexed destination created once
-Case 2 enqueues it, on a later pass). In mirror mode, when the same
-rename also added the `T` flag, Case 2's trashed-destination skip means
-nothing ever enqueues the destination, so the scan never gets that
-second occurrence to notice the collision against either — and the
-scan's own "missed renames" check only retires an occurrence whose
-uniq resolves to no file at all under its folder, never one whose uniq
-still resolves to *some* file, however mismatched (`scan_occurrences`,
-module docstring "Missed renames"). `on_moved` closes this one case
-itself: when the active occurrence's verification **proved** a mismatch
-(it read the destination's bytes and they were not this claimant's)
-**and** the destination is about to be skipped as already trashed, it
-retires the occurrence directly (`Database.retire_mismatched_rename`,
-#1612 round 13) and tombstones the claimant if that was its last live
-occurrence (`Database.mark_lost_messages`, #1612 round 14 — the same
-rule `Reconciler.handle_moved` applies to an ordinary trashed rename,
-so the deletion grace period starts at once instead of waiting for the
-next reconciliation sweep), rather than leaving it dangling with no
-path to ever notice. Unlike `retire_mismatched_occurrence` (the content
-backstop's case, where the mismatched file is still at the same
-recorded path) there is nothing left to re-check about the
-destination — `verify_rename_bytes` already hashed it — so the only
-guard is the usual `state = 'active' AND relative_path = ?` check
-against a concurrent move or retire of the same occurrence.
-`verify_rename_bytes` returns a proven mismatch only when it actually
-read the destination's bytes and they disagreed with the expected
-hash; an unreadable destination or one whose metadata alone ruled out
-trusting it without reading anything is inconclusive, not a mismatch
-(#1612 round 14 — the earlier implementation conflated the two, firing
-this retirement on a merely inconclusive check), and is left active for
-a later reconciliation pass like any other unverified rename.
+A proven mismatch falls through to normal destination admission and
+attempts to retire the stale source for both live and `T`-flagged
+destinations. `Database.retire_mismatched_rename` rechecks the source's
+absence, every supplied mismatch identity, and all current same-uniq
+candidates in its folder's `cur` and `new`. Another candidate without
+proof, a changed proof, or a mutated/unreadable directory inventory
+prevents retirement. This is also the periodic scan's mismatch guard;
+held candidates are checked alongside unheld ones. Inventories are listed
+once per pass and validated at the write, never repeatedly relisted.
+
+Only mirror retention (`self.reconciler is not None`) tombstones a
+claimant after its last live occurrence is retired. Archive mode writes
+no tombstone. A partial account traversal cannot prove a vanished file,
+but a positive size or digest mismatch can still be handled in a readable
+folder: it does not rely on unrelated folders being readable. An
+inconclusive candidate remains active for a later reconciliation pass.
 
 ### The content backstop
 
@@ -4553,17 +4538,26 @@ can legitimately share one, and a crafted or coincidental replacement
 could share size and mtime too. `occurrence_scan.scan_occurrences`
 closes that gap for a **held** path — one whose file did not move this
 pass, which the metadata checks above never read — by hashing it and
-comparing the digest to the occurrence's claimant, bounded per pass:
+comparing the digest to the occurrence's claimant, bounded per pass.
+A different authoritative message size proves mismatch without a read,
+including for a replacement larger than the byte budget:
 
-- **Cache.** Once a path's exact identity (size, mtime, inode) is
-  hash-verified, `hash_cache` remembers it, so a later pass skips it in
-  one dict lookup. A different file landing at the same path gets a new
-  inode in the overwhelming case, so this is not merely a one-time
-  check: a changed identity is always a cache miss.
+- **Cache.** Once a path's identity (size, mtime, inode, ctime, device)
+  is hash-verified, `hash_cache` remembers it, so a later pass skips it
+  in one dict lookup. Ctime invalidates an in-place rewrite even when
+  size, mtime and inode stay the same; device distinguishes files on
+  different mounts. The transaction rechecks this same identity before
+  binding or retiring an occurrence.
 - **Budget.** Only cache misses cost a read. Each pass hashes at most
-  `_BACKSTOP_MAX_FILES` (500) previously-unverified held paths, or
-  `_BACKSTOP_MAX_BYTES` (100 MB), whichever is hit first; the rest wait
-  for a later pass, which sees the same cache miss. Sized from a plain
+  `_BACKSTOP_MAX_FILES` (500) read attempts across all scan paths, or
+  `_BACKSTOP_MAX_BYTES` (100 MiB), whichever is hit first; the rest wait
+  for a later pass. Startup admits rename and copy-bind proofs before
+  routine held-path checks so the initial walk can follow renames.
+  When both groups remain unfinished, subsequent passes alternate
+  their priority. Failed reads spend the budget too; admission rotates
+  within each group, and individually oversized files cannot pin that
+  cursor, so unreadable early files cannot starve admissible later ones. Reads are bounded
+  by the captured size and reject growth or identity changes. Sized from a plain
   wall-clock measurement (2026-10-13, Apple Silicon, warm page cache):
   SHA-256 over a 20 MB file took ~8.7 ms (~2.2 GB/s); a 200 KB file took
   ~0.1 ms. A cold read over real disk or a mounted volume is slower than
@@ -4596,7 +4590,7 @@ comparing the digest to the occurrence's claimant, bounded per pass:
   `unverified`, never retired: the backstop only acts on a positive
   mismatch it could prove.
 - **On a budget already spent**, the path is left unhashed and counted
-  `backstop_deferred` (#1612 round 10 review), surfaced in the
+  `hash_deferred` across the scan and `backstop_deferred` for held paths, surfaced in the
   `reconciler sweep` / `startup rename sweep` log lines, so an
   operator can tell this secondary check is incomplete for those paths
   this pass rather than it silently never running for them. Ordinary

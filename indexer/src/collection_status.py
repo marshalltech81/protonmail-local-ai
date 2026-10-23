@@ -1,20 +1,23 @@
-"""mbsync's collection status file (#1592), format 1.
+"""mbsync's collection status file (#1592), formats 1 and 2.
 
 ``mbsync/entrypoint.sh`` (``publish_collection_status``) publishes
 ``.mbsync-collection-status.json`` at the Maildir root before and after
 every sync attempt, each time to a unique temporary file renamed into
 place. It holds:
 
-* ``format`` (1), ``scope_uuid`` (the account, ``ACCOUNT_SCOPE``),
+* ``format`` (2; legacy 1 is read), ``scope_uuid`` (the account, ``ACCOUNT_SCOPE``),
   ``run_deadline_secs`` and ``sync_interval_secs``;
 * ``attempt``: the latest attempt's ID, start time and outcome
   (``in_progress`` until its terminal outcome is published);
 * ``last_terminal``: the last terminal outcome (``succeeded``,
   ``succeeded_with_withheld_folders`` or ``failed``) with its attempt ID,
   completion time, withheld far-side folder count (``null`` when unknown)
-  and failure class (``null`` for a success);
+  and failure class (``null`` for a success). Format 2 adds the durable
+  ``generation_floor`` at that terminal outcome (``null`` if unknown);
 * ``last_success``: the last success's attempt ID and completion time,
-  which is the success stamp's for the same sync.
+  which is the success stamp's for the same sync, plus its format-2
+  ``generation`` (``null`` if allocation failed). Legacy format-1 records
+  carry no ordering proof and retain conservative attempt-ID matching.
 
 The records follow publication order, never their timestamps, so a clock
 rollback cannot reorder them. The file names no folder: counts and fixed
@@ -38,7 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 COLLECTION_STATUS_NAME = ".mbsync-collection-status.json"
-COLLECTION_STATUS_FORMAT = 1
+COLLECTION_STATUS_FORMAT = 2
 # mbsync's file is a few hundred bytes; anything longer is not one.
 MAX_STATUS_BYTES = 4096
 
@@ -46,7 +49,7 @@ TERMINAL_OUTCOMES = frozenset({"succeeded", "succeeded_with_withheld_folders", "
 ATTEMPT_OUTCOMES = TERMINAL_OUTCOMES | {"in_progress"}
 FAILURE_CLASSES = frozenset({"deadline", "killed", "error", "permission_repair", "interrupted"})
 # Why a status is unknown: no file, a file without a ``format`` (written
-# before the format existed), one that is not format-1 JSON in the
+# before the format existed), one that is not supported JSON in the
 # expected shape, a format this release does not read, one naming another
 # account, or one the indexer could not open or read.
 UNKNOWN_REASONS = frozenset(
@@ -78,7 +81,7 @@ _SUCCESS_KEYS = frozenset({"attempt_id", "completed_at"})
 
 
 class _Malformed(ValueError):
-    """The file is not in the format-1 shape. Fixed text only."""
+    """The file is not in its versioned shape. Fixed text only."""
 
 
 @dataclass(frozen=True)
@@ -88,12 +91,14 @@ class Terminal:
     outcome: str
     withheld_far_side_folders: int | None
     failure_class: str | None
+    generation_floor: int | None = None
 
 
 @dataclass(frozen=True)
 class Success:
     attempt_id: str
     completed_at: str  # ISO 8601, UTC, in ``SyncStamp.completed_at``'s form
+    generation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -142,10 +147,18 @@ def _object(value: object, keys: frozenset[str]) -> dict:
     return value
 
 
-def _terminal(value: object) -> Terminal | None:
+def _generation(value: object, *, zero: bool = False) -> int | None:
     if value is None:
         return None
-    record = _object(value, _TERMINAL_KEYS)
+    if type(value) is not int or not (0 if zero else 1) <= value <= _MAX_INT:
+        raise _Malformed("generation")
+    return value
+
+
+def _terminal(value: object, version: int = 1) -> Terminal | None:
+    if value is None:
+        return None
+    record = _object(value, _TERMINAL_KEYS | ({"generation_floor"} if version == 2 else set()))
     outcome = record["outcome"]
     withheld = record["withheld_far_side_folders"]
     failure_class = record["failure_class"]
@@ -170,16 +183,18 @@ def _terminal(value: object) -> Terminal | None:
         outcome=outcome,
         withheld_far_side_folders=withheld,
         failure_class=failure_class,
+        generation_floor=_generation(record.get("generation_floor"), zero=True),
     )
 
 
-def _success(value: object) -> Success | None:
+def _success(value: object, version: int = 1) -> Success | None:
     if value is None:
         return None
-    record = _object(value, _SUCCESS_KEYS)
+    record = _object(value, _SUCCESS_KEYS | ({"generation"} if version == 2 else set()))
     return Success(
         attempt_id=_attempt_id(record["attempt_id"]),
         completed_at=_time(record["completed_at"]),
+        generation=_generation(record.get("generation")),
     )
 
 
@@ -198,7 +213,7 @@ def parse_collection_status(raw: bytes, scope_uuid: str) -> CollectionStatus | U
         return Unknown("legacy")
     if type(data["format"]) is not int:
         return Unknown("malformed")
-    if data["format"] != COLLECTION_STATUS_FORMAT:
+    if data["format"] not in (1, COLLECTION_STATUS_FORMAT):
         return Unknown("unsupported")
     try:
         if set(data) != _TOP_KEYS or not isinstance(data["scope_uuid"], str):
@@ -214,14 +229,23 @@ def parse_collection_status(raw: bytes, scope_uuid: str) -> CollectionStatus | U
             attempt_id=_attempt_id(attempt["id"]),
             attempt_started_at=_time(attempt["started_at"]),
             attempt_outcome=attempt["outcome"],
-            last_terminal=_terminal(data["last_terminal"]),
-            last_success=_success(data["last_success"]),
+            last_terminal=_terminal(data["last_terminal"], data["format"]),
+            last_success=_success(data["last_success"], data["format"]),
         )
     except _Malformed:
         return Unknown("malformed")
     # The records agree with each other as mbsync writes them: a finished
     # attempt is the last terminal one, and a success is the last success.
     terminal, success = status.last_terminal, status.last_success
+    if (
+        terminal is not None
+        and terminal.outcome == "failed"
+        and terminal.generation_floor is not None
+        and success is not None
+        and success.generation is not None
+        and terminal.generation_floor < success.generation
+    ):
+        return Unknown("malformed")
     if status.attempt_outcome != "in_progress" and (
         terminal is None
         or terminal.attempt_id != status.attempt_id
@@ -235,6 +259,7 @@ def parse_collection_status(raw: bytes, scope_uuid: str) -> CollectionStatus | U
             success is None
             or success.attempt_id != terminal.attempt_id
             or success.completed_at != terminal.completed_at
+            or success.generation != terminal.generation_floor
         )
     ):
         return Unknown("malformed")

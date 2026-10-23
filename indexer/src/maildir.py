@@ -67,7 +67,7 @@ def _sync_stamp(
         return SyncStamp(completed.astimezone(UTC).isoformat(), interval)
     if not isinstance(attempt_id, str) or _ATTEMPT_ID_RE.fullmatch(attempt_id) is None:
         raise ValueError("sync stamp attempt id is not a valid attempt id")
-    if type(generation) is not int or generation < 1:
+    if type(generation) is not int or not 1 <= generation <= 2**63 - 1:
         raise ValueError("sync stamp generation is not a positive integer")
     return SyncStamp(completed.astimezone(UTC).isoformat(), interval, attempt_id, generation)
 

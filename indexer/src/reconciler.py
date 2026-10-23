@@ -55,6 +55,7 @@ from typing import Any
 
 from .database import Database
 from .embedder import EmbeddingBackend, scrub_embed_error
+from .file_evidence import FolderInventory
 from .maildir import is_trashed
 from .occurrence_scan import ScanCounts, scan_occurrences
 from .parser import OversizedMessageError, parse_email
@@ -119,9 +120,10 @@ class Reconciler:
         # during thread rebuild.
         self.maildir_root = maildir_root
         # File hashes of unindexed ``T``-flagged or dead-lettered files
-        # the scan read, by path, size, mtime and inode, so each file is
+        # the scan read, by path, size, mtime, inode, ctime and device, so each file is
         # read once per process (``occurrence_scan``).
-        self._hash_cache: dict[tuple[str, int, int, int], str] = {}
+        self._hash_cache: dict[tuple[str, int, int, int, int, int], str] = {}
+        self._reap_next_thread: str | None = None
         # Threads currently stuck in the reap path because a survivor
         # cannot be parsed (corrupt MIME header, runtime bug in the
         # parser, oversized survivor file). Counter increments each
@@ -180,12 +182,13 @@ class Reconciler:
             "hashed": scan.hashed,
             "stale": scan.stale,
             "backstop_deferred": scan.backstop_deferred,
+            "hash_deferred": scan.hash_deferred,
             "complete": scan.complete,
         }
         if any(v for k, v in counts.items() if k != "complete"):
             log.info(
                 "reconciler sweep: tombstoned=%d cleared=%d renamed=%d retired=%d bound=%d "
-                "unreachable=%d unverified=%d hashed=%d stale=%d backstop_deferred=%d",
+                "unreachable=%d unverified=%d hashed=%d stale=%d backstop_deferred=%d hash_deferred=%d",
                 tombstoned,
                 cleared,
                 scan.renamed,
@@ -196,6 +199,7 @@ class Reconciler:
                 scan.hashed,
                 scan.stale,
                 scan.backstop_deferred,
+                scan.hash_deferred,
             )
         _log_scan("reconciler sweep", scan)
         return counts
@@ -205,7 +209,7 @@ class Reconciler:
         src_path: str,
         dest_path: str,
         *,
-        verified_identity: tuple[int, int, int] | None = None,
+        verified_identity: tuple[int, int, int, int, int] | None = None,
     ) -> str | None:
         """Live tombstone detection from watchdog ``on_moved`` events.
 
@@ -256,6 +260,16 @@ class Reconciler:
         with more than one active account, holds back the messages of an
         account whose own brake trips.
         """
+        if self._blocked_thread_attempts:
+            pending = self.db.threads_with_pending_deletions(list(self._blocked_thread_attempts))
+            cancelled = set(self._blocked_thread_attempts) - pending
+            for thread_id in cancelled:
+                self._clear_blocked(thread_id)
+            if cancelled:
+                log.info(
+                    "reaper: %d blocked thread(s) no longer have pending deletions",
+                    len(cancelled),
+                )
         cutoff = (datetime.now(UTC) - timedelta(days=self.config.grace_days)).isoformat()
         candidates = self.db.reapable_messages(cutoff)
         if not candidates:
@@ -310,12 +324,25 @@ class Reconciler:
         threads_rebuilt = 0
         # Directory listings for the reap's restore check, shared by the
         # pass so each directory is listed at most once (#336).
-        listings: dict[Path, dict[str, Path]] = {}
-        for thread_id, dead in grouped.items():
-            reaped, rebuilt = self._reap_thread(thread_id, dead, cutoff, copies, listings)
+        listings = FolderInventory(self._hash_cache)
+        order = list(grouped)
+        pivot = order.index(self._reap_next_thread) if self._reap_next_thread in grouped else 0
+        order = order[pivot:] + order[:pivot]
+        for thread_id in order:
+            reaped, rebuilt = self._reap_thread(
+                thread_id, grouped[thread_id], cutoff, copies, listings
+            )
             threads_reaped += int(reaped)
             threads_rebuilt += int(rebuilt)
 
+        if listings.hash_deferred:
+            # Move past the starting group even when that group itself
+            # spent the budget, so unreadable early groups cannot pin it.
+            self._reap_next_thread = order[1 % len(order)]
+            log.info(
+                "reaper: restore hash verification deferred: %d candidate(s)",
+                listings.hash_deferred,
+            )
         if threads_reaped or threads_rebuilt:
             log.info(
                 "reconciler reap: threads_reaped=%d threads_rebuilt=%d",
@@ -416,7 +443,7 @@ class Reconciler:
         dead: list,
         cutoff: str,
         copies: Mapping[str, list[str]] | None = None,
-        listings: dict[Path, dict[str, Path]] | None = None,
+        listings: FolderInventory | None = None,
     ) -> tuple[bool, bool]:
         """Reap one thread. Returns (fully_reaped, rebuilt).
 
@@ -613,7 +640,7 @@ def sweep_paths(
     db: Database,
     *,
     maildir_root: Path,
-    hash_cache: dict[tuple[str, int, int, int], str] | None = None,
+    hash_cache: dict[tuple[str, int, int, int, int, int], str] | None = None,
 ) -> dict[str, Any]:
     """Reconcile the occurrences with the Maildir
     (``occurrence_scan.scan_occurrences``) without tombstoning any message:
@@ -655,11 +682,12 @@ def sweep_paths(
         or scan.unverified
         or scan.stale
         or scan.backstop_deferred
+        or scan.hash_deferred
         or tombstones_cleared
     ):
         log.info(
             "startup rename sweep: renamed=%d retired=%d unreachable=%d tombstones_cleared=%d "
-            "bound=%d unverified=%d stale=%d backstop_deferred=%d",
+            "bound=%d unverified=%d stale=%d backstop_deferred=%d hash_deferred=%d",
             scan.renamed,
             scan.retired,
             scan.unreachable,
@@ -668,6 +696,7 @@ def sweep_paths(
             scan.unverified,
             scan.stale,
             scan.backstop_deferred,
+            scan.hash_deferred,
         )
     _log_scan("startup rename sweep", scan)
     return {
@@ -679,6 +708,7 @@ def sweep_paths(
         "unverified": scan.unverified,
         "stale": scan.stale,
         "backstop_deferred": scan.backstop_deferred,
+        "hash_deferred": scan.hash_deferred,
         "complete": scan.complete,
     }
 

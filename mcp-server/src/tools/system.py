@@ -182,7 +182,7 @@ def collection_status(row: dict | None) -> CollectionStatus:
 def collection_reasons(collection: CollectionStatus) -> list[str]:
     """Why mbsync's collection keeps the index from being current: after a
     failed attempt, until a later success is delivered to the index."""
-    if collection.outcome == "failed":
+    if collection.outcome == "failed" and collection.failure_unrecovered:
         return [
             f"mbsync's latest collection attempt failed ({collection.failure_class}); the "
             "index is not current until a later successful sync is delivered to it"
@@ -363,6 +363,8 @@ def _collection_lines(out: MailboxStatusOutput) -> list[str]:
     else:
         head = f"succeeded, {_when(c.outcome_at, out.checked_at)}"
     lines = [f"Mail collection: {head}"]
+    if c.outcome == "failed" and not c.failure_unrecovered:
+        lines.append("  Last recorded outcome; recovered by a later delivered sync.")
     if c.withheld_far_side_folders:
         n = c.withheld_far_side_folders
         folders = f"{n:,} far-side folder{'' if n == 1 else 's'}"

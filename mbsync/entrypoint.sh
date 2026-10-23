@@ -61,7 +61,7 @@ readonly SYNC_STAMP_FILE="${MAILDIR_PATH}/.mbsync-last-sync.json"
 # repair opened (#524). Read by indexer/src/maildir.py
 # ``PERMS_REPAIRED_NAME``; not a sign of a successful sync.
 readonly PERMS_REPAIRED_FILE="${MAILDIR_PATH}/.mbsync-perms-repaired"
-# The collection status (#1592), format 1: the latest attempt, the last
+# The collection status (#1592), format 2: the latest attempt, the last
 # terminal outcome with its withheld far-side folder count and failure
 # class, and the last success. Published before and after every sync
 # attempt (publish_collection_status) and read by the indexer
@@ -69,7 +69,7 @@ readonly PERMS_REPAIRED_FILE="${MAILDIR_PATH}/.mbsync-perms-repaired"
 # counts and fixed tokens only, never a folder name, and reading it never
 # acknowledges a sync: the success stamp above does that.
 readonly COLLECTION_STATUS_FILE="${MAILDIR_PATH}/.mbsync-collection-status.json"
-readonly COLLECTION_STATUS_FORMAT=1
+readonly COLLECTION_STATUS_FORMAT=2
 # The account the status is published for (#1596): a canonical lower-case
 # UUID, checked by require_prerequisites. The indexer reads the status as
 # unknown unless it names the account the index is registered to.
@@ -446,8 +446,10 @@ warn_if_pin_rotation_enabled() {
 # Bash's 64-bit limit, as this start may write it.
 readonly COLLECTION_ATTEMPT_ID_RE='[0-9a-f]{12}-[1-9][0-9]*'
 readonly COLLECTION_TIME_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
-readonly COLLECTION_TERMINAL_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(succeeded|succeeded_with_withheld_folders|failed)\", \"withheld_far_side_folders\": (null|0|[1-9][0-9]*), \"failure_class\": (null|\"(deadline|killed|error|permission_repair|interrupted)\")\\}\$"
-readonly COLLECTION_SUCCESS_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\"\\}\$"
+readonly LEGACY_COLLECTION_TERMINAL_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(succeeded|succeeded_with_withheld_folders|failed)\", \"withheld_far_side_folders\": (null|0|[1-9][0-9]*), \"failure_class\": (null|\"(deadline|killed|error|permission_repair|interrupted)\")\\}\$"
+readonly COLLECTION_TERMINAL_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(succeeded|succeeded_with_withheld_folders|failed)\", \"withheld_far_side_folders\": (null|0|[1-9][0-9]*), \"failure_class\": (null|\"(deadline|killed|error|permission_repair|interrupted)\"), \"generation_floor\": (null|0|[1-9][0-9]*)\\}\$"
+readonly LEGACY_COLLECTION_SUCCESS_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\"\\}\$"
+readonly COLLECTION_SUCCESS_RE="^\\{\"attempt_id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"completed_at\": \"${COLLECTION_TIME_RE}\", \"generation\": (null|0|[1-9][0-9]*)\\}\$"
 # The success stamp's shape (record_successful_sync), read back only by
 # stamp_generation below to guard next_success_generation against the
 # state volume regressing behind an already-published generation.
@@ -991,26 +993,38 @@ load_collection_records() {
     if [[ ! -e "$COLLECTION_STATUS_FILE" && ! -L "$COLLECTION_STATUS_FILE" ]]; then
         return 0
     fi
-    terminal="${COLLECTION_TERMINAL_RE#^}"
-    terminal="${terminal%\$}"
-    success="${COLLECTION_SUCCESS_RE#^}"
-    success="${success%\$}"
-    attempt="\\{\"id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"started_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(in_progress|succeeded|succeeded_with_withheld_folders|failed)\"\\}"
-    re="^\\{\"format\": ${COLLECTION_STATUS_FORMAT}, \"scope_uuid\": \"${ACCOUNT_SCOPE}\", \"run_deadline_secs\": [1-9][0-9]*, \"sync_interval_secs\": [1-9][0-9]*, \"attempt\": ${attempt}, \"last_terminal\": (null|${terminal}), \"last_success\": (null|${success})\\}\$"
-    if [[ -f "$COLLECTION_STATUS_FILE" ]] \
-        && IFS= read -r -n 4096 line <"$COLLECTION_STATUS_FILE" \
-        && [[ "$line" =~ $re ]]; then
-        terminal="${line#*\"last_terminal\": }"
-        collection_last_terminal="${terminal%, \"last_success\": *}"
-        success="${line##*\"last_success\": }"
-        collection_last_success="${success%\}}"
-        return 0
-    fi
+    local version
+    for version in "$COLLECTION_STATUS_FORMAT" 1; do
+        if [[ "$version" == 1 ]]; then
+            terminal="${LEGACY_COLLECTION_TERMINAL_RE#^}"
+            success="${LEGACY_COLLECTION_SUCCESS_RE#^}"
+        else
+            terminal="${COLLECTION_TERMINAL_RE#^}"
+            success="${COLLECTION_SUCCESS_RE#^}"
+        fi
+        terminal="${terminal%\$}"
+        success="${success%\$}"
+        attempt="\\{\"id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"started_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"(in_progress|succeeded|succeeded_with_withheld_folders|failed)\"\\}"
+        re="^\\{\"format\": ${version}, \"scope_uuid\": \"${ACCOUNT_SCOPE}\", \"run_deadline_secs\": [1-9][0-9]*, \"sync_interval_secs\": [1-9][0-9]*, \"attempt\": ${attempt}, \"last_terminal\": (null|${terminal}), \"last_success\": (null|${success})\\}\$"
+        if [[ -f "$COLLECTION_STATUS_FILE" ]] \
+            && IFS= read -r -n 4096 line <"$COLLECTION_STATUS_FILE" \
+            && [[ "$line" =~ $re ]]; then
+            terminal="${line#*\"last_terminal\": }"
+            collection_last_terminal="${terminal%, \"last_success\": *}"
+            success="${line##*\"last_success\": }"
+            collection_last_success="${success%\}}"
+            if [[ "$version" == 1 ]]; then
+                [[ "$collection_last_terminal" == null ]] || collection_last_terminal="${collection_last_terminal%\}}, \"generation_floor\": null}"
+                [[ "$collection_last_success" == null ]] || collection_last_success="${collection_last_success%\}}, \"generation\": null}"
+            fi
+            return 0
+        fi
+    done
     echo ">>> WARNING: the collection status at ${COLLECTION_STATUS_FILE} could not be read, or names another account; it starts again without an earlier outcome." >&2
 }
 
 publish_collection_status() {
-    # Publishes the status file (format 1) for the current attempt with
+    # Publishes the status file (format 2) for the current attempt with
     # outcome $1: written to a unique temporary file in the Maildir root,
     # made world-readable (the indexer runs as another UID) and renamed
     # into place, so a reader sees one whole publication. Every value is
@@ -1048,14 +1062,19 @@ finish_collection_attempt() {
     # (deadline, killed, error, permission_repair, interrupted), or null
     # for a success; $4 the completion time. The records follow
     # publication order, never their times.
-    local class="null"
+    local class="null" floor="null"
+    if [[ "$1" == failed ]]; then
+        floor="$(current_success_generation)" || floor=null
+    else
+        floor="${sync_generation:-null}"
+    fi
     [[ -n "$collection_attempt_id" ]] || return 0
     [[ "$3" == null ]] || class="\"$3\""
-    collection_last_terminal="$(printf '{"attempt_id": "%s", "completed_at": "%s", "outcome": "%s", "withheld_far_side_folders": %s, "failure_class": %s}' \
-        "$collection_attempt_id" "$4" "$1" "$2" "$class")"
+    collection_last_terminal="$(printf '{"attempt_id": "%s", "completed_at": "%s", "outcome": "%s", "withheld_far_side_folders": %s, "failure_class": %s, "generation_floor": %s}' \
+        "$collection_attempt_id" "$4" "$1" "$2" "$class" "$floor")"
     if [[ "$1" != failed ]]; then
-        collection_last_success="$(printf '{"attempt_id": "%s", "completed_at": "%s"}' \
-            "$collection_attempt_id" "$4")"
+        collection_last_success="$(printf '{"attempt_id": "%s", "completed_at": "%s", "generation": %s}' \
+            "$collection_attempt_id" "$4" "$floor")"
     fi
     publish_collection_status "$1"
     collection_attempt_id=""
@@ -1108,6 +1127,7 @@ run_sync() {
     sync_withheld=null
     sync_failure_class=error
     sync_completed_at=""
+    sync_generation=null
     rm -f "$MBSYNC_ERROR_COUNTS_FILE" "$MBSYNC_NOTICES_DONE_FILE"
     begin_collection_attempt
     mark_sync_activity
@@ -1201,8 +1221,8 @@ stamp_generation() {
 # reused or skipped number, so the caller must not report the sync as
 # acknowledged.
 #
-# The counter is seeded forward from the retained stamp's own
-# generation when that is higher (review finding, #1612 round 8): the
+# The counter is seeded forward from the retained stamp or collection
+# ordering evidence when either is higher (review finding, #1612 round 8): the
 # state volume (mbsync-state, documented in docs/architecture.md
 # "Docker Volumes" as unnecessary to back up before this counter
 # existed) can be recreated or restored from an older backup while the
@@ -1210,10 +1230,9 @@ stamp_generation() {
 # restart below a generation already published, and the indexer's
 # forward-only, generation-ordered acknowledgement would never again
 # move past that old stamp — ignoring every later successful sync and
-# leaving an unrecovered collection failure unable to clear. The two
-# durable records can only diverge in this direction (the counter is
-# always allocated and persisted before a stamp names it), so raising
-# the counter to match an already-published generation never regresses
+# leaving an unrecovered collection failure unable to clear. The counter
+# is always persisted before a stamp or status names its generation,
+# so raising it to match already-published evidence never regresses
 # or reorders anything the indexer has already acknowledged.
 
 # Whether all-digit value "$1" is small enough for next_success_
@@ -1227,19 +1246,20 @@ stamp_generation() {
 # tie, lexicographic order (equivalent to numeric order for equal-
 # length digit strings) decide it instead.
 generation_in_range() {
-    local value="$1" max="9223372036854775806"
+    local value="$1" max="${2:-9223372036854775806}"
+    [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
     ((${#value} < ${#max})) && return 0
     ((${#value} > ${#max})) && return 1
     # shellcheck disable=SC2071 # deliberate lexicographic string compare, equal-length digits only
     [[ "$value" < "$max" || "$value" == "$max" ]]
 }
 
-next_success_generation() {
-    local current=0 raw next tmp retained
+current_success_generation() {
+    local current=0 raw retained record re
 
     if [[ -f "$GENERATION_FILE" ]]; then
         if ! IFS= read -r raw <"$GENERATION_FILE" || [[ ! "$raw" =~ ^[0-9]+$ ]] ||
-            ! generation_in_range "$raw"; then
+            ! generation_in_range "$raw" 9223372036854775807; then
             echo ">>> ERROR: the success generation at ${GENERATION_FILE} is not a non-negative integer within range — refusing to record this sync as successful." >&2
             return 1
         fi
@@ -1250,7 +1270,7 @@ next_success_generation() {
     fi
     retained="$(stamp_generation)"
     if [[ -n "$retained" ]]; then
-        if ! generation_in_range "$retained"; then
+        if ! generation_in_range "$retained" 9223372036854775807; then
             echo ">>> ERROR: the retained sync stamp's generation (${retained}) is out of range — refusing to record this sync as successful." >&2
             return 1
         fi
@@ -1258,6 +1278,27 @@ next_success_generation() {
             echo ">>> WARNING: the success generation counter at ${GENERATION_FILE} (${current}) is behind the retained sync stamp's generation (${retained}); seeding it forward (mbsync-state was likely recreated or restored from an older backup)." >&2
             current="$retained"
         fi
+    fi
+    re='"(generation|generation_floor)": ([0-9]+)'
+    for record in "${collection_last_terminal:-null}" "${collection_last_success:-null}"; do
+        if [[ "$record" =~ $re ]]; then
+            retained="${BASH_REMATCH[2]}"
+            generation_in_range "$retained" 9223372036854775807 || return 1
+            if ((retained > current)); then
+                echo ">>> WARNING: seeding the success generation forward from retained collection ordering evidence." >&2
+                current="$retained"
+            fi
+        fi
+    done
+    printf '%s' "$current"
+}
+
+next_success_generation() {
+    local current next tmp
+    current="$(current_success_generation)" || return 1
+    if ! generation_in_range "$current"; then
+        echo ">>> ERROR: the success generation is out of range — refusing to allocate another." >&2
+        return 1
     fi
     next=$((current + 1))
     if ! tmp="$(mktemp "${GENERATION_FILE}.XXXXXX")"; then
@@ -1296,6 +1337,7 @@ record_successful_sync() {
         echo ">>> ERROR: could not allocate the durable success generation — refusing to record this sync as successful." >&2
         return 1
     fi
+    sync_generation="$generation"
     tmp="${MAILDIR_PATH}/.mbsync-last-sync.${completed_at}.${SYNC_INTERVAL}.${collection_attempt_id}.${generation}.tmp"
     if ! printf '{"completed_at": "%s", "sync_interval_secs": %d, "attempt_id": "%s", "generation": %d}\n' \
         "$completed_at" "$SYNC_INTERVAL" "$collection_attempt_id" "$generation" >"$tmp" \

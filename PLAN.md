@@ -1198,7 +1198,8 @@ superseded entries keep their number and one line.
     indexer's `_acknowledge` orders stamps by this generation, never by
     wall-clock time, so #332's clock-ahead tolerance is gone along with
     the gap it left; `_success_delivered` matches by attempt ID
-    equality. A legacy stamp (no attempt ID or generation) is never
+    equality (superseded by format-2 ordering in decision 59 below).
+    A legacy stamp (no attempt ID or generation) is never
     acknowledged and never proves delivery — a missing identity is
     "cannot prove," never a match.
 
@@ -1290,3 +1291,20 @@ superseded entries keep their number and one line.
     encoded-word clarification. No migration, reparse, authority or ranking
     change. Cost: normalization of requested metadata over the evaluated
     population; synthetic 5k/50k actual-reader work gates cover it.
+
+
+59. **Occurrence completeness (#1612, owner, 2026-10-23):** after the
+    Claude Opus 5.5 / Codex GPT-6.1 Sol high-effort panel reached consensus
+    in three exchanges, the owner approved format-2 collection ordering
+    (success generation and terminal generation floor, legacy format 1
+    retained), allocator seeding from stamp and status, and truthful
+    recovery from stale publications. Missing-source refresh jobs remain
+    durable and can transfer to verified active non-trashed copies,
+    preserving destination retries/dead letters. All scan hashing shares
+    the existing 500-file/100MiB bound; stable evidence includes ctime and
+    device, with fair admission and bounded reads. Once-per-pass validated
+    inventories retain all same-uniq paths; mutation defers the decision.
+    Reap restore checks cover historical locators with verified bytes,
+    separately from unmark eligibility. No SQLite migration or relaxed
+    independent control; individually oversized secondary checks remain
+    visibly deferred under the existing cap.

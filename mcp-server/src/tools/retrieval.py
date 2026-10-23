@@ -684,7 +684,7 @@ def _attachment_lines(i: int, a: AttachmentOccurrenceRecord) -> list[str]:
     head = [sent_text(a.sent_at, a.sent_at_status)]
     if a.occurred_at:
         head.append(f"delivered {a.occurred_at}")
-    head.append(clip(a.folder, HEADER_CHAR_LIMIT))
+    head.append(f"{clip(a.folder, HEADER_CHAR_LIMIT)} (representative copy)")
     name = a.filename + (" … [cut]" if a.filename_clipped else "")
     mime = a.content_type + (" … [cut]" if a.content_type_clipped else "")
     extraction = a.extraction_status or "none recorded"
@@ -2467,6 +2467,11 @@ def register_retrieval_tools(server, db):
         apply to the message carrying the attachment and match as in
         ``query_messages``. Attachments on messages in Trash are left out
         unless ``folder="Trash"``.
+
+        A row's ``folder`` and ``source_file`` describe the carrying
+        message's representative copy, which may differ from the copy
+        that matched the folder filter. ``folder_is_representative`` is
+        true; get_message lists the message's copies.
 
         ``total_matches`` counts the occurrences the filters definitely
         match; it is the complete count only when ``indeterminate`` is 0.

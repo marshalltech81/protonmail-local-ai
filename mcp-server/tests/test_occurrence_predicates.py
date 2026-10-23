@@ -187,6 +187,33 @@ class TestFoldersAndGroups:
 
 
 class TestOutputs:
+    def test_attachment_folder_is_labelled_as_representative_when_another_copy_matches(
+        self, mailbox
+    ):
+        conn = _conn(Path(mailbox.path))
+        try:
+            _insert_attachment(
+                conn,
+                message_id="two",
+                thread_id="t-two",
+                attachment_id="synthetic-payload",
+                filename="synthetic.pdf",
+            )
+        finally:
+            conn.close()
+        server = FakeMCPServer()
+        register_retrieval_tools(server, mailbox)
+        out = asyncio.run(server.tools["query_attachments"](folder="Archive"))
+        assert out.structured_content["total_matches"] == 1
+        assert out.structured_content["attachments"][0]["folder"] == "INBOX"
+        assert out.structured_content["attachments"][0]["folder_is_representative"] is True
+        assert "INBOX (representative copy)" in out.content[0].text
+        from src.tools.outputs import ListedAttachment
+
+        description = ListedAttachment.model_json_schema()["properties"]["folder"]["description"]
+        assert "representative" in description
+        assert "matched" in description
+
     def test_rows_list_every_copy_with_its_account(self, mailbox):
         (two,) = [m for m in mailbox.query_messages().messages if m.message_id == "two"]
         assert two.occurrence_count == 2

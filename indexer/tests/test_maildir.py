@@ -205,6 +205,8 @@ class TestReadSyncStamp:
             '"attempt_id": "not-an-attempt-id", "generation": 1}',
             '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60, '
             '"attempt_id": "0123456789ab-1", "generation": 0}',
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60, '
+            '"attempt_id": "0123456789ab-1", "generation": 9223372036854775808}',
         ],
     )
     def test_malformed_stamp_raises(self, tmp_path, content):

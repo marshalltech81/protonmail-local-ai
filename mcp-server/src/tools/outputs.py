@@ -1131,7 +1131,12 @@ class ListedAttachment(_Output):
     )
     content_type_clipped: bool = Field(description="True when the stored MIME type is longer.")
     size_bytes: int
-    folder: str = Field(description="Folder of the message carrying the attachment.")
+    folder: str = Field(
+        description="Folder of the carrying message's representative copy, which need not be "
+        "the copy that matched the folder filter. source_file names this same representative; "
+        "get_message lists the message's copies."
+    )
+    folder_is_representative: Literal[True] = True
     sent_at: str | None = Field(
         description="Send date of the carrying message (its Date: header) in UTC, ISO 8601; "
         "null when that header is missing or unparseable."
@@ -1340,7 +1345,7 @@ class CollectionAttempt(_Output):
 
 class CollectionStatus(_Output):
     outcome: Literal["succeeded", "succeeded_with_withheld_folders", "failed", "unknown"] = Field(
-        description="mbsync's latest completed collection from the Bridge app: "
+        description="mbsync's last recorded collection from the Bridge app: "
         "succeeded; succeeded_with_withheld_folders (the rest synced, but far-side "
         "folders could not be opened, most likely renamed or deleted in Proton; their "
         "local copies are kept); failed; or unknown (see unknown_reason). Not Proton's "

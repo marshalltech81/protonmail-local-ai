@@ -5,7 +5,6 @@ Thread-level indexing: one row per thread, updated as new messages arrive.
 """
 
 import functools
-import hashlib
 import json
 import logging
 import os
@@ -44,7 +43,9 @@ from .extractors import (
     SCANNED_PDF_OCR_DISABLED_ERROR,
     warn_rate_limited,
 )
-from .maildir import is_trashed, message_state, resolve_current_path
+from .file_evidence import FileIdentity, FolderInventory, read_digest
+from .file_evidence import file_identity as current_identity
+from .maildir import is_trashed, message_state
 from .occurrences import OccurrenceLocatorError, SeedFunctions, locate
 from .parser import PARSE_CAPS, participant_names
 from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL, STALE_ENQUEUE_SQL
@@ -77,46 +78,21 @@ def _caps_json(caps: dict[str, int]) -> str:
     return json.dumps({name: caps[name] for name in PARSE_CAPS if name in caps})
 
 
-def _same_file(filepath: str, identity: tuple[int, int, int]) -> bool:
-    """Whether ``filepath`` still has ``identity`` (size, mtime, inode):
+def _same_file(filepath: str, identity: tuple[int, int, int, int, int]) -> bool:
+    """Whether ``filepath`` still has ``identity`` (size, mtime, inode, ctime, device):
     the file whose bytes a scan verified, not a replacement."""
     try:
         st = os.stat(filepath)
     except OSError:
         return False
-    return (st.st_size, st.st_mtime_ns, st.st_ino) == identity
+    return (st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, st.st_dev) == identity
 
 
-# Bytes read per call when hashing a single already-identified file (as
-# ``occurrence_scan._sha256``) — this is a one-file read at a bind
-# decision, not a sweep over many files, so no further byte budget
-# applies (``occurrence_scan``'s ``_BACKSTOP_MAX_BYTES`` bounds its own
-# per-pass sweep instead).
-_HASH_CHUNK_BYTES = 1 << 20
-
-
-def _sha256(filepath: str) -> str:
-    """``filepath``'s SHA-256, read in bounded chunks rather than loaded
-    whole into memory."""
-    digest = hashlib.sha256()
-    with open(filepath, "rb") as handle:
-        while chunk := handle.read(_HASH_CHUNK_BYTES):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _restore_names(path: Path) -> list[Path]:
-    """``path`` and the names an upstream restore can rename it to: the
-    ``T`` flag dropped from its ``:2,`` suffix, in its own directory or
-    its folder's other ``cur``/``new`` one."""
-    base, sep, flags = path.name.partition(":2,")
-    names = [path.name]
-    if sep and "T" in flags:
-        names.append(base + sep + flags.replace("T", ""))
-    dirs = [path.parent]
-    if path.parent.name in ("cur", "new"):
-        dirs.append(path.parent.with_name("new" if path.parent.name == "cur" else "cur"))
-    return [d / n for d in dirs for n in names]
+def _sha256(filepath: str, identity=None) -> str:
+    identity = identity if identity is not None else current_identity(Path(filepath))
+    if identity is None:
+        raise FileNotFoundError("file unavailable")
+    return read_digest(Path(filepath), identity)
 
 
 def _close_connection(conn: sqlite3.Connection) -> None:
@@ -620,6 +596,11 @@ class Database:
         self.account_id: int | None = None
         self._lock = threading.RLock()
         self._transaction_depth = 0
+        # Retry-local byte evidence survives waits; cursors give unreadable
+        # early copies no priority over later copies on the next attempt.
+        self._missing_job_checks: dict[
+            str, tuple[dict[tuple[str, int, int, int, int, int], str], str]
+        ] = {}
         # Operator source-authority rules; empty until ``set_authority_rules``.
         self._authority_rules = AuthorityRules()
         # FTS5 tables a reap deleted from since their last
@@ -3773,6 +3754,7 @@ class Database:
 
     @_synchronized
     def queue_delete(self, filepath: str) -> None:
+        self._missing_job_checks.pop(filepath, None)
         self._conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
         self._conn.commit()
 
@@ -4085,7 +4067,7 @@ class Database:
         except OccurrenceLocatorError:
             return None
         return cur.execute(
-            "SELECT o.id, o.claimant_id, o.trashed, m.thread_id FROM message_occurrences o "
+            "SELECT o.id, o.claimant_id, o.trashed, m.thread_id, m.content_hash, m.size_bytes FROM message_occurrences o "
             "JOIN messages m ON m.claimant_id = o.claimant_id "
             "WHERE o.account_id = ? AND o.relative_path = ? AND o.state = 'active'",
             (self.account_id, where.relative_path),
@@ -4119,11 +4101,116 @@ class Database:
         content hash, for the reconciliation scan
         (``occurrence_scan.scan_occurrences``)."""
         return self._conn.execute(
-            "SELECT o.id, o.claimant_id, o.folder, o.uniq, o.relative_path, m.content_hash "
+            "SELECT o.id, o.claimant_id, o.folder, o.uniq, o.relative_path, m.content_hash, m.size_bytes "
             "FROM message_occurrences o JOIN messages m ON m.claimant_id = o.claimant_id "
             "WHERE o.account_id = ? AND o.state = 'active' ORDER BY o.id",
             (self.account_id,),
         ).fetchall()
+
+    @_synchronized
+    def retain_or_retarget_missing_job(self, filepath: str) -> bool:
+        """Preserve refresh intent; move it only to a verified current copy.
+
+        False means this was never an indexed/occurrence-backed source.
+        A destination's existing retry or dead letter is never reset.
+        """
+        row = self._active_at(self._conn.cursor(), filepath)
+        marker = self.file_identity(filepath)
+        if row is not None and marker is not None and marker["content_hash"] != row["content_hash"]:
+            return True
+        if row is None:
+            row = self._conn.execute(
+                "SELECT m.claimant_id, m.content_hash, m.size_bytes FROM indexed_files f "
+                "JOIN messages m ON m.content_hash = f.content_hash WHERE f.filepath = ?",
+                (filepath,),
+            ).fetchone()
+        if row is None and marker is not None:
+            # A newer marker at a reused locator cannot identify the old
+            # occurrence's refresh. Keep the work at its source.
+            return True
+        if row is None:
+            try:
+                locator = locate(filepath, self.account.maildir_root)
+            except OccurrenceLocatorError:
+                return False
+            row = self._conn.execute(
+                "SELECT m.claimant_id, m.content_hash, m.size_bytes FROM message_occurrences o "
+                "JOIN messages m ON m.claimant_id = o.claimant_id "
+                "WHERE o.account_id = ? AND o.relative_path = ? ORDER BY o.id DESC LIMIT 1",
+                (self.account_id, locator.relative_path),
+            ).fetchone()
+        if row is None:
+            return False
+        if row["content_hash"] is None or row["size_bytes"] is None:
+            return True
+        copies = self._conn.execute(
+            "SELECT relative_path FROM message_occurrences WHERE account_id = ? "
+            "AND claimant_id = ? AND state = 'active' AND trashed = 0 ORDER BY id",
+            (self.account_id, row["claimant_id"]),
+        ).fetchall()
+        identities = {
+            self._absolute(copy["relative_path"]): current_identity(
+                Path(self._absolute(copy["relative_path"]))
+            )
+            for copy in copies
+        }
+        cache, start = self._missing_job_checks.get(filepath, ({}, ""))
+        for key in list(cache):
+            if identities.get(key[0]) != key[1:]:
+                del cache[key]
+        evidence = FolderInventory(cache)
+        ordered = sorted(identities)
+        pivot = next((i for i, name in enumerate(ordered) if name >= start), 0)
+        ordered = ordered[pivot:] + ordered[:pivot]
+        next_path = ""
+        for target in ordered:
+            identity = identities[target]
+            if target == filepath or identity is None or identity[0] != row["size_bytes"]:
+                continue
+            before = evidence.hash_deferred
+            digest = evidence.digest(Path(target), identity)
+            if evidence.hash_deferred > before and not next_path:
+                next_path = target
+            if digest is None or digest != row["content_hash"]:
+                continue
+            with self.transaction():
+                active = self._active_at(self._conn.cursor(), target)
+                if (
+                    Path(filepath).exists()
+                    or self._active_at(self._conn.cursor(), filepath) is not None
+                    or active is None
+                    or active["claimant_id"] != row["claimant_id"]
+                    or active["trashed"]
+                    or not _same_file(target, identity)
+                ):
+                    continue
+                columns = "reason, status, attempts, last_error, last_stage, last_error_class, created_at, updated_at, next_attempt_at"
+                self._conn.execute(
+                    f"INSERT OR IGNORE INTO indexing_jobs (filepath, {columns}) "  # nosec B608 -- fixed internal column list
+                    f"SELECT ?, {columns} FROM indexing_jobs WHERE filepath = ?",
+                    (target, filepath),
+                )
+                if self._conn.execute(
+                    "SELECT 1 FROM indexing_jobs WHERE filepath = ?", (target,)
+                ).fetchone():
+                    self._conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
+                    self._conn.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
+                    self._missing_job_checks.pop(filepath, None)
+                    log.info("missing-source refresh transferred to a verified live copy")
+                    return True
+        self._missing_job_checks[filepath] = cache, next_path
+        if evidence.hash_deferred:
+            log.info(
+                "missing-source refresh hash verification deferred: %d candidate(s)",
+                evidence.hash_deferred,
+            )
+        return True
+
+    @_synchronized
+    def message_content(self, claimant_id: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT content_hash, size_bytes FROM messages WHERE claimant_id = ?", (claimant_id,)
+        ).fetchone()
 
     @_synchronized
     def file_identity(self, filepath: str) -> sqlite3.Row | None:
@@ -4152,7 +4239,7 @@ class Database:
         old_relative_path: str,
         new_path: str,
         *,
-        identity: tuple[int, int, int],
+        identity: tuple[int, int, int, int, int],
     ) -> bool:
         """Carry an active occurrence to ``new_path``, a file the scan
         found under its folder and uniq and whose bytes it verified
@@ -4184,14 +4271,15 @@ class Database:
         return claimant_id is not None
 
     @_synchronized
-    def retire_vanished_occurrence(self, occurrence_id: int, relative_path: str) -> bool:
-        """Retire an active occurrence whose file a complete scan did not
-        find. Returns False, changing nothing, when the occurrence moved
-        or retired since the scan read it, or its file (or a file with its
-        uniq in its folder's ``cur``/``new``) is there now: a rename the
-        watcher has not reported yet is not a removal."""
+    def retire_vanished_occurrence(
+        self, occurrence_id: int, relative_path: str, *, inventory=None
+    ) -> bool:
+        inventory = inventory if inventory is not None else FolderInventory()
+        path = Path(self._absolute(relative_path))
+        inventory.candidates(path)
         with self.transaction():
-            if resolve_current_path(Path(self._absolute(relative_path))) is not None:
+            candidates = inventory.candidates(path)
+            if candidates is None or candidates:
                 return False
             cur = self._conn.execute(
                 "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
@@ -4202,7 +4290,7 @@ class Database:
 
     @_synchronized
     def retire_mismatched_occurrence(
-        self, occurrence_id: int, relative_path: str, *, identity: tuple[int, int, int]
+        self, occurrence_id: int, relative_path: str, *, identity: tuple[int, int, int, int, int]
     ) -> bool:
         """Retire an active occurrence whose file is still there but whose
         bytes a content-hash check proved no longer match its claimant
@@ -4232,45 +4320,26 @@ class Database:
             return cur.rowcount > 0
 
     @_synchronized
-    def retire_mismatched_rename(self, occurrence_id: int, filepath: str) -> bool:
-        """Retire an active occurrence whose rename destination the
-        watcher directly verified does not hold its bytes
-        (``occurrence_scan.verify_rename_bytes``, #1612 round 13).
-        ``filepath`` is the occurrence's absolute source path (as
-        ``find_active_occurrence`` takes it), converted to a locator the
-        same way ``_active_at`` does. Unlike ``retire_vanished_occurrence``
-        (no file with the occurrence's uniq anywhere in its folder) and
-        ``retire_mismatched_occurrence`` (the file is still at the same
-        path), this is for an observed rename whose destination's
-        content was already hashed and found not to be this claimant's:
-        the watcher's own ``on_moved`` handler, not a periodic scan.
-        Whatever the destination's bytes are now, they already were not
-        this occurrence's at verification time, so nothing about the
-        destination needs re-checking here — only that the occurrence
-        itself has not moved or retired since it was read (the same
-        ``state = 'active' AND relative_path = ?`` guard every other
-        occurrence write uses), and that ``filepath`` itself (the
-        occurrence's exact *source* path, not its Maildir uniq — a
-        mismatched candidate sharing that uniq is the whole reason this
-        path exists, so ``resolve_current_path``'s uniq-wide search
-        would wrongly see the proven mismatch itself as "still there"
-        and refuse every call) is still absent now (#1612 round 16): the
-        watcher's own rename observation makes that true by
-        construction, but the periodic scan's missed-rename case reads
-        it well before this transaction, and the exact source can be
-        restored in between. Returns False, changing nothing, when
-        either has changed, or when ``filepath`` lies outside the
-        account's Maildir root."""
+    def retire_mismatched_rename(
+        self, occurrence_id: int, filepath: str, *, proven=None, inventory=None
+    ) -> bool:
+        """Retire only while all current same-uniq candidates are proven mismatches."""
+        if not proven:
+            return False
+        inventory = inventory if inventory is not None else FolderInventory()
+        path = Path(filepath)
+        inventory.candidates(path)
         with self.transaction():
             try:
                 where = locate(filepath, self.account.maildir_root)
             except OccurrenceLocatorError:
                 return False
-            try:
-                restored = Path(self._absolute(where.relative_path)).exists()
-            except OSError:
+            candidates = inventory.candidates(path)
+            if candidates is None or path.exists():
                 return False
-            if restored:
+            if any(not _same_file(p, identity) for p, identity in proven.items()):
+                return False
+            if any(str(p) not in proven for p in candidates):
                 return False
             cur = self._conn.execute(
                 "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
@@ -4281,7 +4350,7 @@ class Database:
 
     @_synchronized
     def bind_found_copy(
-        self, claimant_id: str, filepath: str, *, identity: tuple[int, int, int]
+        self, claimant_id: str, filepath: str, *, identity: tuple[int, int, int, int, int]
     ) -> bool:
         """Bind a file the scan found, whose bytes it verified are
         ``claimant_id``'s, as an occurrence with provenance ``scan``.
@@ -4355,6 +4424,19 @@ class Database:
                 (datetime.now(UTC).isoformat(), *params),
             )
         return int(new)
+
+    @_synchronized
+    def threads_with_pending_deletions(self, thread_ids: list[str]) -> set[str]:
+        """Which tracked threads still have a deletion obligation, including grace."""
+        return {
+            row[0]
+            for row in self._conn.execute(
+                "SELECT DISTINCT m.thread_id FROM messages m "
+                "JOIN pending_deletions p ON p.claimant_id = m.claimant_id "
+                "WHERE m.thread_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(thread_ids),),
+            )
+        }
 
     @_synchronized
     def reapable_messages(self, cutoff_iso: str) -> list[sqlite3.Row]:
@@ -4432,8 +4514,7 @@ class Database:
             paths.setdefault(by_hash[row["content_hash"]], []).append(row["filepath"])
         return paths
 
-    @staticmethod
-    def _unmark_paths(cur: sqlite3.Cursor, filepaths: list[str]) -> None:
+    def _unmark_paths(self, cur: sqlite3.Cursor, filepaths: list[str]) -> None:
         """Drop the ``indexed_files`` and ``indexing_jobs`` rows of
         ``filepaths``: the paths of a message being reaped, its
         occurrences' and every other path recorded with its bytes (#1102).
@@ -4447,6 +4528,8 @@ class Database:
         caller owns the transaction.
         """
         if filepaths:
+            for filepath in filepaths:
+                self._missing_job_checks.pop(filepath, None)
             paths = json.dumps(sorted(set(filepaths)))
             for table in ("indexed_files", "indexing_jobs"):
                 # Only fixed table names are interpolated; values are bound.
@@ -4681,7 +4764,7 @@ class Database:
         cur: sqlite3.Cursor,
         old_path: str,
         new_path: str,
-        verified_identity: tuple[int, int, int] | None,
+        verified_identity: tuple[int, int, int, int, int] | None,
     ) -> tuple[str | None, bool]:
         """Carry the occurrence at ``old_path`` through a rename whose
         bytes are known to be unchanged (an observed watcher event, or a
@@ -4717,7 +4800,7 @@ class Database:
         removes the message's tombstones when the move leaves it live.
 
         An active occurrence at ``old_path`` is carried forward only when
-        ``verified_identity`` (size, mtime, inode, captured by the caller
+        ``verified_identity`` (size, mtime, inode, ctime, device, captured by the caller
         when it verified ``new_path``'s bytes against the occurrence's
         claimant, ``occurrence_scan.verify_rename_bytes``) still matches
         ``new_path`` now, inside this transaction (#1612): a stale
@@ -4736,7 +4819,7 @@ class Database:
         now = datetime.now(UTC).isoformat()
         if row is None:
             prior = cur.execute(
-                "SELECT m.claimant_id, f.size, f.mtime_ns, f.content_hash FROM indexed_files f "
+                "SELECT m.claimant_id, m.size_bytes AS message_size, f.size, f.mtime_ns, f.content_hash FROM indexed_files f "
                 "JOIN messages m ON m.content_hash = f.content_hash "
                 "WHERE f.filepath = ? ORDER BY m.claimant_id LIMIT 1",
                 (old_path,),
@@ -4754,11 +4837,13 @@ class Database:
                 st = os.stat(new_path)
             except OSError:
                 return None, True
+            if prior["message_size"] is None or st.st_size != prior["message_size"]:
+                return None, True
             if (st.st_size, st.st_mtime_ns) != (prior["size"], prior["mtime_ns"]):
                 return None, True
-            identity = (st.st_size, st.st_mtime_ns, st.st_ino)
+            identity = (st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, st.st_dev)
             try:
-                if _sha256(new_path) != prior["content_hash"]:
+                if _sha256(new_path, identity) != prior["content_hash"]:
                     return None, True
             except OSError:
                 return None, True
@@ -5069,7 +5154,7 @@ class Database:
         new_path: str,
         *,
         move_occurrence: bool = False,
-        verified_identity: tuple[int, int, int] | None = None,
+        verified_identity: tuple[int, int, int, int, int] | None = None,
     ) -> str | None:
         """Carry a file's rows through a Maildir rename: its
         ``indexed_files`` record (identity columns kept: mbsync renames
@@ -5090,7 +5175,7 @@ class Database:
         first, ``move_verified_occurrence``).
 
         When an active occurrence exists at ``old_path``,
-        ``verified_identity`` (``new_path``'s size, mtime and inode,
+        ``verified_identity`` (``new_path``'s size, mtime, inode, ctime and device,
         captured by the caller when it verified the destination's bytes
         against the occurrence's claimant, ``occurrence_scan.
         verify_rename_bytes``) is re-checked here, inside the
@@ -5114,7 +5199,7 @@ class Database:
         old_path: str,
         new_path: str,
         move_occurrence: bool,
-        verified_identity: tuple[int, int, int] | None = None,
+        verified_identity: tuple[int, int, int, int, int] | None = None,
     ) -> str | None:
         """``update_filepath``'s writes, in the caller's transaction."""
         claimant_id: str | None = None
@@ -5155,6 +5240,8 @@ class Database:
                 "VALUES (?, datetime('now'), ?, ?, ?)",
                 (new_path, prior["size"], prior["mtime_ns"], prior["content_hash"]),
             )
+        self._missing_job_checks.pop(old_path, None)
+        self._missing_job_checks.pop(new_path, None)
         # The file's queue row moves too, retry or dead state intact: a
         # rename of a file whose Phase 1 committed (so the path is indexed
         # and ``on_moved`` does not re-enqueue it) but whose Phase 2 is
@@ -5194,7 +5281,7 @@ class Database:
         *,
         grace_cutoff: str | None = None,
         copy_paths: Sequence[str] = (),
-        listings: dict[Path, dict[str, Path]] | None = None,
+        listings: FolderInventory | None = None,
     ) -> bool:
         """Remove a thread and every derived row. Used when the last message
         in a thread has been reaped.
@@ -5211,6 +5298,14 @@ class Database:
         messages' occurrence paths (see ``_unmark_paths``).
         """
         cur = self._conn.cursor()
+        listings = listings if listings is not None else FolderInventory()
+        ids = [
+            r[0]
+            for r in cur.execute(
+                "SELECT claimant_id FROM message_thread_map WHERE thread_id = ?", (thread_id,)
+            )
+        ]
+        checks = self._prepare_restore_evidence(cur, ids, copy_paths, listings)
         try:
             cur.execute("BEGIN IMMEDIATE")
             if self._has_unreapable_messages(
@@ -5226,6 +5321,7 @@ class Database:
                 ],
                 copy_paths,
                 listings,
+                checks,
             ):
                 self._conn.rollback()
                 return False
@@ -5304,43 +5400,75 @@ class Database:
             params.extend(claimant_ids)
         return cur.execute(sql + " LIMIT 1", params).fetchone() is not None
 
-    def _restored_on_disk(
-        self,
-        cur: sqlite3.Cursor,
-        claimant_ids: list[str],
-        copy_paths: Sequence[str],
-        listings: dict[Path, dict[str, Path]] | None,
-    ) -> bool:
-        """Whether a file of ``claimant_ids`` is back on disk outside the
-        trash: one of the paths the reap would unmark (``_occurrence_paths``
-        and ``copy_paths``), or the same name with the ``T`` flag dropped
-        or in its folder's other ``cur``/``new`` directory (what an
-        upstream restore renames it to). Read inside the reap transaction
-        (review round 4 on #1612): a copy restored after the sweep is not
-        an occurrence yet, and reaping would unmark it, so the message
-        waits for the next sweep, which binds it. A constant number of
-        ``stat`` calls per path; with ``listings``, the reaper's per-pass
-        cache of directory listings (``resolve_current_path``), a file
-        with the path's uniq under any flags too (a restore that changed
-        other flags, review round 5), each directory listed at most once
-        per pass (#336)."""
-        for path in [*self._occurrence_paths(cur, claimant_ids), *copy_paths]:
-            if any(
-                os.path.exists(candidate) and not is_trashed(candidate)
-                for candidate in _restore_names(Path(path))
-            ):
-                restored = True
-            elif listings is not None:
-                current = resolve_current_path(Path(path), listings)
-                restored = current is not None and current.exists() and not is_trashed(current)
-            else:
-                restored = False
-            if restored:
-                log.info(
-                    "reaper: kept a message whose file is back on disk since the sweep; "
-                    "the next sweep binds it"
+    def _prepare_restore_evidence(self, cur, claimant_ids, copy_paths, inventory):
+        """Verify current and historical locators before entering the reap write."""
+        rows = cur.execute(
+            "SELECT o.relative_path, m.content_hash, m.size_bytes FROM message_occurrences o "
+            "JOIN messages m ON m.claimant_id = o.claimant_id "
+            "WHERE o.account_id = ? AND o.claimant_id IN (SELECT value FROM json_each(?))",
+            (self.account_id, json.dumps(claimant_ids)),
+        ).fetchall()
+        sources = [
+            (Path(self._absolute(r["relative_path"])), r["content_hash"], r["size_bytes"])
+            for r in rows
+        ]
+        for path in copy_paths:
+            record = cur.execute(
+                "SELECT content_hash, size FROM indexed_files WHERE filepath = ?", (path,)
+            ).fetchone()
+            sources.append(
+                (
+                    Path(path),
+                    record["content_hash"] if record else None,
+                    record["size"] if record else None,
                 )
+            )
+        checks: list[tuple[Path, dict[str, tuple[FileIdentity, bool | None]] | None]] = []
+        for path, expected, size in sources:
+            candidates = inventory.candidates(path)
+            if candidates is None:
+                checks.append((path, None))
+                continue
+            proofs: dict[str, tuple[FileIdentity, bool | None]] = {}
+            for candidate in candidates:
+                if is_trashed(candidate):
+                    continue
+                identity = current_identity(candidate)
+                if identity is None:
+                    continue
+                if size is not None and identity[0] != size:
+                    proofs[str(candidate)] = identity, False
+                    continue
+                digest = inventory.digest(candidate, identity)
+                matches = (
+                    digest == expected if digest is not None and expected is not None else None
+                )
+                proofs[str(candidate)] = identity, matches
+            checks.append((path, proofs))
+        return checks
+
+    def _restored_on_disk(self, cur, claimant_ids, copy_paths, listings, checks=None) -> bool:
+        """Unknown, changed, or matching historical copies conservatively prevent reaping."""
+        inventory = listings if listings is not None else FolderInventory()
+        if checks is None:
+            checks = self._prepare_restore_evidence(cur, claimant_ids, copy_paths, inventory)
+        for path, proofs in checks:
+            candidates = inventory.candidates(path)
+            if proofs is None or candidates is None:
+                log.info("reaper: restore verification incomplete; retrying next pass")
                 return True
+            for candidate in candidates:
+                if is_trashed(candidate):
+                    continue
+                proof = proofs.get(str(candidate))
+                if proof is None or proof[1] is None or not _same_file(str(candidate), proof[0]):
+                    log.info("reaper: restore verification incomplete; retrying next pass")
+                    return True
+                if proof[1]:
+                    log.info(
+                        "reaper: kept a message whose file is back on disk since the sweep; the next sweep binds it"
+                    )
+                    return True
         return False
 
     @_synchronized
@@ -5352,7 +5480,7 @@ class Database:
         *,
         grace_cutoff: str | None = None,
         copy_paths: Sequence[str] = (),
-        listings: dict[Path, dict[str, Path]] | None = None,
+        listings: FolderInventory | None = None,
     ) -> list[str] | None:
         """Atomically rewrite a thread and remove reaped messages.
 
@@ -5380,12 +5508,14 @@ class Database:
         occurrence paths (see ``_unmark_paths``).
         """
         cur = self._conn.cursor()
+        listings = listings if listings is not None else FolderInventory()
+        checks = self._prepare_restore_evidence(cur, reaped_claimant_ids, copy_paths, listings)
         removed: list[str] = []
         try:
             cur.execute("BEGIN IMMEDIATE")
             if self._has_unreapable_messages(
                 cur, thread.thread_id, reaped_claimant_ids, grace_cutoff=grace_cutoff
-            ) or self._restored_on_disk(cur, reaped_claimant_ids, copy_paths, listings):
+            ) or self._restored_on_disk(cur, reaped_claimant_ids, copy_paths, listings, checks):
                 self._conn.rollback()
                 return None
             self._rewrite_thread_row(cur, thread, embedding)
