@@ -478,6 +478,10 @@ IDENTITY_SCHEMA_STATEMENTS = (
         PRIMARY KEY (account_id, generation)
     )
     """,
+    # One open generation per account: an older scan's late write must
+    # never undo what a newer complete scan retired.
+    "CREATE UNIQUE INDEX idx_label_scan_generations_open "
+    "ON label_scan_generations(account_id) WHERE status = 'in_progress'",
     f"""
     CREATE TABLE label_membership_observations (
         account_id         INTEGER NOT NULL,
@@ -4344,6 +4348,12 @@ class Database:
         """Open the next label scan generation for this account and
         return its number."""
         with self.transaction():
+            if self._conn.execute(
+                "SELECT 1 FROM label_scan_generations "
+                "WHERE account_id = ? AND status = 'in_progress'",
+                (self.account_id,),
+            ).fetchone():
+                raise ValueError("a label scan generation is already open")
             generation = self._conn.execute(
                 "SELECT COALESCE(MAX(generation), 0) + 1 FROM label_scan_generations "
                 "WHERE account_id = ?",

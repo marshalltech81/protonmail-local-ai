@@ -1706,7 +1706,7 @@ stores what a policy read from header evidence, and accepts nothing.
   generation retires a membership (a trigger enforces it); a partial,
   failed or interrupted one only adds. An account with no complete
   generation reads as unavailable, which is not the same as having no
-  label. Nothing writes generations yet (#1599).
+  label. At most one generation per account is open at a time (a unique index enforces it), so an older scan cannot undo what a newer complete scan retired. Nothing writes generations yet (#1599).
 - **Binding.** An assessment binds the account, the occurrence, its
   claimant (and so the verified full content hash) and the policy
   version to a reading of stored headers. It does **not** prove that the

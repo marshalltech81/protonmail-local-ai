@@ -841,7 +841,30 @@ class TestLabelObservations:
         assert joined == []
 
     def test_generations_are_numbered_per_account_in_order(self, db):
-        assert [db.begin_label_generation() for _ in range(3)] == [1, 2, 3]
+        numbers = []
+        for _ in range(3):
+            numbers.append(db.begin_label_generation())
+            db.finish_label_generation(numbers[-1], "partial")
+        assert numbers == [1, 2, 3]
+
+    def test_a_second_open_generation_is_refused(self, db):
+        # An older scan's late write must never undo what a newer complete
+        # scan retired, so two generations are never open at once.
+        g1 = db.begin_label_generation()
+        db.record_label_memberships(g1, [("A1", _LABEL)])
+        with pytest.raises(ValueError, match="already open"):
+            db.begin_label_generation()
+        db.finish_label_generation(g1, "complete")
+        assert db.begin_label_generation() == g1 + 1
+
+    def test_the_database_refuses_two_open_generations_for_one_account(self, db):
+        db.begin_label_generation()
+        with pytest.raises(sqlite3.IntegrityError):
+            db._conn.execute(
+                "INSERT INTO label_scan_generations (account_id, generation, status, started_at) "
+                "VALUES (?, 2, 'in_progress', 't')",
+                (db.account_id,),
+            )
 
     def test_a_generation_open_at_startup_is_interrupted(self, tmp_path, caplog):
         caplog.set_level(logging.INFO)

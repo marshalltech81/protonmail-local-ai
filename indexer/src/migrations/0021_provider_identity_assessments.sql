@@ -100,6 +100,8 @@ CREATE TABLE label_scan_generations (
     CHECK ((status = 'in_progress') = (finished_at IS NULL)),
     PRIMARY KEY (account_id, generation)
 );
+CREATE UNIQUE INDEX idx_label_scan_generations_open
+    ON label_scan_generations(account_id) WHERE status = 'in_progress';
 CREATE TABLE label_membership_observations (
     account_id         INTEGER NOT NULL,
     provider_id        TEXT NOT NULL CHECK (length(provider_id) BETWEEN 1 AND 256 AND provider_id NOT GLOB '*[^!-~]*'),
