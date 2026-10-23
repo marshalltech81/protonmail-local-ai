@@ -290,8 +290,8 @@ class TestFrames:
     @pytest.mark.parametrize(
         ("name", "status", "extractor"),
         [
-            ("pdf-digital", STATUS_SUCCESS, "pdf-digital@6"),
-            ("pdf-ocr", STATUS_SUCCESS, "pdf-ocr@6"),
+            ("pdf-digital", STATUS_SUCCESS, "pdf-digital@7"),
+            ("pdf-ocr", STATUS_SUCCESS, "pdf-ocr@7"),
             ("pdf-ocr-disabled", STATUS_UNSUPPORTED, None),
         ],
     )
@@ -405,7 +405,7 @@ class TestFrames:
         result = _extract(b"%PDF-1.7")
         assert (result.status, result.extractor, result.text_complete) == (
             STATUS_SUCCESS,
-            "pdf-digital@6",
+            "pdf-digital@7",
             False,
         )
         [line] = [r for r in caplog.records if "OCR fallback failed" in r.getMessage()]
@@ -648,7 +648,7 @@ class TestTextCeiling:
         caplog.set_level("DEBUG")
         monkeypatch.setattr(pdf_child, "extract", lambda *_a, **_k: (text, "pdf-digital"))
         result = _extract(b"%PDF-1.7", max_extracted_chars=setting)
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@6")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@7")
         assert result.text == stored
         assert result.text_complete is False
         assert result.extracted_chars_cap == cap
@@ -756,8 +756,8 @@ class TestOcrPhaseLimit:
         ("layout", "status", "extractor", "error"),
         [
             # A mixed PDF keeps its digital text, as on any OCR failure.
-            ("ds", STATUS_SUCCESS, "pdf-digital@6", None),
-            ("ss", STATUS_FAILED, "pdf@6", "PdfOcrMemoryBudgetError"),
+            ("ds", STATUS_SUCCESS, "pdf-digital@7", None),
+            ("ss", STATUS_FAILED, "pdf@7", "PdfOcrMemoryBudgetError"),
         ],
     )
     def test_over_the_budget_the_ocr_fallback_fails_without_a_tool(
@@ -1049,7 +1049,7 @@ class TestLimitsInTheImage:
         finally:
             done.set()
             watcher.join()
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-ocr@6")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-ocr@7")
         assert "synthetic" in (result.text or "").lower()
         assert progress == 3 + 2
         seen = [(r.name.split(".")[0], r.read_text()) for r in records.iterdir()]
