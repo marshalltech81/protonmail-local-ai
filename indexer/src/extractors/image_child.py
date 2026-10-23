@@ -103,12 +103,13 @@ _SEPARATOR = "\n\n"
 # The modes ``pytesseract`` can pass on: it saves each frame as PNG
 # before running Tesseract, after pasting any alpha channel onto white
 # (``RGBA``, ``LA``, ``PA``). Any other mode Pillow cannot write as PNG
-# (CMYK, YCbCr, HSV, F, the premultiplied and padded RGB/L modes) raises
-# ``OSError`` on that save (#1400). ``LAB`` is left out: Pillow cannot
+# (CMYK, YCbCr, HSV, F, ``I`` since Pillow 13, the premultiplied and
+# padded RGB/L modes) raises ``OSError`` on that save (#1400). ``LAB`` is
+# left out: Pillow cannot
 # write it either, and pytesseract would take its "A" band for alpha and
 # paste through it. ``tests/test_image_child.py`` checks this set against
 # Pillow's own save for each mode.
-_PNG_MODES = frozenset({"1", "L", "P", "PA", "LA", "RGB", "RGBA", "I", "I;16", "I;16B"})
+_PNG_MODES = frozenset({"1", "L", "P", "PA", "LA", "RGB", "RGBA", "I;16", "I;16B"})
 
 # The formats ``Image.draft`` scales down while decoding (libjpeg's DCT
 # scaling), and the factors it offers.
