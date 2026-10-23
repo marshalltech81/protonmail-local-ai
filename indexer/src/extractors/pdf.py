@@ -143,12 +143,15 @@ CHILD_MAX_ADDRESS_SPACE_BYTES = 2048 * 1024 * 1024
 # child's mapped address space at that point plus ``_OCR_CHILD_HEADROOM_BYTES``
 # for what it still allocates (one decoded page, pytesseract's PNG) and
 # ``_OCR_TOOL_ADDRESS_SPACE_BYTES``, the tools' measured need with a
-# margin. Plainly measured in the indexer image: Tesseract needs 240 MiB
+# margin. The measurements below are historical, from pypdf 6.19 in
+# the indexer image. Since 6.21, the 2,000,000-token content-stream cap
+# stops the 71 MiB digital page before that peak; these memory budgets
+# are retained, not re-measured. Tesseract needed 240 MiB
 # on a page of noise at the 10,000,000-pixel render budget (208 MiB of
-# text), ``pdftoppm`` 80 MiB and ``pdfinfo`` 48 MiB; the child maps at
-# most 274 MiB when OCR starts, after the heaviest digital page (71 MiB
-# of path operators, 1,829 MiB at its peak, released by then), and grows
-# by at most 17 MiB while it OCRs. A child that maps more than
+# text), ``pdftoppm`` 80 MiB and ``pdfinfo`` 48 MiB; the child mapped at
+# most 274 MiB when OCR started, after the heaviest digital page (71 MiB
+# of path operators, 1,829 MiB at its peak, released by then), and grew
+# by at most 17 MiB while it OCR'd. A child that maps more than
 # ``_OCR_MAX_ADDRESS_SPACE_BYTES`` less the headroom when OCR would start
 # does not start it (``pdf_child.PdfOcrMemoryBudgetError``), so the
 # child and one tool together stay under twice that limit.
