@@ -298,6 +298,12 @@ class MessageHeaders(_Output):
     to_count: int
     cc: list[Participant]
     cc_count: int
+    bcc: list[Participant] = Field(
+        description="Observed claimed Bcc header participants; not an exhaustive delivery-recipient list."
+    )
+    bcc_count: int = Field(
+        description="Distinct retained claimed Bcc addresses before display limits; not the original recipient total."
+    )
     sender_ambiguous: bool | None = Field(
         description=_SENDER_AMBIGUOUS_DESCRIPTION.format(subject="The message's")
     )
@@ -330,7 +336,7 @@ MetadataStatus = Literal[
 
 class QueriedMessage(ListedMessage):
     direction: Literal["inbound", "outbound", "unknown"] = Field(
-        description="Claimed direction from configured own addresses; unknown includes own-only visible recipients until Bcc is indexed. Headers are unauthenticated; folders do not classify direction."
+        description="Claimed direction from configured own addresses; unknown includes own-only recipients without exhaustive Bcc provenance. Headers are unauthenticated; folders do not classify direction."
     )
 
     list_id: str | None = Field(
@@ -400,6 +406,8 @@ def message_headers(m: MessageRecord) -> MessageHeaders:
         to_count=len(m.to) if m.to_count is None else m.to_count,
         cc=listed(m.cc, people),
         cc_count=len(m.cc) if m.cc_count is None else m.cc_count,
+        bcc=listed(m.bcc, people),
+        bcc_count=len(m.bcc) if m.bcc_count is None else m.bcc_count,
         sender_ambiguous=m.sender_ambiguous,
         source_file=source(m.source_file),
     )

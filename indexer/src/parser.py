@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from . import full_body
 from .extractors import (
     has_container_prefix,
     note_parser_address_repeats,
@@ -107,6 +108,8 @@ type DateStatus = Literal["parsed", "missing", "invalid"]
 # * ``participant_names``: a display name past the first for its (role,
 #   address), past the ``MAX_EXTRA_PARTICIPANT_*`` budget, is not stored
 #   (#1140); the address and its first name are kept;
+# * ``bcc_participant_names``: the same shared name budget dropped a Bcc
+#   name; tracked separately so visible-role name completeness is unchanged;
 # * ``subject_length``: a decoded subject over ``SUBJECT_MAX_CHARS`` is
 #   cut to the cap (#902);
 # * ``in_reply_to_length`` / ``references_length``: an In-Reply-To, or
@@ -116,7 +119,7 @@ type DateStatus = Literal["parsed", "missing", "invalid"]
 # Two names count repeated headers, which lose nothing (#1144) and are
 # logged on their own lines, not the cap line (``PARSE_REPEATS``):
 #
-# * ``address_repeated``: a To or Cc header after the first of its name,
+# * ``address_repeated``: a To, Cc or Bcc header after the first of its name,
 #   merged into that role (recovered);
 # * ``from_repeated``: a From header after the first, counted and never
 #   parsed: the first is kept and the sender flagged ambiguous.
@@ -142,6 +145,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "address_count",
     "address_unparsed",
     "participant_names",
+    "bcc_participant_names",
     "subject_length",
     "headers_budget",
     "headers_parse",
@@ -580,6 +584,8 @@ class Message:
     # RFC 5322 allows several. ``from_addr`` stays the first author for the
     # thread-level sender lists.
     from_addrs: list[str] = field(default_factory=list)
+    # Observed Bcc header participants; capture does not prove exhaustiveness.
+    bcc_addrs: list[str] = field(default_factory=list)
     # File identity captured at parse time. ``size`` / ``mtime_ns``
     # / ``content_hash`` feed ``indexed_files`` so the reconciler can tell a
     # flag-only rename from a genuine content change without re-reading every
@@ -619,8 +625,8 @@ class Message:
     # ``message_participant_names``. ``None`` for a Message built without
     # parsing (only in tests); the writer then derives them itself.
     participant_names: list[tuple[str, str, str]] | None = None
-    # False when the ``MAX_EXTRA_PARTICIPANT_*`` budget dropped a name
-    # from ``participant_names`` (#1140), stored as
+    # False when the ``MAX_EXTRA_PARTICIPANT_*`` budget dropped a visible
+    # From/To/Cc name from ``participant_names`` (#1140), stored as
     # ``messages.participant_names_complete``. Read only with
     # ``participant_names``.
     participant_names_complete: bool = True
@@ -638,12 +644,14 @@ class Message:
     from_addresses_complete: bool = True
     to_addresses_complete: bool = True
     cc_addresses_complete: bool = True
+    bcc_addresses_complete: bool = True
     attachments_manifest_complete: bool = True
     body_complete: bool = True
     # The parse's nonzero ``PARSE_CAPS`` counts by name, in
     # ``PARSE_CAPS`` order: fixed names and integers only, stored as
     # ``messages.caps_json``.
     parse_caps: dict[str, int] = field(default_factory=dict)
+    full_body: full_body.Capture | None = field(default=None, repr=False)
 
     @property
     def effective_date(self) -> datetime:
@@ -688,7 +696,13 @@ class SourceMetadata:
     path: str
 
 
-def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
+def parse_email(
+    path: Path,
+    maildir_root: Path | None = None,
+    *,
+    capture_deadline: float | None = None,
+    capture_full_body: bool = True,
+) -> Message | None:
     """Parse a single .eml file from Maildir into a Message object.
 
     The Maildir adapter (#1077): reads the file under the size cap,
@@ -714,6 +728,10 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     permanent "no Message-ID" outcome and dead-letters without retry.
     Content-pathology errors propagate from ``parse_email_bytes``; see
     there.
+
+    ``capture_full_body=False`` (the reaper, which rebuilds a thread from
+    its survivors' body text and attachments) builds no full decoded body
+    capture; see ``parse_email_bytes``.
 
     Files larger than ``INDEXER_PARSE_MAX_BYTES`` (default 50 MB) raise
     ``OversizedMessageError`` either at the fstat pre-check or while
@@ -788,16 +806,31 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         mtime_ns=stat.st_mtime_ns if stat is not None else None,
         path=str(path),
     )
-    return parse_email_bytes(raw, source)
+    if not capture_full_body:
+        return parse_email_bytes(raw, source, capture_full_body=False)
+    if capture_deadline is None:
+        return parse_email_bytes(raw, source)
+    return parse_email_bytes(raw, source, capture_deadline=capture_deadline)
 
 
-def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
+def parse_email_bytes(
+    raw: bytes,
+    source: SourceMetadata,
+    *,
+    capture_deadline: float | None = None,
+    capture_full_body: bool = True,
+) -> Message | None:
     """Parse an RFC 822 message from its bytes into a Message object.
 
     The pure half of ``parse_email`` (#1077): no filesystem access, so
     a parser test needs no file and another source adapter can plug in
     here. ``source`` is what the adapter knows beyond the bytes; its
     ``path`` names the message in log lines (never any of its content).
+
+    ``capture_full_body=False`` skips the full decoded body capture
+    (``Message.full_body`` is ``None``): no source is collected or
+    decoded for it and the additive HTML child pass does not run. The
+    body text and attachments are the same as a capturing parse returns.
 
     Returns ``None`` for a message without a usable Message-ID (none, or
     one over ``MESSAGE_ID_MAX_CHARS``), which the worker dead-letters.
@@ -869,6 +902,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
             ("from", addresses.from_addrs or [addresses.from_addr]),
             ("to", addresses.to_addrs),
             ("cc", addresses.cc_addrs),
+            ("bcc", addresses.bcc_addrs),
         ),
         caps,
     )
@@ -897,7 +931,10 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         )
     occurred_at = _parse_received_date(msg)
 
-    body_text, attachments = _extract_body_and_attachments(msg, caps=caps, raw=raw)
+    sources: list[full_body.Part] | None = [] if capture_full_body else None
+    body_text, attachments = _extract_body_and_attachments(
+        msg, caps=caps, raw=raw, full_parts=sources, capture_deadline=capture_deadline
+    )
     lost = [name for name in PARSE_CAPS if caps[name] and name not in PARSE_REPEATS]
     if lost:
         # Fixed names and counts only, with the Maildir path: the
@@ -945,6 +982,23 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     # ``mtime_ns`` is the adapter's (see ``parse_email``).
     size = len(raw)
     content_hash = hashlib.sha256(raw).hexdigest()
+    captured = (
+        full_body.prepare(
+            sources,
+            claimant_id(message_id, content_hash),
+            complete=not (caps["mime_parts"] or caps["body_parts"]),
+            deadline=capture_deadline,
+        )
+        if sources is not None
+        else None
+    )
+    if captured is not None and not captured.complete:
+        full_body.warn(
+            "full decoded body evidence incomplete: parts=%d bytes=%d loss_parts=%d",
+            len(captured.parts),
+            captured.source_bytes,
+            sum(bool(part.losses) for part in captured.parts),
+        )
 
     return Message(
         message_id=message_id,
@@ -955,6 +1009,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         from_addrs=addresses.from_addrs,
         to_addrs=addresses.to_addrs,
         cc_addrs=addresses.cc_addrs,
+        bcc_addrs=addresses.bcc_addrs,
         sender_ambiguous=addresses.sender_ambiguous,
         participant_names=names,
         participant_names_complete=not caps["participant_names"],
@@ -964,6 +1019,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         from_addresses_complete=addresses.from_complete,
         to_addresses_complete=addresses.to_complete,
         cc_addresses_complete=addresses.cc_complete,
+        bcc_addresses_complete=addresses.bcc_complete,
         attachments_manifest_complete=not any(caps[name] for name in ATTACHMENT_LOSS_CAPS),
         body_complete=not any(caps[name] for name in BODY_LOSS_CAPS),
         parse_caps={name: caps[name] for name in PARSE_CAPS if caps[name]},
@@ -972,6 +1028,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         first_indexed_at=datetime.now(UTC),
         occurred_at=occurred_at,
         body_text=body_text,
+        full_body=captured,
         folder=source.folder,
         filepath=path,
         attachments=attachments,
@@ -1671,6 +1728,9 @@ class _BodyNode:
     # The nearest inline email above (or at) this node that takes part in
     # an alternative's or related's choice, by node index, or -1.
     inline_root: int = -1
+    source_text: str | None = None
+    source_representation: str = "container"
+    source_losses: int = 0
 
 
 def _selects(node: _BodyNode) -> bool:
@@ -1797,6 +1857,8 @@ def _extract_body_and_attachments(
     caps: Counter[str] | None = None,
     walk: BodyWalk | None = None,
     raw: bytes | None = None,
+    full_parts: list[full_body.Part] | None = None,
+    capture_deadline: float | None = None,
 ) -> tuple[str, list[Attachment]]:
     """The message's body text and attachments. ``caps`` (when given)
     counts the content a work cap dropped, by ``PARSE_CAPS`` name. With
@@ -1811,6 +1873,8 @@ def _extract_body_and_attachments(
     attachments: list[Attachment] = []
     nodes: list[_BodyNode] = []
     text_parts = 0
+    full_text_parts = 0
+    full_encoded_bytes = 0
     # Text parts past MAX_BODY_TEXT_PARTS: (node index, plain or not).
     capped: list[tuple[int, bool]] = []
     # In a body-only walk, the text parts whose transfer decoding lost or
@@ -1974,6 +2038,21 @@ def _extract_body_and_attachments(
             node.depth = node_depth
             node.inline_root = inline_root
             nodes.append(node)
+            if ct in ("multipart/alternative", "multipart/related", "message/rfc822"):
+                node.source_representation = {
+                    "multipart/alternative": "alternative",
+                    "multipart/related": "related",
+                    "message/rfc822": "message",
+                }[ct]
+            if part.get_content_maintype() == "multipart" and not part.is_multipart():
+                node.source_losses |= full_body.STRUCTURE_LOSS
+            # A nested part whose first line after the boundary starts with
+            # ``From `` and has no header/body separator has that line moved
+            # into ``get_unixfrom()`` and out of the payload, with no defect.
+            if any(isinstance(d, DROPPED_HEADER_DEFECTS) for d in part.defects) or (
+                part is not msg and part.get_unixfrom() is not None
+            ):
+                node.source_losses |= full_body.STRUCTURE_LOSS
             if parent >= 0 and _selects(nodes[parent]):
                 nodes[parent].children.append(len(nodes) - 1)
             if inline_email is not None:
@@ -2026,6 +2105,8 @@ def _extract_body_and_attachments(
                     part.get_content_maintype() == "message"
                     and encoding not in ("", "7bit", "8bit", "binary")
                 )
+                if skip and node is not None:
+                    node.source_losses |= full_body.STRUCTURE_LOSS
                 frames.append(
                     (
                         (c for c in children if isinstance(c, email.message.Message)),
@@ -2048,15 +2129,48 @@ def _extract_body_and_attachments(
         # content to prefer (#298).
         is_html = ct == "text/html"
         root = part is msg or (bool(inline_roots) and id(part) in inline_roots)
-        if not is_html and not (
+        legacy_text = is_html or (
             ct == "text/plain" or (root and part.get_content_maintype() == "text")
-        ):
+        )
+        capture_text = full_parts is not None and part.get_content_maintype() == "text"
+        if capture_text:
+            node.source_representation = (
+                "html" if is_html else "plain" if ct == "text/plain" else "other"
+            )
+            node.source_text = ""
+        if not legacy_text and not capture_text:
             continue
-        if text_parts >= max_text_parts:
+        if legacy_text and text_parts >= max_text_parts:
             # Counted below, once the body's selection is known.
             capped.append((len(nodes) - 1, not is_html))
+            node.source_losses |= full_body.BUDGET_LOSS
             continue
-        text_parts += 1
+        if legacy_text:
+            text_parts += 1
+        if capture_text:
+            # The encoded payload is already in memory and bounds the bytes
+            # the transfer decode returns, so the shared source-byte budget
+            # is charged before any decode: a leaf the legacy body ignores
+            # is decoded for the capture alone, and ``full_body.prepare``
+            # would only cut it after the whole decode. It can cut a leaf
+            # whose decoded text would have fit (base64 shrinks it); that
+            # is a recorded BUDGET_LOSS, never silent. A legacy-body part
+            # is decoded whatever the budget, and ``prepare`` keeps its
+            # prefix. The stored text is read as is: ``get_payload()`` would
+            # decode an 8-bit payload with the sender's charset, which is
+            # the work being avoided (and ``idna`` raises on it).
+            raw_payload = getattr(part, "_payload", None)
+            encoded = len(raw_payload) if isinstance(raw_payload, str | bytes) else 0
+            if full_text_parts >= full_body.MAX_SOURCES or (
+                not legacy_text and full_encoded_bytes + encoded > full_body.MAX_SOURCE_BYTES
+            ):
+                node.source_losses |= full_body.BUDGET_LOSS
+                capture_text = False
+            else:
+                full_text_parts += 1
+                full_encoded_bytes += encoded
+        if not legacy_text and not capture_text:
+            continue
         payload = _decoded_payload(part)
         # A part whose decode lost bytes (``_decode_lost_bytes``), or in
         # an encoding not decoded here (anything unknown can come back as
@@ -2080,10 +2194,22 @@ def _extract_body_and_attachments(
             # envelope (#1311). A message root's headers and envelope
             # are checked where its section head is rendered.
             header_lost.append((len(nodes) - 1, not is_html))
-        fallback: Counter[str] | None = None if walk is None else Counter()
+        fallback: Counter[str] | None = Counter() if walk is not None or capture_text else None
         text = _safe_decode(payload, part.get_content_charset() or "utf-8", fallback)
         if fallback:
             charset_degraded.append((len(nodes) - 1, not is_html))
+        if capture_text:
+            node.source_representation = (
+                "html" if is_html else "plain" if ct == "text/plain" else "other"
+            )
+            if fallback:
+                node.source_losses |= full_body.CHARSET_LOSS
+            if _decode_lost_bytes(part, payload) or _transfer_decode_unchecked(part):
+                node.source_losses |= full_body.TRANSFER_LOSS
+            if not is_html:
+                node.source_text = text
+        if not legacy_text:
+            continue
         if is_html and walk is None:
             # Nothing reads a leaf's text before the walk ends, so the
             # message's HTML parts are converted together below.
@@ -2095,6 +2221,26 @@ def _extract_body_and_attachments(
 
     if html_parts:
         _convert_html_parts(nodes, html_parts, caps)
+        if full_parts is not None:
+            sources = [text for _, text in html_parts]
+            try:
+                texts, cut, losses = full_body.convert_html(sources, capture_deadline)
+            except html_conversion.CHILD_FAILURES as exc:
+                texts, cut = [], False
+                losses = [full_body.CONVERSION_LOSS] * len(sources)
+                reason = exc.type_name if isinstance(exc, ChildError) else type(exc).__name__
+                full_body.warn(
+                    "full HTML body capture failed (%s); sources=%d",
+                    reason,
+                    len(sources),
+                )
+            for position, (index, _) in enumerate(html_parts):
+                node = nodes[index]
+                node.source_representation = "html"
+                node.source_losses |= losses[position]
+                node.source_text = texts[position] if position < len(texts) else ""
+                if position >= len(texts) or (cut and position == len(texts) - 1):
+                    node.source_losses |= full_body.CONVERSION_LOSS
     if walk is not None:
         walk.parts_left -= walked
         walk.text_parts_left -= text_parts
@@ -2111,6 +2257,19 @@ def _extract_body_and_attachments(
             if found is not None or label:
                 walk.nested.append((found, depth))
     body = _assemble_body(nodes)
+    if full_parts is not None:
+        kept = _kept_nodes(nodes)
+        full_parts.extend(
+            full_body.Part(
+                index,
+                node.parent,
+                node.source_representation,
+                kept[index],
+                node.source_text,
+                node.source_losses,
+            )
+            for index, node in enumerate(nodes)
+        )
     if capped:
         lost = _capped_parts_lost(nodes, capped)
         if lost:
@@ -2589,16 +2748,16 @@ _MAX_ADDRESS_ELEMENT_CHARS = 128_000
 _MAX_ADDRESS_CHARS = 998
 
 # One message's address-header budget (#1144), spent by
-# ``_read_address_headers`` across From, To and Cc together, so
+# ``_read_address_headers`` across From, To, Cc and Bcc together, so
 # repeating a header cannot multiply the work. Each dimension the cost
 # depends on has its own limit, checked before the work it bounds:
-# header fields scanned for the three names; occurrences read; raw
+# header fields scanned for the four names; occurrences read; raw
 # characters in all (checked, with the per-value
 # ``_MAX_ADDRESS_HEADER_CHARS``, before an occurrence is fetched,
 # decoded or split, so decoding is linear in at most this much text);
 # elements split and parsed (each element costs at most two
 # ``parseaddr`` calls); and addresses kept, one participant row each.
-# Real mail has one From, To and Cc among a few dozen fields, so these
+# Real mail has one From, To, Cc and Bcc among a few dozen fields, so these
 # only touch crafted messages; what they drop is counted in
 # ``PARSE_CAPS``.
 MAX_ADDRESS_HEADER_FIELDS = 10_000
@@ -2615,7 +2774,7 @@ MAX_MESSAGE_ADDRESSES = 10_000
 # is always kept: at most one per ``message_participants`` row, so the
 # address budget above already bounds it. Each
 # further distinct name for the same (role, address) costs one name and
-# its UTF-8 bytes from this budget, across From, To and Cc together, so
+# its UTF-8 bytes from this budget, across From, To, Cc and Bcc together, so
 # every stored name row and byte past the participant rows themselves is
 # bounded. Real mail rarely writes one address under two names; names
 # past the budget are dropped and counted as ``participant_names`` in
@@ -2630,7 +2789,7 @@ def participant_names(
     """Every distinct display name per (role, address), as
     ``(role, address, name)`` rows in header order (#1140).
 
-    ``roles`` is ``(role, address strings)`` in From, To, Cc order, as
+    ``roles`` is ``(role, address strings)`` in From, To, Cc, Bcc order, as
     the participant writer reads them; ``address`` is the
     ``canonical_addr`` it keys rows by and ``name`` the stripped
     ``parseaddr`` display name it stores, so a participant row's
@@ -2638,7 +2797,8 @@ def participant_names(
     address). Exact duplicates are kept once and
     casing is kept. Names past the first of a (role, address) spend the
     ``MAX_EXTRA_PARTICIPANT_*`` budget; each one refused is counted in
-    ``caps["participant_names"]``. Two ``parseaddr`` calls per address.
+    ``caps["participant_names"]`` (or ``bcc_participant_names`` for Bcc).
+    Two ``parseaddr`` calls per address.
     """
     seen: dict[tuple[str, str], set[str]] = {}
     rows: list[tuple[str, str, str]] = []
@@ -2660,7 +2820,10 @@ def participant_names(
                     extra_names >= MAX_EXTRA_PARTICIPANT_NAMES
                     or extra_bytes + size > MAX_EXTRA_PARTICIPANT_NAME_BYTES
                 ):
-                    caps["participant_names"] += 1
+                    if role == "bcc":
+                        caps["bcc_participant_names"] += 1
+                    else:
+                        caps["participant_names"] += 1
                     continue
                 extra_names += 1
                 extra_bytes += size
@@ -2685,17 +2848,19 @@ class _AddressBudget:
 
 @dataclass
 class _AddressHeaders:
-    """The From, To and Cc of one message (``_read_address_headers``)."""
+    """The From, To, Cc and Bcc of one message (``_read_address_headers``)."""
 
     from_addr: str
     from_addrs: list[str]
     to_addrs: list[str]
     cc_addrs: list[str]
+    bcc_addrs: list[str]
     sender_ambiguous: bool
     # Whether every address of the role was kept (#1086).
     from_complete: bool
     to_complete: bool
     cc_complete: bool
+    bcc_complete: bool
 
 
 def _address_losses(caps: Counter[str]) -> int:
@@ -2704,7 +2869,7 @@ def _address_losses(caps: Counter[str]) -> int:
 
 
 def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _AddressHeaders:
-    """Read From, To and Cc under one ``_AddressBudget`` (#1144).
+    """Read From, To, Cc and Bcc under one ``_AddressBudget`` (#1144).
 
     One pass over the raw header fields (up to
     ``MAX_ADDRESS_HEADER_FIELDS``) collects every occurrence of the three
@@ -2720,7 +2885,7 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
     cut short, and (for From) no later From went unparsed (#1086).
     """
     budget = _AddressBudget()
-    found: dict[str, list[str]] = {"from": [], "to": [], "cc": []}
+    found: dict[str, list[str]] = {"from": [], "to": [], "cc": [], "bcc": []}
     complete = True
     for name, raw in msg.raw_items():
         if budget.fields >= MAX_ADDRESS_HEADER_FIELDS:
@@ -2747,7 +2912,7 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
 
     recipients: dict[str, list[str]] = {}
     recipients_complete: dict[str, bool] = {}
-    for role, header in (("to", "To"), ("cc", "Cc")):
+    for role, header in (("to", "To"), ("cc", "Cc"), ("bcc", "Bcc")):
         addrs: list[str] = []
         lost = _address_losses(caps)
         for index, raw in enumerate(found[role]):
@@ -2765,10 +2930,12 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
         from_addrs=from_addrs,
         to_addrs=recipients["to"],
         cc_addrs=recipients["cc"],
+        bcc_addrs=recipients["bcc"],
         sender_ambiguous=len(found["from"]) > 1 or not complete,
         from_complete=from_complete,
         to_complete=recipients_complete["to"],
         cc_complete=recipients_complete["cc"],
+        bcc_complete=recipients_complete["bcc"],
     )
 
 

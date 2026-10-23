@@ -266,19 +266,19 @@ def test_pdf_rows_before_pypdf_620_are_re_extracted_once(tmp_path, monkeypatch, 
         monkeypatch,
         filename="synthetic.pdf",
         content_type="application/pdf",
-        fresh_extractor="pdf-digital@6",
+        fresh_extractor="pdf-digital@7",
     )
     extractor.assert_called_once()
-    assert (row["extractor"], row["extracted_text"]) == ("pdf-digital@6", "fresh text")
+    assert (row["extractor"], row["extracted_text"]) == ("pdf-digital@7", "fresh text")
     extractor, _ = _process_with_cached_extractor(
         db,
-        "pdf-digital@6",
+        "pdf-digital@7",
         STATUS_SUCCESS,
         "fresh text",
         monkeypatch,
         filename="synthetic.pdf",
         content_type="application/pdf",
-        fresh_extractor="pdf-digital@6",
+        fresh_extractor="pdf-digital@7",
     )
     extractor.assert_not_called()
 
@@ -2179,7 +2179,7 @@ def _encrypted_pdf_case(monkeypatch) -> tuple[bytes, str, str]:
         user_password="SYNTHETIC_USER_PASSWORD",  # pragma: allowlist secret
         algorithm="AES-256",
     )
-    return payload, ENCRYPTED_PDF_ERROR, "pdf@6"
+    return payload, ENCRYPTED_PDF_ERROR, "pdf@7"
 
 
 def _pdf_limit_case(monkeypatch) -> tuple[bytes, str, str]:
@@ -2187,7 +2187,7 @@ def _pdf_limit_case(monkeypatch) -> tuple[bytes, str, str]:
 
     from tests.test_extractors import _deep_page_tree_pdf
 
-    return _deep_page_tree_pdf("SYNTHETIC_TEXT_MARKER"), PDF_LIMIT_ERROR, "pdf@6"
+    return _deep_page_tree_pdf("SYNTHETIC_TEXT_MARKER"), PDF_LIMIT_ERROR, "pdf@7"
 
 
 def _xlsx_budget_case(monkeypatch) -> tuple[bytes, str, str]:
@@ -3052,7 +3052,7 @@ class TestOcrCapOnCacheHits:
         attachment = self._pdf_attachment()
         result = ExtractionResult(
             status=STATUS_SUCCESS,
-            extractor="pdf-ocr@6",
+            extractor="pdf-ocr@7",
             text=f"{self.MARKER} fresh text",
             error=None,
             ocr_pages_skipped=7,
@@ -3425,7 +3425,7 @@ class TestUnrecordedCacheRowsAreRefreshedOnce:
     def test_an_unrecorded_ocr_row_is_kept_while_ocr_is_off(self, tmp_path, monkeypatch):
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(b"%PDF-1.7 x", filename="a.pdf", content_type="application/pdf")
-        self._store(db, attachment, extractor="pdf-ocr@6")
+        self._store(db, attachment, extractor="pdf-ocr@7")
         calls = self._counting(monkeypatch)
         plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
         assert (calls, plan.cached, plan.text_complete) == ([], True, None)

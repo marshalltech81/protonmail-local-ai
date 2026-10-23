@@ -40,6 +40,9 @@ _SCRIPT = Path(__file__).resolve().parents[2] / "mcp-server" / "scripts" / "reco
 # and a statement that did would fail on the benchmark's index. Only the
 # WAL writer creates them (``_WRITER_TABLES``), after every other step.
 _TABLES = (
+    "message_body_parts",
+    "message_body_spans",
+    "message_body_ranges",
     "messages",
     "message_participants",
     "message_participant_names",

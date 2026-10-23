@@ -153,12 +153,15 @@ def test_dates_sizes_and_address_coverage_follow_stored_provenance(tmp_path):
     conn.execute("UPDATE messages SET size_bytes = NULL WHERE message_id = 'p2'")
     conn.commit()
     report = Database(str(path)).get_mailbox_status()["query_capabilities"]
-    for name in ("sent_from", "effective_from", "dated", "sender", "address_is"):
+    for name in ("sent_from", "effective_from", "dated", "sender"):
         assert report[name]["available_messages"] == 1
         assert report[name]["unassessed_messages"] == 1
         assert report[name]["missing_messages"] == 1
     assert report["occurred_from"]["status"] == "supported when present"
     assert report["occurred_from"]["missing_messages"] == 2
+    assert report["address_is"]["available_messages"] == 0
+    assert report["address_is"]["unassessed_messages"] == 1
+    assert report["address_is"]["missing_messages"] == 2
     assert report["size_min"]["unassessed_messages"] == 1
     assert report["recipient"]["status"] == "supported"
     conn.close()

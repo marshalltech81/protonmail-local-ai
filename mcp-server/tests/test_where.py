@@ -97,8 +97,8 @@ class TestModel:
         with pytest.raises(ValidationError):
             _where({"leaf": leaf, "role": "from", "value": "x"})
 
-    @pytest.mark.parametrize("role", ["visible_participant", "recipient", "any", "bcc", "From"])
-    def test_only_the_visible_roles(self, role):
+    @pytest.mark.parametrize("role", ["visible_participant", "From"])
+    def test_only_public_exact_role_names(self, role):
         with pytest.raises(ValidationError):
             _where({"leaf": "address_is", "role": role, "value": "a@example.test"})
 
@@ -149,7 +149,7 @@ class TestModel:
             "list_id_is",
             "precedence_is",
         )
-        assert WHERE_ROLES == ("from", "to", "cc", "visible_recipient")
+        assert WHERE_ROLES == ("from", "to", "cc", "bcc", "visible_recipient", "recipient", "any")
         assert set(WHERE_LEAVES) <= set(predicates.LEAVES)
         assert set(WHERE_ROLES) <= set(predicates.ROLE_SETS)
 

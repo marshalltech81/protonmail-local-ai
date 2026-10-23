@@ -867,6 +867,40 @@ class TestReap:
         # Re-embedding happened
         assert embedder.calls > embed_calls_before
 
+    def test_survivors_are_re_read_without_building_a_full_body_capture(
+        self, db, threader, embedder, reconciler, maildir, monkeypatch
+    ):
+        # The rebuild uses each survivor's body text only: the full decoded
+        # body capture would run the extra HTML pass and hold its sources
+        # for every survivor until the reap ends.
+        from src import full_body
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "orig@example.com", subject="Budget", body="Original body.")
+        _index(orig_path, db, threader)
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "reply@example.com",
+            subject="Re: Budget",
+            body="Reply body.",
+            in_reply_to="orig@example.com",
+            date=datetime(2024, 2, 1, 12, 0, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+        orig_path.rename(maildir / "1700000000.M1.host:2,ST")
+        reconciler.sweep()
+
+        prepared = []
+        real = full_body.prepare
+        monkeypatch.setattr(
+            full_body, "prepare", lambda *a, **k: prepared.append(a) or real(*a, **k)
+        )
+        result = reconciler.reap()
+
+        assert result["threads_rebuilt"] == 1
+        assert prepared == []
+
     def test_backs_off_when_embedder_fails(self, db, threader, embedder, reconciler, maildir):
         orig_path = maildir / "1700000000.M1.host:2,S"
         _write_eml(orig_path, "e1@example.com")
@@ -1050,7 +1084,7 @@ class TestReap:
         # Force a deterministic content-pathology failure on every
         # ``parse_email`` call so the reaper hits the broad
         # ``except Exception`` branch.
-        def _raise_value_error(path, maildir_root=None):
+        def _raise_value_error(path, maildir_root=None, **_kwargs):
             raise ValueError("malformed MIME boundary")
 
         monkeypatch.setattr("src.reconciler.parse_email", _raise_value_error)
@@ -1103,7 +1137,7 @@ class TestReap:
         orig_path.rename(trashed)
         reconciler.sweep()
 
-        def _raise_value_error(path, maildir_root=None):
+        def _raise_value_error(path, maildir_root=None, **_kwargs):
             raise ValueError("malformed MIME boundary")
 
         monkeypatch.setattr("src.reconciler.parse_email", _raise_value_error)
@@ -1156,7 +1190,7 @@ class TestReap:
         orig_path.rename(trashed)
         reconciler.sweep()
 
-        def _raise_value_error(path, maildir_root=None):
+        def _raise_value_error(path, maildir_root=None, **_kwargs):
             raise ValueError("malformed MIME boundary")
 
         monkeypatch.setattr("src.reconciler.parse_email", _raise_value_error)
@@ -1200,7 +1234,7 @@ class TestReap:
         orig_path.rename(trashed)
         reconciler.sweep()
 
-        def _raise_oversized(path, maildir_root=None):
+        def _raise_oversized(path, maildir_root=None, **_kwargs):
             raise OversizedMessageError(path, size=99, cap=10)
 
         monkeypatch.setattr("src.reconciler.parse_email", _raise_oversized)
@@ -1239,7 +1273,7 @@ class TestReap:
         orig_path.rename(trashed)
         reconciler.sweep()
 
-        def _raise_value_error(path, maildir_root=None):
+        def _raise_value_error(path, maildir_root=None, **_kwargs):
             raise ValueError("malformed MIME boundary")
 
         monkeypatch.setattr("src.reconciler.parse_email", _raise_value_error)
@@ -1274,7 +1308,7 @@ class TestReap:
         orig_path.rename(maildir / "1700000000.M1.host:2,ST")
         reconciler.sweep()
 
-        def _raise(path, maildir_root=None):
+        def _raise(path, maildir_root=None, **_kwargs):
             raise exc
 
         monkeypatch.setattr("src.reconciler.parse_email", _raise)

@@ -61,6 +61,7 @@ _VERBATIM_FIELDS = (
     "from_addrs",
     "to_addrs",
     "cc_addrs",
+    "bcc_addrs",
     "folder",
     "has_attachments",
     "size",
@@ -72,6 +73,7 @@ _VERBATIM_FIELDS = (
     "from_addresses_complete",
     "to_addresses_complete",
     "cc_addresses_complete",
+    "bcc_addresses_complete",
     "attachments_manifest_complete",
     "body_complete",
     "parse_caps",
@@ -86,6 +88,7 @@ _DERIVED_FIELDS = (
     "content_hash",
     "participant_names",
     "headers",
+    "full_body",
 )
 # Not recorded: the parse time (#1080), a clock reading rather than a
 # property of the bytes.
@@ -112,6 +115,24 @@ def _record(msg: Message, root: Path) -> dict[str, Any]:
     record["headers_count"] = len(msg.headers)
     record["body_text_length"] = len(msg.body_text)
     record["body_text"] = _digest(msg.body_text.encode("utf-8"))
+    record["full_body"] = (
+        {
+            "complete": msg.full_body.complete,
+            "parts": [
+                [
+                    part.ordinal,
+                    part.parent,
+                    part.representation,
+                    part.selected,
+                    part.losses,
+                    None if part.text is None else _digest(part.text.encode("utf-8")),
+                ]
+                for part in msg.full_body.parts
+            ],
+        }
+        if msg.full_body is not None
+        else None
+    )
     record["filepath"] = Path(msg.filepath).relative_to(root).as_posix()
     record["mtime_ns_captured"] = msg.mtime_ns is not None
     record["content_hash"] = f"sha256:{msg.content_hash}"

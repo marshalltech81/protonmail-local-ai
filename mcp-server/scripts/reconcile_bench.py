@@ -129,8 +129,12 @@ CREATE TABLE messages (
     from_addresses_complete INTEGER CHECK (from_addresses_complete IN (0, 1)),
     to_addresses_complete INTEGER CHECK (to_addresses_complete IN (0, 1)),
     cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
+    bcc_addresses_complete INTEGER CHECK (bcc_addresses_complete IN (0, 1)),
     attachments_manifest_complete INTEGER CHECK (attachments_manifest_complete IN (0, 1)),
     body_complete INTEGER CHECK (body_complete IN (0, 1)),
+    full_body_complete INTEGER CHECK (full_body_complete IN (0, 1)),
+    full_body_generation TEXT,
+    full_body_version INTEGER,
     attachment_rows_current INTEGER CHECK (attachment_rows_current IN (0, 1)),
     caps_json TEXT,
     headers_complete INTEGER CHECK (headers_complete IN (0, 1)),
@@ -147,7 +151,7 @@ CREATE INDEX idx_messages_occurred ON messages(occurred_at, claimant_id)
     WHERE (occurred_at IS NOT NULL) = 1;
 CREATE TABLE message_participants (
     claimant_id TEXT NOT NULL,
-    role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
+    role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc', 'bcc')),
     address     TEXT NOT NULL,
     name        TEXT,
     PRIMARY KEY (claimant_id, role, address),
@@ -639,7 +643,7 @@ def authority(address: str) -> tuple[str, str | None]:
 # signature with (``NOT_CONTAINER_IDENTIFIER``). Copies: this script runs
 # without the indexer package, and the fidelity test checks them.
 PDF_MODULE = "pdf"
-PDF_EXTRACTOR = "pdf-digital@6"
+PDF_EXTRACTOR = "pdf-digital@7"
 PDF_IDENTIFIER = "none@2"
 
 
@@ -744,9 +748,9 @@ _INSERT_MESSAGE = (
     "has_attachments, size_bytes, content_hash, indexed_at, first_indexed_at, "
     "sender_ambiguous, participant_names_complete, "
     "subject_complete, from_addresses_complete, to_addresses_complete, "
-    "cc_addresses_complete, attachments_manifest_complete, body_complete, attachment_rows_current, caps_json, headers_complete) "
+    "cc_addresses_complete, bcc_addresses_complete, attachments_manifest_complete, body_complete, attachment_rows_current, caps_json, headers_complete) "
     "VALUES (?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, 0, "
-    "1, 1, 1, 1, 1, 1, ?, ?, ?, ?)"
+    "1, 1, 1, 1, 1, 1, 1, ?, ?, ?, ?)"
 )
 
 
@@ -767,6 +771,7 @@ _UPSERT_MESSAGE = _INSERT_MESSAGE + (
     "from_addresses_complete = excluded.from_addresses_complete, "
     "to_addresses_complete = excluded.to_addresses_complete, "
     "cc_addresses_complete = excluded.cc_addresses_complete, "
+    "bcc_addresses_complete = excluded.bcc_addresses_complete, "
     "attachments_manifest_complete = excluded.attachments_manifest_complete, "
     "body_complete = NULL, attachment_rows_current = NULL, caps_json = excluded.caps_json, "
     "headers_complete = excluded.headers_complete"
@@ -975,6 +980,7 @@ def build(
             conn.execute("BEGIN")
             conn.execute(_INSERT_MESSAGE, _message_values(rec, now, 1))
             _bind_occurrence(conn, rec, now)
+            _write_full_body(conn, rec)
             # One participant row per (role, address), named by its first
             # display name; every distinct name in the name rows.
             conn.executemany(
@@ -1742,6 +1748,7 @@ WRITER_TABLES = (
     "message_chunks_vec",
     "indexing_jobs",
 )
+_SCHEMA += "\nCREATE TABLE message_body_parts (\n claimant_id TEXT NOT NULL REFERENCES messages(claimant_id) ON DELETE CASCADE,\n ordinal INTEGER NOT NULL, parent INTEGER NOT NULL,\n representation TEXT NOT NULL CHECK(representation IN ('container','alternative','related','message','plain','html','other')),\n selected INTEGER NOT NULL CHECK(selected IN (0,1)),\n losses INTEGER NOT NULL, source_chars INTEGER, source_bytes INTEGER,\n source_digest TEXT, classified_until INTEGER,\n PRIMARY KEY(claimant_id,ordinal)\n) WITHOUT ROWID;\nCREATE TABLE message_body_spans (\n claimant_id TEXT NOT NULL, part INTEGER NOT NULL, ordinal INTEGER NOT NULL,\n start INTEGER NOT NULL, end INTEGER NOT NULL,\n data BLOB NOT NULL CHECK(typeof(data)='blob' AND length(data)<=32768),\n PRIMARY KEY(claimant_id,part,ordinal),\n FOREIGN KEY(claimant_id,part) REFERENCES message_body_parts(claimant_id,ordinal) ON DELETE CASCADE\n) WITHOUT ROWID;\nCREATE TABLE message_body_ranges (\n claimant_id TEXT NOT NULL, part INTEGER NOT NULL,\n start INTEGER NOT NULL, end INTEGER NOT NULL,\n kind TEXT NOT NULL CHECK(kind IN ('body','quote','signature','forwarded')),\n PRIMARY KEY(claimant_id,part,start),\n FOREIGN KEY(claimant_id,part) REFERENCES message_body_parts(claimant_id,ordinal) ON DELETE CASCADE\n) WITHOUT ROWID;\n"
 
 
 def _bind_occurrence(conn: sqlite3.Connection, rec, now: str) -> None:
@@ -2140,6 +2147,7 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
     )
     conn.execute(_UPSERT_MESSAGE, _message_values(rec, now, None))
     _bind_occurrence(conn, rec, now)
+    _write_full_body(conn, rec)
     conn.execute("DELETE FROM message_headers WHERE claimant_id = ?", (rec.cid,))
     conn.executemany(
         "INSERT INTO message_headers (claimant_id, ordinal, name, name_normalized, raw_value, decoded_value) "
@@ -2196,6 +2204,90 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
     ).lastrowid
     conn.execute("UPDATE threads SET fts_rowid = ? WHERE thread_id = ?", (fts_rowid, rec.tid))
     _write_thread_vector(conn, rec.tid, vector)
+
+
+def _write_full_body(conn: sqlite3.Connection, rec: _Record) -> None:
+    """Mirror #1362 phase-1 writes for this benchmark's generated plain MIME.
+
+    No mailbox parser is used by this script: render_eml produces one plain
+    source, optionally under a mixed container, with no classification markers.
+    Fidelity tests compare values, table shapes and commit statement cadence.
+    """
+    mime = email.message_from_bytes(rec.raw)
+    mixed = mime.is_multipart()
+    source = mime.get_payload()[0] if mixed else mime
+    text = source.get_payload(decode=True).decode("ascii")
+    conn.execute("DELETE FROM message_body_parts WHERE claimant_id=?", (rec.cid,))
+    generation = hashlib.sha256(b"body-source@1\0")
+    if mixed:
+        conn.execute(
+            "INSERT INTO message_body_parts (claimant_id,ordinal,parent,representation,selected,losses) VALUES (?,?,?,?,?,?)",
+            (rec.cid, 0, -1, "container", 1, 0),
+        )
+        generation.update(
+            json.dumps(
+                (
+                    0,
+                    -1,
+                    "container",
+                    True,
+                    0,
+                    None,
+                    hashlib.sha256().hexdigest(),
+                    0,
+                    hashlib.sha256().hexdigest(),
+                ),
+                separators=(",", ":"),
+            ).encode()
+        )
+    part, parent = (1, 0) if mixed else (0, -1)
+    conn.execute(
+        "INSERT INTO message_body_parts (claimant_id,ordinal,parent,representation,selected,losses) VALUES (?,?,?,?,?,?)",
+        (rec.cid, part, parent, "plain", 1, 0),
+    )
+    digest = hashlib.sha256()
+    size = 0
+    for ordinal, start in enumerate(range(0, len(text), 8192)):
+        end = min(start + 8192, len(text))
+        data = text[start:end].encode()
+        digest.update(data)
+        size += len(data)
+        conn.execute(
+            "INSERT INTO message_body_spans VALUES (?,?,?,?,?,?)",
+            (rec.cid, part, ordinal, start, end, data),
+        )
+    classification = hashlib.sha256()
+    if text:
+        classification.update(json.dumps((0, len(text), "body"), separators=(",", ":")).encode())
+        conn.execute(
+            "INSERT INTO message_body_ranges VALUES (?,?,?,?,?)",
+            (rec.cid, part, 0, len(text), "body"),
+        )
+    conn.execute(
+        "UPDATE message_body_parts SET source_chars=?,source_bytes=?,source_digest=?,classified_until=?,losses=? WHERE claimant_id=? AND ordinal=?",
+        (len(text), size, digest.hexdigest(), len(text), 0, rec.cid, part),
+    )
+    generation.update(
+        json.dumps(
+            (
+                part,
+                parent,
+                "plain",
+                True,
+                0,
+                len(text),
+                digest.hexdigest(),
+                len(text),
+                classification.hexdigest(),
+            ),
+            separators=(",", ":"),
+        ).encode()
+    )
+    generation.update(b"complete=1")
+    conn.execute(
+        "UPDATE messages SET full_body_complete=?, full_body_generation=?, full_body_version=? WHERE claimant_id=?",
+        (1, generation.hexdigest(), 1, rec.cid),
+    )
 
 
 def _write_entity(conn: sqlite3.Connection, address: str) -> None:

@@ -1,6 +1,6 @@
-"""#1568: no code reads the per-copy columns the v17 migration drops.
+"""#1568: no code reads the per-copy columns the v19 migration drops.
 
-v17 moves folder, locator and Maildir flags to ``message_occurrences``
+v19 moves folder, locator and Maildir flags to ``message_occurrences``
 and drops ``messages.filepath/folder/seen/flagged/replied`` and
 ``message_thread_map.filepath``. A statement still naming one fails only
 when it runs, so a path no test executes would fail on a live index.
@@ -29,9 +29,9 @@ _ROOTS = (
     _REPO / "mcp-server" / "src",
     _REPO / "mcp-server" / "scripts",
 )
-# Migrations up to v17 describe the schema they replace: they create,
+# Migrations up to v19 describe the schema they replace: they create,
 # copy and drop these columns by design.
-_LAST_HISTORICAL_MIGRATION = 17
+_LAST_HISTORICAL_MIGRATION = 19
 
 DROPPED = {
     "messages": ("filepath", "folder", "seen", "flagged", "replied"),

@@ -2,13 +2,14 @@
 
 import sqlite3
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 from src.database import SCHEMA_VERSION, Database
+from src.migrations.runner import apply_pending
 
 from tests.conftest import TEST_ACCOUNT, make_message, make_thread
 from tests.test_database import _schema_shape, _v15_from_fresh
-from tests.test_dropped_message_columns import DROPPED
 
 
 def _indexes(conn):
@@ -31,16 +32,6 @@ def test_fresh_clock_indexes(db):
     }
 
 
-def _surviving_columns(conn, table: str) -> str:
-    """``table``'s column names, minus whichever v17 drops (#1567,
-    #1568): a v15 fixture's row still carries them, so comparing with
-    ``SELECT *`` on both sides would compare rows of different shapes
-    once the migration chain reaches v17."""
-    dropped = DROPPED.get(table, ())
-    names = [r[1] for r in conn.execute(f"PRAGMA table_info({table})") if r[1] not in dropped]
-    return ", ".join(names)
-
-
 def test_v15_migration_preserves_rows_and_queue_and_matches_fresh(tmp_path):
     path = tmp_path / "old.db"
     db = Database(path, account=TEST_ACCOUNT)
@@ -48,12 +39,17 @@ def test_v15_migration_preserves_rows_and_queue_and_matches_fresh(tmp_path):
     db.upsert_thread(make_thread(messages=[message]), [0.1] * 4096)
     _v15_from_fresh(db)
     before = {
-        table: [
-            tuple(r)
-            for r in db._conn.execute(f"SELECT {_surviving_columns(db._conn, table)} FROM {table}")
-        ]
+        table: [tuple(r) for r in db._conn.execute(f"SELECT * FROM {table}")]
         for table in ("messages", "message_thread_map", "threads", "threads_vec", "indexing_jobs")
     }
+    assert apply_pending(
+        db._conn,
+        current_version=15,
+        target_version=16,
+        migration_dir=Path(__file__).parents[1] / "src/migrations",
+    ) == [16]
+    for table, rows in before.items():
+        assert [tuple(r) for r in db._conn.execute(f"SELECT * FROM {table}")] == rows
     db.close()
     migrated = Database(path, account=TEST_ACCOUNT)
     fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
@@ -64,13 +60,6 @@ def test_v15_migration_preserves_rows_and_queue_and_matches_fresh(tmp_path):
         )
         assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
         assert _indexes(migrated._conn) == _indexes(fresh._conn)
-        for table, rows in before.items():
-            assert [
-                tuple(r)
-                for r in migrated._conn.execute(
-                    f"SELECT {_surviving_columns(migrated._conn, table)} FROM {table}"
-                )
-            ] == rows
     finally:
         migrated.close()
         fresh.close()

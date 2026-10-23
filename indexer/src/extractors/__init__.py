@@ -779,6 +779,12 @@ class ExtractionResult:
 # pdf 6: pypdf 6.20 changes stream decoding limits and malformed page-tree
 # recovery. Re-run cached PDF results once so those changes reach existing
 # attachments, preserving the usual OCR-disabled and dead-letter rules.
+# pdf 7: pypdf 6.21 stops a content stream at 2,000,000 tokens
+# (``LimitReachedError``), so a page whose text layer sits in a longer
+# stream is no longer read as digital text: it is a failed page and goes
+# to OCR where that is on (#1659). Re-run cached PDF results once, under
+# the same rules. That re-run replaces the ``pdf@6`` rows noted below,
+# so none keeps its fuller text past the 10,000,000-character cut.
 # pdf 6 still: moved to the limited extractor child (#1293) with a
 # hardcoded 10,000,000-character cut applied after stripping, under an
 # owner exception (2026-10-10, as for ``image`` on #1325): no bump. A
@@ -803,7 +809,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "docx": 7,
     "eml": 3,
     "image": 6,
-    "pdf": 6,
+    "pdf": 7,
     "ppt": 2,
     "pptx": 3,
     "text": 3,

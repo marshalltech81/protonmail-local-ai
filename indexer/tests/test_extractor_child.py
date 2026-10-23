@@ -420,6 +420,7 @@ class TestChildSide:
             "eml",
             "image",
             "html",
+            "html_full_body",
             "pdf",
             "container",
         }

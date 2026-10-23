@@ -49,6 +49,7 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 from watchdog.utils import UnsupportedLibcError
 
+from . import full_body
 from .account import AccountConfig, account_config_from_env, maildir_root_from_env
 from .attachment_indexing import (
     AttachmentWritePlan,
@@ -1513,6 +1514,7 @@ def _log_attachment_outcomes(*, force: bool = False) -> None:
         and now - _last_outcomes_log < OUTCOMES_LOG_MIN_INTERVAL_SECS
     ):
         return
+    full_body.log_summary()
     counts = attachment_outcomes.drain()
     line = format_attachment_outcomes(counts)
     if not line:
@@ -1659,6 +1661,7 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
     )
     _log_reparse_progress(c["reparse"], c["reparse_parked_trashed"], c["reparse_dead"])
     _log_extraction_deferral_recovery(c["extraction_deferred"])
+    full_body.log_summary()
 
 
 def _steady_state_summary_due(
@@ -1849,7 +1852,13 @@ def _phase1_commit_thread(
 
     t0 = time.perf_counter()
     try:
-        msg = parse_email(Path(filepath), maildir_root=MAILDIR_PATH)
+        with queue.holding_in_flight() as charged:
+            deadline = (
+                charged[1] + INDEXER_MESSAGE_TIMEOUT_SECONDS
+                if charged is not None and INDEXER_MESSAGE_TIMEOUT_SECONDS
+                else None
+            )
+        msg = parse_email(Path(filepath), maildir_root=MAILDIR_PATH, capture_deadline=deadline)
     except FileNotFoundError:
         # mbsync flag-rename race: file moved between enqueue and parse.
         # For a path not yet indexed, watchdog's IN_MOVED_TO re-enqueues
@@ -1910,6 +1919,10 @@ def _phase1_commit_thread(
         # cannot help while the file is unchanged.
         queue.mark_dead_terminal(filepath, stage="parse", error=MESSAGE_NESTING_DEAD_ERROR)
         return None
+    except MemoryError:
+        # Parent allocation pressure is not incomplete sender evidence. Keep
+        # the in-flight charge for the supervisor/restart path.
+        raise
     except Exception as e:
         queue.mark_failed(filepath, stage="parse", error=_stage_error(e))
         return None
@@ -1971,6 +1984,11 @@ def _phase1_commit_thread(
         # Phase 2 runs, so the next message in the batch sees this
         # message's thread when computing its own thread assignment.
         db.upsert_thread(thread, seed_vector)
+        # The complete source is now durable; do not retain another body
+        # representation throughout a batch's embedding work.
+        msg.full_body = None
+    except MemoryError:
+        raise
     except Exception as e:
         queue.mark_failed(filepath, stage="thread_commit", error=_stage_error(e))
         return None

@@ -12,7 +12,7 @@ dependencies = [
     # (LM Studio / vLLM / TEI / DeepInfra / OpenRouter)
     # target the SDK as their reference client by design, so pointing
     # the SDK at them via ``base_url`` is the supported path.
-    "openai==3.28.0",
+    "openai==3.31.0",
     # Real BPE tokenizer for chunk-size estimation. Counting chunk tokens
     # with a char-count heuristic undercounts CJK / URL / Base64 / code
     # text by 4-6×, producing chunks that blow past the embed model's
@@ -25,12 +25,12 @@ dependencies = [
     # by exactly one extractor module under src/extractors/; lazy import
     # there means a missing one downgrades to ``unsupported`` rather
     # than crashing the indexer.
-    "pypdf==6.20.0",               # digital PDF text layer
+    "pypdf==6.21.1",               # digital PDF text layer
     "cryptography==50.0.2",        # pypdf AES decryption (owner-password-only PDFs)
     "pdf2image==1.17.0",           # render PDF pages → PIL.Image (needs Poppler)
     "pytesseract==0.3.13",         # OCR via Tesseract binary
-    "pillow==13.0.0",              # image loading + EXIF rotation for OCR
-    "pillow-heif==1.8.0",          # HEIC/HEIF opener for Pillow (bundles libheif + libde265)
+    "pillow==13.0.0",            # image loading + EXIF rotation for OCR
+    "pillow-heif==1.8.1",          # HEIC/HEIF opener for Pillow (bundles libheif + libde265)
     "python-docx==1.2.0",          # DOCX paragraph + table walk
     "openpyxl==3.1.5",             # XLSX read-only workbook walk
     "python-pptx==1.0.2",          # PPTX slide shape + notes walk

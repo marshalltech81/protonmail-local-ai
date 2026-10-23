@@ -764,7 +764,7 @@ class TestBrakes:
             box.close()
 
 
-class TestMigrationV17:
+class TestMigrationV19:
     def _v14(self, tmp_path) -> tuple[Path, Path, list[str]]:
         root = tmp_path / "maildir"
         raw = _eml("one@example.test")
@@ -822,7 +822,7 @@ class TestMigrationV17:
         db = Database(path, account=account)
         fresh = Database(tmp_path / "fresh.db", account=account)
         try:
-            assert SCHEMA_VERSION == 18
+            assert SCHEMA_VERSION == 20
             assert _schema_shape(db._conn) == _schema_shape(fresh._conn)
             claimants = ids[:3]
             tombs = {
@@ -843,7 +843,7 @@ class TestMigrationV17:
             assert (retired["state"], retired["provenance"]) == ("retired", "migration")
             assert retired["relative_path"] == "INBOX/cur/m3:2,S"
             assert retired["first_observed_at"] is None and retired["last_observed_at"] is None
-            # IDs unchanged; v17 itself queues nothing (no parser-produced
+            # IDs unchanged; v19 itself queues nothing (no parser-produced
             # data), but v15's attachment-inventory backfill reparses
             # every indexed file in the same migration run.
             chunk_ids = sorted(
@@ -860,8 +860,8 @@ class TestMigrationV17:
         finally:
             db.close()
             fresh.close()
-        assert "applied migrations: [15, 16, 17, 18]" in caplog.text
-        assert "Migration v17 carried 2 tombstone(s)" in caplog.text
+        assert "applied migrations: [15, 16, 17, 18, 19, 20]" in caplog.text
+        assert "Migration v19 carried 2 tombstone(s)" in caplog.text
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert any("found 1 message(s) with no verified file" in m for m in warnings)
         assert MARKER not in caplog.text
@@ -1049,7 +1049,7 @@ class TestReviewRound1:
         assert (counts.renamed, counts.unverified) == (0, 1)
         assert box.active() == [("INBOX/cur/q1:2,S", 0)]
 
-    def test_the_v17_warning_counts_only_messages_with_no_active_copy(self, tmp_path, caplog):
+    def test_the_v19_warning_counts_only_messages_with_no_active_copy(self, tmp_path, caplog):
         """A v14 seed row retired by a later move is history, not a
         message without a verified file."""
         root = tmp_path / "maildir"

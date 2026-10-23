@@ -21,7 +21,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from . import vector_sums
+from . import full_body, vector_sums
 from .account import AccountConfig, register_account_functions, verified_account_id
 from .chunker import l2_normalize, truncate_to_tokens
 from .entities import (
@@ -205,17 +205,19 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # v15 (#1338): whether attachment occurrence rows belong to the current parse,
 # committed in phase 2c; NULL while pending, 0 when extraction was disabled.
 # v16 (#1123): partial clock/claimant indexes for selected-clock listing pages.
-# v17 (#1567, #1568, #1569): the readers move to the occurrences.
+# v17 (#1090): observed Bcc participants and nullable parse-capture completeness.
+# v18 (#1362): full decoded MIME body sources, unknown until queued reparse.
+# v19 (#1567, #1568, #1569): the readers move to the occurrences.
 # ``pending_deletions`` is keyed by occurrence, an occurrence the
 # reconciliation scan binds records provenance ``scan``, a message the
 # v14 seed could not bind gets a retired occurrence, and
 # ``messages.content_hash`` is indexed; no reparse
-# (``migrations/0017_occurrence_readers.sql``).
-# v18 (#1592): ``account_collection_state`` keeps each account's latest
+# (``migrations/0019_occurrence_readers.sql``).
+# v20 (#1592): ``account_collection_state`` keeps each account's latest
 # mbsync collection outcome, read from mbsync's collection status file;
 # empty until the indexer first reads it, no reparse
-# (``migrations/0018_account_collection_state.sql``).
-SCHEMA_VERSION = 18
+# (``migrations/0020_account_collection_state.sql``).
+SCHEMA_VERSION = 20
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -245,7 +247,7 @@ ACCOUNT_SCHEMA_STATEMENTS = (
 )
 
 # Mailbox occurrences' DDL (#1566), shared by the initial schema; the v14
-# migration file repeats it, and v17's rebuilds it with the ``scan``
+# migration file repeats it, and v19's rebuilds it with the ``scan``
 # provenance (#1567).
 OCCURRENCE_SCHEMA_STATEMENTS = (
     """
@@ -278,7 +280,7 @@ OCCURRENCE_SCHEMA_STATEMENTS = (
 )
 
 # Tombstones keyed by occurrence (#1567), shared by the initial schema;
-# the v17 migration file repeats it.
+# the v19 migration file repeats it.
 PENDING_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE pending_deletions (
@@ -292,7 +294,7 @@ PENDING_SCHEMA_STATEMENTS = (
 )
 
 # mbsync's latest collection outcome per account (#1592), shared by the
-# initial schema; the v18 migration file repeats it. One row per account,
+# initial schema; the v20 migration file repeats it. One row per account,
 # replaced by the indexer from mbsync's collection status file
 # (``collection_status.py``) and read by mcp-server's get_mailbox_status.
 # ``status`` is ``unknown`` (with ``unknown_reason``, and the record
@@ -870,7 +872,7 @@ class Database:
         self._verify_account()
         if 14 in applied:
             self._log_occurrence_seed()
-        if 17 in applied:
+        if 19 in applied:
             self._log_occurrence_cutover()
 
     def _log_occurrence_seed(self) -> None:
@@ -878,7 +880,7 @@ class Database:
         message left without an occurrence (its path holds other bytes
         now) waits for the queued reparse, which binds whatever its file
         holds."""
-        # Active rows only: v17, applied in the same run, gives a message
+        # Active rows only: v19, applied in the same run, gives a message
         # the seed could not bind a retired occurrence (#1567).
         seeded, unbound = self._conn.execute(
             "SELECT (SELECT COUNT(*) FROM message_occurrences WHERE state = 'active'), "
@@ -896,7 +898,7 @@ class Database:
             )
 
     def _log_occurrence_cutover(self) -> None:
-        """Report what the v17 migration did (#1567), as counts: the
+        """Report what the v19 migration did (#1567), as counts: the
         messages it gave a retired occurrence because no file was verified
         to hold their bytes, and the tombstones it carried over. A message
         counts once, and only while it has no active occurrence: a v14
@@ -909,10 +911,10 @@ class Database:
             "SELECT 1 FROM message_occurrences a WHERE a.claimant_id = o.claimant_id "
             "AND a.state = 'active')), (SELECT COUNT(*) FROM pending_deletions)"
         ).fetchone()
-        log.info("Migration v17 carried %d tombstone(s) over to occurrences", pending)
+        log.info("Migration v19 carried %d tombstone(s) over to occurrences", pending)
         if retired:
             log.warning(
-                "Migration v17 found %d message(s) with no verified file; each has a "
+                "Migration v19 found %d message(s) with no verified file; each has a "
                 "retired occurrence and counts as having lost its last live copy",
                 retired,
             )
@@ -978,6 +980,9 @@ class Database:
         # leaves it open for the stamp.
         try:
             self._run_initial_schema_script(cur)
+            for statement in full_body.SCHEMA_SQL.split(";"):
+                if statement.strip():
+                    cur.execute(statement)
             # The configured account, registered with the schema (#1596).
             cur.execute(
                 "INSERT INTO accounts (scope_uuid, provider, created_at) VALUES (?, ?, ?)",
@@ -1262,7 +1267,7 @@ class Database:
                 -- default; mcp-server reads NULL as "can't tell".
                 sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
                 -- 1 when the parser's display-name stage stored every
-                -- distinct name in ``message_participant_names``, 0 when
+                -- distinct From/To/Cc name in ``message_participant_names``, 0 when
                 -- its per-message budget dropped one (#1140); NULL = not
                 -- yet known (a row from before v4 the reparse has not
                 -- reached). It covers that stage only: it does not
@@ -1286,9 +1291,14 @@ class Database:
                 from_addresses_complete INTEGER CHECK (from_addresses_complete IN (0, 1)),
                 to_addresses_complete INTEGER CHECK (to_addresses_complete IN (0, 1)),
                 cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
+                -- Header capture only; no exhaustive original-recipient claim (#1090).
+                bcc_addresses_complete INTEGER CHECK (bcc_addresses_complete IN (0, 1)),
                 attachments_manifest_complete INTEGER
                     CHECK (attachments_manifest_complete IN (0, 1)),
                 body_complete INTEGER CHECK (body_complete IN (0, 1)),
+                full_body_complete INTEGER CHECK (full_body_complete IN (0, 1)),
+                full_body_generation TEXT,
+                full_body_version INTEGER,
                 attachment_rows_current INTEGER CHECK (attachment_rows_current IN (0, 1)),
                 -- The parse's nonzero ``PARSE_CAPS`` counts as a JSON
                 -- object of fixed names to integers, never content;
@@ -1334,12 +1344,12 @@ class Database:
             CREATE INDEX idx_message_headers_name_claimant
                 ON message_headers(name_normalized, claimant_id);
 
-            -- Normalized From / To / Cc. ``address`` is the canonical
+            -- Normalized From / To / Cc / observed Bcc. ``address`` is the canonical
             -- lowercased bare address, so "every message from/to X" is an
             -- indexed lookup rather than a scan of JSON participant lists.
             CREATE TABLE message_participants (
                 claimant_id TEXT NOT NULL,
-                role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
+                role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc', 'bcc')),
                 address     TEXT NOT NULL,
                 name        TEXT,
                 PRIMARY KEY (claimant_id, role, address),
@@ -1580,7 +1590,7 @@ class Database:
 
         ``account_collection_state`` holds each account's latest mbsync
         collection outcome (#1592, ``COLLECTION_STATE_SCHEMA_STATEMENTS``);
-        ``migrations/0018_account_collection_state.sql`` creates it on an
+        ``migrations/0020_account_collection_state.sql`` creates it on an
         existing index.
         """
         for statement in (
@@ -3562,6 +3572,7 @@ class Database:
             "EXISTS (SELECT 1 FROM message_participants p "
             "JOIN messages m ON m.claimant_id = p.claimant_id "
             "WHERE m.thread_id = ? AND m.sender_ambiguous = 0 "
+            "AND p.role IN ('from', 'to', 'cc') "
             "AND p.address IN (SELECT value FROM json_each(?)))"
         )
         row = self._conn.execute(
@@ -4897,10 +4908,15 @@ class Database:
         # ``from_addrs`` holds every author; ``from_addr`` alone for callers
         # that build a Message by hand.
         authors = msg.from_addrs or [msg.from_addr]
-        roles = [("from", authors), ("to", msg.to_addrs), ("cc", msg.cc_addrs)]
+        roles = [
+            ("from", authors),
+            ("to", msg.to_addrs),
+            ("cc", msg.cc_addrs),
+            ("bcc", msg.bcc_addrs),
+        ]
         # Every distinct display name per (role, address) (#1140), within
-        # the parser's per-message budget, and whether that budget kept
-        # them all. A Message built without parsing derives both here.
+        # the parser's per-message budget; completeness covers From/To/Cc
+        # names only. A Message built without parsing derives both here.
         names = msg.participant_names
         complete = msg.participant_names_complete
         if names is None:
@@ -4915,10 +4931,10 @@ class Database:
                  sent_at_status, occurred_at, in_reply_to, references_json, has_attachments,
                  size_bytes, content_hash, indexed_at, first_indexed_at,
                  sender_ambiguous, participant_names_complete, subject_complete,
-                 from_addresses_complete, to_addresses_complete, cc_addresses_complete,
+                 from_addresses_complete, to_addresses_complete, cc_addresses_complete, bcc_addresses_complete,
                  attachments_manifest_complete, body_complete, caps_json, headers_complete)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, NULL, ?, ?)
+                    ?, ?, NULL, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 subject         = excluded.subject,
@@ -4945,6 +4961,7 @@ class Database:
                 from_addresses_complete = excluded.from_addresses_complete,
                 to_addresses_complete = excluded.to_addresses_complete,
                 cc_addresses_complete = excluded.cc_addresses_complete,
+                bcc_addresses_complete = excluded.bcc_addresses_complete,
                 attachments_manifest_complete = excluded.attachments_manifest_complete,
                 -- Not known until phase 2c commits this parse's chunks.
                 body_complete = NULL,
@@ -4973,6 +4990,7 @@ class Database:
                 int(msg.from_addresses_complete),
                 int(msg.to_addresses_complete),
                 int(msg.cc_addresses_complete),
+                int(msg.bcc_addresses_complete),
                 int(msg.attachments_manifest_complete),
                 caps_json,
                 int(msg.headers_complete) if msg.headers_complete is not None else None,
@@ -4980,6 +4998,7 @@ class Database:
         )
         # The parsed file is this message's occurrence at its path (#1566).
         self._bind_occurrence(cur, msg.claimant_id, msg.filepath, provenance="parse")
+        full_body.store(cur, msg.claimant_id, msg.full_body)
         cur.execute("DELETE FROM message_headers WHERE claimant_id = ?", (msg.claimant_id,))
         cur.executemany(
             "INSERT INTO message_headers "

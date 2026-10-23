@@ -490,7 +490,11 @@ class Reconciler:
                 )
                 return False, False
             try:
-                msg = parse_email(Path(row["filepath"]), maildir_root=self.maildir_root)
+                # Survivors feed the rebuild's body text only: no full decoded
+                # body capture (its HTML pass and held sources) per survivor.
+                msg = parse_email(
+                    Path(row["filepath"]), maildir_root=self.maildir_root, capture_full_body=False
+                )
             except (OSError, OversizedMessageError) as e:
                 # Foreseeable parse failures the parser is documented to
                 # raise: ``OSError`` covers the mbsync chmod / rename /

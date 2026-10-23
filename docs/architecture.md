@@ -895,7 +895,7 @@ thread's after `Re:`/`Fwd:` normalization, is kept searchable (#303):
   ceiling, the subject is blank, or it is the parser's `(no subject)`
   placeholder for a missing header (a literal `(no subject)` or a
   reply to one counts the same). The stored chunk text, offsets and
-  chunk ID stay body-only, since chunks are the authoritative body store
+  chunk ID stay body-only, since chunks are the authoritative retrieval body store
   (`get_message`, `query_messages(text=...)`). Because the chunk ID does
   not cover the embedding input, an index built before #687 keeps its
   old vectors until it is rebuilt from Maildir.
@@ -944,6 +944,80 @@ and that its quotes appear in the indexed text of the passages cited.
 `extract_from_emails` checks the labels each record field cites and
 looks for its text values in the cited passages (see
 `docs/mcp-tools.md`).
+
+### Complete decoded body sources (#1362)
+
+Schema v18 adds an independent local source store before quote stripping and
+newline/whitespace normalization. `message_body_parts` records ordered inline
+MIME nodes, parent ordinals, fixed representation categories and the existing
+rendering's selection flags. Every decoded inline text rendering is retained,
+including alternatives and whitespace-only parts. Attachments keep their separate
+extraction representation. `message_body_spans` stores UTF-8 BLOB fragments;
+`message_body_ranges` records heuristic body/quote/signature/forwarded offsets on
+the original source characters. Classification uses the existing quoting rules
+on original text and is independent of embedding segmentation: it never removes
+or joins source regions and does not claim identical classification to the
+embedding transform. Independent MIME parts are never concatenated.
+
+HTML evidence is the unstripped output of the existing html2text configuration,
+explicitly a converted-text representation. A second independently limited child
+pass through `_runner`/`_launcher` captures it. The legacy HTML child, stripping,
+budgets, results, chunks and embeddings are unchanged. The new pass has its own
+10-million-character output cap, framed output byte cap, 1 GiB address-space,
+60-second CPU and 75-second wall limits. Its decoded HTML input is separately
+guarded before payload encoding/copying. A child failure or capture cap makes
+full-source evidence incomplete without replacing the legacy retrieval result;
+parent resource/I/O failures retain the ordinary job failure behavior.
+
+Per message, independent guards limit retained source bytes to 64 MiB, charged
+logical metadata to 64 MiB, text sources to 200, MIME nodes/fragments to 10,000,
+classified lines to one million and classification runs to 65,536. Every new row
+is charged twice its UTF-8 claimant-key width plus 256 bytes of fixed metadata
+before repeated-key writes. These are work/storage proxies: physical SQLite pages
+and transient WAL can be substantially larger. A metadata/source cap produces
+explicit incomplete evidence. Classification caps retain source text and leave
+the unclassified suffix unknown. Transfer/charset/structure/conversion losses are
+recorded independently from the legacy `body_complete` flag; replacements cannot
+silently certify complete original-source evidence. A nested part whose first
+line after the boundary starts with `From ` has that line moved out of its
+payload by the standard library with no defect; it is recorded as a structure
+loss. The source-byte guard is charged from each text leaf's encoded size
+before its transfer and charset decode, so a leaf the legacy body ignores is
+not decoded for the capture once the remaining budget cannot hold it (a
+recorded budget loss, possibly for a leaf whose decoded text would have fit).
+
+Interior fragments are exactly 8192 original code points; the final fragment is
+at most 8192. All fragments form one gap-free retained prefix of one MIME source,
+even after caps, and contain at most 32768 UTF-8 bytes. Fragment boundaries are
+paging boundaries, not semantic boundaries. The internal MCP reader
+`lib.full_body` requires a matching message source generation/version inside the
+caller's read transaction. `read_page` returns at most eight fragments/256 KiB;
+`read_metadata` and `read_ranges` page at most 256 fixed-size rows, omitting
+repeated claimant keys. SQL type/byte guards precede Python transfer. These are
+internal primitives for future evidence jobs, not new public MCP tools.
+
+Phase 1 atomically replaces sources, loss flags and the message's
+`full_body_complete`, `full_body_generation` and `full_body_version` beside the
+message record. The migration leaves them NULL until the queued reparse assesses
+them. A failed transaction rolls back the replacement. Source generations bind
+ordered provenance, text digests, classification coverage and the completeness
+flag. Message/thread
+deletion and reaping cascade to all three source tables under the existing
+`secure_delete` policy. No additional FTS index is created here. Full source text
+is excluded from existing FTS, embeddings and vectors, and source references are
+released after the Phase 1 commit. The deletion reaper re-reads a thread's
+survivors for their body text and attachments only, so it parses them with
+`capture_full_body=False`: no capture, no extra HTML child pass and no held
+sources. Reparse keeps unchanged chunk IDs/vectors.
+
+The additive HTML pass uses only the remaining original parse deadline, with a
+16-second measured completion reserve; it never resets the existing stall clock.
+Expected capture degradation uses an independent rate limiter and fixed-count
+heartbeat summary. Source bytes, headers and charset labels never enter logs.
+Synthetic shipped-SQLite 3.46.1 gates exercise actual source/metadata guards,
+gap-free fragments, bounded reads and cascade deletion; the largest tested
+64-MiB source/1032-byte-key alternating-range shape took 2.62 seconds and used
+202.55 MB of database plus 203.78 MB of WAL, demonstrating the storage amplification.
 
 ### Chunk write idempotency
 
@@ -1031,7 +1105,7 @@ header's date, or NULL), `first_indexed_at` (see Message time),
 `in_reply_to` /
 references, attachment flag, and its bytes' `size_bytes` and
 `content_hash` (SHA-256 of the raw `.eml`). Its folders, file locators
-and read state are its copies' (see *Mailbox occurrences*; v17 dropped
+and read state are its copies' (see *Mailbox occurrences*; v19 dropped
 the row's own `filepath`, `folder`, `seen`, `flagged` and `replied` and
 `message_thread_map.filepath`, #1568). The MCP server returns the
 representative copy's locator with the hash and size as `source_file`
@@ -1054,14 +1128,18 @@ always kept; every further one spends one per-message budget of
 `MAX_EXTRA_PARTICIPANT_NAMES` (1,000) names and
 `MAX_EXTRA_PARTICIPANT_NAME_BYTES` (64,000) UTF-8 bytes, and a name
 past it is dropped and counted as the parser cap `participant_names`
+for From/To/Cc or `bcc_participant_names` for Bcc
 (see `docs/troubleshooting.md`).
 
 `messages.participant_names_complete` records, per message, whether
-that name stage kept every distinct name: `1` when it finished within
-the budget, `0` when the budget dropped one, `NULL` for mail not yet
+that name stage kept every distinct From/To/Cc name: `1` when those
+names finished within the budget, `0` when the budget dropped one, `NULL` for mail not yet
 reparsed since the v4 upgrade (and for a dead-lettered message until
 `make requeue-dead`). It is written in the same transaction as the
-participant and name rows. It covers the name stage only: whether
+participant and name rows. Bcc names use the same budget after visible
+names; Bcc-only loss does not change this visible-name flag. Bcc-inclusive
+predicates still report unmatched evidence as unknown. It covers the
+name stage only: whether
 the participant rows hold every address is the per-role completeness
 below. A `sender`, `recipient` or `participant` filter given as a name
 or fragment is decided by a match on a stored address or name; a
@@ -1282,7 +1360,7 @@ predicates", lists the leaves.
 Each Maildir copy of a message is its own occurrence
 (`message_occurrences`, #1566, PLAN.md decision 47), so two
 byte-identical files in different folders keep their own folder, flags
-and observation times; since v17 the `messages` row holds none of them
+and observation times; since v19 the `messages` row holds none of them
 (#1568). An active occurrence is keyed by the
 account (`accounts`, see *Account registry*), its folder relative to the
 account, the file's Maildir uniq (the name before `:2,`, which flag
@@ -1334,7 +1412,7 @@ to. Relocating the root alone keeps every occurrence.
   retirement mark; a retired row keeps its locator for diagnostics.
   `provenance` records how the row was created (`parse`, an observed
   `rename`, a reconciliation `scan` that verified a found copy's bytes,
-  or the `migration` seed: v14's, and v17's retired row for a message
+  or the `migration` seed: v14's, and v19's retired row for a message
   the v14 seed could not bind); `first_observed_at` /
   `last_observed_at` when the indexer saw the file (NULL on a seeded row
   until a parse sees it, so no observation is invented); `internal_at`
@@ -1360,7 +1438,7 @@ threads cannot starve independent ones. Unknown verification logs
 The reconciler and the reaper read occurrences (#1567): a message is
 live while it has an active occurrence that is not `T`-flagged, and its
 tombstones in `pending_deletions` are keyed by occurrence (see *Deletion
-Reconciliation*). Every message keeps at least one occurrence: v17 gave
+Reconciliation*). Every message keeps at least one occurrence: v19 gave
 a message the v14 seed could not bind a retired one at its stored path,
 since no file was verified to hold its bytes. A message is re-read (a
 re-extraction sweep, a reap's survivor) from an active occurrence, a
@@ -1920,9 +1998,9 @@ These claimed values never affect authority or ranked search.
 
 They support claimed message direction (#824). Deterministic message queries
 classify from the stored exact own-address set, complete unambiguous single
-From and observed external To/Cc evidence. Classification does not authenticate
-headers or infer aliases from folders. Own From without an external visible
-recipient remains unresolved until Bcc evidence (#1090). Identity replacement
+From and observed external To/Cc/Bcc evidence. Classification does not authenticate
+headers or infer aliases from folders. Own From without an observed external
+recipient remains unresolved until exhaustive Bcc provenance (#1644). Identity replacement
 and direction-sensitive pagination share a read snapshot; cursor digests bind
 identity state, address digest and classifier version.
 
@@ -2676,8 +2754,9 @@ configured cap recorded (`text_complete` 0, `extracted_chars_cap` 0),
 where in process it kept the whitespace up to the cap and recorded the
 setting. The hardcoded cut records
 no configured cap, so raising a setting does not refresh such a row,
-and cached `pdf@6` rows over 10,000,000 characters keep their fuller
-text (`TestTextCeiling` in `indexer/tests/test_pdf_child.py`).
+and cached `pdf@6` rows over 10,000,000 characters kept their fuller
+text until the `pdf@7` bump re-ran them (`TestTextCeiling` in
+`indexer/tests/test_pdf_child.py`).
 
 The limits were measured plainly in the indexer image (pypdf 6.19,
 Poppler and Tesseract 5.5.0 from Debian trixie), through the real
@@ -2940,7 +3019,7 @@ anything else stays `failed`. The row is keyed by the module that
 raised the error (#928), so it is served only to occurrences that run
 that module on the bytes; an occurrence whose label runs another
 extractor has its own row and extracts. It is stamped with the
-extractor version (`pdf@6`), so a later version bump, for example one
+extractor version (`pdf@7`), so a later version bump, for example one
 that raises a budget, refreshes it; the bumps that came with the
 `pdf`, `xlsx` and `pptx` mappings (`pdf@5`, `xlsx@6`, `pptx@3`)
 refreshed the `failed` rows the previous versions wrote, since the
@@ -2961,10 +3040,13 @@ map over its size limit, for example) is not one of these: like any
 per-page error, that page is counted in `pdf_pages_failed` (and OCR'd
 when OCR is on) and the other pages' text is kept.
 
-The PDF extractor is version 6 with pypdf 6.20.0: stream decoding limits
-and malformed page-tree recovery changed, so cached PDF results from
-earlier extractor versions are re-extracted once. The usual OCR-disabled
-and dead-letter rules still apply.
+The PDF extractor is version 7 with pypdf 6.21.1: stream decoding limits
+and malformed page-tree recovery changed (6.20), and a content stream
+longer than 2,000,000 tokens now raises `LimitReachedError` (6.21), so
+the page counts as failed and is OCR'd when OCR is on instead of being
+read as digital text. Cached PDF results from earlier extractor versions
+are re-extracted once. The usual OCR-disabled and dead-letter rules still
+apply.
 
 The parsing libraries log and warn with values read from the
 attachment (pypdf's font dictionaries and encoding names, openpyxl's
@@ -3399,8 +3481,10 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
-| 18 | `0018_account_collection_state.sql` | `account_collection_state` (#1592; see *Collection status*): mbsync's latest collection outcome per account, empty until the indexer first reads mbsync's collection status file. Nothing the parser produces is added, so no reparse is queued. |
-| 17 | `0017_occurrence_readers.sql` | The readers move to the occurrences (#1567, #1568, #1569). `message_occurrences` is rebuilt, rows and ids unchanged, to accept the `scan` provenance; a message the v14 seed could not bind gets a retired occurrence at its stored path (a WARNING counts them), so every message keeps one; `pending_deletions` is keyed by occurrence, each message's old tombstones carried over as one row with their latest mark, which the next sweep clears for a message that is still live; `messages.content_hash` is indexed; `messages.filepath`, `folder`, `seen`, `flagged` and `replied` and `message_thread_map.filepath` are dropped (each drop rewrites its table once). Nothing the parser produces is added, so no reparse is queued; claimant, chunk and thread IDs and vectors are unchanged. On a synthetic 36,500-message index (14,600 threads, 160 MB) the startup open including the migration took 0.4–0.5 s (three runs, Apple M5 Max). |
+| 20 | `0020_account_collection_state.sql` | `account_collection_state` (#1592; see *Collection status*): mbsync's latest collection outcome per account, empty until the indexer first reads mbsync's collection status file. Nothing the parser produces is added, so no reparse is queued. |
+| 19 | `0019_occurrence_readers.sql` | The readers move to the occurrences (#1567, #1568, #1569). `message_occurrences` is rebuilt, rows and ids unchanged, to accept the `scan` provenance; a message the v14 seed could not bind gets a retired occurrence at its stored path (a WARNING counts them), so every message keeps one; `pending_deletions` is keyed by occurrence, each message's old tombstones carried over as one row with their latest mark, which the next sweep clears for a message that is still live; `messages.content_hash` is indexed; `messages.filepath`, `folder`, `seen`, `flagged` and `replied` and `message_thread_map.filepath` are dropped (each drop rewrites its table once). Nothing the parser produces is added, so no reparse is queued; claimant, chunk and thread IDs and vectors are unchanged. On a synthetic 36,500-message index (14,600 threads, 160 MB) the startup open including the migration took 0.4–0.5 s (three runs, Apple M5 Max). |
+| 18 | `0018_full_decoded_body.sql` | Ordered original decoded MIME body sources and source-preserving classification (#1362), outside current FTS/embeddings. Full-body generation/version/completeness are NULL until queued reparse; unchanged chunk IDs/vectors are kept. |
+| 17 | `0017_bcc_participants.sql` | Observed Bcc participants and nullable parse-capture completeness (#1090); queues reparse without re-embedding unchanged chunks. |
 | 16 | `0016_selected_clock_indexes.sql` | Partial send/delivery clock and claimant-ID indexes for definite-match listing pages (#1123). No columns, evidence rows, reparses or embeddings change. |
 | 15 | `0015_attachment_inventory_current.sql` | `messages.attachment_rows_current` (#1338; see the attachment-inventory discussion below): NULL until reparsed, then 1 when extraction is enabled or 0 when disabled, set by phase 2c in the same transaction as the occurrence writes. The migration queues the standard reparse, keeping unchanged chunks and vectors. |
 | 14 | `0014_account_occurrences.sql` | `accounts` (#1596; see *Account registry*): the configured `ACCOUNT_SCOPE` and `SOURCE_MODE` provider, bound in the migration's own transaction through connection-local functions; update and delete triggers. `message_occurrences` (#1566; see *Mailbox occurrences*), seeded with one occurrence per message whose `indexed_files` record carries its content hash, relative to the configured `MAILDIR_PATH`; a stored path outside that root fails the migration closed with fixed text, and a message whose path holds other bytes gets none (a WARNING counts them). The migration ends with the shared reparse statement: the reparse observes each seeded occurrence and binds the files the seed cannot see (an unmapped byte-identical copy), with no embedding call; dead-lettered jobs stay dead. Claimant, chunk and thread IDs and vectors are unchanged. |
@@ -4422,7 +4506,7 @@ currency* above and the Freshness bullet below.
   unsupported, unreadable or other-account file reads as `unknown`
   with that reason and one fixed-text WARNING per change of reason,
   never as a success.
-- **Storage.** `account_collection_state`, one row per account (v18),
+- **Storage.** `account_collection_state`, one row per account (v20),
   replaced in the same transaction as `ingestion_state`, so the
   acknowledged sync and the outcome are one snapshot. A rebuilt index
   recovers the row from the file at its first write.
@@ -4942,3 +5026,22 @@ Set `INFERENCE_MODE` in `.env`:
 
 The toggle applies per-deployment. A per-session toggle is not planned
 (`PLAN.md`, "Not doing").
+
+
+### Observed Bcc capture (#1090, staged)
+
+Schema17 extends message_participants' role constraint with `bcc` and adds
+nullable `messages.bcc_addresses_complete`. A forward migration preserves
+participant insertion order and name foreign keys, then queues reparse using
+the existing job queue. This flag covers captured header parsing only; it is
+never evidence that a copy retains the exhaustive original Bcc list. Bcc is
+read after From/To/Cc, sharing every existing address and name work ceiling.
+Bcc-only name loss has its own count so visible name completeness is unchanged.
+
+Explicit Bcc-inclusive predicates retain observed positives and answer unknown
+for every no-match. Folders, own From and header presence never supply source
+provenance. External observed Bcc is an outbound witness, while self remains
+unavailable. Shared header outputs show bounded observed Bcc plus retained
+counts; find_contact and thread participant discovery remain visible-only.
+The approved split leaves #1090 open; #1644 owns provenance-backed negatives,
+self and effective completeness at the metadata boundary (#1598/#1584).
