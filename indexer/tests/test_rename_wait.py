@@ -234,7 +234,7 @@ class TestARenameBeforeParseKeepsTheJob:
         db.close()
 
     @pytest.mark.parametrize("reason", sorted(_SHAPES))
-    def test_a_file_still_missing_after_the_wait_is_dropped(
+    def test_a_file_still_missing_after_the_wait_keeps_its_obligation(
         self, tmp_path, monkeypatch, caplog, reason
     ):
         caplog.set_level(logging.INFO)
@@ -246,12 +246,12 @@ class TestARenameBeforeParseKeepsTheJob:
         assert "file_missing" not in caplog.text
         _make_due(db)
         _drain(db, queue, make_mock_embedder(_VECTOR))
-        assert _jobs(db) == {}
-        assert f"skipped: {path} reason=file_missing" in caplog.text
+        assert _jobs(db)[path]["last_error"] == _PERSISTED_MARKER
+        assert "reason=file_missing" not in caplog.text
         assert MARKER not in caplog.text
         db.close()
 
-    def test_a_row_waiting_before_an_upgrade_gets_no_second_wait(self, tmp_path, caplog):
+    def test_a_row_waiting_before_an_upgrade_keeps_its_obligation(self, tmp_path, caplog):
         """A row deferred by the previous image carries the persisted
         marker; the new image reads it as the wait already spent."""
         caplog.set_level(logging.INFO)
@@ -267,8 +267,8 @@ class TestARenameBeforeParseKeepsTheJob:
         _make_due(db)
         Path(path).unlink()
         _drain(db, queue, make_mock_embedder(_VECTOR))
-        assert _jobs(db) == {}
-        assert "reason=file_missing" in caplog.text
+        assert _jobs(db)[path]["last_error"] == _PERSISTED_MARKER
+        assert "reason=file_missing" not in caplog.text
         db.close()
 
     def test_an_unindexed_missing_file_is_dropped_at_once(self, tmp_path, caplog):

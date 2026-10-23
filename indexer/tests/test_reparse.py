@@ -1028,7 +1028,7 @@ class TestReparseCompletionAndRenames:
         assert embedder.embed_batch.call_count == 0
         db.close()
 
-    def test_a_file_still_missing_after_the_wait_is_dropped(self, tmp_path, caplog):
+    def test_a_file_still_missing_after_the_wait_keeps_its_refresh(self, tmp_path, caplog):
         caplog.set_level(logging.INFO)
         db, queue, paths = _index(tmp_path, ["a"])
         queue.enqueue_reparse()
@@ -1036,10 +1036,10 @@ class TestReparseCompletionAndRenames:
         _drain(db, queue, make_mock_embedder(_VECTOR))
         assert _jobs(db)[paths[0]]["last_error"] == main.RENAME_DEFERRED_ERROR
         assert "file_missing" not in caplog.text
-        # Still missing once the wait is over: gone, so dropped.
+        # Still absent: the refresh remains durable until a source returns.
         db._conn.execute("UPDATE indexing_jobs SET next_attempt_at = '2000-01-01T00:00:00+00:00'")
         db._conn.commit()
         _drain(db, queue, make_mock_embedder(_VECTOR))
-        assert _jobs(db) == {}
-        assert "reason=file_missing" in caplog.text
+        assert _jobs(db)[paths[0]]["last_error"] == main.RENAME_DEFERRED_ERROR
+        assert "reason=file_missing" not in caplog.text
         db.close()

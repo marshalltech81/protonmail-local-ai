@@ -1810,13 +1810,9 @@ PERMISSION_DEFER_SECS = 60
 # deletion reconciliation decides its message (see ``_drain_queue_batched``).
 TRASHED_DEFER_SECS = 60 * 60
 PERMISSION_DEFER_WINDOW_SECS = 24 * 60 * 60
-# A job whose file vanished while its path is still indexed waits once,
-# this long, for the watcher to record the rename (see
-# ``_phase1_commit_thread``). A file still missing after that wait is
-# dropped with reason ``file_missing``; a rename the watcher records
-# later than that still loses the job. The error text is persisted in
-# ``last_error`` (it marks the wait as spent) and matched by the MCP
-# server's status, so it never changes.
+# Missing-source refresh work remains deferred until a verified copy can
+# run it, or the message is reaped. Keep the persisted error token stable:
+# MCP uses it to report unfinished source work rather than claiming currency.
 RENAME_DEFER_SECS = 60
 RENAME_DEFERRED_ERROR = "FileNotFoundError: deferred until the rename is recorded"
 # ``last_error`` for a message the stdlib parser cannot parse without
@@ -1862,16 +1858,18 @@ def _phase1_commit_thread(
         # ``on_moved`` then only moves the file's records (and its job,
         # through ``update_filepath``) and enqueues nothing, so dropping
         # the job before the rename is recorded would lose its work.
-        # Wait for it once, without spending an attempt (#1143, #1145);
-        # a file still missing after that wait is dropped.
-        if row["last_error"] != RENAME_DEFERRED_ERROR and db.is_indexed(filepath):
-            queue.defer(
-                filepath,
-                stage=STAGE_PARSE,
-                error=RENAME_DEFERRED_ERROR,
-                error_class=ERROR_CLASS_RETRYABLE,
-                delay_seconds=RENAME_DEFER_SECS,
-            )
+        # Keep the obligation without spending an attempt; a verified
+        # current copy can take the job when the old locator is retired.
+        queue.end_attempt(filepath)
+        if db.retain_or_retarget_missing_job(filepath):
+            if queue.has_pending_row(filepath):
+                queue.defer(
+                    filepath,
+                    stage=STAGE_PARSE,
+                    error=RENAME_DEFERRED_ERROR,
+                    error_class=ERROR_CLASS_RETRYABLE,
+                    delay_seconds=RENAME_DEFER_SECS,
+                )
             return None
         queue.mark_skipped(filepath, reason="file_missing")
         return None

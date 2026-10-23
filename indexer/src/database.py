@@ -596,6 +596,11 @@ class Database:
         self.account_id: int | None = None
         self._lock = threading.RLock()
         self._transaction_depth = 0
+        # Retry-local byte evidence survives waits; cursors give unreadable
+        # early copies no priority over later copies on the next attempt.
+        self._missing_job_checks: dict[
+            str, tuple[dict[tuple[str, int, int, int, int, int], str], str]
+        ] = {}
         # Operator source-authority rules; empty until ``set_authority_rules``.
         self._authority_rules = AuthorityRules()
         # FTS5 tables a reap deleted from since their last
@@ -3749,6 +3754,7 @@ class Database:
 
     @_synchronized
     def queue_delete(self, filepath: str) -> None:
+        self._missing_job_checks.pop(filepath, None)
         self._conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
         self._conn.commit()
 
@@ -4102,6 +4108,105 @@ class Database:
         ).fetchall()
 
     @_synchronized
+    def retain_or_retarget_missing_job(self, filepath: str) -> bool:
+        """Preserve refresh intent; move it only to a verified current copy.
+
+        False means this was never an indexed/occurrence-backed source.
+        A destination's existing retry or dead letter is never reset.
+        """
+        row = self._active_at(self._conn.cursor(), filepath)
+        marker = self.file_identity(filepath)
+        if row is not None and marker is not None and marker["content_hash"] != row["content_hash"]:
+            return True
+        if row is None:
+            row = self._conn.execute(
+                "SELECT m.claimant_id, m.content_hash, m.size_bytes FROM indexed_files f "
+                "JOIN messages m ON m.content_hash = f.content_hash WHERE f.filepath = ?",
+                (filepath,),
+            ).fetchone()
+        if row is None and marker is not None:
+            # A newer marker at a reused locator cannot identify the old
+            # occurrence's refresh. Keep the work at its source.
+            return True
+        if row is None:
+            try:
+                locator = locate(filepath, self.account.maildir_root)
+            except OccurrenceLocatorError:
+                return False
+            row = self._conn.execute(
+                "SELECT m.claimant_id, m.content_hash, m.size_bytes FROM message_occurrences o "
+                "JOIN messages m ON m.claimant_id = o.claimant_id "
+                "WHERE o.account_id = ? AND o.relative_path = ? ORDER BY o.id DESC LIMIT 1",
+                (self.account_id, locator.relative_path),
+            ).fetchone()
+        if row is None:
+            return False
+        if row["content_hash"] is None or row["size_bytes"] is None:
+            return True
+        copies = self._conn.execute(
+            "SELECT relative_path FROM message_occurrences WHERE account_id = ? "
+            "AND claimant_id = ? AND state = 'active' AND trashed = 0 ORDER BY id",
+            (self.account_id, row["claimant_id"]),
+        ).fetchall()
+        identities = {
+            self._absolute(copy["relative_path"]): current_identity(
+                Path(self._absolute(copy["relative_path"]))
+            )
+            for copy in copies
+        }
+        cache, start = self._missing_job_checks.get(filepath, ({}, ""))
+        for key in list(cache):
+            if identities.get(key[0]) != key[1:]:
+                del cache[key]
+        evidence = FolderInventory(cache)
+        ordered = sorted(identities)
+        pivot = next((i for i, name in enumerate(ordered) if name >= start), 0)
+        ordered = ordered[pivot:] + ordered[:pivot]
+        next_path = ""
+        for target in ordered:
+            identity = identities[target]
+            if target == filepath or identity is None or identity[0] != row["size_bytes"]:
+                continue
+            before = evidence.hash_deferred
+            digest = evidence.digest(Path(target), identity)
+            if evidence.hash_deferred > before and not next_path:
+                next_path = target
+            if digest is None or digest != row["content_hash"]:
+                continue
+            with self.transaction():
+                active = self._active_at(self._conn.cursor(), target)
+                if (
+                    Path(filepath).exists()
+                    or self._active_at(self._conn.cursor(), filepath) is not None
+                    or active is None
+                    or active["claimant_id"] != row["claimant_id"]
+                    or active["trashed"]
+                    or not _same_file(target, identity)
+                ):
+                    continue
+                columns = "reason, status, attempts, last_error, last_stage, last_error_class, created_at, updated_at, next_attempt_at"
+                self._conn.execute(
+                    f"INSERT OR IGNORE INTO indexing_jobs (filepath, {columns}) "  # nosec B608 -- fixed internal column list
+                    f"SELECT ?, {columns} FROM indexing_jobs WHERE filepath = ?",
+                    (target, filepath),
+                )
+                if self._conn.execute(
+                    "SELECT 1 FROM indexing_jobs WHERE filepath = ?", (target,)
+                ).fetchone():
+                    self._conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
+                    self._conn.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
+                    self._missing_job_checks.pop(filepath, None)
+                    log.info("missing-source refresh transferred to a verified live copy")
+                    return True
+        self._missing_job_checks[filepath] = cache, next_path
+        if evidence.hash_deferred:
+            log.info(
+                "missing-source refresh hash verification deferred: %d candidate(s)",
+                evidence.hash_deferred,
+            )
+        return True
+
+    @_synchronized
     def message_content(self, claimant_id: str) -> sqlite3.Row | None:
         return self._conn.execute(
             "SELECT content_hash, size_bytes FROM messages WHERE claimant_id = ?", (claimant_id,)
@@ -4396,8 +4501,7 @@ class Database:
             paths.setdefault(by_hash[row["content_hash"]], []).append(row["filepath"])
         return paths
 
-    @staticmethod
-    def _unmark_paths(cur: sqlite3.Cursor, filepaths: list[str]) -> None:
+    def _unmark_paths(self, cur: sqlite3.Cursor, filepaths: list[str]) -> None:
         """Drop the ``indexed_files`` and ``indexing_jobs`` rows of
         ``filepaths``: the paths of a message being reaped, its
         occurrences' and every other path recorded with its bytes (#1102).
@@ -4411,6 +4515,8 @@ class Database:
         caller owns the transaction.
         """
         if filepaths:
+            for filepath in filepaths:
+                self._missing_job_checks.pop(filepath, None)
             paths = json.dumps(sorted(set(filepaths)))
             for table in ("indexed_files", "indexing_jobs"):
                 # Only fixed table names are interpolated; values are bound.
@@ -5121,6 +5227,8 @@ class Database:
                 "VALUES (?, datetime('now'), ?, ?, ?)",
                 (new_path, prior["size"], prior["mtime_ns"], prior["content_hash"]),
             )
+        self._missing_job_checks.pop(old_path, None)
+        self._missing_job_checks.pop(new_path, None)
         # The file's queue row moves too, retry or dead state intact: a
         # rename of a file whose Phase 1 committed (so the path is indexed
         # and ``on_moved`` does not re-enqueue it) but whose Phase 2 is
