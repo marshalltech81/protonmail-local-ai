@@ -2592,8 +2592,9 @@ configured cap recorded (`text_complete` 0, `extracted_chars_cap` 0),
 where in process it kept the whitespace up to the cap and recorded the
 setting. The hardcoded cut records
 no configured cap, so raising a setting does not refresh such a row,
-and cached `pdf@6` rows over 10,000,000 characters keep their fuller
-text (`TestTextCeiling` in `indexer/tests/test_pdf_child.py`).
+and cached `pdf@6` rows over 10,000,000 characters kept their fuller
+text until the `pdf@7` bump re-ran them (`TestTextCeiling` in
+`indexer/tests/test_pdf_child.py`).
 
 The limits were measured plainly in the indexer image (pypdf 6.19,
 Poppler and Tesseract 5.5.0 from Debian trixie), through the real
@@ -2856,7 +2857,7 @@ anything else stays `failed`. The row is keyed by the module that
 raised the error (#928), so it is served only to occurrences that run
 that module on the bytes; an occurrence whose label runs another
 extractor has its own row and extracts. It is stamped with the
-extractor version (`pdf@6`), so a later version bump, for example one
+extractor version (`pdf@7`), so a later version bump, for example one
 that raises a budget, refreshes it; the bumps that came with the
 `pdf`, `xlsx` and `pptx` mappings (`pdf@5`, `xlsx@6`, `pptx@3`)
 refreshed the `failed` rows the previous versions wrote, since the
@@ -2877,10 +2878,13 @@ map over its size limit, for example) is not one of these: like any
 per-page error, that page is counted in `pdf_pages_failed` (and OCR'd
 when OCR is on) and the other pages' text is kept.
 
-The PDF extractor is version 6 with pypdf 6.20.0: stream decoding limits
-and malformed page-tree recovery changed, so cached PDF results from
-earlier extractor versions are re-extracted once. The usual OCR-disabled
-and dead-letter rules still apply.
+The PDF extractor is version 7 with pypdf 6.21.1: stream decoding limits
+and malformed page-tree recovery changed (6.20), and a content stream
+longer than 2,000,000 tokens now raises `LimitReachedError` (6.21), so
+the page counts as failed and is OCR'd when OCR is on instead of being
+read as digital text. Cached PDF results from earlier extractor versions
+are re-extracted once. The usual OCR-disabled and dead-letter rules still
+apply.
 
 The parsing libraries log and warn with values read from the
 attachment (pypdf's font dictionaries and encoding names, openpyxl's
