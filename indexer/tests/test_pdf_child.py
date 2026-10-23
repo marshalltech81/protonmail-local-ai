@@ -1001,8 +1001,12 @@ class TestLimitsInTheImage:
     def test_a_heavy_digital_page_then_scans_run_under_the_ocr_phase_limit(
         self, tmp_path, monkeypatch
     ):
-        """#1450: a 16 MiB page of path operators (pypdf's walk peaks
-        around 430 MiB) then scanned pages, end to end. The child's limit
+        """#1450: an 8 MiB page of path operators (pypdf's walk peaks
+        around 340 MiB resident) then scanned pages, end to end. 8 MiB is
+        about the heaviest page pypdf 6.21 still parses: it stops a
+        content stream at 2,000,000 tokens (``LimitReachedError``, 9.5 MiB
+        of these operators parse, 10 MiB do not), and the page then counts
+        as failed and goes to OCR with the scans. The child's limit
         is 2 GiB for the parse and the OCR phase's once OCR starts; each
         Poppler and Tesseract process runs under the OCR phase's.
 
@@ -1028,7 +1032,7 @@ class TestLimitsInTheImage:
             )
             shim.chmod(0o755)
         monkeypatch.setenv("PATH", str(shims))
-        payload = _mixed_pdf(16.0, 2)
+        payload = _mixed_pdf(8.0, 2)
         child_limits: set[tuple[int, int]] = set()
         done = threading.Event()
 
