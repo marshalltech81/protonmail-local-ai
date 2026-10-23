@@ -143,6 +143,8 @@ QUERY_MESSAGE_FIELDS = (
     "seen",
     "flagged",
     "replied",
+    "occurrences",
+    "occurrence_count",
     "in_reply_to",
     "references",
     "references_count",

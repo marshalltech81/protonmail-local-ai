@@ -164,11 +164,26 @@ class TestReadSyncStamp:
         assert read_sync_stamp(tmp_path) is None
 
     def test_reads_completion_time_as_utc_and_interval(self, tmp_path):
+        """A legacy stamp (written before the 2026-10-13 delivery-identity
+        fix) still reads: no attempt id or generation, which the caller
+        must never treat as proving delivery or ordering it."""
         (tmp_path / SYNC_STAMP_NAME).write_text(
             '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60}\n'
         )
         assert read_sync_stamp(tmp_path) == SyncStamp(
             completed_at="2026-09-28T12:00:00+00:00", sync_interval_secs=60
+        )
+
+    def test_reads_the_attempt_id_and_generation(self, tmp_path):
+        (tmp_path / SYNC_STAMP_NAME).write_text(
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60, '
+            '"attempt_id": "0123456789ab-1", "generation": 1}\n'
+        )
+        assert read_sync_stamp(tmp_path) == SyncStamp(
+            completed_at="2026-09-28T12:00:00+00:00",
+            sync_interval_secs=60,
+            attempt_id="0123456789ab-1",
+            generation=1,
         )
 
     @pytest.mark.parametrize(
@@ -182,6 +197,16 @@ class TestReadSyncStamp:
             '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 0}',
             '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": "60"}',
             '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": true}',
+            # Half-written: mbsync always writes the pair together.
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60, '
+            '"attempt_id": "0123456789ab-1"}',
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60, "generation": 1}',
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60, '
+            '"attempt_id": "not-an-attempt-id", "generation": 1}',
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60, '
+            '"attempt_id": "0123456789ab-1", "generation": 0}',
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60, '
+            '"attempt_id": "0123456789ab-1", "generation": 9223372036854775808}',
         ],
     )
     def test_malformed_stamp_raises(self, tmp_path, content):
@@ -193,10 +218,23 @@ class TestReadSyncStamp:
 
 
 class TestParseSyncStampRename:
-    def test_reads_the_sync_from_the_temporary_name(self):
+    def test_reads_a_legacy_name_with_no_attempt_id_or_generation(self):
+        """A stamp renamed by mbsync before the 2026-10-13 delivery-identity
+        fix: still parses, but proves no delivery and carries no ordering
+        generation (see ``SyncStamp``)."""
         assert parse_sync_stamp_rename(
             "/maildir/.mbsync-last-sync.2026-09-28T12:00:00Z.60.tmp"
         ) == SyncStamp(completed_at="2026-09-28T12:00:00+00:00", sync_interval_secs=60)
+
+    def test_reads_the_attempt_id_and_generation_from_the_temporary_name(self):
+        assert parse_sync_stamp_rename(
+            "/maildir/.mbsync-last-sync.2026-09-28T12:00:00Z.60.0123456789ab-1.1.tmp"
+        ) == SyncStamp(
+            completed_at="2026-09-28T12:00:00+00:00",
+            sync_interval_secs=60,
+            attempt_id="0123456789ab-1",
+            generation=1,
+        )
 
     @pytest.mark.parametrize(
         "src",
@@ -206,6 +244,8 @@ class TestParseSyncStampRename:
             "/maildir/.mbsync-last-sync.yesterday.60.tmp",
             "/maildir/.mbsync-last-sync.2026-09-28T12:00:00.60.tmp",
             "/maildir/.mbsync-last-sync.2026-09-28T12:00:00Z.0.tmp",
+            "/maildir/.mbsync-last-sync.2026-09-28T12:00:00Z.60.not-an-id.1.tmp",
+            "/maildir/.mbsync-last-sync.2026-09-28T12:00:00Z.60.0123456789ab-1.0.tmp",
         ],
     )
     def test_anything_else_is_not_a_sync(self, src):

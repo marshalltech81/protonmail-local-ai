@@ -38,6 +38,7 @@ from ..lib.sqlite import (
     InvalidFilterError,
     MessageBody,
     MessageRecord,
+    OccurrenceRecord,
     Participant,
     ReapedSource,
     address_match_mode,
@@ -105,7 +106,9 @@ _NO_VALUE_LABELS = {
     "sender_domain": "(no attributable sender)",
     "recipient_domain": "(no observed recipient domain)",
     "attachment_content_type": "(no observed current attachment type)",
-    "authority_class": "(no class: Spam, no attributable sender, or no classified sender)",
+    "authority_class": (
+        "(no class: Spam or Recovered Messages, no attributable sender, or no classified sender)"
+    ),
     # #1080: no delivery date and no parseable Date header, or a send
     # date not yet checked; never grouped by when it was indexed.
     "year": "(no known date)",
@@ -246,7 +249,26 @@ def _header_lines(m: MessageRecord) -> list[str]:
     headers.append(("Sent", sent_text(m.sent_at, m.sent_at_status)))
     if m.occurred_at:
         headers.append(("Delivered", m.occurred_at))
-    headers.append(("Folder", clip(m.folder, HEADER_CHAR_LIMIT)))
+    copies = _copies(m)
+    folder = clip(m.folder, HEADER_CHAR_LIMIT)
+    notes = _category_words(m)
+    if copies > 1:
+        notes.append(f"representative of {copies} copies")
+    headers.append(("Folder", f"{folder} ({', '.join(notes)})" if notes else folder))
+    if copies > 1:
+        headers.append(
+            (
+                "Copies",
+                "; ".join(
+                    f"{clip(o.folder, HEADER_CHAR_LIMIT)} "
+                    f"({', '.join(_CATEGORY_WORDS.get(o.category, []) + _copy_words(o))})"
+                    for o in m.occurrences
+                )
+                + (
+                    f"; … {copies - len(m.occurrences)} more" if copies > len(m.occurrences) else ""
+                ),
+            )
+        )
     if m.in_reply_to:
         headers.append(("In-Reply-To", clip(m.in_reply_to, HEADER_CHAR_LIMIT)))
     if m.references:
@@ -256,6 +278,35 @@ def _header_lines(m: MessageRecord) -> list[str]:
     headers.append(("Attachments", "yes" if m.has_attachments else "no"))
     headers.append(("Status", ", ".join(_state_words(m))))
     return [f"{label}: {value}" for label, value in headers]
+
+
+def _copies(m: MessageRecord) -> int:
+    """How many current Maildir copies ``m`` has (#1568)."""
+    return len(m.occurrences) if m.occurrence_count is None else m.occurrence_count
+
+
+# A source category in words (#1569); ordinary mailbox mail gets none.
+_CATEGORY_WORDS = {
+    "unsent": ["unsent"],
+    "recovered": ["recovered, untrusted"],
+    "unknown": ["unknown category"],
+}
+
+
+def _category_words(m: MessageRecord) -> list[str]:
+    """The representative copy's source category in words: the copy
+    whose folder the row shows, a former one for a message with no current copy
+    (review round 3 on #1612)."""
+    return list(_CATEGORY_WORDS.get(m.category, [])) if m.category is not None else []
+
+
+def _copy_words(o: OccurrenceRecord) -> list[str]:
+    """One copy's Maildir state in words, ``deleted`` for a ``T`` flag."""
+    words = ["read" if o.seen else "unread"]
+    words += [w for w, on in (("flagged", o.flagged), ("replied", o.replied)) if on]
+    if o.trashed:
+        words.append("deleted")
+    return words
 
 
 def _state_words(m: MessageRecord) -> list[str]:
@@ -349,7 +400,11 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
     if m.occurred_at and shown("occurred_at"):
         head.append(f"delivered {m.occurred_at}")
     if shown("folder"):
-        head.append(m.folder)
+        copies = _copies(m)
+        notes = _category_words(m)
+        if copies > 1:
+            notes.append(f"+{copies - 1} copies")
+        head.append(f"{m.folder} ({', '.join(notes)})" if notes else m.folder)
     for name, word, on in (
         ("seen", "unread", not m.seen),
         ("flagged", "flagged", m.flagged),
@@ -638,7 +693,7 @@ def _attachment_lines(i: int, a: AttachmentOccurrenceRecord) -> list[str]:
     head = [sent_text(a.sent_at, a.sent_at_status)]
     if a.occurred_at:
         head.append(f"delivered {a.occurred_at}")
-    head.append(clip(a.folder, HEADER_CHAR_LIMIT))
+    head.append(f"{clip(a.folder, HEADER_CHAR_LIMIT)} (representative copy)")
     name = a.filename + (" … [cut]" if a.filename_clipped else "")
     mime = a.content_type + (" … [cut]" if a.content_type_clipped else "")
     extraction = a.extraction_status or "none recorded"
@@ -1222,9 +1277,9 @@ def register_retrieval_tools(server, db):
         Args:
             folder: Folder name (default: INBOX)
             filter_type: "all" (default), "unread" (threads with an
-                         unread message in the folder) or "flagged"
-                         (threads with a flagged / starred message in
-                         the folder). Other values return a validation
+                         unread copy of a message in the folder) or
+                         "flagged" (threads with a flagged / starred
+                         copy in the folder). Other values return a validation
                          error.
             limit: Number of threads to return (default 20, clamped
                    to [1, 100])
@@ -1332,7 +1387,8 @@ def register_retrieval_tools(server, db):
         0. ``indeterminate`` counts messages a filter could not decide
         (a size bound on a message without a stored size; a sender or
         participant filter, or an authority_class filter on a message
-        outside Spam whose sender is ambiguous or not yet checked; a name
+        outside Spam and Recovered Messages whose sender is ambiguous or
+        not yet checked; a name
         or fragment address filter that matches nothing on a message
         whose display names are not all indexed; a subject, text,
         has_attachments or address filter that finds nothing in a
@@ -1450,9 +1506,11 @@ def register_retrieval_tools(server, db):
                   A message whose indexed body is incomplete (a parse
                   limit, indexing not finished, or not checked yet)
                   and lacks a word is indeterminate.
-            folder: Exact folder name (see list_folders). Without it,
-                    messages filed in Trash are left out; pass "Trash"
-                    to list them.
+            folder: Exact folder name (see list_folders): a message
+                    with a copy there, decided on the same copy as
+                    seen / flagged / replied. Without it, messages
+                    filed only in Trash are left out; pass "Trash" to
+                    list them.
             date_from: ISO 8601 lower bound, inclusive, on the clock
                        date_basis selects. A missing clock is indeterminate.
             date_to: ISO 8601 upper bound on date_basis, inclusive; a date-only value
@@ -1475,15 +1533,18 @@ def register_retrieval_tools(server, db):
                              file classes as this: "counsel",
                              "management", "vendor", "government",
                              "personal", "other", or "unclassified"
-                             (no rule matched). Spam-folder messages
-                             never match; any other message whose
+                             (no rule matched). Spam and Recovered
+                             Messages copies never match; any other message whose
                              sender is ambiguous or not yet checked, or
                              whose From address list is incomplete or
                              not yet checked with no classified address
                              stored, is counted as indeterminate.
-            seen: True for messages read in Proton, False for unread.
-            flagged: True for flagged (starred) messages, False for the rest.
-            replied: True for messages answered in Proton, False for the rest.
+            seen: True for messages read in Proton, False for unread
+                  (per copy: a message matches through one copy).
+            flagged: True for flagged (starred) messages, False for the
+                     rest (per copy).
+            replied: True for messages answered in Proton, False for the
+                     rest (per copy).
             size_min: Inclusive lower bound in bytes (an integer from 0
                       to 2^63-1) on the message's local file size (not
                       the server's RFC822.SIZE); a message without a
@@ -1543,7 +1604,8 @@ def register_retrieval_tools(server, db):
             nor reject (no stored size under a size bound; a sender whose
             attribution is ambiguous or not yet checked under a sender
             or participant filter, or an authority_class filter on a
-            message outside Spam; stored content a parse limit cut, or
+            message outside Spam and Recovered Messages; stored content a
+            parse limit cut, or
             not checked yet, under a content or address filter); they
             are in neither
             total_matches nor the pages, so a count is complete only
@@ -2063,7 +2125,7 @@ def register_retrieval_tools(server, db):
         0. The group with a null value holds messages with no value on
         the dimension: no attributable sender (ambiguous, not yet
         checked, or no stored From address), and for authority_class
-        also Spam and senders with no class. A message with several
+        also Spam and Recovered Messages and senders with no class. A message with several
         From addresses counts in each of their groups.
 
         Groups are ordered by messages descending, then value. Group
@@ -2417,6 +2479,11 @@ def register_retrieval_tools(server, db):
         apply to the message carrying the attachment and match as in
         ``query_messages``. Attachments on messages in Trash are left out
         unless ``folder="Trash"``.
+
+        A row's ``folder`` and ``source_file`` describe the carrying
+        message's representative copy, which may differ from the copy
+        that matched the folder filter. ``folder_is_representative`` is
+        true; get_message lists the message's copies.
 
         ``total_matches`` counts the occurrences the filters definitely
         match; it is the complete count only when ``indeterminate`` is 0.
@@ -2773,7 +2840,7 @@ def register_retrieval_tools(server, db):
         Each contact's authority class comes from the operator's rules
         file matched against the claimed From address, not a verified
         sender; the authority_class filters on search_emails and
-        query_messages skip Spam-folder mail.
+        query_messages skip Spam and Recovered Messages mail.
 
         Args:
             query: Name, address, or domain fragment (case-insensitive).

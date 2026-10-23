@@ -1023,7 +1023,7 @@ superseded entries keep their number and one line.
     outside its provider's Trash role, considering only its non-`T`
     active occurrences when any exist, otherwise all its active ones
     (owner, 2026-10-13, #1568). Schema v14 (#1596, #1566) is additive
-    and changes no reader; v15 (#1567, #1568, #1569) moves the readers
+    and changes no reader; v19 (#1567, #1568, #1569) moves the readers
     and drops the old columns. The v14 migration binds the account row,
     seeds one occurrence per message whose `indexed_files` record for
     its stored path carries the same content hash (stored records only;
@@ -1130,7 +1130,7 @@ superseded entries keep their number and one line.
     that withheld folders keeps today's criteria and shows the count;
     upstream Bridge/Proton currency stays the fixed "unknown". The
     indexer stores the outcome per account in `account_collection_state`
-    at schema v16, after decision 47's v15. A missing, legacy,
+    at schema v20, after decision 47's v19. A missing, legacy,
     malformed, unsupported or mismatched file reads as unknown with a
     fixed-text WARNING, never as a success, and a rebuilt index
     recovers the state from the file. `get_mailbox_status` gains a
@@ -1179,6 +1179,29 @@ superseded entries keep their number and one line.
     are removed. Results go into `docs/architecture.md` as executed
     rows; they are necessary, not sufficient, evidence for #1598's
     acceptance rule, and server-side guarantees stay with #1584.
+54. **Sync delivery identity (2026-10-13, #1592 thread on #1621,
+    decision_r4256151340/r4256221584):** `_success_delivered` matched a
+    collection-status success to the acknowledged success stamp by
+    comparing `completed_at` strings — a timestamp used as an attempt
+    identity. Across a host clock rollback, which `_acknowledge`
+    explicitly tolerated, a later retry's stamp could carry the same
+    `completed_at` as an older, already-acknowledged one; if that
+    retry's own rename event was then missed, the stale acknowledgement
+    still matched by timestamp and could clear an unrecovered failure
+    before the retry's stamp was ever observed. Fixed by identity, not
+    by patching the clock tolerance: the success stamp
+    (`.mbsync-last-sync.json`) now carries the same attempt ID
+    `collection_status` already assigns the sync, and mbsync allocates
+    and persists a durable, monotonically increasing success generation
+    in the `mbsync-state` volume (no SQLite schema change) before
+    anything names it, failing closed on allocation failure. The
+    indexer's `_acknowledge` orders stamps by this generation, never by
+    wall-clock time, so #332's clock-ahead tolerance is gone along with
+    the gap it left; `_success_delivered` matches by attempt ID
+    equality (superseded by format-2 ordering in decision 61 below).
+    A legacy stamp (no attempt ID or generation) is never
+    acknowledged and never proves delivery — a missing identity is
+    "cannot prove," never a match.
 
 54. **Selected query clocks and paging (2026-10-13, #1150):** the owner
     approved serving `effective`, `sent` and `occurred` on
@@ -1305,3 +1328,20 @@ superseded entries keep their number and one line.
     private local source storage and a reparse; the measured completion reserve
     is 16 seconds. The future phrase index and public phrase contract remain in
     #1388, separately approved and measured.
+
+
+61. **Occurrence completeness (#1612, owner, 2026-10-23):** after the
+    Claude Opus 5.5 / Codex GPT-6.1 Sol high-effort panel reached consensus
+    in three exchanges, the owner approved format-2 collection ordering
+    (success generation and terminal generation floor, legacy format 1
+    retained), allocator seeding from stamp and status, and truthful
+    recovery from stale publications. Missing-source refresh jobs remain
+    durable and can transfer to verified active non-trashed copies,
+    preserving destination retries/dead letters. All scan hashing shares
+    the existing 500-file/100MiB bound; stable evidence includes ctime and
+    device, with fair admission and bounded reads. Once-per-pass validated
+    inventories retain all same-uniq paths; mutation defers the decision.
+    Reap restore checks cover historical locators with verified bytes,
+    separately from unmark eligibility. No SQLite migration or relaxed
+    independent control; individually oversized secondary checks remain
+    visibly deferred under the existing cap.

@@ -85,7 +85,7 @@ class _ConnSpy:
         return [
             c
             for c in self.cursors
-            if "JOIN message_thread_map m ON m.claimant_id = a.claimant_id" in c.sql
+            if "JOIN message_occurrences m ON m.id = (SELECT o.id" in c.sql
             and ("'unsupported'" in c.sql or "'too_large'" in c.sql)
         ]
 
@@ -100,9 +100,7 @@ def _message(db: Database, name: str) -> str:
 def _occurrences(db: Database, filepath: str, rows: list[tuple]) -> None:
     """``rows``: (attachment_id, filename, MIME type, size, module,
     status, error) per occurrence of the message at ``filepath``."""
-    claimant = db._conn.execute(
-        "SELECT claimant_id FROM message_thread_map WHERE filepath = ?", (filepath,)
-    ).fetchone()["claimant_id"]
+    claimant = db.find_active_occurrence(filepath)["claimant_id"]
     db._conn.executemany(
         "INSERT INTO attachments (attachment_occurrence_id, claimant_id, attachment_id, "
         "thread_id, filename, content_type, size_bytes, seen_at, extractor_module) "
@@ -247,7 +245,13 @@ def test_sweep_reads_bounded_batches_and_closes_its_cursors(mailbox, monkeypatch
         assert max(cursor.batches) <= database.SWEEP_FETCH_ROWS
         assert not cursor.fetchall_called
         assert cursor.closed
-        assert "ORDER BY" not in cursor.sql
+        # The only ordering is the per-message pick of the occurrence
+        # to re-read (#1567), never the whole result.
+        pick = (
+            "ORDER BY o.state <> 'active', o.trashed, "
+            "CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1"
+        )
+        assert "ORDER BY" not in cursor.sql.replace(pick, "")
     assert len(no_extractor.batches) > 2
 
 
@@ -388,3 +392,18 @@ def test_identification_arm_reads_bounded_batches(mailbox, monkeypatch, caplog):
         "3, already queued 1, skipped 1 dead-lettered (run make requeue-dead to refresh them)."
     )
     assert MARKER not in caplog.text
+
+
+def test_a_message_with_no_active_copy_is_queued_at_its_last_path(mailbox):
+    """Review round 1 on #1612: a refresh is not dropped for a message
+    whose copies are all retired (its file is missing, restored later or
+    reaped): the sweep queues its last known path, as before occurrences,
+    so the job waits for a rename like any other missing indexed file."""
+    db, _queue, paths = mailbox
+    db._conn.execute(
+        "UPDATE message_occurrences SET state = 'retired', retired_at = '2024-01-01T00:00:00+00:00'"
+    )
+    db._conn.commit()
+    rerun = main._occurrence_reruns_extraction
+    assert db.find_ocr_disabled_attachment_filepaths(rerun) == {paths["ocr"]}
+    assert paths["noext_mixed"] in db.find_no_extractor_attachment_filepaths(rerun)

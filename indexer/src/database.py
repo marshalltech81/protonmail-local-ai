@@ -7,6 +7,7 @@ Thread-level indexing: one row per thread, updated as new messages arrive.
 import functools
 import json
 import logging
+import os
 import sqlite3
 import struct
 import threading
@@ -42,10 +43,12 @@ from .extractors import (
     SCANNED_PDF_OCR_DISABLED_ERROR,
     warn_rate_limited,
 )
+from .file_evidence import FileIdentity, FolderInventory, read_digest
+from .file_evidence import file_identity as current_identity
 from .maildir import is_trashed, message_state
 from .occurrences import OccurrenceLocatorError, SeedFunctions, locate
 from .parser import PARSE_CAPS, participant_names
-from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL
+from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL, STALE_ENQUEUE_SQL
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
     FTS_SUBJECT_SCAN_ROWS,
@@ -73,6 +76,23 @@ def _caps_json(caps: dict[str, int]) -> str:
     ):
         raise ValueError("parse caps must map PARSE_CAPS names to positive counts")
     return json.dumps({name: caps[name] for name in PARSE_CAPS if name in caps})
+
+
+def _same_file(filepath: str, identity: tuple[int, int, int, int, int]) -> bool:
+    """Whether ``filepath`` still has ``identity`` (size, mtime, inode, ctime, device):
+    the file whose bytes a scan verified, not a replacement."""
+    try:
+        st = os.stat(filepath)
+    except OSError:
+        return False
+    return (st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, st.st_dev) == identity
+
+
+def _sha256(filepath: str, identity=None) -> str:
+    identity = identity if identity is not None else current_identity(Path(filepath))
+    if identity is None:
+        raise FileNotFoundError("file unavailable")
+    return read_digest(Path(filepath), identity)
 
 
 def _close_connection(conn: sqlite3.Connection) -> None:
@@ -186,7 +206,18 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # committed in phase 2c; NULL while pending, 0 when extraction was disabled.
 # v16 (#1123): partial clock/claimant indexes for selected-clock listing pages.
 # v17 (#1090): observed Bcc participants and nullable parse-capture completeness.
-SCHEMA_VERSION = 18
+# v18 (#1362): full decoded MIME body sources, unknown until queued reparse.
+# v19 (#1567, #1568, #1569): the readers move to the occurrences.
+# ``pending_deletions`` is keyed by occurrence, an occurrence the
+# reconciliation scan binds records provenance ``scan``, a message the
+# v14 seed could not bind gets a retired occurrence, and
+# ``messages.content_hash`` is indexed; no reparse
+# (``migrations/0019_occurrence_readers.sql``).
+# v20 (#1592): ``account_collection_state`` keeps each account's latest
+# mbsync collection outcome, read from mbsync's collection status file;
+# empty until the indexer first reads it, no reparse
+# (``migrations/0020_account_collection_state.sql``).
+SCHEMA_VERSION = 20
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -216,7 +247,8 @@ ACCOUNT_SCHEMA_STATEMENTS = (
 )
 
 # Mailbox occurrences' DDL (#1566), shared by the initial schema; the v14
-# migration file repeats it.
+# migration file repeats it, and v19's rebuilds it with the ``scan``
+# provenance (#1567).
 OCCURRENCE_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE message_occurrences (
@@ -235,7 +267,8 @@ OCCURRENCE_SCHEMA_STATEMENTS = (
         internal_at       TEXT,
         state             TEXT NOT NULL CHECK (state IN ('active', 'retired')),
         retired_at        TEXT,
-        provenance        TEXT NOT NULL CHECK (provenance IN ('parse', 'rename', 'migration')),
+        provenance        TEXT NOT NULL
+                          CHECK (provenance IN ('parse', 'rename', 'scan', 'migration')),
         CHECK ((state = 'retired') = (retired_at IS NOT NULL))
     )
     """,
@@ -244,6 +277,82 @@ OCCURRENCE_SCHEMA_STATEMENTS = (
     "CREATE UNIQUE INDEX idx_message_occurrences_path "
     "ON message_occurrences(account_id, relative_path) WHERE state = 'active'",
     "CREATE INDEX idx_message_occurrences_claimant ON message_occurrences(claimant_id)",
+)
+
+# Tombstones keyed by occurrence (#1567), shared by the initial schema;
+# the v19 migration file repeats it.
+PENDING_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE pending_deletions (
+        occurrence_id INTEGER PRIMARY KEY
+                      REFERENCES message_occurrences(id) ON DELETE CASCADE,
+        claimant_id   TEXT NOT NULL,
+        marked_at     TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX idx_pending_deletions_claimant ON pending_deletions(claimant_id, marked_at)",
+)
+
+# mbsync's latest collection outcome per account (#1592), shared by the
+# initial schema; the v20 migration file repeats it. One row per account,
+# replaced by the indexer from mbsync's collection status file
+# (``collection_status.py``) and read by mcp-server's get_mailbox_status.
+# ``status`` is ``unknown`` (with ``unknown_reason``, and the record
+# columns NULL) when the file is missing, legacy, malformed, unsupported,
+# unreadable or names another account. ``success_delivered`` says whether
+# the last success is the sync the indexer acknowledged through the
+# success stamp. ``unrecovered_failure_attempt_id`` is the failed attempt
+# the indexer last saw, kept until a later success is delivered.
+COLLECTION_STATE_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE account_collection_state (
+        account_id                     INTEGER PRIMARY KEY REFERENCES accounts(id),
+        status                         TEXT NOT NULL CHECK (status IN ('known', 'unknown')),
+        unknown_reason                 TEXT CHECK (unknown_reason IN ('missing', 'legacy',
+                                           'malformed', 'unsupported', 'account_mismatch',
+                                           'unreadable')),
+        run_deadline_secs              INTEGER,
+        sync_interval_secs             INTEGER,
+        attempt_id                     TEXT,
+        attempt_started_at             TEXT,
+        attempt_outcome                TEXT CHECK (attempt_outcome IN ('in_progress', 'succeeded',
+                                           'succeeded_with_withheld_folders', 'failed')),
+        terminal_attempt_id            TEXT,
+        terminal_completed_at          TEXT,
+        terminal_outcome               TEXT CHECK (terminal_outcome IN ('succeeded',
+                                           'succeeded_with_withheld_folders', 'failed')),
+        terminal_withheld_folders      INTEGER CHECK (terminal_withheld_folders >= 0),
+        terminal_failure_class         TEXT CHECK (terminal_failure_class IN ('deadline', 'killed',
+                                           'error', 'permission_repair', 'interrupted')),
+        success_attempt_id             TEXT,
+        success_completed_at           TEXT,
+        success_delivered              INTEGER CHECK (success_delivered IN (0, 1)),
+        unrecovered_failure_attempt_id TEXT,
+        observed_at                    TEXT NOT NULL,
+        CHECK ((status = 'unknown') = (unknown_reason IS NOT NULL))
+    )
+    """,
+)
+
+# The columns ``record_ingestion_state`` fills from a collection state
+# mapping; ``account_id`` and ``observed_at`` it sets itself.
+COLLECTION_STATE_COLUMNS = (
+    "status",
+    "unknown_reason",
+    "run_deadline_secs",
+    "sync_interval_secs",
+    "attempt_id",
+    "attempt_started_at",
+    "attempt_outcome",
+    "terminal_attempt_id",
+    "terminal_completed_at",
+    "terminal_outcome",
+    "terminal_withheld_folders",
+    "terminal_failure_class",
+    "success_attempt_id",
+    "success_completed_at",
+    "success_delivered",
+    "unrecovered_failure_attempt_id",
 )
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -293,12 +402,12 @@ _EXTRACTION_COLUMNS = ", ".join(_EXTRACTION_COLUMN_NAMES)
 # ``attachment_indexing._ocr_row_kept`` keeps: an ``-ocr`` stamp (before
 # ``@``), or an OCR page cap or skipped pages above 0 (NULL counts as 0).
 _CAP_REFRESH_SQL = """
-    SELECT m.filepath, a.attachment_occurrence_id AS occurrence_id,
+    SELECT m.relative_path, a.attachment_occurrence_id AS occurrence_id,
            a.text_complete AS occurrence_complete
     FROM attachment_extractions e
     JOIN attachments a ON a.attachment_id = e.attachment_id
         AND a.extractor_module = e.extractor_module
-    JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+    JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
     WHERE e.extraction_status IN ('success', 'empty')
       AND (:ocr_enabled OR (substr(CASE WHEN instr(COALESCE(e.extractor, ''), '@') > 0
                THEN substr(e.extractor, 1, instr(e.extractor, '@') - 1)
@@ -340,12 +449,12 @@ _CAP_BOOTSTRAP_QUERY = _CAP_REFRESH_SQL.format(arm=_CAP_BOOTSTRAP_SQL)
 # row an OCR extractor wrote (an ``-ocr`` stamp before ``@``), so its
 # text is not traded for "OCR disabled".
 _IDENTIFICATION_REFRESH_QUERY = """
-    SELECT m.filepath, a.attachment_occurrence_id AS occurrence_id,
+    SELECT m.relative_path, a.attachment_occurrence_id AS occurrence_id,
            a.text_complete AS occurrence_complete
     FROM attachment_extractions e
     JOIN attachments a ON a.attachment_id = e.attachment_id
         AND a.extractor_module = e.extractor_module
-    JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+    JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
     WHERE e.extraction_status <> 'too_large'
       AND (:ocr_enabled OR substr(CASE WHEN instr(COALESCE(e.extractor, ''), '@') > 0
                THEN substr(e.extractor, 1, instr(e.extractor, '@') - 1)
@@ -489,6 +598,11 @@ class Database:
         self.account_id: int | None = None
         self._lock = threading.RLock()
         self._transaction_depth = 0
+        # Retry-local byte evidence survives waits; cursors give unreadable
+        # early copies no priority over later copies on the next attempt.
+        self._missing_job_checks: dict[
+            str, tuple[dict[tuple[str, int, int, int, int, int], str], str]
+        ] = {}
         # Operator source-authority rules; empty until ``set_authority_rules``.
         self._authority_rules = AuthorityRules()
         # FTS5 tables a reap deleted from since their last
@@ -758,16 +872,21 @@ class Database:
         self._verify_account()
         if 14 in applied:
             self._log_occurrence_seed()
+        if 19 in applied:
+            self._log_occurrence_cutover()
 
     def _log_occurrence_seed(self) -> None:
         """Report what the v14 migration bound (#1566), as counts. A
         message left without an occurrence (its path holds other bytes
         now) waits for the queued reparse, which binds whatever its file
         holds."""
+        # Active rows only: v19, applied in the same run, gives a message
+        # the seed could not bind a retired occurrence (#1567).
         seeded, unbound = self._conn.execute(
-            "SELECT (SELECT COUNT(*) FROM message_occurrences), "
+            "SELECT (SELECT COUNT(*) FROM message_occurrences WHERE state = 'active'), "
             "(SELECT COUNT(*) FROM messages m WHERE NOT EXISTS ("
-            "SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id))"
+            "SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id "
+            "AND o.state = 'active'))"
         ).fetchone()
         log.info("Migration v14 seeded %d mailbox occurrence(s)", seeded)
         if unbound:
@@ -776,6 +895,28 @@ class Database:
                 "does not carry their content hash; the queued reparse binds the files "
                 "still present",
                 unbound,
+            )
+
+    def _log_occurrence_cutover(self) -> None:
+        """Report what the v19 migration did (#1567), as counts: the
+        messages it gave a retired occurrence because no file was verified
+        to hold their bytes, and the tombstones it carried over. A message
+        counts once, and only while it has no active occurrence: a v14
+        seed row retired by a later move sits beside the active row that
+        replaced it and is history, not a missing file (review round 1 on
+        #1612)."""
+        retired, pending = self._conn.execute(
+            "SELECT (SELECT COUNT(DISTINCT o.claimant_id) FROM message_occurrences o "
+            "WHERE o.provenance = 'migration' AND o.state = 'retired' AND NOT EXISTS ("
+            "SELECT 1 FROM message_occurrences a WHERE a.claimant_id = o.claimant_id "
+            "AND a.state = 'active')), (SELECT COUNT(*) FROM pending_deletions)"
+        ).fetchone()
+        log.info("Migration v19 carried %d tombstone(s) over to occurrences", pending)
+        if retired:
+            log.warning(
+                "Migration v19 found %d message(s) with no verified file; each has a "
+                "retired occurrence and counts as having lost its last live copy",
+                retired,
             )
 
     def _verify_account(self) -> None:
@@ -1078,19 +1219,17 @@ class Database:
                 claimant_id TEXT PRIMARY KEY,
                 message_id  TEXT NOT NULL,
                 thread_id   TEXT NOT NULL,
-                filepath    TEXT NOT NULL,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
             );
             CREATE INDEX idx_message_thread_map_message ON message_thread_map(message_id);
-            -- Flag renames match rows by filepath; thread rebuilds and
-            -- removals match them by thread_id.
-            CREATE INDEX idx_message_thread_map_filepath ON message_thread_map(filepath);
+            -- Thread rebuilds and removals match rows by thread_id.
             CREATE INDEX idx_message_thread_map_thread ON message_thread_map(thread_id);
 
             -- One row per indexed message: the authoritative per-message
-            -- record (own headers, send and delivery time, folder, source
-            -- locator and content hash) behind exact enumeration and
-            -- provenance. Cascades from ``message_thread_map`` so every
+            -- record (own headers, send and delivery time and content
+            -- hash) behind exact enumeration and provenance; its folders,
+            -- locators and Maildir flags are its copies' (``message_occurrences``,
+            -- #1568). Cascades from ``message_thread_map`` so every
             -- existing message / thread removal path cleans it up.
             -- ``sent_at`` is the parsed ``Date:`` header, NULL when it is
             -- absent or unparseable, with ``sent_at_status`` saying which
@@ -1108,8 +1247,6 @@ class Database:
                 claimant_id     TEXT PRIMARY KEY,
                 message_id      TEXT NOT NULL,
                 thread_id       TEXT NOT NULL,
-                filepath        TEXT NOT NULL,
-                folder          TEXT NOT NULL,
                 subject         TEXT NOT NULL,
                 sent_at         TEXT,
                 sent_at_status  TEXT CHECK (sent_at_status IN ('parsed', 'missing', 'invalid')),
@@ -1123,11 +1260,6 @@ class Database:
                 content_hash    TEXT,
                 indexed_at      TEXT NOT NULL,
                 first_indexed_at TEXT NOT NULL,
-                -- Maildir S / F / R flags of ``filepath`` (maildir.message_state),
-                -- written with it on every insert and rename.
-                seen            INTEGER NOT NULL DEFAULT 0,
-                flagged         INTEGER NOT NULL DEFAULT 0,
-                replied         INTEGER NOT NULL DEFAULT 0,
                 -- #1144: 0 = one From header; 1 = sender attribution unsafe
                 -- (a repeated From, or the header scan stopped before a
                 -- second could be ruled out); NULL = not yet assessed (a
@@ -1188,16 +1320,16 @@ class Database:
             CREATE INDEX idx_messages_message_effective
                 ON messages(message_id, effective_at, claimant_id);
             CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
-            CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
             CREATE INDEX idx_messages_effective ON messages(effective_at);
+            -- The reconciliation scan finds the message holding a found
+            -- copy's bytes by content hash (#1567).
+            CREATE INDEX idx_messages_content_hash ON messages(content_hash);
             CREATE INDEX idx_messages_sent ON messages(sent_at, claimant_id)
                 WHERE sent_at_status = 'parsed';
             -- Exact page-only predicate: ordinary evidence/count date terms
             -- do not imply this form under SQLite's partial-index matching.
             CREATE INDEX idx_messages_occurred ON messages(occurred_at, claimant_id)
                 WHERE (occurred_at IS NOT NULL) = 1;
-            -- Flag renames and cross-folder moves update by filepath.
-            CREATE INDEX idx_messages_filepath ON messages(filepath);
 
             CREATE TABLE message_headers (
                 claimant_id TEXT NOT NULL,
@@ -1253,19 +1385,6 @@ class Database:
                 mtime_ns     INTEGER,
                 content_hash TEXT
             );
-
-            -- Tombstones for the deletion reconciler (mirror mode, the
-            -- default). ``marked_at``
-            -- is ISO 8601 UTC so the reaper's lexicographic cutoff
-            -- comparison is well-defined.
-            CREATE TABLE pending_deletions (
-                filepath    TEXT PRIMARY KEY,
-                claimant_id TEXT NOT NULL,
-                thread_id   TEXT NOT NULL,
-                marked_at   TEXT NOT NULL
-            );
-            CREATE INDEX idx_pending_deletions_thread
-                ON pending_deletions(thread_id);
 
             -- One row per message the reconciler reaped, written in the
             -- reap transaction, so mcp-server can answer a lookup of a
@@ -1455,13 +1574,31 @@ class Database:
         account's Maildir root and unique among active rows. A retired
         row keeps its path for diagnostics and is never revived.
         ``provenance`` says how the row was created (``parse``, an
-        observed ``rename``, or the ``migration`` seed); the observation
+        observed ``rename``, a reconciliation ``scan`` that verified a
+        found copy's bytes, or the ``migration`` seed); the observation
         dates say when the indexer first and last saw the file (NULL on a
         seeded row until a parse sees it); ``internal_at`` stays NULL,
         unknown, until #1081 writes it. Rows go with their message
         (``ON DELETE CASCADE``).
+
+        ``pending_deletions`` holds the deletion reconciler's tombstones
+        (mirror mode, the default), one per occurrence (#1567), written
+        only while the message has no live occurrence (active and not
+        ``T``-flagged) and removed once it has one again; see
+        ``Database.mark_lost_messages``. ``marked_at`` is ISO 8601 UTC so
+        the reaper's lexicographic cutoff comparison is well-defined.
+
+        ``account_collection_state`` holds each account's latest mbsync
+        collection outcome (#1592, ``COLLECTION_STATE_SCHEMA_STATEMENTS``);
+        ``migrations/0020_account_collection_state.sql`` creates it on an
+        existing index.
         """
-        for statement in ACCOUNT_SCHEMA_STATEMENTS + OCCURRENCE_SCHEMA_STATEMENTS:
+        for statement in (
+            ACCOUNT_SCHEMA_STATEMENTS
+            + OCCURRENCE_SCHEMA_STATEMENTS
+            + PENDING_SCHEMA_STATEMENTS
+            + COLLECTION_STATE_SCHEMA_STATEMENTS
+        ):
             cur.execute(statement)
 
     # -------------------------------------------------------------------------
@@ -1732,14 +1869,11 @@ class Database:
             for msg in thread.messages:
                 cur.execute(
                     """
-                    INSERT INTO message_thread_map
-                        (claimant_id, message_id, thread_id, filepath)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(claimant_id) DO UPDATE SET
-                        thread_id = excluded.thread_id,
-                        filepath  = excluded.filepath
+                    INSERT INTO message_thread_map (claimant_id, message_id, thread_id)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(claimant_id) DO UPDATE SET thread_id = excluded.thread_id
                     """,
-                    (msg.claimant_id, msg.message_id, thread.thread_id, msg.filepath),
+                    (msg.claimant_id, msg.message_id, thread.thread_id),
                 )
 
                 cur.execute(
@@ -2372,17 +2506,17 @@ class Database:
         placeholders = ",".join(["?"] * len(extractors))
         rows = self._conn.execute(
             f"""
-            SELECT DISTINCT m.filepath
+            SELECT DISTINCT m.relative_path
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
-            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.extractor IN ({placeholders})
-            ORDER BY m.filepath
+            ORDER BY m.relative_path
             """,  # nosec B608 — placeholders only, values are bound
             extractors,
         ).fetchall()
-        return [r["filepath"] for r in rows]
+        return [self._absolute(r["relative_path"]) for r in rows]
 
     def _stream_filepaths(
         self,
@@ -2392,7 +2526,12 @@ class Database:
         assessed: CompletenessClearing | None = None,
     ) -> set[str]:
         """The filepaths of the rows ``sql`` returns for which
-        ``qualifies`` holds, read ``SWEEP_FETCH_ROWS`` rows at a time
+        ``qualifies`` holds: each row's ``relative_path``, the file its
+        message is re-read from (an active occurrence's, a live one first,
+        #1567; for a message with none, its latest retired occurrence's,
+        its last known path, so the refresh is queued as before
+        occurrences and its job waits for a rename like any missing
+        indexed file, review round 1 on #1612), read ``SWEEP_FETCH_ROWS`` rows at a time
         (#1289). A message can carry thousands of occurrences with
         sender-chosen labels and sizes, so only the qualifying filepaths
         are kept, never the rows. Callers hold the database lock for the
@@ -2410,7 +2549,7 @@ class Database:
                 for row in rows:
                     if not qualifies(row):
                         continue
-                    filepaths.add(row["filepath"])
+                    filepaths.add(self._absolute(row["relative_path"]))
                     if assessed is not None and row["occurrence_complete"] is not None:
                         assessed.add(row["occurrence_id"])
         finally:
@@ -2432,13 +2571,13 @@ class Database:
         ``assessed`` (#1236)."""
         return self._stream_filepaths(
             """
-            SELECT m.filepath, e.extraction_status, e.extractor, e.text_complete,
+            SELECT m.relative_path, e.extraction_status, e.extractor, e.text_complete,
                    a.attachment_occurrence_id AS occurrence_id,
                    a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
-            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.text_complete IS NULL
               AND e.extraction_status IN ('success', 'empty')
             """,
@@ -2479,19 +2618,19 @@ class Database:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is an "OCR disabled" result
         and for which ``qualifies`` holds. ``qualifies`` gets one row per
-        occurrence with the filepath, filename, MIME type, the cached
-        error, the row's extractor module and its recorded extractor
-        (``NULL`` when unstamped, #1415)."""
+        occurrence with its message's file (``relative_path``, #1567),
+        filename, MIME type, the cached error, the row's extractor module
+        and its recorded extractor (``NULL`` when unstamped, #1415)."""
         return self._stream_filepaths(
             """
-            SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
+            SELECT m.relative_path, a.filename, a.content_type, e.extraction_error,
                    e.extractor_module, e.extractor,
                    a.attachment_occurrence_id AS occurrence_id,
                    a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
-            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.extraction_status = 'unsupported'
               AND e.extraction_error IN (?, ?)
             """,
@@ -2514,14 +2653,14 @@ class Database:
         ``find_ocr_disabled_attachment_filepaths``."""
         return self._stream_filepaths(
             """
-            SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
+            SELECT m.relative_path, a.filename, a.content_type, e.extraction_error,
                    e.extractor_module, e.extractor,
                    a.attachment_occurrence_id AS occurrence_id,
                    a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
-            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.extraction_status = 'unsupported'
               AND e.extraction_error IN (?, ?)
             """,
@@ -2542,12 +2681,12 @@ class Database:
         the same size."""
         return self._stream_filepaths(
             """
-            SELECT m.filepath, a.attachment_occurrence_id AS occurrence_id,
+            SELECT m.relative_path, a.attachment_occurrence_id AS occurrence_id,
                    a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
-            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.extraction_status = 'too_large'
               AND a.size_bytes <= ?
             """,
@@ -2617,9 +2756,9 @@ class Database:
         the message succeeded and leaves the mark)."""
         return self._stream_filepaths(
             """
-            SELECT m.filepath
+            SELECT m.relative_path
             FROM attachments a
-            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE a.extraction_deferred_at IS NOT NULL
             """,
             (),
@@ -3197,19 +3336,26 @@ class Database:
             return []
 
         # Step 3: gather the Maildir filepaths for messages on stuck
-        # threads. ``message_thread_map.filepath`` is the same value
-        # the queue uses, so re-enqueueing routes through the same
-        # parse → thread → embed → commit pipeline as a fresh scan.
-        # Batched for the same variable limit as step 2.
+        # threads: each message's active occurrence, a live one first
+        # (#1567), else its latest retired one (its last known path, as
+        # before occurrences: the job waits for a rename like any missing
+        # indexed file), the path the queue uses, so re-enqueueing routes
+        # through the same parse → thread → embed → commit pipeline as a
+        # fresh scan. Batched for the same variable limit as step 2.
         filepaths: list[str] = []
         for start in range(0, len(stuck_thread_ids), _IN_CLAUSE_BATCH_SIZE):
             id_batch = stuck_thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
             placeholders = ",".join(["?"] * len(id_batch))
             rows = self._conn.execute(
-                f"SELECT filepath FROM message_thread_map WHERE thread_id IN ({placeholders})",  # nosec B608
+                "SELECT (SELECT o.relative_path FROM message_occurrences o "  # nosec B608
+                "WHERE o.claimant_id = t.claimant_id ORDER BY o.state <> 'active', o.trashed, "
+                "CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1) AS relative_path "
+                f"FROM message_thread_map t WHERE t.thread_id IN ({placeholders})",
                 id_batch,
             ).fetchall()
-            filepaths.extend(r["filepath"] for r in rows)
+            filepaths.extend(
+                self._absolute(r["relative_path"]) for r in rows if r["relative_path"] is not None
+            )
         return filepaths
 
     @_synchronized
@@ -3487,6 +3633,29 @@ class Database:
         ).fetchone()
         return row is not None
 
+    @_synchronized
+    def is_indexed_and_fresh(self, filepath: str) -> bool:
+        """Whether ``filepath`` is indexed (as ``is_indexed``) AND its
+        current size and mtime still match the ``indexed_files`` record
+        (#1612): a cheap admission shortcut for the Maildir walk and the
+        watcher's new-mail gate, so a stale record (its bytes replaced
+        without an observed rename, or carried stale across a schema
+        change) no longer hides a changed file from parsing forever. A
+        file with no ``indexed_files`` record is not indexed at all, so
+        this returns the same ``False`` as ``is_indexed``. Pure metadata:
+        the hash-verified backstop lives in ``occurrence_scan``.
+        """
+        row = self._conn.execute(
+            "SELECT size, mtime_ns FROM indexed_files WHERE filepath = ?", (filepath,)
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            st = os.stat(filepath)
+        except OSError:
+            return False
+        return (st.st_size, st.st_mtime_ns) == (row["size"], row["mtime_ns"])
+
     # -------------------------------------------------------------------------
     # indexing_jobs — durable retry / dead-letter queue.
     #
@@ -3540,6 +3709,22 @@ class Database:
         return cur.rowcount
 
     @_synchronized
+    def queue_enqueue_if_absent(self, filepath: str, reason: str) -> bool:
+        """Run ``STALE_ENQUEUE_SQL`` for one path and return whether a row
+        was inserted (``False`` when one was already there, whatever its
+        state, which is left untouched, #1612). Uses ``self.transaction()``,
+        not a direct commit, so a caller needing this admission and
+        another write (the stale-content retirement, #1612 round 15) to
+        commit or roll back together can wrap both in one outer
+        ``with self.transaction():``."""
+        now_iso = datetime.now(UTC).isoformat()
+        with self.transaction():
+            cur = self._conn.execute(
+                STALE_ENQUEUE_SQL, (filepath, reason, now_iso, now_iso, now_iso)
+            )
+        return cur.rowcount > 0
+
+    @_synchronized
     def queue_fetch_due_batch(
         self, status: str, now_iso: str, limit: int, *, reparse_turn: bool = False
     ) -> list[sqlite3.Row]:
@@ -3580,6 +3765,7 @@ class Database:
 
     @_synchronized
     def queue_delete(self, filepath: str) -> None:
+        self._missing_job_checks.pop(filepath, None)
         self._conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
         self._conn.commit()
 
@@ -3762,21 +3948,50 @@ class Database:
         sync_completed_at: str | None,
         sync_interval_secs: int | None,
         seen_at: str,
+        collection: Mapping[str, object] | None = None,
     ) -> None:
-        """Replace the single ``ingestion_state`` row."""
-        self._conn.execute(
-            """
-            INSERT INTO ingestion_state
-                (id, sync_completed_at, sync_interval_secs, indexer_seen_at)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                sync_completed_at = excluded.sync_completed_at,
-                sync_interval_secs = excluded.sync_interval_secs,
-                indexer_seen_at = excluded.indexer_seen_at
-            """,
-            (sync_completed_at, sync_interval_secs, seen_at),
-        )
-        self._conn.commit()
+        """Replace the single ``ingestion_state`` row and, with
+        ``collection`` (``account_collection_state``'s columns other than
+        ``account_id`` and ``observed_at``), this account's collection
+        state row, in one transaction, so mcp-server reads the acknowledged
+        sync and the collection outcome as one snapshot (#1592)."""
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO ingestion_state
+                    (id, sync_completed_at, sync_interval_secs, indexer_seen_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    sync_completed_at = excluded.sync_completed_at,
+                    sync_interval_secs = excluded.sync_interval_secs,
+                    indexer_seen_at = excluded.indexer_seen_at
+                """,
+                (sync_completed_at, sync_interval_secs, seen_at),
+            )
+            if collection is not None:
+                values = {name: collection.get(name) for name in COLLECTION_STATE_COLUMNS}
+                values["account_id"] = self.account_id
+                values["observed_at"] = seen_at
+                columns = ", ".join(values)
+                placeholders = ", ".join(f":{name}" for name in values)
+                self._conn.execute(
+                    f"INSERT OR REPLACE INTO account_collection_state ({columns}) "  # nosec B608 - fixed column names
+                    f"VALUES ({placeholders})",
+                    values,
+                )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    @_synchronized
+    def get_collection_state(self) -> dict | None:
+        """This account's ``account_collection_state`` row, or ``None``
+        before the indexer first records one."""
+        row = self._conn.execute(
+            "SELECT * FROM account_collection_state WHERE account_id = ?", (self.account_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     @_synchronized
     def queue_stats(self) -> dict[str, int]:
@@ -3846,141 +4061,487 @@ class Database:
         return counts, min(due) if due else None
 
     # -------------------------------------------------------------------------
-    # Reconciliation support — filepath tracking, tombstones, thread rebuild
+    # Reconciliation support — occurrences, tombstones, thread rebuild (#1567)
     # -------------------------------------------------------------------------
 
+    def _absolute(self, relative_path: str) -> str:
+        """The path of an occurrence's file, from its locator relative to
+        the account's Maildir root."""
+        return str(self.account.maildir_root / relative_path)
+
+    def _active_at(self, cur: sqlite3.Cursor, filepath: str) -> sqlite3.Row | None:
+        """The active occurrence whose file is at ``filepath``, with its
+        message's thread; ``None`` when there is none or the path lies
+        outside the account's Maildir root."""
+        try:
+            where = locate(filepath, self.account.maildir_root)
+        except OccurrenceLocatorError:
+            return None
+        return cur.execute(
+            "SELECT o.id, o.claimant_id, o.trashed, m.thread_id, m.content_hash, m.size_bytes FROM message_occurrences o "
+            "JOIN messages m ON m.claimant_id = o.claimant_id "
+            "WHERE o.account_id = ? AND o.relative_path = ? AND o.state = 'active'",
+            (self.account_id, where.relative_path),
+        ).fetchone()
+
     @_synchronized
-    def iter_message_map(self) -> list[sqlite3.Row]:
-        """Return every (claimant_id, message_id, thread_id, filepath) row for sweeping."""
+    def find_active_occurrence(self, filepath: str) -> sqlite3.Row | None:
+        """The active occurrence at ``filepath`` (``id``, ``claimant_id``,
+        ``trashed``, ``thread_id``), or ``None``."""
+        return self._active_at(self._conn.cursor(), filepath)
+
+    @_synchronized
+    def has_pending_deletion(self, filepath: str) -> bool:
+        """Whether the message whose active occurrence is at ``filepath``
+        has a tombstone: it lost its last live occurrence and awaits the
+        reaper."""
+        row = self._active_at(self._conn.cursor(), filepath)
+        return row is not None and self._has_tombstone(row["claimant_id"])
+
+    def _has_tombstone(self, claimant_id: str) -> bool:
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM pending_deletions WHERE claimant_id = ? LIMIT 1", (claimant_id,)
+            ).fetchone()
+            is not None
+        )
+
+    @_synchronized
+    def active_occurrences(self) -> list[sqlite3.Row]:
+        """The account's active occurrences, each with its message's
+        content hash, for the reconciliation scan
+        (``occurrence_scan.scan_occurrences``)."""
         return self._conn.execute(
-            "SELECT claimant_id, message_id, thread_id, filepath FROM message_thread_map"
+            "SELECT o.id, o.claimant_id, o.folder, o.uniq, o.relative_path, m.content_hash, m.size_bytes "
+            "FROM message_occurrences o JOIN messages m ON m.claimant_id = o.claimant_id "
+            "WHERE o.account_id = ? AND o.state = 'active' ORDER BY o.id",
+            (self.account_id,),
         ).fetchall()
 
     @_synchronized
-    def find_identical_copies(self, claimant_ids: list[str]) -> dict[str, list[str]]:
-        """Other indexed paths holding the same bytes as each claimant.
+    def retain_or_retarget_missing_job(self, filepath: str) -> bool:
+        """Preserve refresh intent; move it only to a verified current copy.
 
-        Byte-identical files share one claimant ID, and the mapping keeps
-        only the last path indexed; ``indexed_files`` keeps every path
-        (#1102). Returns ``claimant_id -> [filepath, ...]`` (path order)
-        for the paths whose ``content_hash`` matches the claimant's and
-        that are not its mapped path.
-
-        Two statements, whatever the count: the claimants' hashes by
-        primary key, then one pass over ``indexed_files`` (which has no
-        ``content_hash`` index) against that set. A join on the hash
-        would rescan ``indexed_files`` once per claimant.
+        False means this was never an indexed/occurrence-backed source.
+        A destination's existing retry or dead letter is never reset.
         """
-        if not claimant_ids:
-            return {}
-        wanted = self._conn.execute(
-            "SELECT m.claimant_id, m.filepath, msg.content_hash "
-            "FROM message_thread_map m "
-            "JOIN messages msg ON msg.claimant_id = m.claimant_id "
-            "WHERE m.claimant_id IN (SELECT value FROM json_each(?)) "
-            "AND msg.content_hash IS NOT NULL",
-            (json.dumps(claimant_ids),),
+        row = self._active_at(self._conn.cursor(), filepath)
+        marker = self.file_identity(filepath)
+        if row is not None and marker is not None and marker["content_hash"] != row["content_hash"]:
+            return True
+        if row is None:
+            row = self._conn.execute(
+                "SELECT m.claimant_id, m.content_hash, m.size_bytes FROM indexed_files f "
+                "JOIN messages m ON m.content_hash = f.content_hash WHERE f.filepath = ?",
+                (filepath,),
+            ).fetchone()
+        if row is None and marker is not None:
+            # A newer marker at a reused locator cannot identify the old
+            # occurrence's refresh. Keep the work at its source.
+            return True
+        if row is None:
+            try:
+                locator = locate(filepath, self.account.maildir_root)
+            except OccurrenceLocatorError:
+                return False
+            row = self._conn.execute(
+                "SELECT m.claimant_id, m.content_hash, m.size_bytes FROM message_occurrences o "
+                "JOIN messages m ON m.claimant_id = o.claimant_id "
+                "WHERE o.account_id = ? AND o.relative_path = ? ORDER BY o.id DESC LIMIT 1",
+                (self.account_id, locator.relative_path),
+            ).fetchone()
+        if row is None:
+            return False
+        if row["content_hash"] is None or row["size_bytes"] is None:
+            return True
+        copies = self._conn.execute(
+            "SELECT relative_path FROM message_occurrences WHERE account_id = ? "
+            "AND claimant_id = ? AND state = 'active' AND trashed = 0 ORDER BY id",
+            (self.account_id, row["claimant_id"]),
         ).fetchall()
-        # The hash covers the raw bytes, Message-ID included, so it names
-        # one claimant.
-        by_hash = {row["content_hash"]: row for row in wanted}
-        if not by_hash:
-            return {}
-        rows = self._conn.execute(
-            "SELECT filepath, content_hash FROM indexed_files "
-            "WHERE content_hash IN (SELECT value FROM json_each(?)) "
-            "ORDER BY filepath",
-            (json.dumps(list(by_hash)),),
-        ).fetchall()
-        copies: dict[str, list[str]] = {}
-        for row in rows:
-            owner = by_hash[row["content_hash"]]
-            if row["filepath"] != owner["filepath"]:
-                copies.setdefault(owner["claimant_id"], []).append(row["filepath"])
-        return copies
+        identities = {
+            self._absolute(copy["relative_path"]): current_identity(
+                Path(self._absolute(copy["relative_path"]))
+            )
+            for copy in copies
+        }
+        cache, start = self._missing_job_checks.get(filepath, ({}, ""))
+        for key in list(cache):
+            if identities.get(key[0]) != key[1:]:
+                del cache[key]
+        evidence = FolderInventory(cache)
+        ordered = sorted(identities)
+        pivot = next((i for i, name in enumerate(ordered) if name >= start), 0)
+        ordered = ordered[pivot:] + ordered[:pivot]
+        next_path = ""
+        for target in ordered:
+            identity = identities[target]
+            if target == filepath or identity is None or identity[0] != row["size_bytes"]:
+                continue
+            before = evidence.hash_deferred
+            digest = evidence.digest(Path(target), identity)
+            if evidence.hash_deferred > before and not next_path:
+                next_path = target
+            if digest is None or digest != row["content_hash"]:
+                continue
+            with self.transaction():
+                active = self._active_at(self._conn.cursor(), target)
+                if (
+                    Path(filepath).exists()
+                    or self._active_at(self._conn.cursor(), filepath) is not None
+                    or active is None
+                    or active["claimant_id"] != row["claimant_id"]
+                    or active["trashed"]
+                    or not _same_file(target, identity)
+                ):
+                    continue
+                columns = "reason, status, attempts, last_error, last_stage, last_error_class, created_at, updated_at, next_attempt_at"
+                self._conn.execute(
+                    f"INSERT OR IGNORE INTO indexing_jobs (filepath, {columns}) "  # nosec B608 -- fixed internal column list
+                    f"SELECT ?, {columns} FROM indexing_jobs WHERE filepath = ?",
+                    (target, filepath),
+                )
+                if self._conn.execute(
+                    "SELECT 1 FROM indexing_jobs WHERE filepath = ?", (target,)
+                ).fetchone():
+                    self._conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
+                    self._conn.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
+                    self._missing_job_checks.pop(filepath, None)
+                    log.info("missing-source refresh transferred to a verified live copy")
+                    return True
+        self._missing_job_checks[filepath] = cache, next_path
+        if evidence.hash_deferred:
+            log.info(
+                "missing-source refresh hash verification deferred: %d candidate(s)",
+                evidence.hash_deferred,
+            )
+        return True
 
     @_synchronized
-    def remap_to_identical_copy(
-        self, old_path: str, new_path: str, *, folder: str | None = None
+    def message_content(self, claimant_id: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT content_hash, size_bytes FROM messages WHERE claimant_id = ?", (claimant_id,)
+        ).fetchone()
+
+    @_synchronized
+    def file_identity(self, filepath: str) -> sqlite3.Row | None:
+        """``indexed_files``' record of ``filepath`` (``size``,
+        ``mtime_ns``, ``content_hash``), or ``None``."""
+        return self._conn.execute(
+            "SELECT size, mtime_ns, content_hash FROM indexed_files WHERE filepath = ?",
+            (filepath,),
+        ).fetchone()
+
+    @_synchronized
+    def claimant_for_content(self, content_hash: str) -> str | None:
+        """The message whose bytes have ``content_hash``, or ``None``. The
+        hash covers the raw bytes, Message-ID included, so it names one
+        claimant."""
+        row = self._conn.execute(
+            "SELECT claimant_id FROM messages WHERE content_hash = ? ORDER BY claimant_id LIMIT 1",
+            (content_hash,),
+        ).fetchone()
+        return None if row is None else row["claimant_id"]
+
+    @_synchronized
+    def move_verified_occurrence(
+        self,
+        occurrence_id: int,
+        old_relative_path: str,
+        new_path: str,
+        *,
+        identity: tuple[int, int, int, int, int],
     ) -> bool:
-        """Point a message whose file is gone at a byte-identical copy.
-
-        Returns False, changing nothing, unless ``old_path`` is still a
-        mapped path and ``new_path`` still exists, checked inside the
-        transaction: the watcher may have moved the mapping or renamed the
-        copy since the caller resolved it, and a rename that lands after
-        the commit carries the new mapping along with it.
-
-        A rename (``update_filepath``) carries the gone path's tombstone
-        and queue row to ``new_path``. The copy is a file of its own and
-        can already hold either (#1102). Its tombstone describes the file
-        that still exists, so it is kept and the gone path's dropped, but
-        its grace period never starts before the message lost its last
-        live path: of two tombstones the later mark is kept, and when the
-        gone path had none (the message was live through it) the copy's
-        restarts now. Of two queue rows the runnable one is kept: the
-        copy's, unless it is dead and the gone path's is not, since both
-        index the same bytes.
-        """
+        """Carry an active occurrence to ``new_path``, a file the scan
+        found under its folder and uniq and whose bytes it verified
+        (``occurrence_scan``), with the file's ``indexed_files`` and queue
+        rows. Returns False, changing nothing effective, when the
+        occurrence moved or retired since the scan read it, ``new_path``
+        is no longer the file verified (``identity``, its size, mtime and
+        inode before the verification: gone or replaced) at either this
+        check or ``_rename_rows``'s own in-transaction recheck of it
+        (#1612 round 15 — the candidate can be replaced again in the
+        window between the two), or another active occurrence holds
+        it."""
         with self.transaction():
             cur = self._conn.cursor()
             if (
                 cur.execute(
-                    "SELECT 1 FROM message_thread_map WHERE filepath = ?", (old_path,)
+                    "SELECT 1 FROM message_occurrences "
+                    "WHERE id = ? AND state = 'active' AND relative_path = ?",
+                    (occurrence_id, old_relative_path),
                 ).fetchone()
                 is None
-                or not Path(new_path).exists()
+                or not _same_file(new_path, identity)
+                or self._active_at(cur, new_path) is not None
             ):
                 return False
-            # The later of the two marks, or now when the gone path had none.
-            cur.execute(
-                "UPDATE pending_deletions SET marked_at = COALESCE("
-                "(SELECT MAX(marked_at) FROM pending_deletions WHERE filepath IN (?, ?) "
-                "AND EXISTS (SELECT 1 FROM pending_deletions WHERE filepath = ?)), ?) "
-                "WHERE filepath = ?",
-                (old_path, new_path, old_path, datetime.now(UTC).isoformat(), new_path),
+            claimant_id = self._rename_rows(
+                cur, self._absolute(old_relative_path), new_path, True, verified_identity=identity
             )
-            cur.execute(
-                "DELETE FROM pending_deletions WHERE filepath = ? "
-                "AND EXISTS (SELECT 1 FROM pending_deletions WHERE filepath = ?)",
-                (old_path, new_path),
+        return claimant_id is not None
+
+    @_synchronized
+    def retire_vanished_occurrence(
+        self, occurrence_id: int, relative_path: str, *, inventory=None
+    ) -> bool:
+        inventory = inventory if inventory is not None else FolderInventory()
+        path = Path(self._absolute(relative_path))
+        inventory.candidates(path)
+        with self.transaction():
+            candidates = inventory.candidates(path)
+            if candidates is None or candidates:
+                return False
+            cur = self._conn.execute(
+                "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
+                "WHERE id = ? AND state = 'active' AND relative_path = ?",
+                (datetime.now(UTC).isoformat(), occurrence_id, relative_path),
             )
-            # A dead row on the copy gives way to a runnable one on the gone
-            # path, which the rename below then moves onto the copy;
-            # otherwise the copy's row stays and the gone path's goes.
-            cur.execute(
-                "DELETE FROM indexing_jobs WHERE filepath = ? AND status = 'dead' "
-                "AND EXISTS (SELECT 1 FROM indexing_jobs "
-                "WHERE filepath = ? AND status != 'dead')",
-                (new_path, old_path),
+            return cur.rowcount > 0
+
+    @_synchronized
+    def retire_mismatched_occurrence(
+        self, occurrence_id: int, relative_path: str, *, identity: tuple[int, int, int, int, int]
+    ) -> bool:
+        """Retire an active occurrence whose file is still there but whose
+        bytes a content-hash check proved no longer match its claimant
+        (``occurrence_scan``'s periodic backstop, #1612): unlike
+        ``retire_vanished_occurrence``, the file need not be gone — a
+        metadata match is a fast admission shortcut, not proof, so this
+        is the path for a verified mismatch rather than an absence.
+        Retires only this occurrence; any other occurrence of the same
+        claimant is untouched, and the caller enqueues the path for its
+        own reparse. Returns False, changing nothing, when the occurrence
+        moved or retired since the check ran, or the file is no longer
+        the one whose bytes were hashed (``identity``, its size, mtime
+        and inode captured before the hash: gone or replaced again — the
+        same TOCTOU recheck ``move_verified_occurrence`` and
+        ``bind_found_copy`` already do for their own write, #1612 round 8
+        review). Without it, a file that changed back between the hash
+        and this transaction could retire the occurrence on transient,
+        already-stale evidence."""
+        with self.transaction():
+            if not _same_file(self._absolute(relative_path), identity):
+                return False
+            cur = self._conn.execute(
+                "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
+                "WHERE id = ? AND state = 'active' AND relative_path = ?",
+                (datetime.now(UTC).isoformat(), occurrence_id, relative_path),
             )
-            cur.execute(
-                "DELETE FROM indexing_jobs WHERE filepath = ? "
-                "AND EXISTS (SELECT 1 FROM indexing_jobs WHERE filepath = ?)",
-                (old_path, new_path),
+            return cur.rowcount > 0
+
+    @_synchronized
+    def retire_mismatched_rename(
+        self, occurrence_id: int, filepath: str, *, proven=None, inventory=None
+    ) -> bool:
+        """Retire only while all current same-uniq candidates are proven mismatches."""
+        if not proven:
+            return False
+        inventory = inventory if inventory is not None else FolderInventory()
+        path = Path(filepath)
+        inventory.candidates(path)
+        with self.transaction():
+            try:
+                where = locate(filepath, self.account.maildir_root)
+            except OccurrenceLocatorError:
+                return False
+            candidates = inventory.candidates(path)
+            if candidates is None or path.exists():
+                return False
+            if any(not _same_file(p, identity) for p, identity in proven.items()):
+                return False
+            if any(str(p) not in proven for p in candidates):
+                return False
+            cur = self._conn.execute(
+                "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
+                "WHERE id = ? AND state = 'active' AND relative_path = ?",
+                (datetime.now(UTC).isoformat(), occurrence_id, where.relative_path),
             )
-            # The copy is a file with its own occurrence; the gone or
-            # trashed path's occurrence is not renamed onto it (#1566).
-            self.update_filepath(old_path, new_path, folder=folder, move_occurrence=False)
+            return cur.rowcount > 0
+
+    @_synchronized
+    def bind_found_copy(
+        self, claimant_id: str, filepath: str, *, identity: tuple[int, int, int, int, int]
+    ) -> bool:
+        """Bind a file the scan found, whose bytes it verified are
+        ``claimant_id``'s, as an occurrence with provenance ``scan``.
+        Returns False, changing nothing, when the file is no longer the
+        one verified (``identity``, as ``move_verified_occurrence``) or an
+        active occurrence holds its path already."""
+        with self.transaction():
+            cur = self._conn.cursor()
+            if not _same_file(filepath, identity) or self._active_at(cur, filepath) is not None:
+                return False
+            self._bind_occurrence(cur, claimant_id, filepath, provenance="scan")
         return True
 
-    @staticmethod
-    def _unmark_paths(cur: sqlite3.Cursor, filepaths: list[str]) -> None:
-        """Drop the ``indexed_files`` rows of ``filepaths``: the other paths
-        holding the bytes of a message being reaped (#1102), looked up once
-        per reap pass with ``find_identical_copies``.
+    @_synchronized
+    def count_tombstoned_messages(self) -> int:
+        """How many messages have a tombstone."""
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT claimant_id) FROM pending_deletions"
+        ).fetchone()
+        return int(row[0])
 
-        The reap runs only once the sweep found no surviving copy, so any
-        such path is gone or trashed now. Left marked, a copy that comes
-        back (a transient mount or folder outage) would be skipped by every
-        Maildir walk with no mapping left to repair it; unmarked, the walk
-        re-indexes it. Their ``indexing_jobs`` rows go too: the walk
-        skips a path with a dead job, so a returning copy would otherwise
-        wait for ``make requeue-dead``. Primary-key deletes; the caller
-        owns the transaction.
+    @_synchronized
+    def clear_live_tombstones(self) -> int:
+        """Remove the tombstones of every message that has a live
+        occurrence again (active and not ``T``-flagged) and return how
+        many messages they belonged to. A tombstone marks a message that
+        lost its last live occurrence, so one beside a live occurrence is
+        stale (a restore, or a copy found or bound since)."""
+        live = (
+            "EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = p.claimant_id "
+            "AND o.state = 'active' AND o.trashed = 0)"
+        )
+        with self.transaction():
+            cur = self._conn.cursor()
+            count = cur.execute(
+                f"SELECT COUNT(DISTINCT claimant_id) FROM pending_deletions p WHERE {live}"  # nosec B608
+            ).fetchone()[0]
+            cur.execute(f"DELETE FROM pending_deletions AS p WHERE {live}")  # nosec B608
+        return int(count)
+
+    @_synchronized
+    def mark_lost_messages(self, claimant_id: str | None = None) -> int:
+        """Tombstone every message (only ``claimant_id``, when given) that
+        has no live occurrence, and return how many had no tombstone
+        before.
+
+        Each of the message's occurrences gets a row marked now unless it
+        has one, so the mark of a message that lost its last live
+        occurrence earlier is kept: its grace period runs from the first
+        time a sweep or the watcher saw the loss. Tombstones exist only
+        while a message has no live occurrence (``clear_live_tombstones``
+        and every bind or rename that makes one live remove them), so the
+        earliest mark is the loss the reaper's grace window measures."""
+        lost = (
+            "NOT EXISTS (SELECT 1 FROM message_occurrences l WHERE l.claimant_id = o.claimant_id "
+            "AND l.state = 'active' AND l.trashed = 0)"
+        )
+        only = " AND o.claimant_id = ?" if claimant_id is not None else ""
+        params: tuple = (claimant_id,) if claimant_id is not None else ()
+        with self.transaction():
+            cur = self._conn.cursor()
+            new = cur.execute(
+                f"SELECT COUNT(DISTINCT o.claimant_id) FROM message_occurrences o WHERE {lost}"  # nosec B608
+                " AND NOT EXISTS (SELECT 1 FROM pending_deletions p "
+                f"WHERE p.claimant_id = o.claimant_id){only}",
+                params,
+            ).fetchone()[0]
+            cur.execute(
+                "INSERT OR IGNORE INTO pending_deletions (occurrence_id, claimant_id, marked_at) "
+                f"SELECT o.id, o.claimant_id, ? FROM message_occurrences o WHERE {lost}{only}",  # nosec B608
+                (datetime.now(UTC).isoformat(), *params),
+            )
+        return int(new)
+
+    @_synchronized
+    def threads_with_pending_deletions(self, thread_ids: list[str]) -> set[str]:
+        """Which tracked threads still have a deletion obligation, including grace."""
+        return {
+            row[0]
+            for row in self._conn.execute(
+                "SELECT DISTINCT m.thread_id FROM messages m "
+                "JOIN pending_deletions p ON p.claimant_id = m.claimant_id "
+                "WHERE m.thread_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(thread_ids),),
+            )
+        }
+
+    @_synchronized
+    def reapable_messages(self, cutoff_iso: str) -> list[sqlite3.Row]:
+        """Messages the reaper may remove: no live occurrence, and a
+        tombstone marked at or before ``cutoff_iso``. Each row has
+        ``claimant_id``, ``thread_id`` and ``lost_at`` (the earliest
+        mark), oldest loss first."""
+        return self._conn.execute(
+            "SELECT p.claimant_id, m.thread_id, MIN(p.marked_at) AS lost_at "
+            "FROM pending_deletions p JOIN messages m ON m.claimant_id = p.claimant_id "
+            "WHERE NOT EXISTS (SELECT 1 FROM message_occurrences o "
+            "WHERE o.claimant_id = p.claimant_id AND o.state = 'active' AND o.trashed = 0) "
+            "GROUP BY p.claimant_id HAVING MIN(p.marked_at) <= ? "
+            "ORDER BY lost_at, p.claimant_id",
+            (cutoff_iso,),
+        ).fetchall()
+
+    @_synchronized
+    def active_account_count(self) -> int:
+        """How many accounts have an active occurrence."""
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT account_id) FROM message_occurrences WHERE state = 'active'"
+        ).fetchone()
+        return int(row[0])
+
+    @_synchronized
+    def messages_per_account(self) -> dict[int, int]:
+        """Each account's number of messages with an occurrence of it."""
+        return {
+            r[0]: r[1]
+            for r in self._conn.execute(
+                "SELECT account_id, COUNT(DISTINCT claimant_id) FROM message_occurrences "
+                "GROUP BY account_id"
+            )
+        }
+
+    @_synchronized
+    def accounts_of(self, claimant_ids: list[str]) -> dict[str, set[int]]:
+        """The accounts holding an occurrence of each of ``claimant_ids``."""
+        accounts: dict[str, set[int]] = {}
+        for row in self._conn.execute(
+            "SELECT DISTINCT claimant_id, account_id FROM message_occurrences "
+            "WHERE claimant_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(claimant_ids),),
+        ):
+            accounts.setdefault(row[0], set()).add(row[1])
+        return accounts
+
+    @_synchronized
+    def paths_with_content(self, claimant_ids: list[str]) -> dict[str, list[str]]:
+        """The ``indexed_files`` paths holding each claimant's bytes
+        (``claimant_id -> [filepath, ...]``, path order), so a reap can
+        unmark every one (#1102). Two statements whatever the count: the
+        claimants' hashes by primary key, then one pass over
+        ``indexed_files``, which has no ``content_hash`` index."""
+        if not claimant_ids:
+            return {}
+        by_hash = {
+            r["content_hash"]: r["claimant_id"]
+            for r in self._conn.execute(
+                "SELECT claimant_id, content_hash FROM messages "
+                "WHERE claimant_id IN (SELECT value FROM json_each(?)) "
+                "AND content_hash IS NOT NULL",
+                (json.dumps(claimant_ids),),
+            )
+        }
+        if not by_hash:
+            return {}
+        paths: dict[str, list[str]] = {}
+        for row in self._conn.execute(
+            "SELECT filepath, content_hash FROM indexed_files "
+            "WHERE content_hash IN (SELECT value FROM json_each(?)) ORDER BY filepath",
+            (json.dumps(list(by_hash)),),
+        ):
+            paths.setdefault(by_hash[row["content_hash"]], []).append(row["filepath"])
+        return paths
+
+    def _unmark_paths(self, cur: sqlite3.Cursor, filepaths: list[str]) -> None:
+        """Drop the ``indexed_files`` and ``indexing_jobs`` rows of
+        ``filepaths``: the paths of a message being reaped, its
+        occurrences' and every other path recorded with its bytes (#1102).
+
+        The reap runs only once the message has no live occurrence, so
+        any such path is gone or trashed now. Left marked, a copy that
+        comes back (a transient mount or folder outage) would be skipped
+        by every Maildir walk; unmarked, the walk re-indexes it. Its queue
+        row goes too: the walk skips a path with a dead job, and a queued
+        one would re-index the kept ``.eml``. Primary-key deletes; the
+        caller owns the transaction.
         """
         if filepaths:
-            paths = json.dumps(filepaths)
+            for filepath in filepaths:
+                self._missing_job_checks.pop(filepath, None)
+            paths = json.dumps(sorted(set(filepaths)))
             for table in ("indexed_files", "indexing_jobs"):
                 # Only fixed table names are interpolated; values are bound.
                 cur.execute(
@@ -3989,13 +4550,32 @@ class Database:
                     (paths,),
                 )
 
-    @_synchronized
-    def find_message_entry_by_filepath(self, filepath: str) -> sqlite3.Row | None:
-        return self._conn.execute(
-            "SELECT claimant_id, message_id, thread_id, filepath FROM message_thread_map "
-            "WHERE filepath = ?",
-            (filepath,),
-        ).fetchone()
+    def _occurrence_paths(self, cur: sqlite3.Cursor, claimant_ids: list[str]) -> list[str]:
+        """The paths of the occurrences of ``claimant_ids`` that still name
+        their files: every active one, and a retired one only while
+        ``indexed_files`` records the message's own bytes there. A
+        retired locator can hold another message's file now (the path
+        was freed by a move and reused), whose rows the reap must keep
+        (review round 1 on #1612). One primary-key lookup per retired
+        path."""
+        paths = []
+        for r in cur.execute(
+            "SELECT o.relative_path, o.state, m.content_hash FROM message_occurrences o "
+            "JOIN messages m ON m.claimant_id = o.claimant_id "
+            "WHERE o.claimant_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(claimant_ids),),
+        ).fetchall():
+            path = self._absolute(r["relative_path"])
+            if r["state"] != "active":
+                record = cur.execute(
+                    "SELECT content_hash FROM indexed_files WHERE filepath = ?", (path,)
+                ).fetchone()
+                if record is None or r["content_hash"] is None:
+                    continue
+                if record["content_hash"] != r["content_hash"]:
+                    continue
+            paths.append(path)
+        return paths
 
     @_synchronized
     def keep_persisted_first_indexed_at(self, msg) -> None:
@@ -4086,12 +4666,28 @@ class Database:
         return int(cur.lastrowid or 0)
 
     @_synchronized
-    def get_thread_messages(self, thread_id: str) -> list[sqlite3.Row]:
-        """All (claimant_id, message_id, filepath) rows for a thread, used to rebuild it."""
-        return self._conn.execute(
-            "SELECT claimant_id, message_id, filepath FROM message_thread_map WHERE thread_id = ?",
+    def get_thread_messages(self, thread_id: str) -> list[dict]:
+        """Every message of a thread as ``claimant_id``, ``message_id`` and
+        ``filepath``, the file to re-read it from when the thread is
+        rebuilt: an active occurrence's, a live one first, or ``None``
+        when it has none (#1567)."""
+        rows = self._conn.execute(
+            "SELECT t.claimant_id, t.message_id, (SELECT o.relative_path "
+            "FROM message_occurrences o WHERE o.claimant_id = t.claimant_id "
+            "AND o.state = 'active' ORDER BY o.trashed, o.id LIMIT 1) AS relative_path "
+            "FROM message_thread_map t WHERE t.thread_id = ? ORDER BY t.claimant_id",
             (thread_id,),
         ).fetchall()
+        return [
+            {
+                "claimant_id": r["claimant_id"],
+                "message_id": r["message_id"],
+                "filepath": None
+                if r["relative_path"] is None
+                else self._absolute(r["relative_path"]),
+            }
+            for r in rows
+        ]
 
     @_synchronized
     def set_body_complete(self, claimant_id: str, complete: bool) -> None:
@@ -4170,15 +4766,59 @@ class Database:
                 provenance,
             ),
         )
+        # A live occurrence ends the message's loss, so its tombstones go.
+        if not is_trashed(filepath):
+            cur.execute("DELETE FROM pending_deletions WHERE claimant_id = ?", (claimant_id,))
 
-    def _move_occurrence(self, cur: sqlite3.Cursor, old_path: str, new_path: str) -> None:
-        """Carry the occurrence at ``old_path`` through an observed rename
-        to ``new_path`` (#1566). A flag rename or a ``new``/``cur`` move
-        keeps the folder and uniq, so it keeps the occurrence; a change of
-        folder or uniq retires it and binds the destination to the same
-        claimant, in the caller's transaction, so the move is atomic. A
-        path with no active occurrence (indexed before v14 and not yet
-        reparsed) changes nothing.
+    def _move_occurrence(
+        self,
+        cur: sqlite3.Cursor,
+        old_path: str,
+        new_path: str,
+        verified_identity: tuple[int, int, int, int, int] | None,
+    ) -> tuple[str | None, bool]:
+        """Carry the occurrence at ``old_path`` through a rename whose
+        bytes are known to be unchanged (an observed watcher event, or a
+        scan that verified them) to ``new_path`` (#1566), and return its
+        claimant ID (or ``None``) and whether a record this function
+        consulted was found to mismatch ``new_path`` rather than simply
+        having nothing to say about it (#1612) — the caller gates
+        carrying other file-identity rows forward on this, so a stale
+        record is never propagated under its new name. A flag rename or
+        a ``new``/``cur`` move keeps the folder and uniq, so it keeps the
+        occurrence; a change of folder or uniq retires it and binds the
+        destination to the same claimant, in the caller's transaction, so
+        the move is atomic.
+
+        A path with no active occurrence whose ``indexed_files`` record
+        carries the content hash of an indexed message (a byte-identical
+        copy no occurrence held yet) binds the destination to that
+        message instead (#1141); any other such path changes nothing.
+        Size and mtime agreement alone is a fast admission shortcut, not
+        proof (mbsync sets mtime from IMAP's INTERNALDATE, so two
+        different messages can legitimately share one, the same
+        reasoning ``occurrence_scan``'s content backstop rests on): the
+        destination is hashed and checked against the record's content
+        hash before it is trusted. When that record's size, mtime or
+        hash no longer match ``new_path``, or ``new_path`` cannot be
+        read, the mismatch is reported so the record is not carried
+        under the new name either — it is as stale as the occurrence it
+        failed to bind. A path whose ``indexed_files`` record names no
+        current message's content (migration-era tracking data no
+        message claims) has nothing to verify, so it is not a mismatch;
+        the caller's indexed_files carry is unaffected either way, since
+        it is pure bookkeeping there, not an identity claim. The caller
+        removes the message's tombstones when the move leaves it live.
+
+        An active occurrence at ``old_path`` is carried forward only when
+        ``verified_identity`` (size, mtime, inode, ctime, device, captured by the caller
+        when it verified ``new_path``'s bytes against the occurrence's
+        claimant, ``occurrence_scan.verify_rename_bytes``) still matches
+        ``new_path`` now, inside this transaction (#1612): a stale
+        occurrence record must not be trusted to carry a changed file
+        forward silently. A caller with nothing to verify (``None``)
+        gets no move — the file is left to the normal new-mail path,
+        which binds it to its own claimant.
         """
         old = locate(old_path, self.account.maildir_root)
         row = cur.execute(
@@ -4187,16 +4827,55 @@ class Database:
             (self.account_id, old.relative_path),
         ).fetchone()
         new = locate(new_path, self.account.maildir_root)
-        if row is None:
-            return
         now = datetime.now(UTC).isoformat()
+        if row is None:
+            prior = cur.execute(
+                "SELECT m.claimant_id, m.size_bytes AS message_size, f.size, f.mtime_ns, f.content_hash FROM indexed_files f "
+                "JOIN messages m ON m.content_hash = f.content_hash "
+                "WHERE f.filepath = ? ORDER BY m.claimant_id LIMIT 1",
+                (old_path,),
+            ).fetchone()
+            if prior is None:
+                return None, False
+            # The record may be stale: a retired path reused by another
+            # file whose creation was missed. Size and mtime agreement is
+            # a fast admission shortcut, not proof (mbsync sets mtime from
+            # IMAP's INTERNALDATE, so two different messages can
+            # legitimately share one) — a bound destination's bytes are
+            # hashed and checked against the record too, else leave it to
+            # the parse, which binds it to its own claimant.
+            try:
+                st = os.stat(new_path)
+            except OSError:
+                return None, True
+            if prior["message_size"] is None or st.st_size != prior["message_size"]:
+                return None, True
+            if (st.st_size, st.st_mtime_ns) != (prior["size"], prior["mtime_ns"]):
+                return None, True
+            identity = (st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, st.st_dev)
+            try:
+                if _sha256(new_path, identity) != prior["content_hash"]:
+                    return None, True
+            except OSError:
+                return None, True
+            # The same TOCTOU recheck move_verified_occurrence and
+            # bind_found_copy already do for their own write (#1612
+            # round 8 review): mbsync can replace new_path again between
+            # the hash above and the bind below, and this path captured
+            # no identity to recheck until now (#1612 round 15).
+            if not _same_file(new_path, identity):
+                return None, True
+            self._bind_occurrence(cur, prior["claimant_id"], new_path, provenance="rename")
+            return str(prior["claimant_id"]), False
+        if verified_identity is None or not _same_file(new_path, verified_identity):
+            return None, True
         if (new.folder, new.uniq) != (row["folder"], row["uniq"]):
             cur.execute(
                 "UPDATE message_occurrences SET state = 'retired', retired_at = ? WHERE id = ?",
                 (now, row["id"]),
             )
             self._bind_occurrence(cur, row["claimant_id"], new_path, provenance="rename")
-            return
+            return str(row["claimant_id"]), False
         state = message_state(new_path)
         cur.execute(
             "UPDATE message_occurrences SET state = 'retired', retired_at = ? "
@@ -4216,6 +4895,7 @@ class Database:
                 row["id"],
             ),
         )
+        return str(row["claimant_id"]), False
 
     def _write_message_record(self, cur: sqlite3.Cursor, msg, thread_id: str) -> None:
         """Upsert ``msg``'s ``messages`` row and replace its participants.
@@ -4225,7 +4905,6 @@ class Database:
         UPDATE`` (never ``REPLACE``) keeps the row in place, so the
         participant cascade only fires when the message itself is removed.
         """
-        state = message_state(msg.filepath)
         # ``from_addrs`` holds every author; ``from_addr`` alone for callers
         # that build a Message by hand.
         authors = msg.from_addrs or [msg.from_addr]
@@ -4248,18 +4927,16 @@ class Database:
         cur.execute(
             """
             INSERT INTO messages
-                (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
+                (claimant_id, message_id, thread_id, subject, sent_at,
                  sent_at_status, occurred_at, in_reply_to, references_json, has_attachments,
-                 size_bytes, content_hash, indexed_at, first_indexed_at, seen, flagged,
-                 replied, sender_ambiguous, participant_names_complete, subject_complete,
+                 size_bytes, content_hash, indexed_at, first_indexed_at,
+                 sender_ambiguous, participant_names_complete, subject_complete,
                  from_addresses_complete, to_addresses_complete, cc_addresses_complete, bcc_addresses_complete,
                  attachments_manifest_complete, body_complete, caps_json, headers_complete)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, NULL, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, NULL, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
-                filepath        = excluded.filepath,
-                folder          = excluded.folder,
                 subject         = excluded.subject,
                 sent_at         = excluded.sent_at,
                 sent_at_status  = excluded.sent_at_status,
@@ -4278,9 +4955,6 @@ class Database:
                 size_bytes      = excluded.size_bytes,
                 content_hash    = excluded.content_hash,
                 indexed_at      = excluded.indexed_at,
-                seen            = excluded.seen,
-                flagged         = excluded.flagged,
-                replied         = excluded.replied,
                 sender_ambiguous = excluded.sender_ambiguous,
                 participant_names_complete = excluded.participant_names_complete,
                 subject_complete = excluded.subject_complete,
@@ -4299,8 +4973,6 @@ class Database:
                 msg.claimant_id,
                 msg.message_id,
                 thread_id,
-                msg.filepath,
-                msg.folder,
                 msg.subject,
                 msg.date.isoformat() if msg.date is not None else None,
                 msg.date_status,
@@ -4312,9 +4984,6 @@ class Database:
                 msg.content_hash,
                 datetime.now(UTC).isoformat(),
                 msg.first_indexed_at.isoformat(),
-                int(state.seen),
-                int(state.flagged),
-                int(state.replied),
                 int(msg.sender_ambiguous),
                 int(complete),
                 int(msg.subject_complete),
@@ -4472,8 +5141,13 @@ class Database:
     @_synchronized
     def report_direction_conflicts(self) -> int:
         """Count-only diagnostic at startup and the periodic reconcile interval."""
+        # ``messages.folder`` no longer exists post-occurrence-cutover
+        # (#1568); a message is "Sent" when one of its active occurrences
+        # carries that folder.
         count = self._conn.execute(
-            "SELECT COUNT(*) FROM messages m WHERE m.folder='Sent' "
+            "SELECT COUNT(*) FROM messages m WHERE EXISTS "
+            "(SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id "
+            "AND o.state = 'active' AND o.folder = 'Sent') "
             "AND (SELECT state FROM operator_identity WHERE id=1)='configured' "
             "AND m.sender_ambiguous=0 AND m.from_addresses_complete=1 "
             "AND (SELECT COUNT(*) FROM (SELECT 1 FROM message_participants p "
@@ -4498,175 +5172,113 @@ class Database:
         old_path: str,
         new_path: str,
         *,
-        folder: str | None = None,
-        clear_tombstone: bool = False,
         move_occurrence: bool = False,
-    ) -> None:
-        """Update message_thread_map, indexed_files and the queue row after a Maildir rename.
+        verified_identity: tuple[int, int, int, int, int] | None = None,
+    ) -> str | None:
+        """Carry a file's rows through a Maildir rename: its
+        ``indexed_files`` record (identity columns kept: mbsync renames
+        files in place for flag changes, so the bytes are unchanged) and
+        its queue row, in one transaction that joins an enclosing
+        ``db.transaction()``.
 
-        ``folder`` is the destination's folder when the rename crosses
-        Maildir folders (``None`` for flag-only renames). It is written in
-        the same transaction as the locator, so the per-message record can
-        never point at one folder's file while claiming another.
+        ``move_occurrence=True`` is for a rename whose bytes are known:
+        an observed watcher event. The file's occurrence moves with it
+        (#1566, ``_move_occurrence``) in the same transaction, and when
+        that leaves its message live (the rename dropped the ``T`` flag,
+        a restore) the message's tombstones go too: the reaper runs on
+        another thread, and seeing the restored message still tombstoned
+        it would delete it. Returns the claimant ID of the occurrence
+        moved or bound, else ``None``. Every other caller leaves
+        occurrences alone: a sweep that found the file by its uniq alone
+        has not seen its bytes (the reconciliation scan verifies them
+        first, ``move_verified_occurrence``).
 
-        ``clear_tombstone`` drops the file's tombstone in the same
-        transaction, for a rename that restores it (T flag cleared): the
-        reaper runs on another thread, and seeing the restored path with
-        its tombstone still in place it would delete the message.
-
-        mbsync renames a Maildir file whenever flags change (e.g. S → SR when
-        the message is replied to). Keep the stored path in sync so later
-        reconciliation sweeps can still find the file.
-
-        Goes through ``_begin_if_needed`` / ``_commit_if_started`` /
-        ``_rollback_if_started``, so it joins an enclosing
-        ``db.transaction()`` (as ``remap_to_identical_copy`` uses it)
-        instead of failing on a nested ``BEGIN``.
-
-        ``move_occurrence=True`` is for an observed rename (a watcher
-        event): the file's occurrence moves with it (#1566,
-        ``_move_occurrence``) in the same transaction. Every other caller
-        leaves occurrences alone: a sweep that found the file by its uniq
-        alone has not seen its bytes, and a remap to a byte-identical copy
-        moves to a file with its own occurrence. Those are missed moves,
-        left to completeness-gated reconciliation (#1567).
+        When an active occurrence exists at ``old_path``,
+        ``verified_identity`` (``new_path``'s size, mtime, inode, ctime and device,
+        captured by the caller when it verified the destination's bytes
+        against the occurrence's claimant, ``occurrence_scan.
+        verify_rename_bytes``) is re-checked here, inside the
+        transaction, before the occurrence is carried forward (#1612): a
+        caller that did not verify (``None``), or whose verified file was
+        replaced again since, gets no move for that occurrence — the file
+        is left to the normal new-mail path. A path with no active
+        occurrence is unaffected: ``_move_occurrence`` verifies that case
+        itself, from ``indexed_files``.
         """
         if old_path == new_path:
-            return
-        cur = self._conn.cursor()
-        started = False
-        try:
-            started = self._begin_if_needed(cur)
-            if move_occurrence:
-                self._move_occurrence(cur, old_path, new_path)
-            cur.execute(
-                "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
-                (new_path, old_path),
+            return None
+        with self.transaction():
+            return self._rename_rows(
+                self._conn.cursor(), old_path, new_path, move_occurrence, verified_identity
             )
-            # mbsync carries Proton's read / flagged / replied changes as
-            # renames, so the state moves with the path, never re-parsed.
-            state = message_state(new_path)
-            cur.execute(
-                "UPDATE messages SET filepath = ?, seen = ?, flagged = ?, replied = ? "
-                "WHERE filepath = ?",
-                (new_path, int(state.seen), int(state.flagged), int(state.replied), old_path),
+
+    def _rename_rows(
+        self,
+        cur: sqlite3.Cursor,
+        old_path: str,
+        new_path: str,
+        move_occurrence: bool,
+        verified_identity: tuple[int, int, int, int, int] | None = None,
+    ) -> str | None:
+        """``update_filepath``'s writes, in the caller's transaction."""
+        claimant_id: str | None = None
+        mismatched = False
+        if move_occurrence:
+            claimant_id, mismatched = self._move_occurrence(
+                cur, old_path, new_path, verified_identity
             )
-            if folder is not None:
-                cur.execute(
-                    "UPDATE messages SET folder = ? WHERE filepath = ?",
-                    (folder, new_path),
-                )
-            # Carry the file-identity columns forward on rename. mbsync
-            # renames files in place for flag changes; the content on
-            # disk is unchanged, so reindexing just to recompute ``size``
-            # / ``mtime_ns`` / ``content_hash`` would be wasted I/O.
-            # Preserve whatever identity the previous indexing captured.
-            prior = cur.execute(
-                "SELECT size, mtime_ns, content_hash FROM indexed_files WHERE filepath = ?",
-                (old_path,),
-            ).fetchone()
+        if claimant_id is not None:
+            # A rename that leaves the message live (a restore) ends its loss.
+            cur.execute(
+                "DELETE FROM pending_deletions WHERE claimant_id = ? AND EXISTS ("
+                "SELECT 1 FROM message_occurrences o WHERE o.claimant_id = ? "
+                "AND o.state = 'active' AND o.trashed = 0)",
+                (claimant_id, claimant_id),
+            )
+        # Carry the file-identity columns forward on rename. mbsync
+        # renames files in place for flag changes; the content on disk
+        # is unchanged, so reindexing just to recompute ``size`` /
+        # ``mtime_ns`` / ``content_hash`` would be wasted I/O. For a
+        # ``move_occurrence`` caller this is refused on ``mismatched``
+        # (#1612): ``_move_occurrence`` reports that only when a record
+        # it consulted (the occurrence's claimant, or an indexed_files
+        # row naming a current message) was found to disagree with
+        # ``new_path`` — never merely because there was nothing to say,
+        # which is the common case for a path with no active occurrence
+        # and no matching indexed_files row (plain bookkeeping, not an
+        # identity claim).
+        prior = cur.execute(
+            "SELECT size, mtime_ns, content_hash FROM indexed_files WHERE filepath = ?",
+            (old_path,),
+        ).fetchone()
+        if prior is not None and not mismatched:
             cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (old_path,))
             cur.execute(
                 "INSERT OR REPLACE INTO indexed_files "
                 "(filepath, indexed_at, size, mtime_ns, content_hash) "
                 "VALUES (?, datetime('now'), ?, ?, ?)",
-                (
-                    new_path,
-                    prior["size"] if prior else None,
-                    prior["mtime_ns"] if prior else None,
-                    prior["content_hash"] if prior else None,
-                ),
+                (new_path, prior["size"], prior["mtime_ns"], prior["content_hash"]),
             )
-            if clear_tombstone:
-                cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (old_path,))
-            else:
-                cur.execute(
-                    "UPDATE pending_deletions SET filepath = ? WHERE filepath = ?",
-                    (new_path, old_path),
-                )
-            # The file's queue row moves too, retry or dead state intact:
-            # a rename of a file whose Phase 1 committed (so the path is
-            # indexed and ``on_moved`` does not re-enqueue it) but whose
-            # Phase 2 is still pending would otherwise leave the job on a
-            # path that no longer exists, to be dropped as missing.
-            cur.execute(
-                "UPDATE OR REPLACE indexing_jobs SET filepath = ? WHERE filepath = ?",
-                (new_path, old_path),
-            )
-            # A job the drain parked because its file was T-flagged is due
-            # at once on any rename: a restore must not wait out the park
-            # delay (there may be no tombstone yet to clear), and a job
-            # still on a trashed path is simply parked again.
-            cur.execute(
-                "UPDATE indexing_jobs SET next_attempt_at = ? "
-                "WHERE filepath = ? AND status = 'queued' AND last_stage = 'trashed'",
-                (datetime.now(UTC).isoformat(), new_path),
-            )
-            self._commit_if_started(started)
-        except Exception:
-            self._rollback_if_started(started)
-            raise
-
-    @_synchronized
-    def add_pending_deletion(self, filepath: str, claimant_id: str, thread_id: str) -> bool:
-        """Record a tombstone. Returns True if newly inserted, False if already present.
-
-        Uses INSERT OR IGNORE so repeated sweeps over the same T-flagged file
-        do not churn the marked_at timestamp — the grace window is measured
-        from when the file was *first* seen as tombstoned.
-
-        ``marked_at`` is written as an ISO 8601 UTC string so that the
-        reaper's ``WHERE marked_at <= ?`` comparison against
-        ``datetime.now(UTC).isoformat()`` is well-defined. SQLite's own
-        ``datetime('now')`` returns a space-separated format that sorts
-        lexicographically before ``T``-separated ISO strings and would
-        cause tombstones to be reaped up to a day early.
-
-        Refused when ``message_thread_map`` maps ``claimant_id`` to another
-        path (#301): the caller's path is stale because the watcher renamed
-        the file meanwhile (a restore, or a move to another folder). The
-        reaper matches tombstones by claimant ID, and no sweep revisits the
-        old path, so the tombstone would delete the live message. The check
-        and the insert are one statement, so a rename cannot land between
-        them.
-        """
-        cur = self._conn.cursor()
-        marked_at = datetime.now(UTC).isoformat()
+        self._missing_job_checks.pop(old_path, None)
+        self._missing_job_checks.pop(new_path, None)
+        # The file's queue row moves too, retry or dead state intact: a
+        # rename of a file whose Phase 1 committed (so the path is indexed
+        # and ``on_moved`` does not re-enqueue it) but whose Phase 2 is
+        # still pending would otherwise leave the job on a path that no
+        # longer exists, to be dropped as missing.
         cur.execute(
-            "INSERT OR IGNORE INTO pending_deletions "
-            "(filepath, claimant_id, thread_id, marked_at) "
-            "SELECT ?, ?, ?, ? WHERE NOT EXISTS ("
-            "SELECT 1 FROM message_thread_map WHERE claimant_id = ? AND filepath != ?)",
-            (filepath, claimant_id, thread_id, marked_at, claimant_id, filepath),
+            "UPDATE OR REPLACE indexing_jobs SET filepath = ? WHERE filepath = ?",
+            (new_path, old_path),
         )
-        self._conn.commit()
-        return cur.rowcount > 0
-
-    @_synchronized
-    def clear_pending_deletion(self, filepath: str) -> None:
-        self._conn.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
-        self._conn.commit()
-
-    @_synchronized
-    def has_pending_deletion(self, filepath: str) -> bool:
-        row = self._conn.execute(
-            "SELECT 1 FROM pending_deletions WHERE filepath = ?", (filepath,)
-        ).fetchone()
-        return row is not None
-
-    @_synchronized
-    def list_pending_deletions_older_than(self, cutoff_iso: str) -> list[sqlite3.Row]:
-        """Tombstones marked at or before ``cutoff_iso``, each with
-        ``mapped_filepath``: the path ``message_thread_map`` holds for the
-        message now (``None`` when the message is unmapped)."""
-        return self._conn.execute(
-            "SELECT p.filepath, p.claimant_id, p.thread_id, p.marked_at, "
-            "m.filepath AS mapped_filepath "
-            "FROM pending_deletions p "
-            "LEFT JOIN message_thread_map m ON m.claimant_id = p.claimant_id "
-            "WHERE p.marked_at <= ? ORDER BY p.marked_at ASC",
-            (cutoff_iso,),
-        ).fetchall()
+        # A job the drain parked because its file was T-flagged is due at
+        # once on any rename: a restore must not wait out the park delay,
+        # and a job still on a trashed path is simply parked again.
+        cur.execute(
+            "UPDATE indexing_jobs SET next_attempt_at = ? "
+            "WHERE filepath = ? AND status = 'queued' AND last_stage = 'trashed'",
+            (datetime.now(UTC).isoformat(), new_path),
+        )
+        return claimant_id
 
     @_synchronized
     def prune_reaped_messages(self, *, now: datetime | None = None) -> int:
@@ -4688,36 +5300,53 @@ class Database:
         *,
         grace_cutoff: str | None = None,
         copy_paths: Sequence[str] = (),
+        listings: FolderInventory | None = None,
     ) -> bool:
         """Remove a thread and every derived row. Used when the last message
         in a thread has been reaped.
 
         Returns False, changing nothing, when a message in the thread is no
-        longer tombstoned — the watcher restored it (or a new message
-        joined the thread) after the reaper read its tombstones — or, with
-        ``grace_cutoff``, has a tombstone newer than it (restored and
-        trashed again, so its grace period restarted).
+        longer reapable — the watcher restored it, a copy of it was bound,
+        or a new message joined the thread after the reaper read its
+        tombstones — or, with ``grace_cutoff``, it lost its last live
+        occurrence after that (restored and lost again, so its grace
+        period restarted).
 
         ``copy_paths`` are other paths holding the bytes of the thread's
-        messages; they are unmarked in the same transaction (see
-        ``_unmark_paths``).
+        messages; they are unmarked in the same transaction with the
+        messages' occurrence paths (see ``_unmark_paths``).
         """
         cur = self._conn.cursor()
+        listings = listings if listings is not None else FolderInventory()
+        ids = [
+            r[0]
+            for r in cur.execute(
+                "SELECT claimant_id FROM message_thread_map WHERE thread_id = ?", (thread_id,)
+            )
+        ]
+        checks = self._prepare_restore_evidence(cur, ids, copy_paths, listings)
         try:
             cur.execute("BEGIN IMMEDIATE")
-            if self._has_untombstoned_messages(cur, thread_id, grace_cutoff=grace_cutoff):
+            if self._has_unreapable_messages(
+                cur, thread_id, grace_cutoff=grace_cutoff
+            ) or self._restored_on_disk(
+                cur,
+                [
+                    r["claimant_id"]
+                    for r in cur.execute(
+                        "SELECT claimant_id FROM message_thread_map WHERE thread_id = ?",
+                        (thread_id,),
+                    ).fetchall()
+                ],
+                copy_paths,
+                listings,
+                checks,
+            ):
                 self._conn.rollback()
                 return False
             row = cur.execute(
                 "SELECT fts_rowid FROM threads WHERE thread_id = ?", (thread_id,)
             ).fetchone()
-            filepaths = [
-                r["filepath"]
-                for r in cur.execute(
-                    "SELECT filepath FROM message_thread_map WHERE thread_id = ?",
-                    (thread_id,),
-                ).fetchall()
-            ]
             if row and row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (row["fts_rowid"],))
                 self._mark_fts_scrub("threads_fts")
@@ -4737,7 +5366,10 @@ class Database:
             ]
             for cid in claimant_ids:
                 self._delete_attachments_for_message(cur, cid)
-            self._unmark_paths(cur, list(copy_paths))
+            # Every occurrence's path and every other path with the
+            # messages' bytes; a job still queued for one (an embedder
+            # outage past the grace window) would re-index the kept .eml.
+            self._unmark_paths(cur, [*self._occurrence_paths(cur, claimant_ids), *copy_paths])
             # Read before the map delete cascades the participant rows away.
             mentions = self._participant_mentions(cur, claimant_ids)
             cur.execute(
@@ -4747,14 +5379,9 @@ class Database:
                 "WHERE thread_id = ?",
                 (datetime.now(UTC).isoformat(), thread_id),
             )
+            # Cascades to ``messages``, their occurrences and tombstones.
             cur.execute("DELETE FROM message_thread_map WHERE thread_id = ?", (thread_id,))
             cur.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
-            cur.execute("DELETE FROM pending_deletions WHERE thread_id = ?", (thread_id,))
-            for fp in filepaths:
-                cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (fp,))
-                # A job still queued for the file (an embedder outage past
-                # the grace window) would re-index it from the kept .eml.
-                cur.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (fp,))
             self._prune_orphan_entities(cur, mentions)
             self._conn.commit()
         except Exception:
@@ -4763,7 +5390,7 @@ class Database:
         return True
 
     @staticmethod
-    def _has_untombstoned_messages(
+    def _has_unreapable_messages(
         cur: sqlite3.Cursor,
         thread_id: str,
         claimant_ids: list[str] | None = None,
@@ -4771,16 +5398,18 @@ class Database:
         grace_cutoff: str | None = None,
     ) -> bool:
         """Whether a message of ``thread_id`` (only ``claimant_ids``, when
-        given) has no tombstone, or none marked at or before
-        ``grace_cutoff``. Read inside the reap transaction, so a restore
-        (or a restore and a new tombstone) after the reaper's snapshot is
-        seen."""
+        given) has a live occurrence, or no tombstone marked at or before
+        ``grace_cutoff`` (no tombstone at all without one). Read inside the
+        reap transaction, so a restore, a copy bound, or a restore and a
+        new loss after the reaper's snapshot is seen."""
         # Only fixed SQL fragments are interpolated; values are bound.
         marked = " AND p.marked_at <= ?" if grace_cutoff is not None else ""
         sql = (
             "SELECT 1 FROM message_thread_map m WHERE m.thread_id = ? "  # nosec B608
-            "AND NOT EXISTS (SELECT 1 FROM pending_deletions p "
-            f"WHERE p.claimant_id = m.claimant_id{marked})"
+            "AND (EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = m.claimant_id "
+            "AND o.state = 'active' AND o.trashed = 0) "
+            "OR NOT EXISTS (SELECT 1 FROM pending_deletions p "
+            f"WHERE p.claimant_id = m.claimant_id{marked}))"
         )
         params: list[str] = [thread_id]
         if grace_cutoff is not None:
@@ -4789,6 +5418,77 @@ class Database:
             sql += f" AND m.claimant_id IN ({','.join('?' * len(claimant_ids))})"  # nosec B608
             params.extend(claimant_ids)
         return cur.execute(sql + " LIMIT 1", params).fetchone() is not None
+
+    def _prepare_restore_evidence(self, cur, claimant_ids, copy_paths, inventory):
+        """Verify current and historical locators before entering the reap write."""
+        rows = cur.execute(
+            "SELECT o.relative_path, m.content_hash, m.size_bytes FROM message_occurrences o "
+            "JOIN messages m ON m.claimant_id = o.claimant_id "
+            "WHERE o.account_id = ? AND o.claimant_id IN (SELECT value FROM json_each(?))",
+            (self.account_id, json.dumps(claimant_ids)),
+        ).fetchall()
+        sources = [
+            (Path(self._absolute(r["relative_path"])), r["content_hash"], r["size_bytes"])
+            for r in rows
+        ]
+        for path in copy_paths:
+            record = cur.execute(
+                "SELECT content_hash, size FROM indexed_files WHERE filepath = ?", (path,)
+            ).fetchone()
+            sources.append(
+                (
+                    Path(path),
+                    record["content_hash"] if record else None,
+                    record["size"] if record else None,
+                )
+            )
+        checks: list[tuple[Path, dict[str, tuple[FileIdentity, bool | None]] | None]] = []
+        for path, expected, size in sources:
+            candidates = inventory.candidates(path)
+            if candidates is None:
+                checks.append((path, None))
+                continue
+            proofs: dict[str, tuple[FileIdentity, bool | None]] = {}
+            for candidate in candidates:
+                if is_trashed(candidate):
+                    continue
+                identity = current_identity(candidate)
+                if identity is None:
+                    continue
+                if size is not None and identity[0] != size:
+                    proofs[str(candidate)] = identity, False
+                    continue
+                digest = inventory.digest(candidate, identity)
+                matches = (
+                    digest == expected if digest is not None and expected is not None else None
+                )
+                proofs[str(candidate)] = identity, matches
+            checks.append((path, proofs))
+        return checks
+
+    def _restored_on_disk(self, cur, claimant_ids, copy_paths, listings, checks=None) -> bool:
+        """Unknown, changed, or matching historical copies conservatively prevent reaping."""
+        inventory = listings if listings is not None else FolderInventory()
+        if checks is None:
+            checks = self._prepare_restore_evidence(cur, claimant_ids, copy_paths, inventory)
+        for path, proofs in checks:
+            candidates = inventory.candidates(path)
+            if proofs is None or candidates is None:
+                log.info("reaper: restore verification incomplete; retrying next pass")
+                return True
+            for candidate in candidates:
+                if is_trashed(candidate):
+                    continue
+                proof = proofs.get(str(candidate))
+                if proof is None or proof[1] is None or not _same_file(str(candidate), proof[0]):
+                    log.info("reaper: restore verification incomplete; retrying next pass")
+                    return True
+                if proof[1]:
+                    log.info(
+                        "reaper: kept a message whose file is back on disk since the sweep; the next sweep binds it"
+                    )
+                    return True
+        return False
 
     @_synchronized
     def reap_thread_messages(
@@ -4799,6 +5499,7 @@ class Database:
         *,
         grace_cutoff: str | None = None,
         copy_paths: Sequence[str] = (),
+        listings: FolderInventory | None = None,
     ) -> list[str] | None:
         """Atomically rewrite a thread and remove reaped messages.
 
@@ -4812,36 +5513,40 @@ class Database:
         its chunk mean: the survivors' chunk-vector sum, once the reaped
         messages' chunks are subtracted in this transaction (#1356).
 
-        Returns the filepaths that were removed from the index (the files
-        themselves stay on disk), or ``None``,
-        changing nothing, when a reaped message is no longer tombstoned
-        (the watcher restored it after the reaper read its tombstones) or,
-        with ``grace_cutoff``, its tombstone is newer than that, or when
-        ``embedding`` is ``None`` and no chunk vector survives (the thread
-        changed since the caller checked; the next pass embeds the
+        Returns the claimant IDs that were removed from the index (the
+        files themselves stay on disk), or ``None``, changing nothing,
+        when a reaped message is no longer reapable (the watcher restored
+        it, or a copy was bound, after the reaper read its tombstones) or,
+        with ``grace_cutoff``, it lost its last live occurrence after that,
+        or when ``embedding`` is ``None`` and no chunk vector survives (the
+        thread changed since the caller checked; the next pass embeds the
         fallback).
 
         ``copy_paths`` are other paths holding the reaped messages' bytes;
-        they are unmarked in the same transaction (see ``_unmark_paths``).
+        they are unmarked in the same transaction with the messages'
+        occurrence paths (see ``_unmark_paths``).
         """
         cur = self._conn.cursor()
-        removed_filepaths: list[str] = []
+        listings = listings if listings is not None else FolderInventory()
+        checks = self._prepare_restore_evidence(cur, reaped_claimant_ids, copy_paths, listings)
+        removed: list[str] = []
         try:
             cur.execute("BEGIN IMMEDIATE")
-            if self._has_untombstoned_messages(
+            if self._has_unreapable_messages(
                 cur, thread.thread_id, reaped_claimant_ids, grace_cutoff=grace_cutoff
-            ):
+            ) or self._restored_on_disk(cur, reaped_claimant_ids, copy_paths, listings, checks):
                 self._conn.rollback()
                 return None
             self._rewrite_thread_row(cur, thread, embedding)
             # The replaced thread row held the reaped messages' words.
             self._mark_fts_scrub("threads_fts")
             mentions = self._participant_mentions(cur, reaped_claimant_ids)
-            self._unmark_paths(cur, list(copy_paths))
+            self._unmark_paths(
+                cur, [*self._occurrence_paths(cur, reaped_claimant_ids), *copy_paths]
+            )
             for cid in reaped_claimant_ids:
-                fp = self._remove_message_row(cur, cid)
-                if fp is not None:
-                    removed_filepaths.append(fp)
+                if self._remove_message_row(cur, cid):
+                    removed.append(cid)
             if embedding is None:
                 total, count = self._thread_sums(cur, thread.thread_id)
                 if not count:
@@ -4855,7 +5560,7 @@ class Database:
         except Exception:
             self._conn.rollback()
             raise
-        return removed_filepaths
+        return removed
 
     def _rewrite_thread_row(
         self, cur: sqlite3.Cursor, thread, embedding: list[float] | None
@@ -5037,21 +5742,21 @@ class Database:
                 (org_id, org_id),
             )
 
-    def _remove_message_row(self, cur: sqlite3.Cursor, claimant_id: str) -> str | None:
-        """Remove a message's map / indexed_files / tombstone / queue /
-        chunk / attachment rows using ``cur``, and record it in
-        ``reaped_messages``. Returns the message's filepath (the file
-        stays on disk), or ``None`` if no such message
-        was tracked. Used by ``reap_thread_messages``; the caller owns
-        the enclosing transaction.
+    def _remove_message_row(self, cur: sqlite3.Cursor, claimant_id: str) -> bool:
+        """Remove a message's map / chunk / attachment rows using ``cur``,
+        with its ``messages`` row, occurrences and tombstones by cascade,
+        and record it in ``reaped_messages``. Returns False when no such
+        message was tracked. Its files stay on disk; the caller unmarks
+        their paths (``_unmark_paths``). Used by ``reap_thread_messages``;
+        the caller owns the enclosing transaction.
         """
-        row = cur.execute(
-            "SELECT filepath FROM message_thread_map WHERE claimant_id = ?",
-            (claimant_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        filepath = row["filepath"]
+        if (
+            cur.execute(
+                "SELECT 1 FROM message_thread_map WHERE claimant_id = ?", (claimant_id,)
+            ).fetchone()
+            is None
+        ):
+            return False
         # Per-message chunk cascade. ``_delete_chunks_for_message``
         # drops both body-chunk and attachment-chunk rows because both
         # carry this claimant_id.
@@ -5069,9 +5774,4 @@ class Database:
             (datetime.now(UTC).isoformat(), claimant_id),
         )
         cur.execute("DELETE FROM message_thread_map WHERE claimant_id = ?", (claimant_id,))
-        cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
-        cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
-        # A job still queued for the file would re-index it from the kept
-        # .eml (see ``delete_thread_completely``).
-        cur.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
-        return filepath
+        return True

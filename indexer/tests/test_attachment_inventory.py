@@ -10,6 +10,7 @@ from src.queue import REPARSE_ENQUEUE_SQL
 from src.threader import Threader
 
 from tests.conftest import TEST_ACCOUNT, make_message, make_mock_embedder, make_thread
+from tests.test_database import _v14_from_fresh
 from tests.test_main import _drain, _make_queue
 
 
@@ -45,16 +46,7 @@ def test_migration_keeps_old_inventory_unknown_and_queues_reparse(tmp_path):
     db = Database(path, account=TEST_ACCOUNT)
     msg = make_message(message_id="old@test.example")
     db.upsert_thread(make_thread(messages=[msg]), [0.1] * 4096)
-    for table in ("message_body_ranges", "message_body_spans", "message_body_parts"):
-        db._conn.execute(f"DROP TABLE {table}")
-    for column in ("full_body_complete", "full_body_generation", "full_body_version"):
-        db._conn.execute(f"ALTER TABLE messages DROP COLUMN {column}")
-    db._conn.execute("ALTER TABLE messages DROP COLUMN attachment_rows_current")
-    db._conn.execute("ALTER TABLE messages DROP COLUMN bcc_addresses_complete")
-    db._conn.execute("DROP INDEX idx_messages_sent")
-    db._conn.execute("DROP INDEX idx_messages_occurred")
-    db._conn.execute("UPDATE schema_version SET version=14")
-    db._conn.commit()
+    _v14_from_fresh(db)
     db.close()
     db = Database(path, account=TEST_ACCOUNT)
     try:
@@ -62,7 +54,7 @@ def test_migration_keeps_old_inventory_unknown_and_queues_reparse(tmp_path):
         assert (
             db._conn.execute("SELECT version FROM schema_version").fetchone()[0]
             == SCHEMA_VERSION
-            == 18
+            == SCHEMA_VERSION
         )
         assert (
             db._conn.execute(

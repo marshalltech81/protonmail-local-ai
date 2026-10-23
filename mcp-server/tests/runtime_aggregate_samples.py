@@ -35,22 +35,36 @@ class RuntimeAggregateSamples(unittest.TestCase):
                 conn.create_function("mcp_casefold", 1, str.casefold, deterministic=True)
                 stamp = "2024-01-01T00:00:00+00:00"
                 conn.executemany(
-                    "INSERT INTO messages (claimant_id,message_id,thread_id,filepath,folder,subject,"
+                    "INSERT INTO messages (claimant_id,message_id,thread_id,subject,"
                     "sent_at,sent_at_status,occurred_at,references_json,has_attachments,indexed_at,"
                     "first_indexed_at,sender_ambiguous,from_addresses_complete,to_addresses_complete,"
                     "cc_addresses_complete,attachments_manifest_complete,attachment_rows_current,body_complete,subject_complete) "
-                    "VALUES (?,?,?,?, 'INBOX','synthetic recurring bulletin',?,'parsed',?,'[]',0,?,?,0,1,1,1,1,1,1,1)",
+                    "VALUES (?,?,?, 'synthetic recurring bulletin',?,'parsed',?,'[]',0,?,?,0,1,1,1,1,1,1,1)",
                     (
                         (
                             f"c{i:06}",
                             f"m{i:06}",
                             f"t{i // 4}",
-                            f"/synthetic/{i}",
                             stamp,
                             stamp,
                             stamp,
                             stamp,
                         )
+                        for i in range(size)
+                    ),
+                )
+                # Folder and flags live on message_occurrences since the
+                # occurrence cutover (#1567, #1568): aggregate_messages's
+                # default_scope leaf (always compiled in without an
+                # explicit folder filter) needs one active, non-trashed
+                # occurrence per message, outside Trash/Spam, to count it.
+                conn.executemany(
+                    "INSERT INTO message_occurrences (account_id, folder, uniq, claimant_id, "
+                    "relative_path, seen, flagged, replied, trashed, first_observed_at, "
+                    "last_observed_at, state, provenance) "
+                    "VALUES (1, 'INBOX', ?, ?, ?, 0, 0, 0, 0, ?, ?, 'active', 'parse')",
+                    (
+                        (f"m{i:06}", f"c{i:06}", f"INBOX/cur/m{i:06}:2,S", stamp, stamp)
                         for i in range(size)
                     ),
                 )

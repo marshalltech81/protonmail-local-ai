@@ -252,7 +252,7 @@ class TestMessageScope:
     def test_a_moved_message_is_labelled_by_its_current_folder(self, scope_db, tmp_path):
         with sqlite3.connect(str(tmp_path / "scope.db")) as conn:
             conn.execute(
-                "UPDATE messages SET folder = 'Archive' WHERE claimant_id = ?",
+                "UPDATE message_occurrences SET folder = 'Archive' WHERE claimant_id = ?",
                 (_claimant("sep"),),
             )
         assert _in_scope(scope_db, folders=["INBOX"]) == {"late", "nov", "club"}

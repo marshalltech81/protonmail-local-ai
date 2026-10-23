@@ -105,6 +105,13 @@ REASON_REEXTRACT = "reextract"
 # Re-read an already indexed message so a parser change that keeps chunk
 # IDs fills its per-message rows (#1078). Queued by ``REPARSE_ENQUEUE_SQL``.
 REASON_REPARSE = "reparse"
+# A path whose content occurrence_scan's periodic content backstop
+# found no longer matched the occurrence that still named it, requesting
+# a reparse (#1612). The Maildir walk and the watcher's new-mail gate
+# re-discover a stale path through their own existing reasons (an
+# unindexed-or-stale file looks the same to them as new mail); only the
+# backstop's own detection uses this one. Queued by ``STALE_ENQUEUE_SQL``.
+REASON_STALE_CONTENT = "stale_content"
 
 # Queue every indexed source file for a reparse, in one statement. A
 # migration that adds parser-produced per-message data ends with this
@@ -125,6 +132,22 @@ SELECT filepath, 'reparse', 'queued', 0,
        strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
        strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
 FROM indexed_files WHERE true
+ON CONFLICT(filepath) DO NOTHING;"""
+
+# Queue one path whose content a backstop check (not a fresh watcher
+# event) found changed, without disturbing a row already there: a
+# pending retry's attempts and error, or a dead letter's status, stay as
+# they are until the worker or the operator (``make requeue-dead``)
+# acts on them (#1612). ``queue_enqueue``'s ``INSERT OR REPLACE`` is for
+# a watcher event (a path genuinely new to the queue, or fresh intent);
+# this statement is for a detection that can recur on a later pass before
+# the worker catches up, so it must not keep resetting state the
+# detection itself did not change. Modeled on ``REPARSE_ENQUEUE_SQL``,
+# for one path rather than every indexed file.
+STALE_ENQUEUE_SQL = """\
+INSERT INTO indexing_jobs
+    (filepath, reason, status, attempts, created_at, updated_at, next_attempt_at)
+VALUES (?, ?, 'queued', 0, ?, ?, ?)
 ON CONFLICT(filepath) DO NOTHING;"""
 
 # Stages ``defer`` is called with. The queue heartbeat counts deferrals
@@ -264,6 +287,20 @@ class IndexingQueue:
         should retry from a clean state. ``INSERT OR REPLACE`` is the
         minimum write that expresses that semantics without a manual
         SELECT / UPDATE / INSERT dance.
+
+        ``max_attempts`` bounds how many failures one admission tolerates
+        before the row goes ``dead`` again, never the total retries a
+        path accumulates over its lifetime: a path repeatedly renamed
+        (``MaildirHandler.on_moved``'s Case 2, #1612/#1627 panel) gets a
+        fresh ``attempts=0`` on every such event, so the true bound on
+        total attempts is the number of rename events the path
+        undergoes — which the indexer's read-only ``/maildir`` mount
+        means only mbsync, never the indexer itself, can generate. This
+        is intended: a ``DO NOTHING`` admission here would leave new
+        bytes delivered onto a dead-lettered destination stuck dead
+        instead of retried (contrast ``queue_enqueue_if_absent``, used
+        only by the content backstop, which must not disturb a pending
+        retry or a dead letter it did not itself cause).
         """
         now_iso = _now_iso()
         self.db.queue_enqueue(

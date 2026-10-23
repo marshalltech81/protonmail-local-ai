@@ -95,6 +95,14 @@ PROTON_CHANNEL_NAME="$PROTON_DEFAULT_CHANNEL_NAME"
 SOURCE_MODE="$PROTON_DEFAULT_SOURCE_MODE"
 PROTON_FOLDER_EXCLUSIONS="$PROTON_DEFAULT_FOLDER_EXCLUSIONS"
 
+# The account the collection status names (#1592), synthetic.
+ACCOUNT_SCOPE="00000000-0000-4000-8000-000000000001"
+# The collection records' and success stamp's shapes, as the entrypoint
+# defines them.
+eval "$(grep -E '^readonly ((LEGACY_)?COLLECTION_(ATTEMPT_ID|TIME|TERMINAL|SUCCESS)|SYNC_STAMP)_RE=' "$ENTRYPOINT" | sed 's/^readonly //')"
+# shellcheck disable=SC2034 # read by the loaded publish_collection_status
+COLLECTION_STATUS_FORMAT=2
+
 # Synthetic fingerprints in the pin's format: 64 lowercase hex digits.
 FP_OLD="$(printf 'a%.0s' {1..64})"
 FP_NEW="$(printf 'b%.0s' {1..64})"
@@ -311,6 +319,258 @@ fifo_pin_is_refused_without_reading() {
     [[ "$err" == *"not a regular file"* && -p "$PIN_FILE" ]] || return 1
 }
 
+# --- next_success_generation (#1621 thread, 2026-10-13) --------------------
+#
+# A durable, monotonically increasing counter in the state volume (never
+# SQLite): record_successful_sync allocates one per successful sync, so
+# the indexer can order acknowledged stamps without the wall clock and
+# never reuse a generation a stamp already claimed.
+
+generation_setup() {
+    STATE_DIR="$WORK/state-gen-$1"
+    GENERATION_FILE="$STATE_DIR/sync-generation"
+    MAILDIR_PATH="$WORK/maildir-gen-$1"
+    SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
+    load stamp_generation generation_in_range current_success_generation next_success_generation
+}
+
+first_generation_is_1() {
+    generation_setup first
+    mkdir -p "$STATE_DIR"
+    [[ "$(next_success_generation)" == "1" ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == "1" ]] || return 1
+    [[ "$(stat -c %a "$GENERATION_FILE" 2>/dev/null || stat -f %Lp "$GENERATION_FILE")" == "600" ]] \
+        || return 1
+}
+
+generation_seeds_from_status_after_a_stamp_failure() {
+    generation_setup status-seed
+    mkdir -p "$STATE_DIR" "$MAILDIR_PATH"
+    printf '5\n' >"$GENERATION_FILE"
+    collection_last_success='{"attempt_id": "0123456789ab-1", "completed_at": "2026-10-12T00:00:00Z", "generation": 50}'
+    collection_last_terminal='{"generation_floor": 60}'
+    [[ "$(next_success_generation 2>"$WORK/status-seed-log")" == 61 ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == 61 ]] || return 1
+    grep -q 'seeding the success generation forward from retained collection ordering evidence' "$WORK/status-seed-log"
+}
+
+generation_increases_by_one_each_call() {
+    generation_setup increments
+    mkdir -p "$STATE_DIR"
+    [[ "$(next_success_generation)" == "1" ]] || return 1
+    [[ "$(next_success_generation)" == "2" ]] || return 1
+    [[ "$(next_success_generation)" == "3" ]] || return 1
+}
+
+generation_survives_a_restart() {
+    generation_setup restart
+    mkdir -p "$STATE_DIR"
+    next_success_generation >/dev/null
+    next_success_generation >/dev/null
+    # A fresh load, as a new container start would do.
+    load current_success_generation next_success_generation
+    [[ "$(next_success_generation)" == "3" ]] || return 1
+}
+
+first_generation_fails_closed_when_it_cannot_be_saved() {
+    generation_setup unsaved
+    # The state directory does not exist, so no write can succeed.
+    if next_success_generation; then
+        echo "a generation was allocated although it was never saved"
+        return 1
+    fi
+    [[ ! -e "$GENERATION_FILE" ]] || return 1
+}
+
+malformed_generation_is_refused_and_kept() {
+    generation_setup malformed
+    mkdir -p "$STATE_DIR"
+    printf 'not-a-number\n' >"$GENERATION_FILE"
+    if next_success_generation; then
+        echo "a generation was allocated over a malformed counter"
+        return 1
+    fi
+    [[ "$(cat "$GENERATION_FILE")" == "not-a-number" ]] || return 1
+}
+
+directory_generation_is_refused() {
+    generation_setup directory
+    mkdir -p "$GENERATION_FILE"
+    if next_success_generation; then
+        echo "a generation was allocated over a directory"
+        return 1
+    fi
+    [[ -d "$GENERATION_FILE" ]] || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+failed_generation_write_fails_closed_and_keeps_the_old_value() {
+    generation_setup write-fail
+    mkdir -p "$STATE_DIR"
+    printf '5\n' >"$GENERATION_FILE"
+    mv() { return 1; }
+    if next_success_generation; then
+        echo "a generation was allocated although it was never saved"
+        return 1
+    fi
+    [[ "$(cat "$GENERATION_FILE")" == "5" ]] || return 1
+    # No temporary file is left behind in the state directory.
+    [[ "$(find "$STATE_DIR" -type f | wc -l)" -eq 1 ]] || return 1
+}
+
+# --- generation seeded from a retained stamp (#1612 round 8, P2) -----------
+#
+# mbsync-state can be recreated or restored from an older backup while
+# the Maildir volume (which docs/architecture.md's "Docker Volumes"
+# table documented as not needing one before this counter existed)
+# keeps a newer stamp. The counter must never allocate a generation at
+# or below one the stamp already published, or the indexer's
+# forward-only, generation-ordered acknowledgement (never moves past a
+# stamp whose generation is not greater than the one already
+# acknowledged) would ignore every later sync until the counter caught
+# back up on its own.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+write_stamp_with_generation() {
+    mkdir -p "$MAILDIR_PATH"
+    printf '{"completed_at": "2026-10-01T00:00:00Z", "sync_interval_secs": 60, "attempt_id": "0123456789ab-1", "generation": %d}\n' \
+        "$1" >"$SYNC_STAMP_FILE"
+}
+
+a_missing_counter_is_seeded_from_the_retained_stamp() {
+    local out
+    generation_setup seed-missing
+    # The state volume's mountpoint exists (Docker always provides one)
+    # but holds no counter file, as a freshly recreated or restored
+    # volume would.
+    mkdir -p "$STATE_DIR"
+    write_stamp_with_generation 50
+    out="$(next_success_generation 2>"$WORK/seed-missing-err")" || return 1
+    [[ "$out" == "51" ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == "51" ]] || return 1
+    grep -q "is behind the retained sync stamp's generation (50)" "$WORK/seed-missing-err" || return 1
+}
+
+a_lower_counter_is_seeded_forward_from_the_retained_stamp() {
+    local out
+    generation_setup seed-lower
+    mkdir -p "$STATE_DIR"
+    printf '2\n' >"$GENERATION_FILE"
+    write_stamp_with_generation 50
+    out="$(next_success_generation 2>"$WORK/seed-lower-err")" || return 1
+    [[ "$out" == "51" ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == "51" ]] || return 1
+    grep -q "is behind the retained sync stamp's generation (50)" "$WORK/seed-lower-err" || return 1
+}
+
+a_counter_ahead_of_the_retained_stamp_is_unaffected() {
+    local out
+    generation_setup seed-ahead
+    mkdir -p "$STATE_DIR"
+    printf '5\n' >"$GENERATION_FILE"
+    write_stamp_with_generation 3
+    out="$(next_success_generation 2>"$WORK/seed-ahead-err")" || return 1
+    [[ "$out" == "6" ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == "6" ]] || return 1
+    [[ ! -s "$WORK/seed-ahead-err" ]] || return 1
+}
+
+a_legacy_stamp_does_not_seed_the_counter() {
+    generation_setup seed-legacy
+    mkdir -p "$STATE_DIR" "$MAILDIR_PATH"
+    printf '1\n' >"$GENERATION_FILE"
+    # Written before the 2026-10-13 delivery-identity fix: no attempt_id
+    # or generation field.
+    printf '{"completed_at": "2026-10-01T00:00:00Z", "sync_interval_secs": 60}\n' >"$SYNC_STAMP_FILE"
+    [[ "$(next_success_generation 2>/dev/null)" == "2" ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == "2" ]] || return 1
+}
+
+a_missing_stamp_does_not_seed_the_counter() {
+    generation_setup seed-none
+    mkdir -p "$STATE_DIR"
+    printf '1\n' >"$GENERATION_FILE"
+    # No stamp written at all: the common, non-recovery case.
+    [[ "$(next_success_generation 2>/dev/null)" == "2" ]] || return 1
+}
+
+# --- generation bounded before Bash arithmetic (#1612 round 16, P2) -------
+#
+# An all-digit counter or stamp generation above Bash's signed 64-bit
+# range must be refused before next_success_generation does arithmetic
+# on it: evaluating it first wraps "current + 1" negative, which the
+# indexer then rejects as non-positive forever (record_successful_sync
+# keeps reporting the sync as successful on a stamp that can never be
+# acknowledged).
+
+an_oversized_counter_is_refused_and_kept() {
+    generation_setup oversized-counter
+    mkdir -p "$STATE_DIR"
+    # One past generation_in_range's upper bound (INT64_MAX - 1):
+    # INT64_MAX itself, still all digits and still within int64, but
+    # one more than the counter could ever safely add 1 to.
+    printf '9223372036854775807\n' >"$GENERATION_FILE"
+    if next_success_generation; then
+        echo "a generation was allocated over an out-of-range counter"
+        return 1
+    fi
+    [[ "$(cat "$GENERATION_FILE")" == "9223372036854775807" ]] || return 1
+}
+
+noncanonical_generation_counters_are_refused() {
+    local value
+    generation_setup noncanonical
+    mkdir -p "$STATE_DIR"
+    for value in 00 01 08 09 010 0000000000000000000000000000000000000001; do
+        printf '%s\n' "$value" >"$GENERATION_FILE"
+        if next_success_generation; then
+            echo "a generation was allocated over a noncanonical counter"
+            return 1
+        fi
+        [[ "$(cat "$GENERATION_FILE")" == "$value" ]] || return 1
+    done
+}
+
+an_oversized_retained_stamp_generation_is_refused() {
+    local err
+    generation_setup oversized-stamp
+    mkdir -p "$STATE_DIR" "$MAILDIR_PATH"
+    printf '5\n' >"$GENERATION_FILE"
+    printf '{"completed_at": "2026-10-01T00:00:00Z", "sync_interval_secs": 60, "attempt_id": "0123456789ab-1", "generation": 9223372036854775807}\n' \
+        >"$SYNC_STAMP_FILE"
+    err="$WORK/oversized-stamp-err"
+    if next_success_generation 2>"$err"; then
+        echo "a generation was allocated from an out-of-range retained stamp"
+        return 1
+    fi
+    [[ "$(cat "$GENERATION_FILE")" == "5" ]] || return 1
+    grep -q "out of range" "$err" || return 1
+}
+
+# --- collection status setup (#1592) ------------------------------------------
+
+# Every case that runs run_sync publishes the collection status, so each
+# gets its own status file, records and success-generation counter. The
+# cases are further down.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+collection_setup() {
+    COLLECTION_STATUS_FILE="$MAILDIR_PATH/.mbsync-collection-status.json"
+    STATE_DIR="$WORK/state-$1"
+    GENERATION_FILE="$STATE_DIR/sync-generation"
+    mkdir -p "$STATE_DIR"
+    collection_count=0
+    collection_attempt_id=""
+    collection_attempt_started_at=""
+    collection_result_ready=0
+    collection_last_terminal="null"
+    collection_last_success="null"
+    load collection_now load_collection_records \
+        publish_collection_status begin_collection_attempt finish_collection_attempt \
+        record_collection_outcome stamp_generation generation_in_range current_success_generation next_success_generation \
+        record_successful_sync stamp_write_failed
+    load_collection_records
+}
+
 # --- run_sync (#227) -------------------------------------------------------
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -326,11 +586,14 @@ sync_setup() {
     SYNC_DEADLINE_SECONDS=86400
     SYNC_KILL_GRACE_SECONDS=30
     PERMS_REPAIRED_FILE="$MAILDIR_PATH/.mbsync-perms-repaired"
+    SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
+    SYNC_INTERVAL=60
     mkdir -p "$MAILDIR_PATH" "$RUNTIME_DIR"
     : >"$FIND_CALLS"
     load run_child relax_new_maildir_perms signal_perms_repaired mark_sync_activity \
         filter_mbsync_output report_mbsync_errors report_mbsync_notices \
         wait_for_mbsync_filter read_mbsync_error_counts run_sync
+    collection_setup "$1"
     # run_sync runs mbsync under timeout(1) (#282). These cases mock
     # mbsync as a shell function, which timeout cannot exec, so timeout
     # passes straight through to it here; the deadline cases below run
@@ -484,8 +747,10 @@ repair_marker_follows_every_repair() {
     ((rc == expected)) || return 1
     ! grep -q early "$FIND_CALLS" || return 1
     [[ -f "$PERMS_REPAIRED_FILE" ]] || return 1
-    # Renamed into place: no temporary file is left behind.
-    [[ "$(command find "$MAILDIR_PATH" -type f | wc -l)" -eq 1 ]] || return 1
+    # Renamed into place: no temporary file is left behind, beside the
+    # collection status (#1592).
+    [[ "$(command find "$MAILDIR_PATH" -type f ! -name .mbsync-collection-status.json | wc -l)" -eq 1 ]] \
+        || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -719,7 +984,409 @@ sync_loop_counts_failures_but_not_unopenable_far_boxes() {
     [[ "$(wc -l <"$stamps_file")" -eq 1 ]] || return 1
     grep -q 'failed 5 syncs in a row — exiting' "$WORK/loop-log" || return 1
     SYNC_LOG="$WORK/loop-log"
-    marker_not_logged
+    marker_not_logged || return 1
+    # The loop publishes every outcome (#1592): the last attempt failed,
+    # and the degraded success is the last success.
+    status_has_shape failed "$(terminal_re 10 failed 0 '"error"')" "$(success_re 5)" || return 1
+    collection_clean
+}
+
+# --- collection status (#1592) ----------------------------------------------
+#
+# Every sync attempt is published as in_progress before mbsync starts and
+# with its terminal outcome after it ends: succeeded, succeeded with
+# withheld far-side folders (a count), or failed with a fixed failure
+# class. The file holds counts and fixed tokens only; the synthetic folder
+# marker must never reach it, the saved records or the log.
+
+# One attempt as the entrypoint's initial sync runs it: run_sync, then for
+# a success the stamp, then the outcome. Sets SYNC_RC; output in SYNC_LOG.
+attempt_like_the_entrypoint() {
+    SYNC_LOG="$WORK/collection-log-$1"
+    SYNC_RC=0
+    {
+        if run_sync; then
+            record_successful_sync
+            record_collection_outcome
+        else
+            SYNC_RC=$?
+            record_collection_outcome
+        fi
+    } >>"$SYNC_LOG" 2>&1
+}
+
+# The status file is one line in the format-1 shape; $1 is the attempt's
+# outcome, and the terminal and success records are $2 and $3 (regular
+# expressions, or null).
+status_has_shape() {
+    local LC_ALL=C attempt terminal="${COLLECTION_TERMINAL_RE#^}" success="${COLLECTION_SUCCESS_RE#^}" re
+    terminal="${terminal%\$}"
+    success="${success%\$}"
+    attempt="\\{\"id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"started_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"$1\"\\}"
+    re="^\\{\"format\": 2, \"scope_uuid\": \"${ACCOUNT_SCOPE}\", \"run_deadline_secs\": ${SYNC_DEADLINE_SECONDS}, \"sync_interval_secs\": ${SYNC_INTERVAL}, \"attempt\": ${attempt}, \"last_terminal\": (null|${terminal}), \"last_success\": (null|${success})\\}\$"
+    [[ "$(wc -l <"$COLLECTION_STATUS_FILE")" -eq 1 ]] || return 1
+    [[ "$(cat "$COLLECTION_STATUS_FILE")" =~ $re ]] || {
+        printf 'not the format-1 shape: %s\n' "$(cat "$COLLECTION_STATUS_FILE")"
+        return 1
+    }
+    status_contains "\"last_terminal\": $2" || return 1
+    status_contains "\"last_success\": $3" || return 1
+}
+
+# The status file matches the extended regular expression $1.
+status_contains() {
+    grep -qE -- "$1" "$COLLECTION_STATUS_FILE" || {
+        printf 'status lacks %s: %s\n' "$1" "$(cat "$COLLECTION_STATUS_FILE")"
+        return 1
+    }
+}
+
+# A terminal record's expression: $1 attempt number, $2 outcome, $3 count,
+# $4 failure class (null or a quoted token).
+# shellcheck disable=SC2154 # collection_boot is set by the loaded load_collection_records
+terminal_re() {
+    printf '\\{"attempt_id": "%s-%s", "completed_at": "%s", "outcome": "%s", "withheld_far_side_folders": %s, "failure_class": %s, "generation_floor": (null|[0-9]+)\\}' \
+        "$collection_boot" "$1" "$COLLECTION_TIME_RE" "$2" "$3" "$4"
+}
+
+success_re() {
+    printf '\\{"attempt_id": "%s-%s", "completed_at": "%s", "generation": (null|[0-9]+)\\}' "$collection_boot" "$1" "${2:-$COLLECTION_TIME_RE}"
+}
+
+# Neither the status nor the log names a folder; the status is
+# world-readable and no temporary file is left in the Maildir.
+collection_clean() {
+    local file
+    for file in "$COLLECTION_STATUS_FILE" "$SYNC_LOG"; do
+        if grep -qF "MarkerZq9" "$file"; then
+            printf 'a folder name reached %s\n' "$file"
+            return 1
+        fi
+    done
+    [[ "$(stat -c %a "$COLLECTION_STATUS_FILE" 2>/dev/null || stat -f %Lp "$COLLECTION_STATUS_FILE")" == "644" ]] \
+        || return 1
+    if command find "$MAILDIR_PATH" -maxdepth 1 -type f -name '.mbsync-collection-status.json.*' | grep -q .; then
+        echo "a temporary status file was left behind"
+        return 1
+    fi
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+clean_sync_publishes_in_progress_then_success() {
+    local stamp_time
+    sync_setup coll-clean
+    mbsync() { cp "$COLLECTION_STATUS_FILE" "$WORK/coll-clean-during"; }
+    find() { :; }
+    attempt_like_the_entrypoint coll-clean
+    ((SYNC_RC == 0)) || return 1
+    # While mbsync ran: in_progress, with no earlier records.
+    cp "$COLLECTION_STATUS_FILE" "$WORK/coll-clean-after"
+    cp "$WORK/coll-clean-during" "$COLLECTION_STATUS_FILE"
+    status_has_shape in_progress null null || return 1
+    cp "$WORK/coll-clean-after" "$COLLECTION_STATUS_FILE"
+    # After: the success, count 0, at the success stamp's completion time.
+    stamp_time="$(sed -E 's/^\{"completed_at": "([^"]*)".*/\1/' "$SYNC_STAMP_FILE")"
+    status_has_shape succeeded "$(terminal_re 1 succeeded 0 null)" "$(success_re 1 "$stamp_time")" || return 1
+    status_contains "\"completed_at\": \"${stamp_time}\", \"outcome\": \"succeeded\"" || return 1
+    collection_clean
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+far_side_only_publishes_the_withheld_count() {
+    sync_setup coll-far
+    mbsync() { mock_mbsync_output; }
+    find() { :; }
+    MOCK_RC=1
+    MOCK_STDERR="${FAR_BOX_LINE}"$'\n'"${FAR_BOX_LINE_144/MarkerZq9-276/MarkerZq9-other}"
+    attempt_like_the_entrypoint coll-far
+    ((SYNC_RC == 0)) || return 1
+    # Still a success: the stamp is written as before.
+    [[ -f "$SYNC_STAMP_FILE" ]] || return 1
+    status_has_shape succeeded_with_withheld_folders \
+        "$(terminal_re 1 succeeded_with_withheld_folders 2 null)" "$(success_re 1)" || return 1
+    collection_clean
+}
+
+# $1: case name; $2: expected failure class; the mocks are set by the caller.
+failed_attempt_is_published() {
+    attempt_like_the_entrypoint "$1"
+    ((SYNC_RC != 0)) || return 1
+    [[ ! -e "$SYNC_STAMP_FILE" ]] || return 1
+    status_has_shape failed "$(terminal_re 1 failed "$3" "\"$2\"")" null || return 1
+    collection_clean
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+far_side_with_another_error_is_a_failure() {
+    sync_setup coll-mixed
+    mbsync() { mock_mbsync_output; }
+    find() { :; }
+    MOCK_RC=1
+    MOCK_STDERR="${FAR_BOX_LINE}"$'\n'"Error: synthetic other failure"
+    failed_attempt_is_published coll-mixed error 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+mbsync_error_is_a_failure() {
+    sync_setup coll-error
+    mbsync() { mbsync_fails; }
+    find() { :; }
+    failed_attempt_is_published coll-error error 0
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+permission_repair_failure_is_a_failure() {
+    sync_setup coll-repair
+    mbsync() { mbsync_ok; }
+    find() { return 1; }
+    failed_attempt_is_published coll-repair permission_repair 0
+}
+
+# The counts never arrived: the failure's count is unknown (null).
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+missing_counts_publish_an_unknown_count() {
+    sync_setup coll-nocounts
+    mbsync() { mbsync_fails; }
+    find() { :; }
+    read_mbsync_error_counts() { return 1; }
+    failed_attempt_is_published coll-nocounts error null
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+deadline_stop_is_a_failure() {
+    deadline_setup coll
+    write_keepalive_mbsync stop 0
+    SYNC_DEADLINE_SECONDS=1
+    SYNC_KILL_GRACE_SECONDS=5
+    failed_attempt_is_published coll-deadline deadline 0
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+kill_after_the_grace_is_a_failure() {
+    deadline_setup coll-killed
+    write_keepalive_mbsync ignore 0
+    SYNC_DEADLINE_SECONDS=1
+    SYNC_KILL_GRACE_SECONDS=1
+    failed_attempt_is_published coll-killed killed 0
+}
+
+# A retry keeps the earlier failure in last_terminal while it runs; the
+# next success replaces it, and the records follow publication order.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+retry_keeps_the_earlier_failure_until_a_success() {
+    sync_setup coll-retry
+    find() { :; }
+    mbsync() { mbsync_fails; }
+    attempt_like_the_entrypoint coll-retry
+    mbsync() { cp "$COLLECTION_STATUS_FILE" "$WORK/coll-retry-during"; }
+    attempt_like_the_entrypoint coll-retry
+    ((SYNC_RC == 0)) || return 1
+    cp "$WORK/coll-retry-during" "$COLLECTION_STATUS_FILE"
+    status_has_shape in_progress "$(terminal_re 1 failed 0 '"error"')" null || return 1
+    status_contains "\"id\": \"${collection_boot}-2\"" || return 1
+    attempt_like_the_entrypoint coll-retry
+    status_has_shape succeeded "$(terminal_re 3 succeeded 0 null)" "$(success_re 3)"
+}
+
+# A restart picks a new boot token and carries the records of the status
+# an earlier start published into its first publication.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+restart_carries_the_records() {
+    local first_boot terminal success
+    sync_setup coll-restart
+    find() { :; }
+    mbsync() { mbsync_ok; }
+    attempt_like_the_entrypoint coll-restart
+    mbsync() { mbsync_fails; }
+    attempt_like_the_entrypoint coll-restart
+    first_boot="$collection_boot"
+    terminal="$collection_last_terminal"
+    success="$collection_last_success"
+    # The next start: fresh globals, then the startup load.
+    collection_count=0
+    collection_last_terminal="null"
+    collection_last_success="null"
+    load_collection_records
+    [[ "$collection_boot" =~ ^[0-9a-f]{12}$ && "$collection_boot" != "$first_boot" ]] || return 1
+    [[ "$collection_last_terminal" == "$terminal" && "$collection_last_success" == "$success" ]] \
+        || return 1
+    begin_collection_attempt
+    status_contains "\"id\": \"${collection_boot}-1\", \"started_at\": \"[^\"]*\", \"outcome\": \"in_progress\"" \
+        || return 1
+    grep -qF "\"last_terminal\": ${terminal}, \"last_success\": ${success}}" "$COLLECTION_STATUS_FILE"
+}
+
+# A status file not in the written shape, or naming another account, is
+# set aside with a warning: the records start empty rather than made up.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+damaged_status_is_set_aside() {
+    local good damaged log="$WORK/coll-damaged-log"
+    sync_setup coll-damaged
+    find() { :; }
+    mbsync() { mbsync_ok; }
+    attempt_like_the_entrypoint coll-damaged
+    good="$(cat "$COLLECTION_STATUS_FILE")"
+    # The written shape is carried.
+    collection_last_terminal="null"
+    load_collection_records 2>"$log"
+    [[ ! -s "$log" && "$collection_last_terminal" != null ]] || return 1
+    for damaged in '{"completed_at": "2026-10-12T00:00:00Z", "sync_interval_secs": 60}' \
+        "${good/\"format\": 2/\"format\": 3}" \
+        "${good/$ACCOUNT_SCOPE/00000000-0000-4000-8000-000000000002}" \
+        "${good/\"withheld_far_side_folders\": 0/\"withheld_far_side_folders\": \"MarkerZq9\"}" \
+        "${good%\}}, \"x\": 1}" 'garbage'; do
+        printf '%s\n' "$damaged" >"$COLLECTION_STATUS_FILE"
+        collection_last_terminal="null"
+        collection_last_success="null"
+        load_collection_records 2>"$log"
+        grep -q 'WARNING: the collection status at .* could not be read, or names another account' "$log" \
+            || return 1
+        ! grep -qF MarkerZq9 "$log" || return 1
+        [[ "$collection_last_terminal" == null && "$collection_last_success" == null ]] || return 1
+    done
+}
+
+# A status that cannot be published is warned and keeps the sync's result.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unpublishable_status_is_warned_and_keeps_the_result() {
+    sync_setup coll-unpublishable
+    COLLECTION_STATUS_FILE="$WORK/no-such-dir/.mbsync-collection-status.json"
+    mbsync() { mbsync_ok; }
+    find() { :; }
+    attempt_like_the_entrypoint coll-unpublishable
+    ((SYNC_RC == 0)) || return 1
+    [[ -f "$SYNC_STAMP_FILE" ]] || return 1
+    [[ "$(grep -c 'WARNING: could not publish the collection status' "$SYNC_LOG")" -eq 2 ]] || return 1
+}
+
+# A stop during the attempt is its outcome: failed, class interrupted,
+# count unknown.
+term_during_a_sync_publishes_an_interruption() {
+    stop_setup coll-term
+    (install_signal_handlers && run_sync) &
+    signal_once_started "$!" TERM
+    ((STOP_RC == 143)) || return 1
+    status_has_shape failed '\{"attempt_id": "[0-9a-f]{12}-1", "completed_at": "[^"]*", "outcome": "failed", "withheld_far_side_folders": null, "failure_class": "interrupted", "generation_floor": (null|[0-9]+)\}' null
+}
+
+# A stop after run_sync has its result (here while the success stamp is
+# written) publishes that result, not an interruption (review round 3):
+# the success carries the stamp's time, so the indexer can still deliver it.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+stop_after_the_result_publishes_the_result() {
+    local real_stamp
+    stop_setup coll-late-stop
+    SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
+    # A quick successful mbsync on PATH in place of stop_setup's long one.
+    printf '#!/bin/bash\nexit 0\n' >"$WORK/bin-stop-coll-late-stop/mbsync"
+    real_stamp="$(declare -f record_successful_sync)"
+    eval "${real_stamp/record_successful_sync/real_record_successful_sync}"
+    # The stop arrives once the stamp is in place, before the outcome.
+    record_successful_sync() {
+        real_record_successful_sync
+        kill -TERM "$(sh -c 'printf "%s" "$PPID"')"
+    }
+    STOP_RC=0
+    (
+        install_signal_handlers
+        if run_sync; then
+            record_successful_sync
+            record_collection_outcome
+        fi
+    ) >"$WORK/coll-late-stop-log" 2>&1 || STOP_RC=$?
+    cat "$WORK/coll-late-stop-log"
+    ((STOP_RC == 143)) || return 1
+    local stamp_time
+    stamp_time="$(sed -E 's/^\{"completed_at": "([^"]*)".*/\1/' "$SYNC_STAMP_FILE")"
+    status_has_shape succeeded "$(terminal_re 1 succeeded 0 null)" "$(success_re 1 "$stamp_time")"
+}
+
+# A shell killed outright publishes nothing more: the in_progress record
+# stays, with the earlier records beside it, until the next start.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+kernel_kill_leaves_the_in_progress_record() {
+    local earlier='{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z", "outcome": "succeeded", "withheld_far_side_folders": 0, "failure_class": null, "generation_floor": 1}'
+    stop_setup coll-kill
+    collection_last_terminal="$earlier"
+    collection_last_success='{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z", "generation": 1}'
+    (install_signal_handlers && run_sync) &
+    signal_once_started "$!" KILL
+    pkill -TERM -f "$WORK/bin-stop-coll-kill/mbsync" || true
+    ((STOP_RC == 137)) || return 1
+    status_has_shape in_progress "$(printf '%s' "$earlier" | sed 's/[{}]/\\&/g')" '\{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z", "generation": 1\}'
+}
+
+# A success stamp that cannot be written still ends the attempt: its
+# outcome is published (the success is never delivered, since no stamp
+# names it), then the entrypoint exits for a restart, as before. $1: the
+# block of the entrypoint to run (initial or loop). Each stamp step is
+# checked, so no partial stamp replaces the old one.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+stamp_failure_publishes_the_outcome_and_exits() {
+    local block rc=0 log="$WORK/coll-stamp-log-$1"
+    sync_setup "coll-stamp-$1"
+    if [[ "$1" == initial ]]; then
+        block="$(awk '$0 == "echo \">>> Running initial sync...\"" {p = 1; next} p {print} p && $0 == "fi" {exit}' "$ENTRYPOINT")"
+    else
+        block="$(awk '$0 == "while true; do" {p = 1} p {print} p && $0 == "done" {exit}' "$ENTRYPOINT")"
+    fi
+    [[ -n "$block" ]] || return 1
+    printf '{"completed_at": "2026-10-12T00:00:00Z", "sync_interval_secs": 60}\n' >"$SYNC_STAMP_FILE"
+    # The block runs in a subshell tested with ||, where errexit is off, so
+    # a second attempt fails and the loop's failure limit (1) ends a run
+    # that ignored the stamp failure instead of looping on.
+    STAMP_RAN="$WORK/coll-stamp-$1-ran"
+    mbsync() {
+        [[ ! -e "$STAMP_RAN" ]] || return 1
+        : >"$STAMP_RAN"
+    }
+    find() { :; }
+    sleep() { [[ "$1" == "$SYNC_INTERVAL" ]] || command sleep "$1"; }
+    chmod() {
+        if [[ "$2" == "$MAILDIR_PATH"/.mbsync-last-sync.* ]]; then
+            return 1
+        fi
+        command chmod "$@"
+    }
+    MAX_CONSECUTIVE_SYNC_FAILURES=1
+    consecutive_sync_failures=0
+    (eval "$block") >"$log" 2>&1 || rc=$?
+    cat "$log"
+    ((rc == 1)) || return 1
+    grep -q 'ERROR: could not write the success stamp' "$log" || return 1
+    # The old stamp is kept and no temporary stamp is left.
+    grep -qF '"completed_at": "2026-10-12T00:00:00Z"' "$SYNC_STAMP_FILE" || return 1
+    ! command find "$MAILDIR_PATH" -name '.mbsync-last-sync.*.tmp' | grep -q . || return 1
+    status_has_shape succeeded "$(terminal_re 1 succeeded 0 null)" "$(success_re 1)"
+}
+
+# The refusals are fixed text, never the value.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+account_scope_is_required_at_startup() {
+    local value pass_file="$WORK/scope-pass" err="$WORK/scope-err"
+    printf 'synthetic-pass\n' >"$pass_file"
+    BRIDGE_PASS_FILE="$pass_file"
+    BRIDGE_USER="synthetic@example.com"
+    SYNC_INTERVAL=60
+    SYNC_DEADLINE_SECONDS=86400
+    BRIDGE_HOST="host.docker.internal"
+    BRIDGE_IMAP_PORT=1143
+    BRIDGE_CERT_HOST="127.0.0.1"
+    BRIDGE_CERT_FINGERPRINT="$FP_OLD"
+    BRIDGE_CERT_PIN_ROTATE="false"
+    load expected_fingerprint validate_proton_settings validate_bridge_endpoint \
+        account_scope_is_canonical require_prerequisites
+    (require_prerequisites) || return 1
+    for value in "" "MarkerZq9-scope" "00000000-0000-4000-8000-00000000000A" \
+        " 00000000-0000-4000-8000-000000000001"; do
+        ACCOUNT_SCOPE="$value"
+        if (require_prerequisites) 2>"$err"; then
+            printf 'accepted %q\n' "$value"
+            return 1
+        fi
+        grep -q 'ERROR: ACCOUNT_SCOPE' "$err" || return 1
+        ! grep -qF "MarkerZq9" "$err" || return 1
+    done
 }
 
 # --- folder names in other mbsync output (#570) -------------------------------
@@ -1153,13 +1820,19 @@ success_stamp_is_written_by_a_completed_sync() {
     MAILDIR_PATH="$WORK/maildir-stamp"
     SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
     SYNC_INTERVAL=60
-    mkdir -p "$MAILDIR_PATH"
-    load record_successful_sync
+    STATE_DIR="$WORK/state-stamp"
+    GENERATION_FILE="$STATE_DIR/sync-generation"
+    collection_attempt_id="0123456789ab-1"
+    mkdir -p "$MAILDIR_PATH" "$STATE_DIR"
+    load collection_now stamp_generation generation_in_range current_success_generation next_success_generation record_successful_sync
     record_successful_sync
-    grep -qE '^\{"completed_at": "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z", "sync_interval_secs": 60\}$' \
-        "$SYNC_STAMP_FILE" || return 1
+    grep -qE '^\{"completed_at": "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z", "sync_interval_secs": 60, '\
+'"attempt_id": "0123456789ab-1", "generation": 1\}$' "$SYNC_STAMP_FILE" || return 1
     [[ "$(stat -c %a "$SYNC_STAMP_FILE" 2>/dev/null || stat -f %Lp "$SYNC_STAMP_FILE")" == "644" ]] || return 1
     [[ "$(find "$MAILDIR_PATH" -type f | wc -l)" -eq 1 ]] || return 1
+    # The generation it allocated is persisted in the state volume, not
+    # the Maildir.
+    [[ "$(cat "$GENERATION_FILE")" == "1" ]] || return 1
 }
 
 # --- per-run deadline: a stalled mbsync is stopped (#282) --------------------
@@ -1299,7 +1972,8 @@ invalid_deadlines_are_refused_at_startup() {
     BRIDGE_CERT_HOST="127.0.0.1"
     BRIDGE_CERT_FINGERPRINT="$FP_OLD"
     PIN_ROTATION_RUN="false"
-    load expected_fingerprint validate_proton_settings validate_bridge_endpoint require_prerequisites
+    load expected_fingerprint validate_proton_settings validate_bridge_endpoint \
+        account_scope_is_canonical require_prerequisites
     SYNC_DEADLINE_SECONDS=86400
     (require_prerequisites) || return 1
     for value in "" 0 -5 08 1.5 abc " 60" 1000000000; do
@@ -1991,6 +2665,7 @@ missing_expected_fingerprint_is_refused_at_startup() {
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 stop_setup() {
     MAILDIR_PATH="$WORK/maildir-stop-$1"
+    SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
     RUNTIME_DIR="$WORK/runtime-stop-$1"
     CONFIG_FILE="$WORK/mbsyncrc"
     CHILD_LOG="$WORK/child-$1"
@@ -2016,8 +2691,11 @@ MOCK
     chmod 755 "$WORK/bin-stop-$1/mbsync"
     PATH="$WORK/bin-stop-$1:$PATH"
     load run_child stop_on_signal install_signal_handlers relax_new_maildir_perms \
-        mark_sync_activity filter_mbsync_output report_mbsync_errors report_mbsync_notices \
-        wait_for_mbsync_filter read_mbsync_error_counts run_sync
+        signal_perms_repaired mark_sync_activity filter_mbsync_output report_mbsync_errors \
+        report_mbsync_notices wait_for_mbsync_filter read_mbsync_error_counts run_sync
+    PERMS_REPAIRED_FILE="$MAILDIR_PATH/.mbsync-perms-repaired"
+    SYNC_INTERVAL=60
+    collection_setup "stop-$1"
 }
 
 # Signals the stand-in entrypoint once its child has started and waits for
@@ -2136,6 +2814,35 @@ check "rotation replaces an unreadable pin file" rotation_replaces_an_unreadable
 check "rotation refuses a directory in the pin's place" \
     rotation_refuses_a_directory_in_the_pins_place
 check "a FIFO pin is refused without reading it" fifo_pin_is_refused_without_reading
+check "the first allocated success generation is 1" first_generation_is_1
+check "generation seeds from status after a stamp failure and state restore" \
+    generation_seeds_from_status_after_a_stamp_failure
+check "the success generation increases by one each call" generation_increases_by_one_each_call
+check "the success generation survives a restart" generation_survives_a_restart
+check "the first success generation fails closed when it cannot be saved" \
+    first_generation_fails_closed_when_it_cannot_be_saved
+check "a malformed success generation is refused and kept" \
+    malformed_generation_is_refused_and_kept
+check "a directory in the success generation's place is refused" \
+    directory_generation_is_refused
+check "a failed success generation write fails closed and keeps the old value" \
+    failed_generation_write_fails_closed_and_keeps_the_old_value
+check "a missing counter is seeded from the retained stamp" \
+    a_missing_counter_is_seeded_from_the_retained_stamp
+check "a lower counter is seeded forward from the retained stamp" \
+    a_lower_counter_is_seeded_forward_from_the_retained_stamp
+check "a counter ahead of the retained stamp is unaffected" \
+    a_counter_ahead_of_the_retained_stamp_is_unaffected
+check "a legacy stamp does not seed the counter" \
+    a_legacy_stamp_does_not_seed_the_counter
+check "a missing stamp does not seed the counter" \
+    a_missing_stamp_does_not_seed_the_counter
+check "an oversized counter is refused and kept" \
+    an_oversized_counter_is_refused_and_kept
+check "noncanonical generation counters are refused and kept" \
+    noncanonical_generation_counters_are_refused
+check "an oversized retained stamp generation is refused" \
+    an_oversized_retained_stamp_generation_is_refused
 check "sync succeeds when mbsync and the repair succeed" \
     sync_succeeds_when_mbsync_and_repair_succeed
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync
@@ -2189,6 +2896,37 @@ check "a failed repair marker is warned and keeps the sync's result" \
     failed_repair_marker_is_warned_and_keeps_the_result
 check "a completed sync still writes the success stamp" \
     success_stamp_is_written_by_a_completed_sync
+check "collection: a clean sync publishes in_progress, then a success with count 0" \
+    clean_sync_publishes_in_progress_then_success
+check "collection: far-side-only failures publish the withheld count and keep the stamp" \
+    far_side_only_publishes_the_withheld_count
+check "collection: a far-side failure with another error is a failure (error)" \
+    far_side_with_another_error_is_a_failure
+check "collection: an mbsync error is a failure (error)" mbsync_error_is_a_failure
+check "collection: a permission-repair failure is a failure (permission_repair)" \
+    permission_repair_failure_is_a_failure
+check "collection: counts that never arrive publish an unknown count" \
+    missing_counts_publish_an_unknown_count
+check "collection: a deadline stop is a failure (deadline)" deadline_stop_is_a_failure
+check "collection: a kill after the grace is a failure (killed)" kill_after_the_grace_is_a_failure
+check "collection: a retry keeps the earlier failure until a success" \
+    retry_keeps_the_earlier_failure_until_a_success
+check "collection: a restart carries the saved records" restart_carries_the_records
+check "collection: a damaged or other-account status is set aside" damaged_status_is_set_aside
+check "collection: an unpublishable status is warned and keeps the result" \
+    unpublishable_status_is_warned_and_keeps_the_result
+check "collection: TERM during a sync publishes an interruption" \
+    term_during_a_sync_publishes_an_interruption
+check "collection: a stop after the sync's result publishes that result" \
+    stop_after_the_result_publishes_the_result
+check "collection: a kernel kill leaves the in_progress record" \
+    kernel_kill_leaves_the_in_progress_record
+check "collection: ACCOUNT_SCOPE is required at startup, with fixed text" \
+    account_scope_is_required_at_startup
+check "collection: an unwritable stamp after the initial sync publishes the outcome, then exits" \
+    stamp_failure_publishes_the_outcome_and_exits initial
+check "collection: an unwritable stamp in the sync loop publishes the outcome, then exits" \
+    stamp_failure_publishes_the_outcome_and_exits loop
 check "an empty Maildir passes the layout check" an_empty_maildir_is_accepted
 check "the current layout passes the layout check" the_current_layout_is_accepted
 check "sync state at the Maildir root is refused without naming it" \
@@ -2521,7 +3259,7 @@ order_run() {
         SOURCE_MODE= PROTON_FOLDER_EXCLUSIONS= \
         BRIDGE_HOST=host.docker.internal BRIDGE_IMAP_PORT=1143 BRIDGE_CERT_HOST=127.0.0.1 \
         BRIDGE_USER=synthetic@example.com SYNC_INTERVAL=3600 SYNC_DEADLINE_SECONDS=86400 \
-        "$@" \
+        ACCOUNT_SCOPE="$ACCOUNT_SCOPE" "$@" \
         timeout 60 "$BASH" "$ORDER_ENTRYPOINT" ${ORDER_ARGS[@]+"${ORDER_ARGS[@]}"} \
         >>"$ORDER_LOG" 2>&1 || ORDER_RC=$?
 }
@@ -2602,6 +3340,10 @@ first_start_runs_in_order() {
     }
     [[ "$(cat "$ORDER_DIR/seen/pin")" == "$(cert_fingerprint "$WORK/cert-a.pem")" ]] || return 1
     cmp -s "$ORDER_DIR/seen/cert" "$WORK/cert-a.pem" || return 1
+    # The initial sync published its outcome (#1592); the stop came
+    # between attempts, so it is not an interruption.
+    grep -qE '"attempt": \{"id": "[0-9a-f]{12}-1", "started_at": "[^"]*", "outcome": "succeeded"\}' \
+        "$ORDER_DIR/maildir/.mbsync-collection-status.json" || return 1
 }
 
 # A missing BRIDGE_CERT_FINGERPRINT stops the start at validation: no
@@ -3606,7 +4348,8 @@ setting_changes_behaviour() {
             order_run BRIDGE_CERT_FINGERPRINT="$fp_a" SYNC_INTERVAL=4321
             order_is "$SYNCED_START" 143 \
                 && grep -qF '>>> Starting sync loop (interval: 4321s)...' "$ORDER_LOG" \
-                && grep -qF '"sync_interval_secs": 4321}' "$ORDER_DIR/maildir/.mbsync-last-sync.json" \
+                && grep -qF '"sync_interval_secs": 4321, "attempt_id"' \
+                    "$ORDER_DIR/maildir/.mbsync-last-sync.json" \
                 && health_verdict_changes SYNC_INTERVAL "$2"
             ;;
         SYNC_DEADLINE_SECONDS)

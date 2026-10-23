@@ -44,7 +44,14 @@ from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import TEST_ACCOUNT, make_message, make_mock_embedder, make_ole2, make_thread
+from tests.conftest import (
+    TEST_ACCOUNT,
+    make_message,
+    make_mock_embedder,
+    make_ole2,
+    make_thread,
+    message_path_sql,
+)
 
 MARKER = "SYNTHETIC_1418_MARKER"
 _UNIT_VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
@@ -785,8 +792,8 @@ class TestStartupSweep:
     @staticmethod
     def _shared_words(db, filepath) -> int:
         rows = db._conn.execute(
-            "SELECT c.text FROM message_chunks c JOIN message_thread_map m "
-            "ON m.claimant_id = c.claimant_id WHERE m.filepath = ? "
+            "SELECT c.text FROM message_chunks c JOIN messages m "
+            f"ON m.claimant_id = c.claimant_id WHERE {message_path_sql(db)} = ? "
             "AND c.attachment_id IS NOT NULL",
             (filepath,),
         ).fetchall()
@@ -828,8 +835,8 @@ class TestStartupSweep:
         assert {
             r["text_complete"]
             for r in db._conn.execute(
-                "SELECT a.text_complete FROM attachments a JOIN message_thread_map m "
-                "ON m.claimant_id = a.claimant_id WHERE m.filepath IN (?, ?, ?)",
+                "SELECT a.text_complete FROM attachments a JOIN messages m "
+                f"ON m.claimant_id = a.claimant_id WHERE {message_path_sql(db)} IN (?, ?, ?)",
                 (paths["first"], paths["second"], paths["dead"]),
             )
         } == {None}

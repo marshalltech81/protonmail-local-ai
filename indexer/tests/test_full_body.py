@@ -129,11 +129,13 @@ def test_full_body_migration_leaves_old_sources_unknown_and_queues_reparse(tmp_p
     from src.queue import REPARSE_ENQUEUE_SQL
 
     from tests.conftest import TEST_ACCOUNT, make_thread
+    from tests.test_database import _v18_from_fresh
 
     path = tmp_path / "upgrade.db"
     db = Database(path, account=TEST_ACCOUNT)
     message = parse(b"original synthetic body")
     db.upsert_thread(make_thread(messages=[message], thread_id="upgrade"), [0.0] * EMBEDDING_DIM)
+    _v18_from_fresh(db)
     for table in ("message_body_ranges", "message_body_spans", "message_body_parts"):
         db._conn.execute(f"DROP TABLE {table}")
     for column in ("full_body_complete", "full_body_generation", "full_body_version"):
@@ -156,6 +158,48 @@ def test_full_body_migration_leaves_old_sources_unknown_and_queues_reparse(tmp_p
         )
     finally:
         upgraded.close()
+
+
+def test_occurrence_cutover_preserves_main_bcc_and_full_body_rows(tmp_path):
+    from src.database import EMBEDDING_DIM, Database
+
+    from tests.conftest import TEST_ACCOUNT, make_thread
+    from tests.test_database import _schema_shape, _v18_from_fresh
+
+    path = tmp_path / "cutover.db"
+    db = Database(path, account=TEST_ACCOUNT)
+    message = parse(b"original body\r\n> quoted text", b"Bcc: synthetic@example.test\r\n")
+    db.upsert_thread(make_thread(messages=[message]), [0.1] * EMBEDDING_DIM)
+    _v18_from_fresh(db)
+    tables = (
+        "message_participants",
+        "message_participant_names",
+        "message_body_parts",
+        "message_body_spans",
+        "message_body_ranges",
+        "message_chunks",
+        "threads_vec",
+        "indexing_jobs",
+    )
+    before = {
+        table: [tuple(r) for r in db._conn.execute(f"SELECT * FROM {table}")] for table in tables
+    }
+    columns = "bcc_addresses_complete, full_body_complete, full_body_generation, full_body_version"
+    evidence = tuple(db._conn.execute(f"SELECT {columns} FROM messages").fetchone())
+    db.close()
+    upgraded = Database(path, account=TEST_ACCOUNT)
+    fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
+    try:
+        assert _schema_shape(upgraded._conn) == _schema_shape(fresh._conn)
+        for table, rows in before.items():
+            assert [tuple(r) for r in upgraded._conn.execute(f"SELECT * FROM {table}")] == rows
+        assert (
+            tuple(upgraded._conn.execute(f"SELECT {columns} FROM messages").fetchone()) == evidence
+        )
+        assert upgraded._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        upgraded.close()
+        fresh.close()
 
 
 def test_queued_reparse_preserves_chunks_without_embedding_again(tmp_path):

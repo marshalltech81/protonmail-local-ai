@@ -30,11 +30,20 @@ from src.database import EMBEDDING_DIM, Database
 from src.embed_identity import CALIBRATION_TEXT
 from src.extractors import NOT_CONTAINER_IDENTIFIER
 from src.maildir import SyncStamp
+from src.occurrence_scan import file_identity
 from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import TEST_ACCOUNT, make_message, make_mock_embedder, make_ole2, make_thread
+from tests.conftest import (
+    TEST_ACCOUNT,
+    lose_message,
+    make_message,
+    make_mock_embedder,
+    make_ole2,
+    make_thread,
+    message_path_sql,
+)
 
 # Captured before any test monkeypatches the name, so the sorted
 # wrapper installed by ``_run`` still walks the real Maildir.
@@ -578,8 +587,11 @@ class TestOnMovedIndexesDestination:
 
         def state():
             return [
-                tuple(r)
-                for r in db._conn.execute("SELECT filepath, seen, flagged, replied FROM messages")
+                ("/" + r[0], *r[1:])
+                for r in db._conn.execute(
+                    "SELECT relative_path, seen, flagged, replied FROM message_occurrences "
+                    "WHERE state = 'active'"
+                )
             ]
 
         assert state() == [(str(delivered), 0, 0, 0)]
@@ -2288,7 +2300,8 @@ class TestReprocessKeepsFirstDate:
         self._index(db, threader, rewritten)
 
         rows = db._conn.execute(
-            "SELECT filepath, sent_at FROM messages WHERE message_id = ?",
+            f"SELECT {message_path_sql(db)} AS filepath, sent_at FROM messages m "
+            "WHERE message_id = ?",
             ("changed@example.com",),
         ).fetchall()
         assert {(r["filepath"], r["sent_at"]) for r in rows} == {
@@ -3304,8 +3317,16 @@ class TestSteadyStateBatchedDrain:
         assert queue.stats() == {"queued": 3, "dead": 0}
 
 
-STAMP_JSON = '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60}'
-STAMP = SyncStamp(completed_at="2026-09-28T12:00:00+00:00", sync_interval_secs=60)
+STAMP_JSON = (
+    '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60, '
+    '"attempt_id": "0123456789ab-1", "generation": 1}'
+)
+STAMP = SyncStamp(
+    completed_at="2026-09-28T12:00:00+00:00",
+    sync_interval_secs=60,
+    attempt_id="0123456789ab-1",
+    generation=1,
+)
 
 
 class TestIngestionStateRecorder:
@@ -3339,26 +3360,39 @@ class TestIngestionStateRecorder:
         assert row["sync_interval_secs"] == 60
 
     def test_acknowledgement_never_moves_backwards(self, tmp_path, db):
-        """While the acknowledged stamp is not ahead of the clock."""
+        """A generation no higher than the one already acknowledged never
+        replaces it (#1621 thread, 2026-10-13): ordering is the durable
+        generation, never completed_at."""
         recorder = main._IngestionStateRecorder(db, tmp_path)
         recorder.acknowledge(STAMP)
-        recorder.acknowledge(SyncStamp("2026-09-28T11:00:00+00:00", 60))
+        recorder.acknowledge(SyncStamp("2026-09-28T11:00:00+00:00", 60, "0123456789ab-2", 1))
         recorder.acknowledge(None)
         recorder.maybe_record(now=100.0)
 
         assert self._state(db)["sync_completed_at"] == STAMP.completed_at
 
-    def test_a_future_acknowledged_stamp_yields_to_a_new_sync(self, tmp_path, db):
-        """After a clock rollback the acknowledged stamp is ahead of the
-        clock and every later sync sorts earlier; without yielding, the
-        status stays not current until the clock catches up (#332)."""
+    def test_acknowledgement_never_depends_on_the_wall_clock(self, tmp_path, db):
+        """#332's clock-ahead tolerance is gone: ordering by generation
+        instead of completed_at (#1621 thread, 2026-10-13) means a stamp
+        whose time is far in the future never blocks a higher-generation
+        sync, with no special case needed."""
         recorder = main._IngestionStateRecorder(db, tmp_path)
         future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
-        recorder.acknowledge(SyncStamp(future, 60))
-        recorder.acknowledge(STAMP)
+        recorder.acknowledge(SyncStamp(future, 60, "0123456789ab-1", 1))
+        recorder.acknowledge(SyncStamp(STAMP.completed_at, 60, "0123456789ab-2", 2))
         recorder.maybe_record(now=100.0)
 
         assert self._state(db)["sync_completed_at"] == STAMP.completed_at
+
+    def test_a_legacy_stamp_is_never_acknowledged(self, tmp_path, db):
+        """A stamp written before the 2026-10-13 delivery-identity fix
+        carries no generation, so it can never be ordered or acknowledged
+        — not even as the first stamp seen."""
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        recorder.acknowledge(SyncStamp("2026-09-28T12:00:00+00:00", 60))
+        recorder.maybe_record(now=100.0)
+
+        assert self._state(db)["sync_completed_at"] is None
 
     def test_writes_at_most_once_per_interval(self, tmp_path, db):
         recorder = main._IngestionStateRecorder(db, tmp_path, interval_secs=30)
@@ -3412,11 +3446,12 @@ class TestIngestionStateRecorder:
         recorder = main._IngestionStateRecorder(db, tmp_path)
         handler = main.MaildirHandler(db, _make_queue(db), ingestion_state=recorder)
         (tmp_path / main.SYNC_STAMP_NAME).write_text(
-            '{"completed_at": "2026-09-28T12:05:00Z", "sync_interval_secs": 60}'
+            '{"completed_at": "2026-09-28T12:05:00Z", "sync_interval_secs": 60, '
+            '"attempt_id": "0123456789ab-2", "generation": 2}'
         )
         handler.on_moved(
             FileMovedEvent(
-                str(tmp_path / ".mbsync-last-sync.2026-09-28T12:00:00Z.60.tmp"),
+                str(tmp_path / ".mbsync-last-sync.2026-09-28T12:00:00Z.60.0123456789ab-1.1.tmp"),
                 str(tmp_path / main.SYNC_STAMP_NAME),
             )
         )
@@ -3483,11 +3518,16 @@ def _overflow_lines(caplog) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.getMessage() == _OVERFLOW_WARNING]
 
 
-def _stamp_moved_event(root: Path, completed_at: str = "2026-09-28T12:00:00Z"):
+def _stamp_moved_event(
+    root: Path,
+    completed_at: str = "2026-09-28T12:00:00Z",
+    attempt_id: str = "0123456789ab-1",
+    generation: int = 1,
+):
     from watchdog.events import FileMovedEvent
 
     return FileMovedEvent(
-        str(root / f".mbsync-last-sync.{completed_at}.60.tmp"),
+        str(root / f".mbsync-last-sync.{completed_at}.60.{attempt_id}.{generation}.tmp"),
         str(root / main.SYNC_STAMP_NAME),
     )
 
@@ -3750,16 +3790,21 @@ class TestInotifyOverflow:
         assert len(lines) == 1
         assert "recovered from 2 inotify queue overflow(s)" in lines[0].getMessage()
 
-    def test_held_stamp_follows_arrival_order_across_a_clock_rollback(
-        self, tmp_path, db, monkeypatch
-    ):
-        """#1199: watchdog dispatches stamps in sync
-        order, so the last one handled is the newest sync even when the
-        clock rolled back between two syncs and its time sorts earlier."""
+    def test_held_stamp_follows_arrival_order_not_comparison(self, tmp_path, db, monkeypatch):
+        """#1199: watchdog dispatches stamps in sync order, so the last one
+        handled is the newest sync — the held slot is a plain overwrite,
+        never compared against the previous one, so a stamp whose own
+        fields would sort earlier (completed_at, before the 2026-10-13
+        generation-identity fix; or an out-of-order generation here) is
+        still the one acknowledged once the walk completes."""
         maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
         recorder.overflow_seen()
-        handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:05:00Z"))
-        handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:00:00Z"))
+        # Dispatched first with the higher generation, second with the
+        # lower one (STAMP's) — a scenario no real mbsync produces, but
+        # it proves the held slot does not pick the larger generation,
+        # only the most recently dispatched stamp.
+        handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:05:00Z", "0123456789ab-2", 2))
+        handler.on_moved(_stamp_moved_event(maildir))
 
         main._run_periodic_rescan(
             db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True
@@ -4462,7 +4507,7 @@ class TestRequeueOcrDisabledExtractions:
             },
         )
         rows = self._ocr_disabled_rows(db)
-        assert sorted((r["filepath"], r["extraction_error"]) for r in rows) == sorted(
+        assert sorted(("/" + r["relative_path"], r["extraction_error"]) for r in rows) == sorted(
             [
                 (paths["photo"], OCR_DISABLED_ERROR),
                 (paths["scan"], SCANNED_PDF_OCR_DISABLED_ERROR),
@@ -6319,6 +6364,53 @@ class TestMainStartupAndLoop:
         init = next(e for e in events if e.startswith("initial_index"))
         assert events.index("sweep_paths") < events.index(init)
 
+    def test_startup_sweep_shares_the_reconcilers_hash_cache_in_mirror_mode(
+        self, tmp_path, monkeypatch
+    ):
+        """#1612 round 15: in mirror mode, ``Reconciler.sweep()`` runs
+        its own ``scan_occurrences`` moments after this always-on
+        startup sweep. Passing the reconciler's own ``_hash_cache``
+        here instead of the module-level one (archive mode's, which
+        has no reconciler to share) means a path the startup sweep's
+        content backstop already hash-verified is not immediately
+        re-hashed by the reconciliation sweep that follows it."""
+        from src.reconciler import ReconcilerConfig
+
+        monkeypatch.setattr(
+            main,
+            "load_config_from_env",
+            lambda _env: ReconcilerConfig(
+                enabled=True,
+                grace_days=7,
+                sweep_interval_secs=3600,
+                max_batch_pct=0.05,
+                force=False,
+            ),
+        )
+        real_reconciler_cls = main.Reconciler
+        built: list = []
+
+        def recording_reconciler(*a, **kw):
+            instance = real_reconciler_cls(*a, **kw)
+            built.append(instance)
+            return instance
+
+        monkeypatch.setattr(main, "Reconciler", recording_reconciler)
+
+        sweep_hash_caches: list = []
+
+        def capturing_sweep_paths(db, **kw):
+            self._events.append("sweep_paths")
+            sweep_hash_caches.append(kw.get("hash_cache"))
+
+        self._run_main(tmp_path, monkeypatch, sweep_due=False, sweep_paths=capturing_sweep_paths)
+
+        assert len(built) == 1
+        assert len(sweep_hash_caches) == 1
+        # Identity, not equality: two distinct empty dicts compare equal
+        # but would not share a single file's hash between the sweeps.
+        assert sweep_hash_caches[0] is built[0]._hash_cache
+
     # --- #934: startup and recovery failures log the type only ------------
 
     @staticmethod
@@ -6353,7 +6445,10 @@ class TestMainStartupAndLoop:
 
         class _Raising:
             def __init__(self, *_a, **_kw):
-                pass
+                # The startup sweep reads this before sweep()/reap() run
+                # (#1612 round 15): it shares the reconciler's own cache
+                # instead of the module-level one in mirror mode.
+                self._hash_cache: dict = {}
 
             def sweep(self):
                 calls.append("sweep")
@@ -7940,20 +8035,28 @@ class TestMessageRecordsEndToEnd:
         dest.parent.mkdir(parents=True)
         src.rename(dest)
         db._conn.execute(
-            "CREATE TRIGGER fail_folder BEFORE UPDATE OF folder ON messages "
+            "CREATE TRIGGER fail_move BEFORE INSERT ON message_occurrences "
             "BEGIN SELECT RAISE(ABORT, 'injected'); END"
         )
         main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
 
-        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
-        assert (row["folder"], row["filepath"]) == ("INBOX", str(src))
+        def active():
+            return db._conn.execute(
+                "SELECT folder, relative_path FROM message_occurrences WHERE state = 'active'"
+            ).fetchall()
+
+        ((folder, relative),) = active()
+        assert folder.endswith("INBOX") and "/" + relative == str(src)
         assert not db.is_indexed(str(dest))
 
-        db._conn.execute("DROP TRIGGER fail_folder")
+        db._conn.execute("DROP TRIGGER fail_move")
+        # The periodic rescan's sweep retires the vanished source (#1567),
+        # then its walk queues the destination.
+        main.sweep_paths(db, maildir_root=maildir)
         assert main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN) == 1
         _drain(queue, db, embedder, Threader(db))
-        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
-        assert (row["folder"], row["filepath"]) == ("Archive", str(dest))
+        ((folder, relative),) = active()
+        assert folder.endswith("Archive") and "/" + relative == str(dest)
 
     def _ingest_headers(self, tmp_path, monkeypatch, headers: str, message_id: str):
         maildir = tmp_path / "maildir"
@@ -8430,10 +8533,10 @@ class TestMessageRecordsEndToEnd:
         )
 
         row = db._conn.execute(
-            "SELECT folder, filepath FROM messages WHERE message_id = 'moved@example.com'"
+            "SELECT folder, relative_path FROM message_occurrences WHERE state = 'active'"
         ).fetchone()
-        assert row["filepath"] == str(dest)
-        assert row["folder"] == "Archive"
+        assert "/" + row["relative_path"] == str(dest)
+        assert row["folder"].endswith("Archive")
 
     def test_flag_rename_within_folder_keeps_folder(self, tmp_path, monkeypatch):
         maildir = tmp_path / "maildir"
@@ -8443,21 +8546,23 @@ class TestMessageRecordsEndToEnd:
         db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
-        folder_before = db._conn.execute("SELECT folder FROM messages").fetchone()["folder"]
+        occurrence = "SELECT id, folder, relative_path FROM message_occurrences"
+        before = db._conn.execute(occurrence).fetchone()
 
         dest = src.with_name("1700000000.M1.host:2,RS")
         src.rename(dest)
         main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
 
-        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
-        assert row["filepath"] == str(dest)
-        assert row["folder"] == folder_before
+        (row,) = db._conn.execute(occurrence).fetchall()
+        assert "/" + row["relative_path"] == str(dest)
+        assert (row["id"], row["folder"]) == (before["id"], before["folder"])
 
-    # The ``EXISTS`` predicate mcp-server's ``get_message`` / ``query_messages``
-    # evaluate for ``pending_deletion`` (``mcp-server/src/lib/sqlite.py``).
+    # The message-level ``pending_deletion`` derived from the occurrences
+    # (#1567): no live occurrence and a tombstone.
     _PENDING_DELETION_SQL = (
-        "SELECT EXISTS (SELECT 1 FROM pending_deletions p WHERE p.filepath = m.filepath "
-        "AND p.claimant_id = m.claimant_id) FROM messages m"
+        "SELECT NOT EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id = "
+        "m.claimant_id AND o.state = 'active' AND o.trashed = 0) AND EXISTS (SELECT 1 FROM "
+        "pending_deletions p WHERE p.claimant_id = m.claimant_id) FROM messages m"
     )
 
     def _index_with_leftover_tombstone(self, tmp_path, monkeypatch, subject: str):
@@ -8470,9 +8575,9 @@ class TestMessageRecordsEndToEnd:
         db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
         queue = _make_queue(db)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
-        entry = db.find_message_entry_by_filepath(str(src))
+        entry = db.find_active_occurrence(str(src))
         assert entry is not None
-        assert db.add_pending_deletion(str(src), entry["claimant_id"], entry["thread_id"])
+        lose_message(db, entry["claimant_id"])
         assert db._conn.execute(self._PENDING_DELETION_SQL).fetchone()[0] == 1
         return db, queue, src
 
@@ -8498,8 +8603,7 @@ class TestMessageRecordsEndToEnd:
         # Nothing reaped: the message, its locator and its chunks survive
         # under the restored name.
         assert db.is_indexed(str(dest))
-        row = db._conn.execute("SELECT filepath FROM messages").fetchone()
-        assert row["filepath"] == str(dest)
+        assert db.find_active_occurrence(str(dest)) is not None
         assert db._conn.execute("SELECT count(*) FROM message_thread_map").fetchone()[0] == 1
         assert db._conn.execute("SELECT count(*) FROM message_chunks").fetchone()[0] == 1
         assert db._conn.execute("SELECT count(*) FROM reaped_messages").fetchone()[0] == 0
@@ -8529,9 +8633,9 @@ class TestMessageRecordsEndToEnd:
             paths.append(src)
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
         for src in paths:
-            entry = db.find_message_entry_by_filepath(str(src))
+            entry = db.find_active_occurrence(str(src))
             assert entry is not None
-            assert db.add_pending_deletion(str(src), entry["claimant_id"], entry["thread_id"])
+            lose_message(db, entry["claimant_id"])
         handler = main.MaildirHandler(db, queue)
 
         with caplog.at_level(logging.INFO):
@@ -8616,12 +8720,12 @@ class TestMessageRecordsEndToEnd:
         main.initial_index(db, embedder, threader, _make_queue(db))
 
         row = db._conn.execute(
-            "SELECT filepath, folder, content_hash, size_bytes FROM messages "
+            "SELECT claimant_id, content_hash, size_bytes FROM messages "
             "WHERE message_id = 'e2e@example.com'"
         ).fetchone()
         raw = live.read_bytes()
-        assert row["filepath"] == str(live)
-        assert row["folder"] == "INBOX"
+        occurrence = db.find_active_occurrence(str(live))
+        assert occurrence["claimant_id"] == row["claimant_id"]
         assert row["content_hash"] == hashlib.sha256(raw).hexdigest()
         assert row["size_bytes"] == len(raw)
         participants = {
@@ -8918,11 +9022,14 @@ class TestTrashedFilesWithReconciliation:
                 max_batch_pct=1.0,
                 force=False,
             ),
+            maildir_root=maildir,
         )
         queue.enqueue(str(live), REASON_INITIAL_SCAN)
         drain()
         live.rename(trashed)
-        reconciler.handle_moved(str(live), str(trashed))  # tombstones it
+        reconciler.handle_moved(
+            str(live), str(trashed), verified_identity=file_identity(trashed)
+        )  # tombstones it
         queue.enqueue(str(trashed), REASON_INITIAL_SCAN)  # e.g. a retry still pending
 
         drain()
@@ -8932,7 +9039,7 @@ class TestTrashedFilesWithReconciliation:
         # Restoring clears the tombstone, moves the job, and makes it due
         # now rather than after the park delay.
         trashed.rename(live)
-        reconciler.handle_moved(str(trashed), str(live))
+        reconciler.handle_moved(str(trashed), str(live), verified_identity=file_identity(live))
         drain()
         assert not queue.has_pending_row(str(live))
         assert db.is_indexed(str(live))
@@ -8965,7 +9072,10 @@ class TestTrashedFilesWithReconciliation:
         queue.enqueue(str(live), REASON_INITIAL_SCAN)
         drain()
         live.rename(trashed)
-        db.update_filepath(str(live), str(trashed))
+        # The startup scan follows the rename once the bytes match (#1567).
+        db.update_filepath(
+            str(live), str(trashed), move_occurrence=True, verified_identity=file_identity(trashed)
+        )
         queue.enqueue(str(trashed), REASON_INITIAL_SCAN)
         drain()  # parked
         assert queue.has_pending_row(str(trashed))
@@ -9335,8 +9445,11 @@ class TestMessageIdClaimants:
             return sorted(tuple(r) for r in db._conn.execute(sql))
 
         return {
-            "messages": rows("SELECT claimant_id, message_id, filepath FROM messages"),
-            "map": rows("SELECT claimant_id, message_id, filepath FROM message_thread_map"),
+            "messages": rows("SELECT claimant_id, message_id FROM messages"),
+            "map": rows("SELECT claimant_id, message_id FROM message_thread_map"),
+            "occurrences": rows(
+                "SELECT claimant_id, relative_path FROM message_occurrences WHERE state = 'active'"
+            ),
             "chunks": rows("SELECT claimant_id, chunk_id, attachment_id FROM message_chunks"),
             "attachments": rows("SELECT attachment_occurrence_id, claimant_id FROM attachments"),
             "participants": rows("SELECT claimant_id, role, address FROM message_participants"),
@@ -9361,7 +9474,9 @@ class TestMessageIdClaimants:
         assert a != b
         assert a.startswith(self.MID + "#") and b.startswith(self.MID + "#")
         rows = db._conn.execute(
-            "SELECT claimant_id, filepath FROM messages WHERE message_id = ?", (self.MID,)
+            f"SELECT claimant_id, {message_path_sql(db)} AS filepath FROM messages m "
+            "WHERE message_id = ?",
+            (self.MID,),
         ).fetchall()
         assert {(r["claimant_id"], r["filepath"]) for r in rows} == {
             (a, str(first)),
@@ -9728,9 +9843,9 @@ class TestWalMaintenance:
             keep = make_message(message_id="k@x", filepath="/m/k", body_text="survivor")
             thread = make_thread([reaped, keep])
             db.upsert_thread(thread, embedding)
-            db.add_pending_deletion("/m/r", "r@x", thread.thread_id)
+            lose_message(db, "r@x")
             rebuilt = make_thread([keep], thread_id=thread.thread_id, subject=thread.subject)
-            assert db.reap_thread_messages(rebuilt, embedding, ["r@x"]) == ["/m/r"]
+            assert db.reap_thread_messages(rebuilt, embedding, ["r@x"]) == ["r@x"]
             assert db.wal_checkpoint_truncate()[0] == 0
             assert b"zqmaintmark" in db.path.read_bytes()
 

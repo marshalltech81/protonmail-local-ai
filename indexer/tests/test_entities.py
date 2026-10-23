@@ -9,7 +9,7 @@ addresses, however similar their names.
 import pytest
 from src.entities import FREE_MAIL_DOMAINS, organization_domain
 
-from tests.conftest import make_message, make_thread
+from tests.conftest import lose_message, make_message, make_thread
 
 
 def _vec() -> list[float]:
@@ -164,20 +164,20 @@ class TestEntityPopulation:
 
 def _tombstone(db, thread_id: str) -> None:
     for row in db.get_thread_messages(thread_id):
-        db.add_pending_deletion(row["filepath"], row["claimant_id"], thread_id)
+        lose_message(db, row["claimant_id"])
 
 
 def _reap(db, thread_id: str, survivors: list, reaped: list) -> None:
     """Remove ``reaped`` from ``thread_id`` as the reconciler does:
     tombstone them, then rewrite the thread from ``survivors``."""
     for msg in reaped:
-        db.add_pending_deletion(msg.filepath, msg.claimant_id, thread_id)
+        lose_message(db, msg.claimant_id)
     removed = db.reap_thread_messages(
         make_thread(messages=survivors, thread_id=thread_id),
         _vec(),
         [m.claimant_id for m in reaped],
     )
-    assert removed == [m.filepath for m in reaped]
+    assert removed == [m.claimant_id for m in reaped]
 
 
 def _participant_rows(db, claimant_id: str) -> int:

@@ -31,7 +31,7 @@ from src.queue import (
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import TEST_ACCOUNT, make_mock_embedder
+from tests.conftest import TEST_ACCOUNT, make_mock_embedder, message_path_sql
 from tests.test_database import _drop_v14_tables, _v7_from_fresh
 
 MARKER = "SYNTHETIC_REPARSE_MARKER"
@@ -306,7 +306,9 @@ class TestSenderAmbiguousMigration:
         assert embedder.embed.call_count == 0
         by_path = {
             r["filepath"]: r["sender_ambiguous"]
-            for r in db._conn.execute("SELECT filepath, sender_ambiguous FROM messages")
+            for r in db._conn.execute(
+                f"SELECT {message_path_sql(db)} AS filepath, sender_ambiguous FROM messages m"
+            )
         }
         assert by_path == {plain: 0, repeated: 1, dead: None}
         assert (
@@ -350,9 +352,7 @@ class TestParticipantNamesMigration:
         }
         assert {name for _, name in all_names} == {"Bob", MARKER}
         dead = paths[2]
-        [dead_claimant] = db._conn.execute(
-            "SELECT claimant_id FROM messages WHERE filepath = ?", (dead,)
-        ).fetchone()
+        dead_claimant = db.find_active_occurrence(dead)["claimant_id"]
         queue.enqueue(dead, REASON_INITIAL_SCAN)
         queue.mark_dead_terminal(dead, stage="parse", error="oversized: too large")
         chunks_before = db._conn.execute(
@@ -404,7 +404,10 @@ class TestParticipantNamesMigration:
         assert after == {(c, n) for c, n in all_names if c != dead_claimant or n == "Bob"}
         by_path = {
             r["filepath"]: r["participant_names_complete"]
-            for r in db._conn.execute("SELECT filepath, participant_names_complete FROM messages")
+            for r in db._conn.execute(
+                f"SELECT {message_path_sql(db)} AS filepath, participant_names_complete "
+                "FROM messages m"
+            )
         }
         assert by_path == {paths[0]: 1, paths[1]: 1, dead: None}
         assert (
@@ -460,7 +463,9 @@ def _drop_v5_columns(db: Database) -> None:
 def _completeness(db: Database) -> dict[str, tuple]:
     return {
         row["filepath"]: tuple(row)[1:]
-        for row in db._conn.execute(f"SELECT filepath, {', '.join(_V5_COLUMNS)} FROM messages")
+        for row in db._conn.execute(
+            f"SELECT {message_path_sql(db)} AS filepath, {', '.join(_V5_COLUMNS)} FROM messages m"
+        )
     }
 
 
@@ -525,7 +530,8 @@ class TestUnknownDateMigration:
         return {
             r["filepath"]: tuple(r)[1:]
             for r in db._conn.execute(
-                "SELECT filepath, sent_at, sent_at_status, effective_at FROM messages"
+                f"SELECT {message_path_sql(db)} AS filepath, sent_at, sent_at_status, "
+                "effective_at FROM messages m"
             )
         }
 
@@ -560,14 +566,19 @@ class TestUnknownDateMigration:
             "SELECT thread_id, date_first, date_last FROM threads ORDER BY thread_id"
         ).fetchall()
 
+        claimants = {
+            r["filepath"]: r["claimant_id"]
+            for r in db._conn.execute("SELECT filepath, claimant_id FROM messages")
+        }
+
         def date_lines() -> set[bool]:
             # Whether each undated message's v7 fallback is in its thread text.
             return {
                 f"Date: {v7[path][0]}"
                 in db._conn.execute(
                     "SELECT t.body_text FROM threads t JOIN messages m "
-                    "ON m.thread_id = t.thread_id WHERE m.filepath = ?",
-                    (path,),
+                    "ON m.thread_id = t.thread_id WHERE m.claimant_id = ?",
+                    (claimants[path],),
                 ).fetchone()[0]
                 for path in undated.values()
             }
@@ -626,7 +637,7 @@ class TestBodyCompletePublication:
 
     def _body_complete(self, db, path):
         return db._conn.execute(
-            "SELECT body_complete FROM messages WHERE filepath = ?", (path,)
+            f"SELECT body_complete FROM messages m WHERE {message_path_sql(db)} = ?", (path,)
         ).fetchone()[0]
 
     def test_a_capped_body_is_stored_incomplete(self, tmp_path, monkeypatch):
@@ -1017,7 +1028,7 @@ class TestReparseCompletionAndRenames:
         assert embedder.embed_batch.call_count == 0
         db.close()
 
-    def test_a_file_still_missing_after_the_wait_is_dropped(self, tmp_path, caplog):
+    def test_a_file_still_missing_after_the_wait_keeps_its_refresh(self, tmp_path, caplog):
         caplog.set_level(logging.INFO)
         db, queue, paths = _index(tmp_path, ["a"])
         queue.enqueue_reparse()
@@ -1025,10 +1036,10 @@ class TestReparseCompletionAndRenames:
         _drain(db, queue, make_mock_embedder(_VECTOR))
         assert _jobs(db)[paths[0]]["last_error"] == main.RENAME_DEFERRED_ERROR
         assert "file_missing" not in caplog.text
-        # Still missing once the wait is over: gone, so dropped.
+        # Still absent: the refresh remains durable until a source returns.
         db._conn.execute("UPDATE indexing_jobs SET next_attempt_at = '2000-01-01T00:00:00+00:00'")
         db._conn.commit()
         _drain(db, queue, make_mock_embedder(_VECTOR))
-        assert _jobs(db) == {}
-        assert "reason=file_missing" in caplog.text
+        assert _jobs(db)[paths[0]]["last_error"] == main.RENAME_DEFERRED_ERROR
+        assert "reason=file_missing" not in caplog.text
         db.close()
