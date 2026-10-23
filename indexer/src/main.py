@@ -1319,6 +1319,7 @@ class MaildirHandler(FileSystemEventHandler):
         # metadata that alone ruled out trusting it without reading
         # anything), which must not be treated as a confirmed mismatch.
         rename_mismatch = False
+        mismatch_identity = None
         if occurrence is not None:
             verification = verify_rename_bytes(
                 self.db, src_path, dest_path, occurrence["claimant_id"]
@@ -1328,6 +1329,7 @@ class MaildirHandler(FileSystemEventHandler):
             if not take_case_1:
                 stale_occurrence = occurrence
                 rename_mismatch = verification.mismatch
+                mismatch_identity = verification.mismatch_identity
                 warn_rate_limited(
                     log,
                     "on_moved: %d rename's destination bytes did not match the "
@@ -1444,8 +1446,18 @@ class MaildirHandler(FileSystemEventHandler):
             # would not start until the next reconciliation sweep, up to
             # an hour by default.
             try:
-                if self.db.retire_mismatched_rename(stale_occurrence["id"], src_path):
-                    self.db.mark_lost_messages(stale_occurrence["claimant_id"])
+                with self.db.transaction():
+                    if (
+                        self.db.retire_mismatched_rename(
+                            stale_occurrence["id"],
+                            src_path,
+                            proven={dest_path: mismatch_identity}
+                            if mismatch_identity is not None
+                            else {},
+                        )
+                        and self.reconciler is not None
+                    ):
+                        self.db.mark_lost_messages(stale_occurrence["claimant_id"])
             except Exception as e:
                 log.error("retire_mismatched_rename failed: %s", type(e).__name__)
         if (
@@ -1481,8 +1493,8 @@ _monotonic = time.monotonic
 # call this process makes (#1612): archive mode has no ``Reconciler`` to
 # hold one (mirror mode's lives on ``Reconciler._hash_cache``), so this
 # module-level dict is the one it keeps across calls, keyed by path,
-# size, mtime and inode exactly as ``occurrence_scan`` keys it.
-_sweep_hash_cache: dict[tuple[str, int, int, int], str] = {}
+# size, mtime, inode, ctime and device exactly as ``occurrence_scan`` keys it.
+_sweep_hash_cache: dict[tuple[str, int, int, int, int, int], str] = {}
 
 
 def _log_attachment_outcomes(*, force: bool = False) -> None:
@@ -3936,7 +3948,7 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> bool
                 brake = "ok"
             log.info(
                 "maintenance pass=reconcile ms=%d tombstoned=%d cleared=%d renamed=%d "
-                "retired=%d bound=%d stale=%d backstop_deferred=%d scan=%s threads_reaped=%d "
+                "retired=%d bound=%d stale=%d backstop_deferred=%d hash_deferred=%d scan=%s threads_reaped=%d "
                 "threads_rebuilt=%d blocked_threads=%d brake=%s",
                 (_monotonic() - started) * 1000,
                 swept.get("tombstoned", 0),
@@ -3946,6 +3958,7 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> bool
                 swept.get("bound", 0),
                 swept.get("stale", 0),
                 swept.get("backstop_deferred", 0),
+                swept.get("hash_deferred", 0),
                 "complete" if swept.get("complete", True) else "partial",
                 reaped.get("threads_reaped", 0),
                 reaped.get("threads_rebuilt", 0),

@@ -332,15 +332,7 @@ class TestWatcherRenameVerification:
             box.close()
 
     def test_a_mismatch_with_an_indexed_files_record_is_not_carried_forward(self, tmp_path, caplog):
-        """The metadata-based check: the source has an indexed_files
-        record, but the race (something else wrote different content at
-        the rename's destination between the OS rename and this event)
-        means the destination's metadata no longer matches it. Neither
-        side's bytes are ever read here (#1612 round 14): a metadata
-        mismatch alone is inconclusive, not a proven mismatch, the same
-        as an unreadable destination — see
-        ``test_an_inconclusive_check_onto_an_already_trashed_destination_does_not_retire``
-        for why that distinction matters."""
+        """A size mismatch proves the renamed file cannot be this claimant."""
         box = Box(tmp_path)
         try:
             path = box.put("INBOX/cur/r2:2,S", _eml("before@example.test"))
@@ -358,12 +350,11 @@ class TestWatcherRenameVerification:
 
             # Not carried forward: the occurrence stays at the old,
             # now-nonexistent path rather than being trusted onto dest.
-            assert box.db.find_active_occurrence(str(path)) is not None
+            assert box.db.find_active_occurrence(str(path)) is None
             assert box.db.find_active_occurrence(str(dest)) is None
             # Treated as new mail instead.
             assert queue.has_pending_row(str(dest))
-            assert "could not be verified" in caplog.text
-            assert "did not match" not in caplog.text
+            assert "did not match" in caplog.text
             assert MARKER not in caplog.text
         finally:
             box.close()
@@ -406,10 +397,10 @@ class TestWatcherRenameVerification:
             with patch.object(main, "MAILDIR_PATH", box.root):
                 handler.on_moved(_moved(path, dest))
 
-            # Not carried forward: the occurrence stays at the old,
-            # now-nonexistent path rather than being trusted onto dest
-            # on a size/mtime match alone.
-            assert box.db.find_active_occurrence(str(path)) is not None
+            # A proven mismatch retires the old copy in either retention
+            # mode; archive mode never starts a deletion grace period.
+            assert box.db.find_active_occurrence(str(path)) is None
+            assert box.tombstones() == []
             assert box.db.find_active_occurrence(str(dest)) is None
             # Treated as new mail instead.
             assert queue.has_pending_row(str(dest))
@@ -761,7 +752,7 @@ class TestContentBackstop:
                 counts = scan_occurrences(box.db, box.root, hash_cache={})
             finally:
                 os.chmod(path, 0o600)
-            assert (counts.stale, counts.hashed, counts.unverified) == (0, 0, 1)
+            assert (counts.stale, counts.hashed, counts.unverified) == (0, 1, 1)
             assert box.db.find_active_occurrence(str(path)) is not None
         finally:
             box.close()
@@ -902,8 +893,8 @@ class TestContentBackstop:
 
             real_sha256 = scan_module._sha256
 
-            def _sha256_then_restore(p):
-                digest = real_sha256(p)
+            def _sha256_then_restore(p, identity=None):
+                digest = real_sha256(p, identity)
                 if p == path:
                     # The race: the path is back to its own claimant's
                     # bytes — via a fresh write, a different inode, as a
@@ -918,7 +909,7 @@ class TestContentBackstop:
             monkeypatch.setattr(scan_module, "_sha256", _sha256_then_restore)
 
             counts = scan_occurrences(box.db, box.root, hash_cache={})
-            assert (counts.stale, counts.unreachable) == (0, 1)
+            assert (counts.stale, counts.unverified) == (0, 1)
             assert box.db.find_active_occurrence(str(path)) is not None
         finally:
             box.close()

@@ -353,6 +353,7 @@ class TestSweepPaths:
             "unverified": 0,
             "stale": 0,
             "backstop_deferred": 0,
+            "hash_deferred": 0,
             "complete": True,
         }
         assert len(listed) == len(set(listed))
@@ -441,7 +442,7 @@ class TestSweepPaths:
             (
                 logging.INFO,
                 "startup rename sweep: renamed=1 retired=0 unreachable=0 tombstones_cleared=1 "
-                "bound=0 unverified=0 stale=0 backstop_deferred=0",
+                "bound=0 unverified=0 stale=0 backstop_deferred=0 hash_deferred=0",
             )
         ]
         assert marker not in caplog.text

@@ -1131,7 +1131,12 @@ class ListedAttachment(_Output):
     )
     content_type_clipped: bool = Field(description="True when the stored MIME type is longer.")
     size_bytes: int
-    folder: str = Field(description="Folder of the message carrying the attachment.")
+    folder: str = Field(
+        description="Folder of the carrying message's representative copy, which need not be "
+        "the copy that matched the folder filter. source_file names this same representative; "
+        "get_message lists the message's copies."
+    )
+    folder_is_representative: Literal[True] = True
     sent_at: str | None = Field(
         description="Send date of the carrying message (its Date: header) in UTC, ISO 8601; "
         "null when that header is missing or unparseable."
