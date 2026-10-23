@@ -11,10 +11,9 @@ metadata. They record what ``parse_email_bytes`` and the
 Maildir adapter produce today, including where the handoff stops short
 of what a general source would need:
 
-- Byte-identical copies in two folders share one claimant ID. The
-  writer then keeps one ``messages`` row tracking a single path
-  (``TestByteIdenticalCopies`` in ``test_reconciler.py``), so this is
-  not independent occurrence storage; that is #1083.
+- Byte-identical copies in two folders share one claimant ID. These
+  parser tests check that identity and each parse's folder and path;
+  ``test_occurrences.py`` checks the writer's independent copy rows.
 - ``SourceMetadata.flags`` and ``SourceMetadata.size`` reach nothing:
   ``Message`` has no flag field, the writer reads the read / flagged /
   replied state back from the Maildir file name (``maildir.message_state``),
@@ -203,10 +202,9 @@ class TestByteIdenticalCopiesAcrossFolders:
     def test_byte_identical_copies_in_two_folders_share_one_claimant_id(self, tmp_path):
         """The same bytes filed in two mailboxes give one claimant ID,
         because the key is the Message-ID plus the bytes' hash (#217).
-        Each parse keeps its own folder and path, but the writer stores
-        one ``messages`` row per claimant tracking a single path, so
-        this shows the limit of today's handoff, not independent
-        occurrence storage (#1083)."""
+        Each parse keeps its own folder and path. This test stops at
+        the parser seam; ``test_occurrences.py`` checks that the writer
+        binds the copies to independent occurrences (#1083)."""
         raw = _raw("ordinary-imap-received.eml")
         first = tmp_path / "INBOX" / "cur" / "1704186930.1.host:2,S"
         second = tmp_path / "Archive" / ".2024" / "cur" / "1704186999.2.host:2,"

@@ -465,13 +465,13 @@ indexer; mbsync is not replaced (Deferred).
    messages resolve to by ID, and two of them never merge by an empty
    ID) and update AGENTS.md in the same PR. Until then the claimant-ID
    invariant stands unchanged.
-7. **Occurrence model** — each Maildir copy of a message becomes its
-   own occurrence (decision 47; #1566, #1567, #1568, #1569). Until
-   then one `messages` row holds one folder, path and flag state, so
-   byte-identical files claiming one Message-ID share a claimant ID and
-   one row; removing one such copy no longer reaps a message whose
-   other copy survives (#1102). The `,U=` in a Maildir file name is
-   never read; `.mbsyncstate` is never parsed.
+7. **Occurrence model** — **Done** (decision 47; #1601, #1612).
+   Each Maildir copy has its own `message_occurrences` row with folder,
+   path and flag state. Byte-identical copies share one claimant and
+   `messages` row; a message is reaped only after losing its last live
+   occurrence, under the existing grace and brakes. Arrival time remains
+   unknown until #1081. The `,U=` in a Maildir file name is never read;
+   `.mbsyncstate` is never parsed.
 
 ## Not doing (decided 2026-09-26)
 
