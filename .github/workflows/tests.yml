@@ -214,6 +214,27 @@ jobs:
           uv run pytest -q -n auto -m "not serial" --cov-fail-under=0
           uv run pytest -q -m serial --cov-append --cov-report=xml:coverage.xml --cov-report=term
 
+      - name: Build the full-body runtime gate image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: indexer
+          load: true
+          tags: full-body-runtime
+          cache-from: |
+            type=gha,scope=indexer-ppt
+            type=gha,scope=full-body-runtime
+          cache-to: type=gha,mode=max,scope=full-body-runtime,ignore-error=true
+
+      - name: Verify full-body source bounds on runtime SQLite
+        run: |
+          docker run --rm -i --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --memory 1g --pids-limit 32 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=768m \
+            --mount type=bind,src="$PWD/indexer/src",dst=/task/indexer/src,readonly \
+            --mount type=bind,src="$PWD/mcp-server/src/lib/full_body.py",dst=/task/mcp-server/src/lib/full_body.py,readonly \
+            --env FULL_BODY_ROOT=/task --entrypoint python full-body-runtime - \
+            < mcp-server/tests/runtime_full_body.py
+
       - name: Upload indexer coverage report
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

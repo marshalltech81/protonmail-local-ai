@@ -332,6 +332,7 @@ _MESSAGE_FIELDS = [
     "attachments_manifest_complete",
     "body_complete",
     "parse_caps",
+    "full_body",
 ]
 
 _SOURCE = parser.SourceMetadata(

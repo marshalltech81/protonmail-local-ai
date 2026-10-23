@@ -7972,6 +7972,7 @@ _EXTRACTOR_MODULES = (
     "src.extractors.eml",
     "src.extractors.html",
     "src.extractors.html_child",
+    "src.extractors.html_full_body",
     "src.extractors.extractor_child",
     "src.extractors.ooxml",
     "src.extractors.image",
