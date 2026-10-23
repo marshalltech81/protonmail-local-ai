@@ -21,7 +21,7 @@ dependencies = [
     # around ``AsyncOpenAI`` so the project does not maintain its own
     # HTTP/retry plumbing for a wire format the SDK already handles.
     "openai==3.28.0",
-    "anthropic==1.13.0",
+    "anthropic==1.15.0",
     "cohere==7.2.0",
     # Output models for structured tool results (``src/tools/outputs.py``).
     # Pinned to a version ``fastmcp`` and ``mcp`` accept; declared
