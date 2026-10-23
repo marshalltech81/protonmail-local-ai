@@ -616,7 +616,7 @@ def authority(address: str) -> tuple[str, str | None]:
 # signature with (``NOT_CONTAINER_IDENTIFIER``). Copies: this script runs
 # without the indexer package, and the fidelity test checks them.
 PDF_MODULE = "pdf"
-PDF_EXTRACTOR = "pdf-digital@6"
+PDF_EXTRACTOR = "pdf-digital@7"
 PDF_IDENTIFIER = "none@2"
 
 
