@@ -258,6 +258,36 @@ class TestParse:
             assert parse_collection_status(raw, SCOPE) == Unknown("malformed"), name
         assert MARKER not in caplog.text
 
+    @pytest.mark.parametrize("version", [1, 2])
+    @pytest.mark.parametrize(
+        "section, field",
+        [("attempt", "outcome"), ("last_terminal", "outcome"), ("last_terminal", "failure_class")],
+    )
+    @pytest.mark.parametrize(
+        "value",
+        [None, True, 1, 1.5, [], {}, [MARKER], {"value": MARKER}],
+        ids=["null", "bool", "int", "float", "array", "object", "marker-array", "marker-object"],
+    )
+    def test_non_string_enums_are_malformed_without_breaking_startup(
+        self, version, section, field, value, tmp_path, db, caplog
+    ):
+        caplog.set_level(logging.INFO)
+        data = _failed(2)
+        data["format"] = version
+        if version == 2:
+            data["last_terminal"]["generation_floor"] = 0
+        data[section][field] = value
+        assert parse_collection_status(json.dumps(data).encode(), SCOPE) == Unknown("malformed")
+        _write(tmp_path, data)
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        recorder.read_collection()
+        recorder.maybe_record(now=1.0)
+        row = _row(db)
+        assert (row["status"], row["unknown_reason"]) == ("unknown", "malformed")
+        assert "collection status unavailable (reason=malformed)" in caplog.text
+        assert MARKER not in caplog.text
+        assert MARKER not in json.dumps(row)
+
 
 class TestRead:
     def test_missing_file(self, tmp_path):

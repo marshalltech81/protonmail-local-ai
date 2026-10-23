@@ -162,12 +162,12 @@ def _terminal(value: object, version: int = 1) -> Terminal | None:
     outcome = record["outcome"]
     withheld = record["withheld_far_side_folders"]
     failure_class = record["failure_class"]
-    if outcome not in TERMINAL_OUTCOMES:
+    if not isinstance(outcome, str) or outcome not in TERMINAL_OUTCOMES:
         raise _Malformed("outcome")
     if withheld is not None and (type(withheld) is not int or not 0 <= withheld <= _MAX_INT):
         raise _Malformed("count")
     if outcome == "failed":
-        if failure_class not in FAILURE_CLASSES:
+        if not isinstance(failure_class, str) or failure_class not in FAILURE_CLASSES:
             raise _Malformed("failure class")
     elif failure_class is not None:
         raise _Malformed("failure class")
@@ -221,7 +221,7 @@ def parse_collection_status(raw: bytes, scope_uuid: str) -> CollectionStatus | U
         if data["scope_uuid"] != scope_uuid:
             return Unknown("account_mismatch")
         attempt = _object(data["attempt"], _ATTEMPT_KEYS)
-        if attempt["outcome"] not in ATTEMPT_OUTCOMES:
+        if not isinstance(attempt["outcome"], str) or attempt["outcome"] not in ATTEMPT_OUTCOMES:
             raise _Malformed("outcome")
         status = CollectionStatus(
             run_deadline_secs=_positive(data["run_deadline_secs"]),
