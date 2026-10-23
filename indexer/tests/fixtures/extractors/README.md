@@ -41,7 +41,7 @@ bumped so cached rows re-extract.
   never runs).
 - **What extracts:** without fontTools, pypdf falls back to
   StandardEncoding and returns the ROT13 text as `success` /
-  `pdf-digital@6`; with fontTools 4.66.1 it returns the sentence.
+  `pdf-digital@7`; with fontTools 4.66.1 it returns the sentence.
 - **Metadata:** no document information dictionary (`writer.metadata =
   None`, so pypdf writes no `/Producer`), no XMP stream and no `/ID`.
   `TestCffFontPdf` checks the metadata and the font shape on every run.

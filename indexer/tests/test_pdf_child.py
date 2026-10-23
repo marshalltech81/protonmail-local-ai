@@ -290,8 +290,8 @@ class TestFrames:
     @pytest.mark.parametrize(
         ("name", "status", "extractor"),
         [
-            ("pdf-digital", STATUS_SUCCESS, "pdf-digital@6"),
-            ("pdf-ocr", STATUS_SUCCESS, "pdf-ocr@6"),
+            ("pdf-digital", STATUS_SUCCESS, "pdf-digital@7"),
+            ("pdf-ocr", STATUS_SUCCESS, "pdf-ocr@7"),
             ("pdf-ocr-disabled", STATUS_UNSUPPORTED, None),
         ],
     )
@@ -405,7 +405,7 @@ class TestFrames:
         result = _extract(b"%PDF-1.7")
         assert (result.status, result.extractor, result.text_complete) == (
             STATUS_SUCCESS,
-            "pdf-digital@6",
+            "pdf-digital@7",
             False,
         )
         [line] = [r for r in caplog.records if "OCR fallback failed" in r.getMessage()]
@@ -648,7 +648,7 @@ class TestTextCeiling:
         caplog.set_level("DEBUG")
         monkeypatch.setattr(pdf_child, "extract", lambda *_a, **_k: (text, "pdf-digital"))
         result = _extract(b"%PDF-1.7", max_extracted_chars=setting)
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@6")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@7")
         assert result.text == stored
         assert result.text_complete is False
         assert result.extracted_chars_cap == cap
@@ -756,8 +756,8 @@ class TestOcrPhaseLimit:
         ("layout", "status", "extractor", "error"),
         [
             # A mixed PDF keeps its digital text, as on any OCR failure.
-            ("ds", STATUS_SUCCESS, "pdf-digital@6", None),
-            ("ss", STATUS_FAILED, "pdf@6", "PdfOcrMemoryBudgetError"),
+            ("ds", STATUS_SUCCESS, "pdf-digital@7", None),
+            ("ss", STATUS_FAILED, "pdf@7", "PdfOcrMemoryBudgetError"),
         ],
     )
     def test_over_the_budget_the_ocr_fallback_fails_without_a_tool(
@@ -1001,8 +1001,12 @@ class TestLimitsInTheImage:
     def test_a_heavy_digital_page_then_scans_run_under_the_ocr_phase_limit(
         self, tmp_path, monkeypatch
     ):
-        """#1450: a 16 MiB page of path operators (pypdf's walk peaks
-        around 430 MiB) then scanned pages, end to end. The child's limit
+        """#1450: an 8 MiB page of path operators (pypdf's walk peaks
+        around 340 MiB resident) then scanned pages, end to end. 8 MiB is
+        about the heaviest page pypdf 6.21 still parses: it stops a
+        content stream at 2,000,000 tokens (``LimitReachedError``, 9.5 MiB
+        of these operators parse, 10 MiB do not), and the page then counts
+        as failed and goes to OCR with the scans. The child's limit
         is 2 GiB for the parse and the OCR phase's once OCR starts; each
         Poppler and Tesseract process runs under the OCR phase's.
 
@@ -1028,7 +1032,7 @@ class TestLimitsInTheImage:
             )
             shim.chmod(0o755)
         monkeypatch.setenv("PATH", str(shims))
-        payload = _mixed_pdf(16.0, 2)
+        payload = _mixed_pdf(8.0, 2)
         child_limits: set[tuple[int, int]] = set()
         done = threading.Event()
 
@@ -1045,7 +1049,7 @@ class TestLimitsInTheImage:
         finally:
             done.set()
             watcher.join()
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-ocr@6")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-ocr@7")
         assert "synthetic" in (result.text or "").lower()
         assert progress == 3 + 2
         seen = [(r.name.split(".")[0], r.read_text()) for r in records.iterdir()]
