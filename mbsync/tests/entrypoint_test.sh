@@ -99,9 +99,9 @@ PROTON_FOLDER_EXCLUSIONS="$PROTON_DEFAULT_FOLDER_EXCLUSIONS"
 ACCOUNT_SCOPE="00000000-0000-4000-8000-000000000001"
 # The collection records' and success stamp's shapes, as the entrypoint
 # defines them.
-eval "$(grep -E '^readonly (COLLECTION_(ATTEMPT_ID|TIME|TERMINAL|SUCCESS)|SYNC_STAMP)_RE=' "$ENTRYPOINT" | sed 's/^readonly //')"
+eval "$(grep -E '^readonly ((LEGACY_)?COLLECTION_(ATTEMPT_ID|TIME|TERMINAL|SUCCESS)|SYNC_STAMP)_RE=' "$ENTRYPOINT" | sed 's/^readonly //')"
 # shellcheck disable=SC2034 # read by the loaded publish_collection_status
-COLLECTION_STATUS_FORMAT=1
+COLLECTION_STATUS_FORMAT=2
 
 # Synthetic fingerprints in the pin's format: 64 lowercase hex digits.
 FP_OLD="$(printf 'a%.0s' {1..64})"
@@ -331,7 +331,7 @@ generation_setup() {
     GENERATION_FILE="$STATE_DIR/sync-generation"
     MAILDIR_PATH="$WORK/maildir-gen-$1"
     SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
-    load stamp_generation generation_in_range next_success_generation
+    load stamp_generation generation_in_range current_success_generation next_success_generation
 }
 
 first_generation_is_1() {
@@ -341,6 +341,17 @@ first_generation_is_1() {
     [[ "$(cat "$GENERATION_FILE")" == "1" ]] || return 1
     [[ "$(stat -c %a "$GENERATION_FILE" 2>/dev/null || stat -f %Lp "$GENERATION_FILE")" == "600" ]] \
         || return 1
+}
+
+generation_seeds_from_status_after_a_stamp_failure() {
+    generation_setup status-seed
+    mkdir -p "$STATE_DIR" "$MAILDIR_PATH"
+    printf '5\n' >"$GENERATION_FILE"
+    collection_last_success='{"attempt_id": "0123456789ab-1", "completed_at": "2026-10-12T00:00:00Z", "generation": 50}'
+    collection_last_terminal='{"generation_floor": 60}'
+    [[ "$(next_success_generation 2>"$WORK/status-seed-log")" == 61 ]] || return 1
+    [[ "$(cat "$GENERATION_FILE")" == 61 ]] || return 1
+    grep -q 'seeding the success generation forward from retained collection ordering evidence' "$WORK/status-seed-log"
 }
 
 generation_increases_by_one_each_call() {
@@ -357,7 +368,7 @@ generation_survives_a_restart() {
     next_success_generation >/dev/null
     next_success_generation >/dev/null
     # A fresh load, as a new container start would do.
-    load next_success_generation
+    load current_success_generation next_success_generation
     [[ "$(next_success_generation)" == "3" ]] || return 1
 }
 
@@ -506,6 +517,20 @@ an_oversized_counter_is_refused_and_kept() {
     [[ "$(cat "$GENERATION_FILE")" == "9223372036854775807" ]] || return 1
 }
 
+noncanonical_generation_counters_are_refused() {
+    local value
+    generation_setup noncanonical
+    mkdir -p "$STATE_DIR"
+    for value in 00 01 08 09 010 0000000000000000000000000000000000000001; do
+        printf '%s\n' "$value" >"$GENERATION_FILE"
+        if next_success_generation; then
+            echo "a generation was allocated over a noncanonical counter"
+            return 1
+        fi
+        [[ "$(cat "$GENERATION_FILE")" == "$value" ]] || return 1
+    done
+}
+
 an_oversized_retained_stamp_generation_is_refused() {
     local err
     generation_setup oversized-stamp
@@ -541,7 +566,7 @@ collection_setup() {
     collection_last_success="null"
     load collection_now load_collection_records \
         publish_collection_status begin_collection_attempt finish_collection_attempt \
-        record_collection_outcome stamp_generation generation_in_range next_success_generation \
+        record_collection_outcome stamp_generation generation_in_range current_success_generation next_success_generation \
         record_successful_sync stamp_write_failed
     load_collection_records
 }
@@ -998,7 +1023,7 @@ status_has_shape() {
     terminal="${terminal%\$}"
     success="${success%\$}"
     attempt="\\{\"id\": \"${COLLECTION_ATTEMPT_ID_RE}\", \"started_at\": \"${COLLECTION_TIME_RE}\", \"outcome\": \"$1\"\\}"
-    re="^\\{\"format\": 1, \"scope_uuid\": \"${ACCOUNT_SCOPE}\", \"run_deadline_secs\": ${SYNC_DEADLINE_SECONDS}, \"sync_interval_secs\": ${SYNC_INTERVAL}, \"attempt\": ${attempt}, \"last_terminal\": (null|${terminal}), \"last_success\": (null|${success})\\}\$"
+    re="^\\{\"format\": 2, \"scope_uuid\": \"${ACCOUNT_SCOPE}\", \"run_deadline_secs\": ${SYNC_DEADLINE_SECONDS}, \"sync_interval_secs\": ${SYNC_INTERVAL}, \"attempt\": ${attempt}, \"last_terminal\": (null|${terminal}), \"last_success\": (null|${success})\\}\$"
     [[ "$(wc -l <"$COLLECTION_STATUS_FILE")" -eq 1 ]] || return 1
     [[ "$(cat "$COLLECTION_STATUS_FILE")" =~ $re ]] || {
         printf 'not the format-1 shape: %s\n' "$(cat "$COLLECTION_STATUS_FILE")"
@@ -1020,12 +1045,12 @@ status_contains() {
 # $4 failure class (null or a quoted token).
 # shellcheck disable=SC2154 # collection_boot is set by the loaded load_collection_records
 terminal_re() {
-    printf '\\{"attempt_id": "%s-%s", "completed_at": "%s", "outcome": "%s", "withheld_far_side_folders": %s, "failure_class": %s\\}' \
+    printf '\\{"attempt_id": "%s-%s", "completed_at": "%s", "outcome": "%s", "withheld_far_side_folders": %s, "failure_class": %s, "generation_floor": (null|[0-9]+)\\}' \
         "$collection_boot" "$1" "$COLLECTION_TIME_RE" "$2" "$3" "$4"
 }
 
 success_re() {
-    printf '\\{"attempt_id": "%s-%s", "completed_at": "%s"\\}' "$collection_boot" "$1" "${2:-$COLLECTION_TIME_RE}"
+    printf '\\{"attempt_id": "%s-%s", "completed_at": "%s", "generation": (null|[0-9]+)\\}' "$collection_boot" "$1" "${2:-$COLLECTION_TIME_RE}"
 }
 
 # Neither the status nor the log names a folder; the status is
@@ -1206,7 +1231,7 @@ damaged_status_is_set_aside() {
     load_collection_records 2>"$log"
     [[ ! -s "$log" && "$collection_last_terminal" != null ]] || return 1
     for damaged in '{"completed_at": "2026-10-12T00:00:00Z", "sync_interval_secs": 60}' \
-        "${good/\"format\": 1/\"format\": 2}" \
+        "${good/\"format\": 2/\"format\": 3}" \
         "${good/$ACCOUNT_SCOPE/00000000-0000-4000-8000-000000000002}" \
         "${good/\"withheld_far_side_folders\": 0/\"withheld_far_side_folders\": \"MarkerZq9\"}" \
         "${good%\}}, \"x\": 1}" 'garbage'; do
@@ -1241,7 +1266,7 @@ term_during_a_sync_publishes_an_interruption() {
     (install_signal_handlers && run_sync) &
     signal_once_started "$!" TERM
     ((STOP_RC == 143)) || return 1
-    status_has_shape failed '\{"attempt_id": "[0-9a-f]{12}-1", "completed_at": "[^"]*", "outcome": "failed", "withheld_far_side_folders": null, "failure_class": "interrupted"\}' null
+    status_has_shape failed '\{"attempt_id": "[0-9a-f]{12}-1", "completed_at": "[^"]*", "outcome": "failed", "withheld_far_side_folders": null, "failure_class": "interrupted", "generation_floor": (null|[0-9]+)\}' null
 }
 
 # A stop after run_sync has its result (here while the success stamp is
@@ -1280,15 +1305,15 @@ stop_after_the_result_publishes_the_result() {
 # stays, with the earlier records beside it, until the next start.
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 kernel_kill_leaves_the_in_progress_record() {
-    local earlier='{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z", "outcome": "succeeded", "withheld_far_side_folders": 0, "failure_class": null}'
+    local earlier='{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z", "outcome": "succeeded", "withheld_far_side_folders": 0, "failure_class": null, "generation_floor": 1}'
     stop_setup coll-kill
     collection_last_terminal="$earlier"
-    collection_last_success='{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z"}'
+    collection_last_success='{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z", "generation": 1}'
     (install_signal_handlers && run_sync) &
     signal_once_started "$!" KILL
     pkill -TERM -f "$WORK/bin-stop-coll-kill/mbsync" || true
     ((STOP_RC == 137)) || return 1
-    status_has_shape in_progress "$(printf '%s' "$earlier" | sed 's/[{}]/\\&/g')" '\{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z"\}'
+    status_has_shape in_progress "$(printf '%s' "$earlier" | sed 's/[{}]/\\&/g')" '\{"attempt_id": "0123456789ab-4", "completed_at": "2026-10-12T00:00:00Z", "generation": 1\}'
 }
 
 # A success stamp that cannot be written still ends the attempt: its
@@ -1799,7 +1824,7 @@ success_stamp_is_written_by_a_completed_sync() {
     GENERATION_FILE="$STATE_DIR/sync-generation"
     collection_attempt_id="0123456789ab-1"
     mkdir -p "$MAILDIR_PATH" "$STATE_DIR"
-    load collection_now stamp_generation next_success_generation record_successful_sync
+    load collection_now stamp_generation generation_in_range current_success_generation next_success_generation record_successful_sync
     record_successful_sync
     grep -qE '^\{"completed_at": "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z", "sync_interval_secs": 60, '\
 '"attempt_id": "0123456789ab-1", "generation": 1\}$' "$SYNC_STAMP_FILE" || return 1
@@ -2640,6 +2665,7 @@ missing_expected_fingerprint_is_refused_at_startup() {
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 stop_setup() {
     MAILDIR_PATH="$WORK/maildir-stop-$1"
+    SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
     RUNTIME_DIR="$WORK/runtime-stop-$1"
     CONFIG_FILE="$WORK/mbsyncrc"
     CHILD_LOG="$WORK/child-$1"
@@ -2789,6 +2815,8 @@ check "rotation refuses a directory in the pin's place" \
     rotation_refuses_a_directory_in_the_pins_place
 check "a FIFO pin is refused without reading it" fifo_pin_is_refused_without_reading
 check "the first allocated success generation is 1" first_generation_is_1
+check "generation seeds from status after a stamp failure and state restore" \
+    generation_seeds_from_status_after_a_stamp_failure
 check "the success generation increases by one each call" generation_increases_by_one_each_call
 check "the success generation survives a restart" generation_survives_a_restart
 check "the first success generation fails closed when it cannot be saved" \
@@ -2811,6 +2839,8 @@ check "a missing stamp does not seed the counter" \
     a_missing_stamp_does_not_seed_the_counter
 check "an oversized counter is refused and kept" \
     an_oversized_counter_is_refused_and_kept
+check "noncanonical generation counters are refused and kept" \
+    noncanonical_generation_counters_are_refused
 check "an oversized retained stamp generation is refused" \
     an_oversized_retained_stamp_generation_is_refused
 check "sync succeeds when mbsync and the repair succeed" \

@@ -1340,7 +1340,7 @@ class CollectionAttempt(_Output):
 
 class CollectionStatus(_Output):
     outcome: Literal["succeeded", "succeeded_with_withheld_folders", "failed", "unknown"] = Field(
-        description="mbsync's latest completed collection from the Bridge app: "
+        description="mbsync's last recorded collection from the Bridge app: "
         "succeeded; succeeded_with_withheld_folders (the rest synced, but far-side "
         "folders could not be opened, most likely renamed or deleted in Proton; their "
         "local copies are kept); failed; or unknown (see unknown_reason). Not Proton's "

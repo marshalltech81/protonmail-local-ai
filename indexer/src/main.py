@@ -863,13 +863,12 @@ class _IngestionStateRecorder:
     the acknowledgements, and records it per account in the same
     transaction as ``ingestion_state``. After a failed attempt the
     failure stays unrecovered (and the index not current) until a later
-    success is delivered: the last success in the file is the sync named
-    by the acknowledged stamp, matched by attempt ID, which mbsync writes
-    identically into both (never by completion time — two different
-    attempts can publish the same one across a clock rollback, #1621
-    thread, 2026-10-13). The file's records are taken in
-    publication order (the file always holds the newest), never ordered
-    by their times.
+    success is delivered: format-2 generations prove that an acknowledged
+    sync is later than a failure's floor or a recorded success. Equal
+    success generations also require equal attempt IDs; format 1 retains
+    conservative attempt-ID matching. Wall-clock times never prove
+    delivery or recovery, including across clock rollback. The outcome
+    stays the last recorded one when a later publication failed.
     """
 
     def __init__(self, db: Database, maildir_root: Path, interval_secs: float = 30):
@@ -1012,20 +1011,26 @@ class _IngestionStateRecorder:
             self._observe_collection(status)
 
     def _success_delivered(self, status: CollectionStatus) -> bool:
-        # Called with ``_lock`` held. Delivery is proven by attempt ID
-        # equality, never by comparing completion times: mbsync writes
-        # the same attempt ID into the collection status file's
-        # last_success and the acknowledged stamp for one sync, but two
-        # different attempts can publish the same completed_at across a
-        # clock rollback (#1621 thread, 2026-10-13). A legacy stamp
-        # (``attempt_id`` ``None``) can never prove delivery of a later
-        # attempt, so it is never a match.
-        success = status.last_success
+        # A newer acknowledged generation proves an older success was
+        # delivered; equal generations additionally require equal attempt
+        # IDs. Format-1 records retain the conservative equality check.
+        success, acked = status.last_success, self._acked
+        if success is None or acked is None or acked.attempt_id is None:
+            return False
+        if success.generation is not None and acked.generation is not None:
+            return acked.generation > success.generation or (
+                acked.generation == success.generation and acked.attempt_id == success.attempt_id
+            )
+        return success.attempt_id == acked.attempt_id
+
+    def _failure_recovered(self, status: CollectionStatus) -> bool:
+        terminal, acked = status.last_terminal, self._acked
         return (
-            success is not None
-            and self._acked is not None
-            and self._acked.attempt_id is not None
-            and success.attempt_id == self._acked.attempt_id
+            terminal is not None
+            and terminal.generation_floor is not None
+            and acked is not None
+            and acked.generation is not None
+            and acked.generation > terminal.generation_floor
         )
 
     def _observe_collection(self, status: CollectionStatus | Unknown) -> None:
@@ -1046,7 +1051,11 @@ class _IngestionStateRecorder:
             self._logged_reason = None
             log.info("mbsync collection status is readable again")
         terminal = status.last_terminal
-        if terminal is not None and terminal.outcome == "failed":
+        if (
+            terminal is not None
+            and terminal.outcome == "failed"
+            and not self._failure_recovered(status)
+        ):
             self._unrecovered = terminal.attempt_id
             if terminal.attempt_id != self._logged_failure:
                 self._logged_failure = terminal.attempt_id
@@ -1058,7 +1067,14 @@ class _IngestionStateRecorder:
                     terminal.failure_class,
                     "unknown" if withheld is None else withheld,
                 )
-        elif self._unrecovered is not None and self._success_delivered(status):
+        elif self._unrecovered is not None and (
+            self._failure_recovered(status)
+            or (
+                terminal is not None
+                and terminal.outcome != "failed"
+                and self._success_delivered(status)
+            )
+        ):
             self._unrecovered = None
             log.info(
                 "mbsync collection recovered: a successful sync after the failed attempt "

@@ -162,7 +162,7 @@ class TestParse:
 
     def test_another_format_is_unsupported(self):
         data = _succeeded(1)
-        data["format"] = 2
+        data["format"] = 3
         assert parse_collection_status(json.dumps(data).encode(), SCOPE) == Unknown("unsupported")
 
     def test_another_account_is_a_mismatch(self):
@@ -344,7 +344,9 @@ class TestEntrypointAgreement:
         constants = "\n".join(
             line.removeprefix("readonly ")
             for line in ENTRYPOINT.read_text().splitlines()
-            if line.startswith("readonly COLLECTION_")
+            if line.startswith(
+                ("readonly COLLECTION_", "readonly LEGACY_COLLECTION_", "readonly SYNC_STAMP_RE")
+            )
             and not line.startswith("readonly COLLECTION_STATUS_FILE")
         )
         script = "\n".join(
@@ -354,6 +356,8 @@ class TestEntrypointAgreement:
                 f'COLLECTION_STATUS_FILE="{tmp_path}/{COLLECTION_STATUS_NAME}"',
                 f'ACCOUNT_SCOPE="{SCOPE}"',
                 "SYNC_DEADLINE_SECONDS=86400",
+                f'GENERATION_FILE="{tmp_path}/generation"',
+                f'SYNC_STAMP_FILE="{tmp_path}/stamp"',
                 f"SYNC_INTERVAL={interval}",
                 'collection_count=0 collection_attempt_id="" collection_attempt_started_at=""',
                 "collection_last_terminal=null collection_last_success=null",
@@ -363,6 +367,9 @@ class TestEntrypointAgreement:
                     "publish_collection_status",
                     "begin_collection_attempt",
                     "finish_collection_attempt",
+                    "stamp_generation",
+                    "generation_in_range",
+                    "current_success_generation",
                 ),
                 "load_collection_records",
                 steps,
@@ -386,6 +393,16 @@ class TestEntrypointAgreement:
         restarted = self._publish(tmp_path, "begin_collection_attempt", interval=1_000_000_000)
         assert isinstance(restarted, CollectionStatus)
         assert restarted.last_terminal == status.last_terminal
+
+    def test_format1_records_survive_a_collector_upgrade_without_invented_generations(
+        self, tmp_path
+    ):
+        _write(tmp_path, json.dumps(_failed(4, success=_success(3, "2026-10-12T10:00:00Z"))) + "\n")
+        status = self._publish(tmp_path, "begin_collection_attempt")
+        assert isinstance(status, CollectionStatus)
+        assert status.last_terminal.generation_floor is None
+        assert status.last_terminal.attempt_id == "0123456789ab-4"
+        assert status.last_success.generation is None
 
     def test_each_publication_is_read(self, tmp_path):
         status = self._publish(tmp_path, "begin_collection_attempt")
@@ -481,7 +498,7 @@ class TestRecorder:
             (None, "missing"),
             ({"completed_at": "2026-10-12T10:00:00Z", "sync_interval_secs": 60}, "legacy"),
             ("{" + MARKER, "malformed"),
-            ({**_succeeded(1), "format": 2}, "unsupported"),
+            ({**_succeeded(1), "format": 3}, "unsupported"),
             (_succeeded(1, withheld=1) | {"scope_uuid": OTHER_SCOPE}, "account_mismatch"),
         ],
     )
@@ -695,3 +712,57 @@ class TestMigrationV18:
                 "VALUES (?, 'unknown', 'x')",
                 (db.account_id,),
             )
+
+
+class TestOrderedRecovery:
+    @staticmethod
+    def version2(data, generation, floor):
+        data["format"] = 2
+        if data["last_success"] is not None:
+            data["last_success"]["generation"] = generation
+        if data["last_terminal"] is not None:
+            data["last_terminal"]["generation_floor"] = floor
+        return data
+
+    def test_newer_ack_delivers_an_older_published_success(self, tmp_path, db):
+        _write(tmp_path, self.version2(_succeeded(1), 1, 1))
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        recorder._acknowledge(_stamp("2026-10-12T10:00:00Z", "0123456789ab-3", 2))
+        recorder.maybe_record(0)
+        assert _row(db)["success_delivered"] == 1
+
+    @pytest.mark.parametrize(
+        "floor,recovered", [(0, True), (1, True), (2, False), (3, False), (None, False)]
+    )
+    def test_stale_failure_recovers_only_after_its_floor(
+        self, tmp_path, db, caplog, floor, recovered
+    ):
+        caplog.set_level(logging.INFO)
+        _write(
+            tmp_path,
+            self.version2(
+                _failed(2, success=None if floor == 0 else _success(1, "2026-10-12T10:00:00Z")),
+                1,
+                floor,
+            ),
+        )
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        recorder.read_collection()
+        assert recorder._unrecovered is not None
+        recorder._acknowledge(_stamp("2026-10-12T09:00:00Z", "0123456789ab-3", 2))
+        recorder.maybe_record(0)
+        recorder.maybe_record(31)
+        assert (_row(db)["unrecovered_failure_attempt_id"] is None) == recovered
+        assert ("collection recovered" in caplog.text) == recovered
+
+    def test_equal_generation_requires_the_same_attempt(self, tmp_path, db):
+        _write(tmp_path, self.version2(_succeeded(1), 2, 2))
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        recorder._acknowledge(_stamp("2026-10-12T10:00:00Z", "0123456789ab-3", 2))
+        recorder.maybe_record(0)
+        assert _row(db)["success_delivered"] == 0
+
+    @pytest.mark.parametrize("value", [True, -1, 1.5, "2", 2**63])
+    def test_invalid_ordering_evidence_is_unknown(self, value):
+        data = self.version2(_succeeded(1), value, value)
+        assert parse_collection_status(json.dumps(data).encode(), SCOPE) == Unknown("malformed")
