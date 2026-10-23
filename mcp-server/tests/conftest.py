@@ -122,6 +122,7 @@ VALUES (1, 'unconfigured', 0,
             from_addresses_complete INTEGER CHECK (from_addresses_complete IN (0, 1)),
             to_addresses_complete INTEGER CHECK (to_addresses_complete IN (0, 1)),
             cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
+            bcc_addresses_complete INTEGER CHECK (bcc_addresses_complete IN (0, 1)),
             attachments_manifest_complete INTEGER
                 CHECK (attachments_manifest_complete IN (0, 1)),
             body_complete INTEGER CHECK (body_complete IN (0, 1)),
@@ -155,7 +156,7 @@ VALUES (1, 'unconfigured', 0,
         CREATE INDEX idx_message_headers_name_claimant ON message_headers(name_normalized, claimant_id);
         CREATE TABLE message_participants (
             claimant_id TEXT NOT NULL,
-            role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
+            role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc', 'bcc')),
             address     TEXT NOT NULL,
             name        TEXT,
             PRIMARY KEY (claimant_id, role, address)
@@ -590,6 +591,7 @@ COMPLETE: dict[str, int | None] = {
     "from_addresses_complete": 1,
     "to_addresses_complete": 1,
     "cc_addresses_complete": 1,
+    "bcc_addresses_complete": 1,
     "attachments_manifest_complete": 1,
     "body_complete": 1,
 }

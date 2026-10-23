@@ -511,7 +511,7 @@ different filters"), never read against them.
 | `header_exists` | header name | `query_messages` and `aggregate_messages` `where` | any occurrence of the named top-level header exists, even with an empty value; absence is unknown unless header evidence is complete |
 | `list_id_is` | list_id | deterministic queries `where` | canonical bracketless ASCII List-ID or explicit null for known absence; malformed/conflicting/incomplete evidence is unknown |
 | `precedence_is` | precedence | deterministic queries `where` | bulk, list, junk, unsupported or explicit null for known absence; unsupported raw tokens must agree before categorization |
-| `direction_is` | direction | deterministic message/thread/group queries; flat `direction` or `where` | inbound, outbound or self from explicit own addresses and claimed header evidence; partial knowledge preserved under NOT; no Bcc self matches yet |
+| `direction_is` | direction | deterministic message/thread/group queries; flat `direction` or `where` | inbound, outbound or self from explicit own addresses and claimed header evidence; partial knowledge preserved under NOT; self awaits exhaustive Bcc provenance (#1644) |
 | `header_contains` | header name, text | `query_messages` and `aggregate_messages` `where` | any occurrence contains the Unicode caseless substring in its decoded value (raw value when decoding failed); a miss is unknown unless header evidence is complete |
 | `subject_contains` | text | `query_messages` and `aggregate_messages` `where` | same as `subject`, including unknown on a miss against an incomplete subject |
 | `attachment_content_type_is` | MIME type | `query_messages` and `aggregate_messages` `where` | exact declared type on a current occurrence; a miss is unknown unless the current inventory is exhaustive |
@@ -536,11 +536,16 @@ different filters"), never read against them.
 
 **Explicit address leaves
 ([#1088](https://github.com/marshalltech81/protonmail-local-ai/issues/1088)).**
-The five address leaves each take a role: `from`, `to`, `cc` or
-`visible_recipient` (To or Cc), plus the internal From, To or Cc set
-that `participant` uses; the Bcc-inclusive roles arrive with Bcc
-([#1090](https://github.com/marshalltech81/protonmail-local-ai/issues/1090)).
-In every role, finding nothing is false only when the role's addresses
+The five address leaves take `from`, `to`, `cc`, `bcc`,
+`visible_recipient` (To/Cc), `recipient` (To/Cc/Bcc), or `any`
+(From/To/Cc/Bcc). The flat `recipient` and `participant` filters keep
+their visible To/Cc and From/To/Cc meanings. Bcc-inclusive roles are
+positive-only: an observed eligible match is true, and every no-match
+is unknown, including on Sent copies and under NOT. Captured Bcc does
+not establish the original list's exhaustiveness. Provenance-backed
+definite negatives remain [#1644](https://github.com/marshalltech81/protonmail-local-ai/issues/1644);
+[#1090](https://github.com/marshalltech81/protonmail-local-ai/issues/1090) stays open.
+In visible-only roles, finding nothing is false only when the role's addresses
 are complete, and the From role decides only when `sender_ambiguous`
 is `false`, as for `sender`. `sender` (role `from`), `recipient`
 (`visible_recipient`) and `participant` compile to `address_is` or
@@ -575,7 +580,7 @@ A `sender`, `recipient` or `participant` value matched as a substring
 (a name or fragment, not a full address) that matches none of a
 message's stored addresses and display names is unknown, not false,
 when its `participant_names_complete` is not `1`: `0` when the
-indexer's per-message name budget dropped a name, `null` for mail not
+indexer's per-message name budget dropped a From/To/Cc name, `null` for mail not
 reparsed since the upgrade that added it
 ([#1140](https://github.com/marshalltech81/protonmail-local-ai/issues/1140)).
 A match on a stored address or name still decides it, and a full
@@ -1080,7 +1085,7 @@ or `get_evidence` on the thread
 
 ### `get_thread`
 Read a thread by ID as its messages, oldest first. Each message shows
-its own headers (Message-ID, claimant ID, subject, From / To / Cc, send date and,
+its own headers (Message-ID, claimant ID, subject, From / To / Cc / observed Bcc, send date and,
 when known, delivery date (`occurred_at`) in UTC,
 folder, In-Reply-To, attachment flag, [read state](#read-state);
 recipient lists past 10 are summarized as a count) and its indexed body after quoted-reply
@@ -1138,7 +1143,7 @@ reaches the calling model, which may be remote. If that exceeds the
 requested or approved scope, ask before the call: a message ID or body
 offset does not prevent the context fallback.
 
-Return one message's own headers — subject, From / To / Cc and
+Return one message's own headers — subject, From / To / Cc / observed Bcc and
 whether its sender is safe to attribute (`sender_ambiguous`,
 [Sender attribution](#sender-attribution)), send date
 and, when known, delivery date (`occurred_at`) in UTC, folder,
@@ -1320,10 +1325,10 @@ The exact own-address set comes from `config/identity.toml`; no alias or folder
 is inferred. Headers are claimed, not authenticated.
 
 A complete, unambiguous single external From is inbound. An own From with any
-observed external To/Cc is outbound, even when the recipient list is partial.
+observed external To/Cc/Bcc is outbound, even when the recipient list is partial.
 An own From without such a recipient rules out inbound but cannot yet decide
-outbound or self without Bcc (#1090). Thus `self` never matches in this version;
-known inbound/outbound messages decide it false, and own-only visible recipients
+outbound or self without exhaustive Bcc provenance (#1644). Thus `self` never matches in this version;
+known inbound/outbound messages decide it false, and own-only observed recipients
 remain indeterminate. Missing configuration, incomplete or unchecked From,
 multiple From addresses and ambiguous senders leave direction unknown.
 
@@ -1400,7 +1405,8 @@ through the flat parameters' inferred mode:
 
 - **Leaves:** `address_is`, `address_contains`,
   `display_name_contains`, `address_or_name_contains` and `domain_is`
-  take a `role` (`from`, `to`, `cc` or `visible_recipient`);
+  take a `role` (`from`, `to`, `cc`, `bcc`, `visible_recipient`,
+  `recipient` or `any`);
   `body_words`, `subject_contains`, `attachment_text_words` and
   `attachment_content_type_is` take none.
   `header_exists` takes a `name` and no `value`; `header_contains` takes
@@ -1581,7 +1587,7 @@ message carries its send and delivery dates (`sent_at` null when the
 `sent_at_status`: `parsed`, `missing`, `invalid`, or null, with
 `sent_at` null too, before the reparse; the prose says which), folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
-From / To / Cc (at most 10 per role, with a count of the rest),
+From / To / Cc / observed Bcc (at most 10 per role, with retained counts),
 Message-ID, claimant ID, and Thread ID, and the prose row flags a
 sender that is ambiguous or not yet checked; the structured output
 adds `sender_ambiguous` itself ([Sender
@@ -3590,13 +3596,14 @@ can match even on an incomplete row. Always use the actual query's
 
 The report returns flags and counts only, never addresses, headers, bodies or
 attachment text. Direction coverage uses indexed participant probes: a capped
-two-row From cardinality check and visible-recipient existence checks. Fully
+two-row From cardinality check and observed-recipient existence checks. Fully
 usable direction evidence means known inbound/outbound across all operands;
 own-unresolved and incomplete From remain missing. `operator_identity` reports
 configuration state, address count and count-only Sent conflicts in the same
 status snapshot. This diagnostic is not authenticated direction. It describes registered leaves; unsupported operands such as
-`date_basis=internal` (#1092) and Bcc-inclusive roles (#1090) remain rejected by
-validation and are not advertised as registered leaves.
+`date_basis=internal` (#1092) remain rejected by validation. Bcc-inclusive roles are accepted; address-leaf
+coverage across all public roles reports assessed Bcc exhaustiveness as missing
+evidence and pre-reparse Bcc capture as unassessed.
 
 Message-ID conflicts are reported as counts only, with a fixed hint
 in the text output (`get_message` on such a Message-ID lists its
@@ -3627,3 +3634,23 @@ helper reports only the exception type, as the tool does, and
 ``make status`` exits non-zero when mcp-server is not running, when the
 check cannot run (its error output is shown), or when the helper reports
 ``status: error``; an index that is merely not current still exits zero.
+
+
+### Observed Bcc headers (#1090, staged)
+
+Message-header outputs (`query_messages`, thread/message retrieval and listings)
+include bounded `bcc` participant lists and `bcc_count`, the distinct retained
+address count before display limits. Both are selectable through query-message
+`fields`. Empty lists and zero counts describe observed header evidence, never
+absence of original blind recipients; no effective `bcc_complete` is exposed.
+The parser reads Bcc last under the existing shared address/name budgets,
+merges repeated Bcc fields and retains aliases. Its nullable stored
+`bcc_addresses_complete` certifies capture only. Migration17 queues an in-place
+reparse; unchanged chunks retain their IDs and vectors.
+
+`find_contact` discovery, names and counts remain From/To/Cc only. Bcc aliases
+are stored but never introduce contacts or name matches there. Thread-level
+participants and ranked participant filtering retain their visible meaning.
+An external observed Bcc can prove claimed outbound direction under the usual
+From/identity guards; own-only Bcc cannot establish self direction. Classifier
+v2 invalidates earlier message/direction-sensitive cursors.

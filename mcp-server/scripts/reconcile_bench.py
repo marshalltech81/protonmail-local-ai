@@ -133,6 +133,7 @@ CREATE TABLE messages (
     from_addresses_complete INTEGER CHECK (from_addresses_complete IN (0, 1)),
     to_addresses_complete INTEGER CHECK (to_addresses_complete IN (0, 1)),
     cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
+    bcc_addresses_complete INTEGER CHECK (bcc_addresses_complete IN (0, 1)),
     attachments_manifest_complete INTEGER CHECK (attachments_manifest_complete IN (0, 1)),
     body_complete INTEGER CHECK (body_complete IN (0, 1)),
     attachment_rows_current INTEGER CHECK (attachment_rows_current IN (0, 1)),
@@ -152,7 +153,7 @@ CREATE INDEX idx_messages_occurred ON messages(occurred_at, claimant_id)
 CREATE INDEX idx_messages_filepath ON messages(filepath);
 CREATE TABLE message_participants (
     claimant_id TEXT NOT NULL,
-    role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
+    role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc', 'bcc')),
     address     TEXT NOT NULL,
     name        TEXT,
     PRIMARY KEY (claimant_id, role, address),
@@ -721,9 +722,9 @@ _INSERT_MESSAGE = (
     "has_attachments, size_bytes, content_hash, indexed_at, first_indexed_at, "
     "seen, flagged, replied, sender_ambiguous, participant_names_complete, "
     "subject_complete, from_addresses_complete, to_addresses_complete, "
-    "cc_addresses_complete, attachments_manifest_complete, body_complete, attachment_rows_current, caps_json, headers_complete) "
+    "cc_addresses_complete, bcc_addresses_complete, attachments_manifest_complete, body_complete, attachment_rows_current, caps_json, headers_complete) "
     "VALUES (?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, "
-    "1, 1, 1, 1, 1, 1, ?, ?, ?, ?)"
+    "1, 1, 1, 1, 1, 1, 1, ?, ?, ?, ?)"
 )
 
 
@@ -745,6 +746,7 @@ _UPSERT_MESSAGE = _INSERT_MESSAGE + (
     "from_addresses_complete = excluded.from_addresses_complete, "
     "to_addresses_complete = excluded.to_addresses_complete, "
     "cc_addresses_complete = excluded.cc_addresses_complete, "
+    "bcc_addresses_complete = excluded.bcc_addresses_complete, "
     "attachments_manifest_complete = excluded.attachments_manifest_complete, "
     "body_complete = NULL, attachment_rows_current = NULL, caps_json = excluded.caps_json, "
     "headers_complete = excluded.headers_complete"
