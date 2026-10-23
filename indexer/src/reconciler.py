@@ -260,6 +260,16 @@ class Reconciler:
         with more than one active account, holds back the messages of an
         account whose own brake trips.
         """
+        if self._blocked_thread_attempts:
+            pending = self.db.threads_with_pending_deletions(list(self._blocked_thread_attempts))
+            cancelled = set(self._blocked_thread_attempts) - pending
+            for thread_id in cancelled:
+                self._clear_blocked(thread_id)
+            if cancelled:
+                log.info(
+                    "reaper: %d blocked thread(s) no longer have pending deletions",
+                    len(cancelled),
+                )
         cutoff = (datetime.now(UTC) - timedelta(days=self.config.grace_days)).isoformat()
         candidates = self.db.reapable_messages(cutoff)
         if not candidates:

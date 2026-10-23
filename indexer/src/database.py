@@ -4426,6 +4426,19 @@ class Database:
         return int(new)
 
     @_synchronized
+    def threads_with_pending_deletions(self, thread_ids: list[str]) -> set[str]:
+        """Which tracked threads still have a deletion obligation, including grace."""
+        return {
+            row[0]
+            for row in self._conn.execute(
+                "SELECT DISTINCT m.thread_id FROM messages m "
+                "JOIN pending_deletions p ON p.claimant_id = m.claimant_id "
+                "WHERE m.thread_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(thread_ids),),
+            )
+        }
+
+    @_synchronized
     def reapable_messages(self, cutoff_iso: str) -> list[sqlite3.Row]:
         """Messages the reaper may remove: no live occurrence, and a
         tombstone marked at or before ``cutoff_iso``. Each row has
