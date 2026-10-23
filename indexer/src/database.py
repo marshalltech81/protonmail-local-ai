@@ -21,7 +21,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from . import full_body, vector_sums
+from . import full_body, provider_identity, vector_sums
 from .account import AccountConfig, register_account_functions, verified_account_id
 from .chunker import l2_normalize, truncate_to_tokens
 from .entities import (
@@ -217,7 +217,12 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # mbsync collection outcome, read from mbsync's collection status file;
 # empty until the indexer first reads it, no reparse
 # (``migrations/0020_account_collection_state.sql``).
-SCHEMA_VERSION = 20
+# v21 (#1598): provider-identity assessments (one per occurrence and policy
+# version, per account), the policy selector, and dated label-membership
+# observations with their scan generations. Candidates are read from the
+# stored header rows, so no reparse is queued, and nothing is accepted
+# (``migrations/0021_provider_identity_assessments.sql``).
+SCHEMA_VERSION = 21
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -331,6 +336,193 @@ COLLECTION_STATE_SCHEMA_STATEMENTS = (
         observed_at                    TEXT NOT NULL,
         CHECK ((status = 'unknown') = (unknown_reason IS NOT NULL))
     )
+    """,
+)
+
+# One canonical form for a provider message ID, wherever one is stored
+# (#1598): 1 to 256 printable ASCII characters, no whitespace. It is the
+# shape check of a candidate and of a label observation's ID, not a claim
+# about Proton's grammar. ``{column}`` is the column it constrains.
+PROVIDER_ID_CHECK = "length({column}) BETWEEN 1 AND 256 AND {column} NOT GLOB '*[^!-~]*'"
+
+# Provider-identity assessments, the policy selector and dated label
+# observations (#1598), shared by the initial schema; the v21 migration
+# file repeats it. An assessment is one occurrence's reading of its
+# candidate identity under one policy version; ``proton-bridge-v1`` has
+# no acceptance rule (owner, 2026-10-23), so the ``accepted`` outcome
+# exists in the vocabulary and the effective relation reads it, but a
+# trigger refuses to store it. Label observations name an account, a
+# provider ID and a label with no key to any assessment: they keep their
+# own retention and outlive every source (decision 52).
+IDENTITY_SCHEMA_STATEMENTS = (
+    # The parent key of the assessments' composite foreign key, which
+    # makes an assessment's account the occurrence's account.
+    "CREATE UNIQUE INDEX idx_message_occurrences_id_account ON message_occurrences(id, account_id)",
+    """
+    CREATE TABLE identity_policy_state (
+        id             INTEGER PRIMARY KEY CHECK (id = 1),
+        policy_version TEXT NOT NULL CHECK (length(policy_version) BETWEEN 1 AND 64)
+    )
+    """,
+    f"""
+    CREATE TABLE provider_identity_assessments (
+        occurrence_id         INTEGER NOT NULL,
+        account_id            INTEGER NOT NULL REFERENCES accounts(id),
+        policy_version        TEXT NOT NULL CHECK (length(policy_version) BETWEEN 1 AND 64),
+        outcome               TEXT NOT NULL CHECK (outcome IN ('accepted', 'unresolved', 'rejected')),
+        reason                TEXT NOT NULL CHECK (reason IN ('recovered_folder', 'headers_unknown',
+                                  'headers_incomplete', 'no_identity_header',
+                                  'duplicate_identity_header', 'malformed_identity',
+                                  'no_acceptance_rule')),
+        candidate             TEXT CHECK (candidate IS NULL OR ({PROVIDER_ID_CHECK.format(column="candidate")})),
+        identity_header_count INTEGER NOT NULL CHECK (identity_header_count >= 0),
+        headers_complete      INTEGER CHECK (headers_complete IN (0, 1)),
+        state                 TEXT NOT NULL CHECK (state IN ('current', 'invalidated')),
+        assessed_at           TEXT NOT NULL,
+        CHECK (candidate IS NULL OR reason = 'no_acceptance_rule'),
+        PRIMARY KEY (occurrence_id, policy_version),
+        FOREIGN KEY (occurrence_id, account_id)
+            REFERENCES message_occurrences(id, account_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TRIGGER provider_identity_no_acceptance_insert
+    BEFORE INSERT ON provider_identity_assessments
+    WHEN NEW.outcome = 'accepted'
+    BEGIN
+        SELECT RAISE(ABORT, 'no identity acceptance rule is approved');
+    END
+    """,
+    """
+    CREATE TRIGGER provider_identity_no_acceptance_update
+    BEFORE UPDATE OF outcome ON provider_identity_assessments
+    WHEN NEW.outcome = 'accepted'
+    BEGIN
+        SELECT RAISE(ABORT, 'no identity acceptance rule is approved');
+    END
+    """,
+    # An assessment is invalidated in the statement that changes its
+    # evidence: the claimant's identity header rows, its capture
+    # completeness, or the occurrence's folder or lifecycle.
+    """
+    CREATE TRIGGER message_headers_invalidate_assessments_insert
+    AFTER INSERT ON message_headers
+    WHEN NEW.name_normalized = 'x-pm-internal-id'
+    BEGIN
+        UPDATE provider_identity_assessments SET state = 'invalidated'
+        WHERE state = 'current' AND occurrence_id IN (
+            SELECT id FROM message_occurrences WHERE claimant_id = NEW.claimant_id);
+    END
+    """,
+    """
+    CREATE TRIGGER message_headers_invalidate_assessments_update
+    AFTER UPDATE ON message_headers
+    WHEN OLD.name_normalized = 'x-pm-internal-id' OR NEW.name_normalized = 'x-pm-internal-id'
+    BEGIN
+        UPDATE provider_identity_assessments SET state = 'invalidated'
+        WHERE state = 'current' AND occurrence_id IN (
+            SELECT id FROM message_occurrences
+            WHERE claimant_id IN (OLD.claimant_id, NEW.claimant_id));
+    END
+    """,
+    """
+    CREATE TRIGGER message_headers_invalidate_assessments_delete
+    AFTER DELETE ON message_headers
+    WHEN OLD.name_normalized = 'x-pm-internal-id'
+    BEGIN
+        UPDATE provider_identity_assessments SET state = 'invalidated'
+        WHERE state = 'current' AND occurrence_id IN (
+            SELECT id FROM message_occurrences WHERE claimant_id = OLD.claimant_id);
+    END
+    """,
+    """
+    CREATE TRIGGER messages_invalidate_assessments
+    AFTER UPDATE OF headers_complete ON messages
+    WHEN OLD.headers_complete IS NOT NEW.headers_complete
+    BEGIN
+        UPDATE provider_identity_assessments SET state = 'invalidated'
+        WHERE state = 'current' AND occurrence_id IN (
+            SELECT id FROM message_occurrences WHERE claimant_id = NEW.claimant_id);
+    END
+    """,
+    """
+    CREATE TRIGGER message_occurrences_invalidate_assessments
+    AFTER UPDATE OF folder, state ON message_occurrences
+    WHEN OLD.folder IS NOT NEW.folder OR OLD.state IS NOT NEW.state
+    BEGIN
+        UPDATE provider_identity_assessments SET state = 'invalidated'
+        WHERE state = 'current' AND occurrence_id = NEW.id;
+    END
+    """,
+    # The effective accepted-occurrence relation (decision 52): each
+    # active occurrence's current assessment under the selected policy
+    # version, when it is accepted. Logical messages are the distinct
+    # (account_id, candidate) pairs of this view; nothing stores them.
+    """
+    CREATE VIEW effective_accepted_occurrences AS
+    SELECT a.occurrence_id, a.account_id, a.policy_version, a.candidate
+    FROM provider_identity_assessments a
+    JOIN identity_policy_state p ON p.policy_version = a.policy_version
+    JOIN message_occurrences o ON o.id = a.occurrence_id AND o.state = 'active'
+    WHERE a.state = 'current' AND a.outcome = 'accepted' AND a.candidate IS NOT NULL
+    """,
+    """
+    CREATE TABLE label_scan_generations (
+        account_id  INTEGER NOT NULL REFERENCES accounts(id),
+        generation  INTEGER NOT NULL CHECK (generation >= 1),
+        status      TEXT NOT NULL CHECK (status IN ('in_progress', 'complete', 'partial',
+                        'failed', 'interrupted')),
+        started_at  TEXT NOT NULL,
+        finished_at TEXT,
+        CHECK ((status = 'in_progress') = (finished_at IS NULL)),
+        PRIMARY KEY (account_id, generation)
+    )
+    """,
+    f"""
+    CREATE TABLE label_membership_observations (
+        account_id         INTEGER NOT NULL,
+        provider_id        TEXT NOT NULL CHECK ({PROVIDER_ID_CHECK.format(column="provider_id")}),
+        label              TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 512),
+        first_generation   INTEGER NOT NULL,
+        last_generation    INTEGER NOT NULL,
+        observed_at        TEXT NOT NULL,
+        retired_generation INTEGER,
+        retired_at         TEXT,
+        CHECK ((retired_generation IS NULL) = (retired_at IS NULL)),
+        CHECK (last_generation >= first_generation),
+        CHECK (retired_generation IS NULL OR retired_generation > last_generation),
+        PRIMARY KEY (account_id, provider_id, label),
+        FOREIGN KEY (account_id, first_generation)
+            REFERENCES label_scan_generations(account_id, generation),
+        FOREIGN KEY (account_id, last_generation)
+            REFERENCES label_scan_generations(account_id, generation),
+        FOREIGN KEY (account_id, retired_generation)
+            REFERENCES label_scan_generations(account_id, generation)
+    )
+    """,
+    # Stored data never certifies absence: only a complete generation
+    # retires a membership.
+    """
+    CREATE TRIGGER label_observations_retire_guard_insert
+    BEFORE INSERT ON label_membership_observations
+    WHEN NEW.retired_generation IS NOT NULL AND (
+        SELECT status FROM label_scan_generations
+        WHERE account_id = NEW.account_id AND generation = NEW.retired_generation
+    ) IS NOT 'complete'
+    BEGIN
+        SELECT RAISE(ABORT, 'only a complete generation retires a membership');
+    END
+    """,
+    """
+    CREATE TRIGGER label_observations_retire_guard_update
+    BEFORE UPDATE OF retired_generation ON label_membership_observations
+    WHEN NEW.retired_generation IS NOT NULL AND (
+        SELECT status FROM label_scan_generations
+        WHERE account_id = NEW.account_id AND generation = NEW.retired_generation
+    ) IS NOT 'complete'
+    BEGIN
+        SELECT RAISE(ABORT, 'only a complete generation retires a membership');
+    END
     """,
 )
 
@@ -619,6 +811,11 @@ class Database:
         self._finalizer = weakref.finalize(self, _close_connection, self._conn)
         try:
             self._migrate()
+            self._select_identity_policy()
+            # A generation still open at startup was cut short.
+            interrupted = self.interrupt_open_label_generations()
+            if interrupted:
+                log.warning("label scan generations interrupted by a restart: %d", interrupted)
         except Exception:
             self.close()
             raise
@@ -1600,6 +1797,13 @@ class Database:
             + COLLECTION_STATE_SCHEMA_STATEMENTS
         ):
             cur.execute(statement)
+        # After the per-message tables the identity triggers watch.
+        for statement in IDENTITY_SCHEMA_STATEMENTS:
+            cur.execute(statement)
+        cur.execute(
+            "INSERT INTO identity_policy_state (id, policy_version) VALUES (1, ?)",
+            (provider_identity.POLICY_VERSION,),
+        )
 
     # -------------------------------------------------------------------------
     # Write operations
@@ -3983,6 +4187,256 @@ class Database:
         except BaseException:
             self._conn.rollback()
             raise
+
+    # -------------------------------------------------------------------------
+    # Provider identities and label observations (#1598)
+    # -------------------------------------------------------------------------
+
+    def _select_identity_policy(self) -> None:
+        """Make the stored policy selector the code's version. The
+        selector is the one place that says which assessments count, so
+        moving it revokes every assessment of an earlier version in one
+        statement; those rows stay as history and the occurrences are
+        pending again. Fixed tokens only in the log."""
+        current = provider_identity.POLICY_VERSION
+        with self.transaction():
+            row = self._conn.execute("SELECT policy_version FROM identity_policy_state").fetchone()
+            if row is not None and row[0] == current:
+                return
+            self._conn.execute(
+                "INSERT OR REPLACE INTO identity_policy_state (id, policy_version) VALUES (1, ?)",
+                (current,),
+            )
+        log.info(
+            "identity policy selector moved from %s to %s",
+            row[0] if row is not None else "none",
+            current,
+        )
+
+    _IDENTITY_EVIDENCE_SQL = """
+        SELECT o.id AS occurrence_id, o.folder AS folder, m.headers_complete AS headers_complete,
+               (SELECT COUNT(*) FROM message_headers h
+                 WHERE h.claimant_id = o.claimant_id
+                   AND h.name_normalized = 'x-pm-internal-id') AS identity_count,
+               (SELECT h.raw_value FROM message_headers h
+                 WHERE h.claimant_id = o.claimant_id
+                   AND h.name_normalized = 'x-pm-internal-id'
+                 ORDER BY h.ordinal LIMIT 1) AS identity_value
+        FROM message_occurrences o JOIN messages m ON m.claimant_id = o.claimant_id
+    """
+
+    @staticmethod
+    def _identity_evidence(row: sqlite3.Row) -> provider_identity.Evidence:
+        complete = row["headers_complete"]
+        return provider_identity.Evidence(
+            folder=row["folder"],
+            headers_complete=None if complete is None else bool(complete),
+            identity_count=row["identity_count"],
+            identity_value=row["identity_value"],
+        )
+
+    _IDENTITY_PENDING_SQL = (
+        " LEFT JOIN provider_identity_assessments a ON a.occurrence_id = o.id "
+        "AND a.policy_version = ? "
+        "WHERE o.account_id = ? AND o.state = 'active' "
+        "AND (a.occurrence_id IS NULL OR a.state = 'invalidated')"
+    )
+
+    def _identity_policy_applies(self) -> bool:
+        return self.account.provider == provider_identity.POLICY_PROVIDER
+
+    @_synchronized
+    def pending_identity_evidence(self, *, limit: int) -> list[provider_identity.Pending]:
+        """Up to ``limit`` active occurrences of this account with no
+        current assessment under the selected policy version, in
+        occurrence order, each with the evidence read for it. Nothing for
+        an account of another provider."""
+        if not self._identity_policy_applies():
+            return []
+        version = self._conn.execute("SELECT policy_version FROM identity_policy_state").fetchone()[
+            0
+        ]
+        rows = self._conn.execute(
+            self._IDENTITY_EVIDENCE_SQL  # nosec B608 - constant fragments, values bound
+            + self._IDENTITY_PENDING_SQL
+            + " ORDER BY o.id LIMIT ?",
+            (version, self.account_id, limit),
+        ).fetchall()
+        return [
+            provider_identity.Pending(r["occurrence_id"], version, self._identity_evidence(r))
+            for r in rows
+        ]
+
+    @_synchronized
+    def count_pending_identity(self) -> int:
+        """How many occurrences ``pending_identity_evidence`` would still
+        offer."""
+        if not self._identity_policy_applies():
+            return 0
+        version = self._conn.execute("SELECT policy_version FROM identity_policy_state").fetchone()[
+            0
+        ]
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM message_occurrences o"  # nosec B608 - constant fragments
+            + self._IDENTITY_PENDING_SQL,
+            (version, self.account_id),
+        ).fetchone()[0]
+
+    @_synchronized
+    def record_identity_assessment(
+        self, pending: provider_identity.Pending, assessment: provider_identity.Assessment
+    ) -> bool:
+        """Store ``assessment`` for ``pending``'s occurrence, current under
+        its policy version, or return False without writing when the
+        worker is stale: the selector has moved, or the occurrence's
+        evidence is no longer what the worker read. The check and the
+        write are one transaction. ``accepted`` is refused here and by a
+        trigger."""
+        if assessment.outcome not in provider_identity.WRITABLE_OUTCOMES:
+            raise ValueError("an identity assessment cannot be accepted")
+        with self.transaction():
+            selected = self._conn.execute(
+                "SELECT policy_version FROM identity_policy_state"
+            ).fetchone()[0]
+            fresh = self._conn.execute(
+                self._IDENTITY_EVIDENCE_SQL + " WHERE o.id = ? AND o.account_id = ? "  # nosec B608
+                "AND o.state = 'active'",
+                (pending.occurrence_id, self.account_id),
+            ).fetchone()
+            if (
+                selected != pending.policy_version
+                or fresh is None
+                or self._identity_evidence(fresh) != pending.evidence
+            ):
+                return False
+            evidence = pending.evidence
+            self._conn.execute(
+                """
+                INSERT INTO provider_identity_assessments
+                    (occurrence_id, account_id, policy_version, outcome, reason, candidate,
+                     identity_header_count, headers_complete, state, assessed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'current', ?)
+                ON CONFLICT (occurrence_id, policy_version) DO UPDATE SET
+                    outcome               = excluded.outcome,
+                    reason                = excluded.reason,
+                    candidate             = excluded.candidate,
+                    identity_header_count = excluded.identity_header_count,
+                    headers_complete      = excluded.headers_complete,
+                    state                 = 'current',
+                    assessed_at           = excluded.assessed_at
+                """,
+                (
+                    pending.occurrence_id,
+                    self.account_id,
+                    pending.policy_version,
+                    assessment.outcome,
+                    assessment.reason,
+                    assessment.candidate,
+                    evidence.identity_count,
+                    None if evidence.headers_complete is None else int(evidence.headers_complete),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+        return True
+
+    @_synchronized
+    def begin_label_generation(self) -> int:
+        """Open the next label scan generation for this account and
+        return its number."""
+        with self.transaction():
+            generation = self._conn.execute(
+                "SELECT COALESCE(MAX(generation), 0) + 1 FROM label_scan_generations "
+                "WHERE account_id = ?",
+                (self.account_id,),
+            ).fetchone()[0]
+            self._conn.execute(
+                "INSERT INTO label_scan_generations (account_id, generation, status, started_at) "
+                "VALUES (?, ?, 'in_progress', ?)",
+                (self.account_id, generation, datetime.now(UTC).isoformat()),
+            )
+        return generation
+
+    def _require_open_generation(self, generation: int) -> None:
+        row = self._conn.execute(
+            "SELECT status FROM label_scan_generations WHERE account_id = ? AND generation = ?",
+            (self.account_id, generation),
+        ).fetchone()
+        if row is None or row[0] != "in_progress":
+            raise ValueError("the label scan generation is not open")
+
+    @_synchronized
+    def record_label_memberships(
+        self, generation: int, memberships: Sequence[tuple[str, str]]
+    ) -> None:
+        """Record ``(provider_id, label)`` memberships seen in the open
+        ``generation``, all or none. A membership seen again is live
+        again; nothing is retired here, so a generation that never
+        completes adds observations and certifies no absence."""
+        now = datetime.now(UTC).isoformat()
+        with self.transaction():
+            self._require_open_generation(generation)
+            self._conn.executemany(
+                """
+                INSERT INTO label_membership_observations
+                    (account_id, provider_id, label, first_generation, last_generation,
+                     observed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (account_id, provider_id, label) DO UPDATE SET
+                    last_generation    = excluded.last_generation,
+                    observed_at        = excluded.observed_at,
+                    retired_generation = NULL,
+                    retired_at         = NULL
+                """,
+                [
+                    (self.account_id, pid, label, generation, generation, now)
+                    for pid, label in memberships
+                ],
+            )
+
+    @_synchronized
+    def finish_label_generation(self, generation: int, status: str) -> None:
+        """Close the open ``generation`` as ``complete``, ``partial`` or
+        ``failed``. Only ``complete`` retires: memberships its scan did
+        not see, in the same transaction."""
+        if status not in ("complete", "partial", "failed"):
+            raise ValueError("a label scan generation ends complete, partial or failed")
+        now = datetime.now(UTC).isoformat()
+        with self.transaction():
+            self._require_open_generation(generation)
+            self._conn.execute(
+                "UPDATE label_scan_generations SET status = ?, finished_at = ? "
+                "WHERE account_id = ? AND generation = ?",
+                (status, now, self.account_id, generation),
+            )
+            if status == "complete":
+                self._conn.execute(
+                    "UPDATE label_membership_observations SET retired_generation = ?, "
+                    "retired_at = ? WHERE account_id = ? AND retired_generation IS NULL "
+                    "AND last_generation < ?",
+                    (generation, now, self.account_id, generation),
+                )
+
+    @_synchronized
+    def interrupt_open_label_generations(self) -> int:
+        """Mark every open generation of this account ``interrupted``;
+        returns how many."""
+        with self.transaction():
+            return self._conn.execute(
+                "UPDATE label_scan_generations SET status = 'interrupted', finished_at = ? "
+                "WHERE account_id = ? AND status = 'in_progress'",
+                (datetime.now(UTC).isoformat(), self.account_id),
+            ).rowcount
+
+    @_synchronized
+    def label_scan_status(self) -> str:
+        """``available`` once a scan has completed for this account, else
+        ``unavailable``: no reconciled scan is not the same as no label."""
+        done = self._conn.execute(
+            "SELECT 1 FROM label_scan_generations WHERE account_id = ? AND status = 'complete' "
+            "LIMIT 1",
+            (self.account_id,),
+        ).fetchone()
+        return "available" if done else "unavailable"
 
     @_synchronized
     def get_collection_state(self) -> dict | None:

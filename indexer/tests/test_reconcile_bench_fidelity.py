@@ -298,6 +298,32 @@ def test_benchmark_schema_is_the_indexers(bench, tmp_path, table):
         assert _schema(ours, table) == _schema(prod, table)
 
 
+def test_benchmark_carries_the_indexers_identity_invalidation_triggers(bench, tmp_path):
+    """A trigger on a table adds entries to the statements a write traces,
+    so the WAL writer must carry the triggers the indexer's tables carry
+    (#1598), or the cadence comparison below sees the indexer write more
+    statements than the benchmark does."""
+    Database(tmp_path / "indexer.db", account=TEST_ACCOUNT).close()
+    query = (
+        "SELECT name, sql FROM sqlite_master WHERE name = 'provider_identity_assessments' "
+        "OR name LIKE '%invalidate_assessments%'"
+    )
+
+    def objects(conn):
+        return {
+            name: " ".join(sql.replace(" IF NOT EXISTS", "").split())
+            for name, sql in conn.execute(query)
+        }
+
+    with (
+        closing(_with_vec(sqlite3.connect(tmp_path / "indexer.db"))) as prod,
+        closing(_with_vec(sqlite3.connect(":memory:"))) as ours,
+    ):
+        ours.executescript(bench._SCHEMA + bench._WRITER_SCHEMA)
+        assert len(objects(prod)) == 6
+        assert objects(ours) == objects(prod)
+
+
 # --- the WAL writer's commits (#1476) ----------------------------------
 
 # Every table the indexer writes for a message: the benchmark's, and the

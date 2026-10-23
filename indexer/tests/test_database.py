@@ -125,8 +125,8 @@ class TestSchema:
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        the current version (v20), skipping the migration files."""
-        assert SCHEMA_VERSION == 20
+        the current version (v21), skipping the migration files."""
+        assert SCHEMA_VERSION == 21
         assert (
             db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         )
@@ -328,7 +328,7 @@ class TestMigrationV1:
             migrated.close()
             fresh.close()
         assert (
-            "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]"
+            "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
             in caplog.text
         )
         assert "SYNTHETIC" not in caplog.text
@@ -567,8 +567,41 @@ def _only_the_v12_reparse(db: Database) -> bool:
     return {r[0] for r in jobs} == files and all(r[1] == "reparse" for r in jobs)
 
 
+def _revert_v21(db: Database) -> None:
+    """Undo what v21 adds (#1598): the provider-identity assessments, the
+    policy selector and the label observations, with their guards. Safe
+    to repeat: older revert helpers call it from several paths."""
+    conn = db._conn
+    for kind, name in (
+        ("VIEW", "effective_accepted_occurrences"),
+        ("TABLE", "provider_identity_assessments"),
+        ("TABLE", "identity_policy_state"),
+        ("TABLE", "label_membership_observations"),
+        ("TABLE", "label_scan_generations"),
+    ):
+        conn.execute(f"DROP {kind} IF EXISTS {name}")
+    conn.execute("DROP INDEX IF EXISTS idx_message_occurrences_id_account")
+    for trigger in (
+        "message_headers_invalidate_assessments_insert",
+        "message_headers_invalidate_assessments_update",
+        "message_headers_invalidate_assessments_delete",
+        "messages_invalidate_assessments",
+        "message_occurrences_invalidate_assessments",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+
+
+def _v20_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v20 shape (#1598)."""
+    _revert_v21(db)
+    db._conn.execute("UPDATE schema_version SET version = 20")
+    db._conn.commit()
+
+
 def _revert_v20(db: Database) -> None:
-    """Undo what v20 adds (#1592): the per-account collection state."""
+    """Undo what v20 adds (#1592): the per-account collection state,
+    after undoing v21."""
+    _revert_v21(db)
     db._conn.execute("DROP TABLE account_collection_state")
 
 
@@ -871,7 +904,7 @@ class TestMigrationV6:
             migrated.close()
             fresh.close()
         assert (
-            "applied migrations: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]"
+            "applied migrations: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
             in caplog.text
         )
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
@@ -1163,7 +1196,7 @@ class TestMigrationV12:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [12, 13, 14, 15, 16, 17, 18, 19, 20]" in caplog.text
+        assert "applied migrations: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
 
@@ -1208,7 +1241,7 @@ class TestMigrationV11:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]" in caplog.text
+        assert "applied migrations: [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
 
@@ -1254,7 +1287,7 @@ class TestMigrationV10:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]" in caplog.text
+        assert "applied migrations: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]" in caplog.text
 
 
 class TestMigrationV9:
@@ -1294,7 +1327,9 @@ class TestMigrationV9:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]" in caplog.text
+        assert (
+            "applied migrations: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]" in caplog.text
+        )
 
 
 class TestMigrationV8:
@@ -1404,7 +1439,8 @@ class TestMigrationV8:
             migrated.close()
             fresh.close()
         assert (
-            "applied migrations: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]" in caplog.text
+            "applied migrations: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
+            in caplog.text
         )
         assert "SYNTHETIC_V8_MARKER" not in caplog.text
 
@@ -1478,7 +1514,7 @@ class TestMigrationV7:
             migrated.close()
             fresh.close()
         assert (
-            "applied migrations: [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]"
+            "applied migrations: [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
             in caplog.text
         )
 
@@ -1604,7 +1640,7 @@ class TestMigrationV5:
             migrated.close()
             fresh.close()
         assert (
-            "applied migrations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]"
+            "applied migrations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
             in caplog.text
         )
 
@@ -1737,7 +1773,7 @@ class TestMigrationV2:
             migrated.close()
             fresh.close()
         assert (
-            "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]"
+            "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
             in caplog.text
         )
 
@@ -1792,7 +1828,7 @@ class TestMigrationV3:
             migrated.close()
             fresh.close()
         assert (
-            "applied migrations: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]"
+            "applied migrations: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
             in caplog.text
         )
         assert "SYNTHETIC" not in caplog.text
@@ -1803,8 +1839,11 @@ class TestMigrationV3:
         self._v2_with_rows(tmp_path / "v2.db")
         # This migration alone: v4 queues a reparse of its own (#1140).
         monkeypatch.setattr(database, "SCHEMA_VERSION", 3)
-        # v3 predates the account registry (v14) the open check reads.
+        # v3 predates the account registry (v14) the open check reads, and
+        # the v21 tables the policy selector and label generations read.
         monkeypatch.setattr(database.Database, "_verify_account", lambda self: None)
+        monkeypatch.setattr(database.Database, "_select_identity_policy", lambda self: None)
+        monkeypatch.setattr(database.Database, "interrupt_open_label_generations", lambda self: 0)
         db = Database(tmp_path / "v2.db", account=TEST_ACCOUNT)
         try:
             # Read directly: v3 predates the v6 column the accessor reads.
