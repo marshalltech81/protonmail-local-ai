@@ -966,7 +966,13 @@ and transient WAL can be substantially larger. A metadata/source cap produces
 explicit incomplete evidence. Classification caps retain source text and leave
 the unclassified suffix unknown. Transfer/charset/structure/conversion losses are
 recorded independently from the legacy `body_complete` flag; replacements cannot
-silently certify complete original-source evidence.
+silently certify complete original-source evidence. A nested part whose first
+line after the boundary starts with `From ` has that line moved out of its
+payload by the standard library with no defect; it is recorded as a structure
+loss. The source-byte guard is charged from each text leaf's encoded size
+before its transfer and charset decode, so a leaf the legacy body ignores is
+not decoded for the capture once the remaining budget cannot hold it (a
+recorded budget loss, possibly for a leaf whose decoded text would have fit).
 
 Interior fragments are exactly 8192 original code points; the final fragment is
 at most 8192. All fragments form one gap-free retained prefix of one MIME source,
@@ -982,11 +988,15 @@ Phase 1 atomically replaces sources, loss flags and the message's
 `full_body_complete`, `full_body_generation` and `full_body_version` beside the
 message record. The migration leaves them NULL until the queued reparse assesses
 them. A failed transaction rolls back the replacement. Source generations bind
-ordered provenance, text digests and classification coverage. Message/thread
+ordered provenance, text digests, classification coverage and the completeness
+flag. Message/thread
 deletion and reaping cascade to all three source tables under the existing
 `secure_delete` policy. No additional FTS index is created here. Full source text
 is excluded from existing FTS, embeddings and vectors, and source references are
-released after the Phase 1 commit. Reparse keeps unchanged chunk IDs/vectors.
+released after the Phase 1 commit. The deletion reaper re-reads a thread's
+survivors for their body text and attachments only, so it parses them with
+`capture_full_body=False`: no capture, no extra HTML child pass and no held
+sources. Reparse keeps unchanged chunk IDs/vectors.
 
 The additive HTML pass uses only the remaining original parse deadline, with a
 16-second measured completion reserve; it never resets the existing stall clock.

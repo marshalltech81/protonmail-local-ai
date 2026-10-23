@@ -413,6 +413,10 @@ def store(cur: sqlite3.Cursor, claimant: str, capture: Capture | None) -> None:
                 separators=(",", ":"),
             ).encode()
         )
+    # The completeness flag is global state the parts do not carry: a reparse
+    # whose cap omits nodes while the retained prefix stays identical changes
+    # only this flag, and the old generation must not stay valid for it.
+    generation.update(f"complete={int(capture.complete)}".encode())
     cur.execute(
         "UPDATE messages SET full_body_complete=?, full_body_generation=?, full_body_version=? WHERE claimant_id=?",
         (int(capture.complete), generation.hexdigest(), VERSION, claimant),

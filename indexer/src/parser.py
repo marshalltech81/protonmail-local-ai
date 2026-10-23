@@ -697,7 +697,11 @@ class SourceMetadata:
 
 
 def parse_email(
-    path: Path, maildir_root: Path | None = None, *, capture_deadline: float | None = None
+    path: Path,
+    maildir_root: Path | None = None,
+    *,
+    capture_deadline: float | None = None,
+    capture_full_body: bool = True,
 ) -> Message | None:
     """Parse a single .eml file from Maildir into a Message object.
 
@@ -724,6 +728,10 @@ def parse_email(
     permanent "no Message-ID" outcome and dead-letters without retry.
     Content-pathology errors propagate from ``parse_email_bytes``; see
     there.
+
+    ``capture_full_body=False`` (the reaper, which rebuilds a thread from
+    its survivors' body text and attachments) builds no full decoded body
+    capture; see ``parse_email_bytes``.
 
     Files larger than ``INDEXER_PARSE_MAX_BYTES`` (default 50 MB) raise
     ``OversizedMessageError`` either at the fstat pre-check or while
@@ -798,13 +806,19 @@ def parse_email(
         mtime_ns=stat.st_mtime_ns if stat is not None else None,
         path=str(path),
     )
+    if not capture_full_body:
+        return parse_email_bytes(raw, source, capture_full_body=False)
     if capture_deadline is None:
         return parse_email_bytes(raw, source)
     return parse_email_bytes(raw, source, capture_deadline=capture_deadline)
 
 
 def parse_email_bytes(
-    raw: bytes, source: SourceMetadata, *, capture_deadline: float | None = None
+    raw: bytes,
+    source: SourceMetadata,
+    *,
+    capture_deadline: float | None = None,
+    capture_full_body: bool = True,
 ) -> Message | None:
     """Parse an RFC 822 message from its bytes into a Message object.
 
@@ -812,6 +826,11 @@ def parse_email_bytes(
     a parser test needs no file and another source adapter can plug in
     here. ``source`` is what the adapter knows beyond the bytes; its
     ``path`` names the message in log lines (never any of its content).
+
+    ``capture_full_body=False`` skips the full decoded body capture
+    (``Message.full_body`` is ``None``): no source is collected or
+    decoded for it and the additive HTML child pass does not run. The
+    body text and attachments are the same as a capturing parse returns.
 
     Returns ``None`` for a message without a usable Message-ID (none, or
     one over ``MESSAGE_ID_MAX_CHARS``), which the worker dead-letters.
@@ -912,7 +931,7 @@ def parse_email_bytes(
         )
     occurred_at = _parse_received_date(msg)
 
-    sources: list[full_body.Part] = []
+    sources: list[full_body.Part] | None = [] if capture_full_body else None
     body_text, attachments = _extract_body_and_attachments(
         msg, caps=caps, raw=raw, full_parts=sources, capture_deadline=capture_deadline
     )
@@ -963,13 +982,17 @@ def parse_email_bytes(
     # ``mtime_ns`` is the adapter's (see ``parse_email``).
     size = len(raw)
     content_hash = hashlib.sha256(raw).hexdigest()
-    captured = full_body.prepare(
-        sources,
-        claimant_id(message_id, content_hash),
-        complete=not (caps["mime_parts"] or caps["body_parts"]),
-        deadline=capture_deadline,
+    captured = (
+        full_body.prepare(
+            sources,
+            claimant_id(message_id, content_hash),
+            complete=not (caps["mime_parts"] or caps["body_parts"]),
+            deadline=capture_deadline,
+        )
+        if sources is not None
+        else None
     )
-    if not captured.complete:
+    if captured is not None and not captured.complete:
         full_body.warn(
             "full decoded body evidence incomplete: parts=%d bytes=%d loss_parts=%d",
             len(captured.parts),
@@ -1851,6 +1874,7 @@ def _extract_body_and_attachments(
     nodes: list[_BodyNode] = []
     text_parts = 0
     full_text_parts = 0
+    full_encoded_bytes = 0
     # Text parts past MAX_BODY_TEXT_PARTS: (node index, plain or not).
     capped: list[tuple[int, bool]] = []
     # In a body-only walk, the text parts whose transfer decoding lost or
@@ -2022,7 +2046,12 @@ def _extract_body_and_attachments(
                 }[ct]
             if part.get_content_maintype() == "multipart" and not part.is_multipart():
                 node.source_losses |= full_body.STRUCTURE_LOSS
-            if any(isinstance(d, DROPPED_HEADER_DEFECTS) for d in part.defects):
+            # A nested part whose first line after the boundary starts with
+            # ``From `` and has no header/body separator has that line moved
+            # into ``get_unixfrom()`` and out of the payload, with no defect.
+            if any(isinstance(d, DROPPED_HEADER_DEFECTS) for d in part.defects) or (
+                part is not msg and part.get_unixfrom() is not None
+            ):
                 node.source_losses |= full_body.STRUCTURE_LOSS
             if parent >= 0 and _selects(nodes[parent]):
                 nodes[parent].children.append(len(nodes) - 1)
@@ -2119,11 +2148,29 @@ def _extract_body_and_attachments(
         if legacy_text:
             text_parts += 1
         if capture_text:
-            if full_text_parts >= full_body.MAX_SOURCES:
+            # The encoded payload is already in memory and bounds the bytes
+            # the transfer decode returns, so the shared source-byte budget
+            # is charged before any decode: a leaf the legacy body ignores
+            # is decoded for the capture alone, and ``full_body.prepare``
+            # would only cut it after the whole decode. It can cut a leaf
+            # whose decoded text would have fit (base64 shrinks it); that
+            # is a recorded BUDGET_LOSS, never silent. A legacy-body part
+            # is decoded whatever the budget, and ``prepare`` keeps its
+            # prefix. The stored text is read as is: ``get_payload()`` would
+            # decode an 8-bit payload with the sender's charset, which is
+            # the work being avoided (and ``idna`` raises on it).
+            raw_payload = getattr(part, "_payload", None)
+            encoded = len(raw_payload) if isinstance(raw_payload, str | bytes) else 0
+            if full_text_parts >= full_body.MAX_SOURCES or (
+                not legacy_text and full_encoded_bytes + encoded > full_body.MAX_SOURCE_BYTES
+            ):
                 node.source_losses |= full_body.BUDGET_LOSS
                 capture_text = False
             else:
                 full_text_parts += 1
+                full_encoded_bytes += encoded
+        if not legacy_text and not capture_text:
+            continue
         payload = _decoded_payload(part)
         # A part whose decode lost bytes (``_decode_lost_bytes``), or in
         # an encoding not decoded here (anything unknown can come back as

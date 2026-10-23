@@ -290,3 +290,138 @@ def test_decoding_loss_has_independent_source_provenance(payload):
     )
     assert message is not None and not message.full_body.complete
     assert any(p.losses for p in message.full_body.parts)
+
+
+def test_generation_is_bound_to_the_completeness_flag():
+    """A reparse that only flips ``complete`` (a cap omitted nodes while the
+    retained parts stayed identical) must not leave the old generation valid."""
+    connection = sqlite3.connect(":memory:")
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute(
+        "CREATE TABLE messages(claimant_id TEXT PRIMARY KEY, full_body_complete INTEGER, full_body_generation TEXT, full_body_version INTEGER)"
+    )
+    connection.executescript(full_body.SCHEMA_SQL)
+    connection.execute("INSERT INTO messages(claimant_id) VALUES ('c')")
+    parts = [full_body.Part(0, -1, "plain", True, "body\r\n")]
+    seen = []
+    for complete in (True, False):
+        full_body.store(connection.cursor(), "c", full_body.prepare(parts, "c", complete=complete))
+        seen.append(
+            connection.execute(
+                "SELECT full_body_complete, full_body_generation FROM messages"
+            ).fetchone()
+        )
+    assert [row[0] for row in seen] == [1, 0]
+    assert seen[0][1] != seen[1][1]
+    connection.close()
+
+
+def _html_message() -> bytes:
+    return (
+        b"Message-ID: <no-capture@example.test>\r\n"
+        b"Content-Type: text/html; charset=utf-8\r\n\r\n<p>SYNTHETIC_BODY</p>"
+    )
+
+
+def _source() -> SourceMetadata:
+    return SourceMetadata(
+        folder="INBOX", path="/synthetic/cur/body:2,", flags=frozenset(), size=None, mtime_ns=None
+    )
+
+
+def test_capture_can_be_disabled_without_the_html_pass_or_a_changed_legacy_result(monkeypatch):
+    """The reaper re-reads survivors only for their body text and attachments:
+    with ``capture_full_body=False`` it builds no capture, runs no capture HTML
+    child pass, and the legacy result is the one a capturing parse returns."""
+    calls = []
+    real = full_body.convert_html
+    monkeypatch.setattr(full_body, "convert_html", lambda *a: calls.append(a) or real(*a))
+    captured = parse_email_bytes(_html_message(), _source())
+    assert len(calls) == 1 and captured is not None and captured.full_body is not None
+    calls.clear()
+    plain = parse_email_bytes(_html_message(), _source(), capture_full_body=False)
+    assert not calls and plain is not None and plain.full_body is None
+    assert (plain.body_text, plain.attachments, plain.body_complete) == (
+        captured.body_text,
+        captured.attachments,
+        captured.body_complete,
+    )
+
+
+def _calendar_message(leaves: int, size: int) -> bytes:
+    parts = b"".join(
+        b"--b\r\nContent-Type: text/calendar; charset=utf-8\r\n\r\n" + b"X" * size + b"\r\n"
+        for _ in range(leaves)
+    )
+    return (
+        b"Message-ID: <calendar@example.test>\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSYNTHETIC_BODY\r\n"
+        + parts
+        + b"--b--\r\n"
+    )
+
+
+def _decoded_lengths(monkeypatch) -> list[int]:
+    from src import parser
+
+    lengths: list[int] = []
+    real = parser._safe_decode
+
+    def spy(payload, *args, **kwargs):
+        lengths.append(len(payload))
+        return real(payload, *args, **kwargs)
+
+    monkeypatch.setattr(parser, "_safe_decode", spy)
+    return lengths
+
+
+def test_capture_only_leaf_over_the_source_byte_budget_is_not_decoded(monkeypatch):
+    """A multipart ``text/*`` leaf the legacy body ignores is decoded only for
+    the capture, so the remaining source-byte budget is checked before the
+    transfer and charset decode, not after ``full_body.prepare`` cuts it."""
+    monkeypatch.setattr(full_body, "MAX_SOURCE_BYTES", 100)
+    lengths = _decoded_lengths(monkeypatch)
+    message = parse_email_bytes(_calendar_message(1, 5000), _source())
+    assert message is not None and message.body_text == "SYNTHETIC_BODY"
+    assert lengths and max(lengths) < 100
+    assert not message.full_body.complete
+    assert any(p.losses & full_body.BUDGET_LOSS for p in message.full_body.parts)
+
+
+def test_capture_only_leaves_past_the_source_count_are_not_decoded(monkeypatch):
+    monkeypatch.setattr(full_body, "MAX_SOURCES", 2)
+    lengths = _decoded_lengths(monkeypatch)
+    message = parse_email_bytes(_calendar_message(3, 300), _source())
+    assert message is not None
+    # The plain body and one calendar leaf: the other two are never decoded.
+    assert len(lengths) == 2
+    assert not message.full_body.complete
+    assert sum(bool(p.losses & full_body.BUDGET_LOSS) for p in message.full_body.parts) == 2
+
+
+def test_budget_probe_does_not_decode_a_capture_only_leaf_with_the_senders_charset():
+    """``get_payload()`` decodes an 8-bit payload with the sender's charset, and
+    ``idna`` raises on ``errors="replace"``: sizing a leaf for the budget must
+    not do that work, or escape ``parse_email_bytes`` with it."""
+    raw = (
+        b"Message-ID: <probe@example.test>\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSYNTHETIC_BODY\r\n"
+        b"--b\r\nContent-Type: text/calendar; charset=idna\r\n\r\nCaf\xc3\xa9\r\n--b--\r\n"
+    )
+    message = parse_email_bytes(raw, _source())
+    assert message is not None and message.body_text == "SYNTHETIC_BODY"
+    assert any(p.text == "Café\r\n" or p.text == "Café" for p in message.full_body.parts)
+
+
+def test_nested_leaf_losing_a_from_line_as_an_mbox_envelope_is_marked_incomplete():
+    """The stdlib moves a first post-boundary ``From `` line with no header/body
+    separator into ``get_unixfrom()`` and omits it from the payload."""
+    raw = (
+        b"Message-ID: <envelope@example.test>\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSYNTHETIC_BODY\r\n"
+        b"--b\r\nFrom synthetic@example.test Mon Jan  1 00:00:00 2024\r\nsecond leaf\r\n--b--\r\n"
+    )
+    message = parse_email_bytes(raw, _source())
+    assert message is not None
+    assert not message.full_body.complete
+    assert any(p.losses & full_body.STRUCTURE_LOSS for p in message.full_body.parts)

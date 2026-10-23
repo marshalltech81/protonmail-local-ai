@@ -2288,6 +2288,7 @@ def _write_full_body(conn: sqlite3.Connection, rec: _Record) -> None:
             separators=(",", ":"),
         ).encode()
     )
+    generation.update(b"complete=1")
     conn.execute(
         "UPDATE messages SET full_body_complete=?, full_body_generation=?, full_body_version=? WHERE claimant_id=?",
         (1, generation.hexdigest(), 1, rec.cid),
