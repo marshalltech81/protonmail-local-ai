@@ -263,6 +263,17 @@ Do not make any of the following changes unless the repository owner explicitly 
   sender-controlled Message-ID, so two files claiming one Message-ID
   cannot overwrite or delete each other's rows (#217). Thread
   membership still resolves by Message-ID.
+- Provider-identity assessments (`provider_identity_assessments`, keyed
+  by occurrence and policy version, with the account tied to the
+  occurrence) store what `proton-bridge-v1` read from header evidence;
+  nothing is accepted until the owner approves an acceptance rule (owner,
+  2026-10-23, #1598). The policy has no acceptance path and a trigger
+  refuses the `accepted` outcome: do not add one, loosen the trigger, or
+  derive a logical message, a count or a label from a candidate,
+  `X-Pm-Gluon-Id` or equal bytes. Label observations
+  (`label_membership_observations`) have no key to a source or an
+  assessment, and only a complete scan generation retires a membership.
+  A provider ID or label name is mailbox content: never log it.
 - Do not store raw attachment payload bytes in SQLite. The current schema
   keeps bytes only in the `.eml` on disk. ``attachment_extractions`` caches
   the extracted *text* per content hash and extractor module (#928) so

@@ -1158,7 +1158,15 @@ superseded entries keep their number and one line.
     assessment in the same account, never through the claimant or
     equal bytes. Logical counts apply each occurrence's eligibility,
     then deduplicate before counting and paging; source counts stay
-    the default.
+    the default. *2026-10-23 (owner, #1598; panel: Opus 5.5 and Codex
+    GPT-6.1 Sol, consensus after round 3):* the acceptance rule stays
+    open, which is option A: schema v21 stores candidates, assessments
+    and observations, `proton-bridge-v1` has no acceptance path and a
+    trigger refuses the `accepted` outcome. The rule returns to the
+    owner after #1664 (APPEND and recovery through Bridge's own
+    connector), #1665 (only an account's collector mounts its Maildir
+    writable) and the owner-approved #1584 run; the `X-Pm-Gluon-Id` shape
+    check is then an anomaly filter, not provenance.
 53. **Upstream Gluon and Bridge harness (2026-10-12, #1583):** the
     pinned Gluon and Bridge commits are built and run locally for
     #1316's identity evidence matrix, with acquisition kept apart from
