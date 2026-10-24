@@ -731,6 +731,10 @@ def register_search_tools(
             raise ToolError("Provide a query to gather evidence for.")
         try:
             validate_fts_query(query)
+        except InvalidFilterError as e:
+            rejections.reject("get_evidence", e.field_name)
+            raise ToolError(f"Evidence error: {e}") from e
+        try:
             _check_precision_controls(source, scope, max_chunks_per_thread, max_chars_per_chunk)
         except InvalidFilterError as e:
             precision_rejections.record(e.field_name)

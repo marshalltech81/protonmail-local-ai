@@ -1589,3 +1589,22 @@ def test_oversized_query_is_rejected_before_provider_or_database(
     assert "4096 characters" in error
     assert marker not in error and marker not in caplog.text
     assert calls == [] and fake_embed.embed_calls == []
+
+
+@pytest.mark.parametrize("thread_id", [None, "t-alpha"])
+def test_oversized_evidence_query_returns_actionable_error_and_logs_rejection(
+    fake_server, fake_embed, seeded_db, caplog, thread_id
+):
+    register_search_tools(fake_server, seeded_db, fake_embed)
+    marker = "SYNTHETIC_PRIVATE_EVIDENCE_1271"
+    with caplog.at_level("WARNING"):
+        error = _error(
+            fake_server.tools["get_evidence"](
+                query=marker + " word" * 1000,
+                thread_id=thread_id,
+            )
+        )
+    assert "4096 characters" in error
+    assert "query" in caplog.text
+    assert marker not in error + caplog.text
+    assert fake_embed.embed_calls == []
