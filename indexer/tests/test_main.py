@@ -2815,8 +2815,6 @@ class TestBatchedInitialIndex:
         )
         embedder_fail = make_mock_embedder()
         embedder_fail.embed_batch.side_effect = RuntimeError("simulated cloud outage")
-        # Patch wait_exponential so retry-cascade tests don't sleep.
-        monkeypatch.setattr("src.embedder.wait_exponential", lambda **_: lambda *_: 0)
         self._run(db, embedder_fail, threader, queue, monkeypatch, maildir)
 
         # B should NOT be indexed (Phase 2 failed). A's thread vector
@@ -2912,7 +2910,6 @@ class TestBatchedInitialIndex:
         )
         embedder_fail = make_mock_embedder()
         embedder_fail.embed_batch.side_effect = RuntimeError("simulated cloud outage")
-        monkeypatch.setattr("src.embedder.wait_exponential", lambda **_: lambda *_: 0)
         self._run(db, embedder_fail, threader, queue, monkeypatch, maildir)
 
         # Existing chunkless thread MUST still carry the subject vector,
@@ -2954,7 +2951,6 @@ class TestBatchedInitialIndex:
         embedder_fail = make_mock_embedder()
         embedder_fail.embed_batch.side_effect = RuntimeError("simulated outage")
         queue = _make_queue(db)
-        monkeypatch.setattr("src.embedder.wait_exponential", lambda **_: lambda *_: 0)
         self._run(db, embedder_fail, threader, queue, monkeypatch, maildir)
 
         # Confirm the stuck state: dead row, zero vec, no chunks.
@@ -3010,7 +3006,6 @@ class TestBatchedInitialIndex:
         embedder_fail = make_mock_embedder()
         embedder_fail.embed_batch.side_effect = RuntimeError("simulated outage")
         queue = _make_queue(db)
-        monkeypatch.setattr("src.embedder.wait_exponential", lambda **_: lambda *_: 0)
         self._run(db, embedder_fail, threader, queue, monkeypatch, maildir)
         assert queue.is_dead(str(inbox / "m.eml"))
 
