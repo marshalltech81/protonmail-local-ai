@@ -14,7 +14,8 @@
 # cannot tell a `#` inside quotes (`-H "X-Note: # release"`) from one
 # that starts a comment. A trailing comment that mentions an unsafe
 # flag is reported too; reword it. The other rules use `^[^#\n]*`
-# before each match. In the mkdir/install rule, the gap between the
+# before each match. Command/option gaps in the chmod and xtrace rules
+# accept backslash-continued lines. In the mkdir/install rule, the gap between the
 # command and its mode flag may cross backslash-continued lines, and
 # `#` in it counts only where bash would start a comment (at the start
 # of a word).
@@ -56,8 +57,8 @@ rules:
       exclude:
         - ".semgrep/"
     pattern-either:
-      - pattern-regex: (?m)^[^#\n]*\bset\s+(-[a-zA-Z]*x[a-zA-Z]*|-o\s+xtrace)(\s|;|$)
-      - pattern-regex: (?m)^[^#\n]*\b(ba)?sh\s+(-[a-zA-Z]*x[a-zA-Z]*|-o\s+xtrace)(\s|$)
+      - pattern-regex: (?m)^[^#\n]*\bset(?:\s|\\\n)+(-[a-zA-Z]*x[a-zA-Z]*|-o(?:\s|\\\n)+xtrace)((?:\s|\\\n)|;|$)
+      - pattern-regex: (?m)^[^#\n]*\b(ba)?sh(?:\s|\\\n)+(-[a-zA-Z]*x[a-zA-Z]*|-o(?:\s|\\\n)+xtrace)((?:\s|\\\n)|$)
       - pattern-regex: \A#![^\n]*\s-[a-zA-Z]*x
 
   - id: shell-pipe-to-shell
@@ -87,5 +88,5 @@ rules:
       exclude:
         - ".semgrep/"
     pattern-either:
-      - pattern-regex: (?m)^[^#\n]*\bchmod\s+(-[a-zA-Z]+\s+|--([a-z][a-z-]*)?\s+)*["']?([0-7]?[0-7]{2}[2367]|[ugo]*[ao][ugoa]*[+=][rwxXst]*w[rwxXst]*)["']?(\s|$)
+      - pattern-regex: (?m)^[^#\n]*\bchmod(?:\s|\\\n)+(-[a-zA-Z]+(?:\s|\\\n)+|--([a-z][a-z-]*)?(?:\s|\\\n)+)*["']?([0-7]?[0-7]{2}[2367]|[ugo]*[ao][ugoa]*[+=][rwxXst]*w[rwxXst]*)["']?((?:\s|\\\n)|$)
       - pattern-regex: (?m)^[^#\n]*\b(mkdir|install)\b(?:[^#\n]|(?<=\S)#|\\\n)*\s(-m\s*|--mode[=\s])["']?([0-7]?[0-7]{2}[2367]|[ugo]*[ao][ugoa]*[+=][rwxXst]*w[rwxXst]*)["']?(\s|$)
