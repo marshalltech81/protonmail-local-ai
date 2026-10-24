@@ -155,7 +155,7 @@ jobs:
           # not track a driver option: bump the tag and digest by hand,
           # together with tests.yml's (scripts/tests/image_pin_test.sh
           # fails while they differ, #1122).
-          driver-opts: image=moby/buildkit:v0.34.0@sha256:b059f8d7226d0b326bc871af489a5dddf65e36af4d20d14251b072974d9ee87c
+          driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
 
       - name: Build the .ppt reader stage (from the cache on pull-request runs)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -181,7 +181,7 @@ jobs:
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
-          version: v0.75.0
+          version: v0.76.1
           cache: true
 
       # The full reports list every severity, unfixed findings included,

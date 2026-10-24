@@ -11,6 +11,7 @@
 093be1b03331bce2932d6825c37e98272d7621e6a9e9fb93289a002518b8dd5a  org/tukaani/xz/1.9/xz-1.9.pom
 09b999a969e73525a6cc3ad2868ea744766e1d93b25c6c656d61a5ff9c881da9  org/codehaus/plexus/plexus/1.0.10/plexus-1.0.10.pom
 0a4077f6aeae2865532a564807af8d30c26acc6f63b7928d93bd7ab1f2190449  org/tukaani/xz/1.11/xz-1.11.jar
+0fb2b1db4ae69f750ea97f3c4d103e35f544bc3a6ec4be2753281ec65ef4f8b5  org/apache/poi/poi-scratchpad/6.0.0/poi-scratchpad-6.0.0.jar
 10937d44c425984cb8739225d34712e1a3145641ca93ac3f7ef186fa25f6babc  org/junit/junit-bom/5.10.3/junit-bom-5.10.3.pom
 10bbc5674fab0fa2bbcf8f7696796d3e1b92ab31525330921fbdb8da74fe1472  org/apache/maven/doxia/doxia-skin-model/2.0.0/doxia-skin-model-2.0.0.pom
 110438863bad37c28f906bf87016e38c7a8c758ba321e09d11dc5a2363a8e79e  org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.pom
@@ -34,9 +35,7 @@
 1c150e3d2df4b4237b47e28fea2079fb0da324578d5cca6a5fed2e37a62082ec  org/apache/commons/commons-digester3/3.2/commons-digester3-3.2.jar
 1c19157d1171d560088e485be97c93a7a2f7e9f56e517f0a30273c5c39df6231  org/apache/velocity/velocity-engine-core/2.4.1/velocity-engine-core-2.4.1.jar
 1d65f810ae5de6141ff73c659dae6f9db6bad83c76b811d977eb3798a6dc1d0f  org/apache/maven/plugins/maven-assembly-plugin/3.7.1/maven-assembly-plugin-3.7.1.jar
-1e1f6b4222ae7bfd6332003edf70201835990dbd46106b16cddba8a53e3cdf65  org/apache/groovy/groovy-bom/4.0.22/groovy-bom-4.0.22.pom
 1e56d7b058d28b65abd256b8458e3885b674c1d588fa43cd7d1cbb9c7ef2b308  org/apache/commons/commons-math3/3.6.1/commons-math3-3.6.1.jar
-1f472b0bc2004d5cf421ac48871417f84189e78f35c049718387fd8b44fb9f32  com/fasterxml/jackson/jackson-bom/2.17.2/jackson-bom-2.17.2.pom
 1f895a587df4844d9b7565e8e9a6352afe1d55532458a0dbeb746bc1d02e9216  org/apache/maven/maven-archiver/3.6.2/maven-archiver-3.6.2.jar
 2032531f05994121c2fdb5df7235ed548f53d294d0b7ac45e797148d85a30ee2  org/apache/maven/reporting/maven-reporting-api/4.0.0/maven-reporting-api-4.0.0.pom
 205c039a42cbae3556efbeb04a483eb3a3cf9550bd75bf84260dc8f28218f105  org/eclipse/ee4j/project/1.0.7/project-1.0.7.pom
@@ -45,7 +44,6 @@
 2283fb0bb5cec9f7524cba93498c6e89739aac5edd25d3a418f0fc4f6ce30007  org/apache/maven/resolver/maven-resolver-util/1.9.25/maven-resolver-util-1.9.25.pom
 22a5a7c25e445560604cb0e1e5cc3d3af2669a0549c3d7db8265dcf8d8ebb4e3  org/codehaus/plexus/plexus-archiver/4.11.0/plexus-archiver-4.11.0.pom
 23d186c8d8cd06015d022c710c715423d660d49e2973b15870b029cc26018682  com/fasterxml/jackson/jackson-parent/2.19.3/jackson-parent-2.19.3.pom
-24c3f407eff517432d5cfd5628b6b8a091f94c1dbb7481384599b5a0fbeedeb9  org/apache/poi/poi-scratchpad/5.5.1/poi-scratchpad-5.5.1.jar
 24f2e52bde65e2dc9cfcebb2fc22d8de0edb3726925ccf80b13db4eeb515a302  org/apache/commons/commons-parent/14/commons-parent-14.pom
 25a17abcbd162cf65dfae5bd7400611d19e424d679e132e9a9228346c6d78d42  org/apache/maven/doxia/doxia-site-model/2.0.0/doxia-site-model-2.0.0.pom
 28ebb2998bc7d7acb25078526971640892000f3413586ff42d611f1043bfec30  commons-io/commons-io/2.5/commons-io-2.5.pom
@@ -59,7 +57,6 @@
 3242ddc20873f71b381c333b22afb9cf3596d6a63b6683036a16bd51bc8721a4  org/codehaus/plexus/plexus-xml/3.0.1/plexus-xml-3.0.1.pom
 335513ce1dd2cf4c7d1dbfa1b8aa14656d9be5f9f3f0d0875ac528893c9f0f06  org/apache/maven/resolver/maven-resolver-api/1.4.1/maven-resolver-api-1.4.1.pom
 33dc67306cc95da14e5444e8b494d967924abf1d01bae1894676164cbd3f6112  org/apache/maven/resolver/maven-resolver-api/1.4.1/maven-resolver-api-1.4.1.jar
-348d4e7c131be6114c854a719ce7a44307a7c39bd366084977b24fd29ad0edb4  org/apache/commons/commons-parent/81/commons-parent-81.pom
 34f38c5d5e8bcb32cbd2d11e44bc12725be1ccdb87c3c96000af57fd81df6e64  org/ow2/asm/asm/9.10/asm-9.10.jar
 351c6e4940e939b1f330df47f60f13ba383db81ee008181af541f3a2a6d2a56c  org/apache/commons/commons-lang3/3.17.0/commons-lang3-3.17.0.pom
 3541e043252daf4e73b9e0e8badcc74a89bd6855419622d7739873fc9324feac  org/apache/maven/plugins/maven-install-plugin/3.1.2/maven-install-plugin-3.1.2.jar
@@ -88,6 +85,7 @@
 48fd6dc846e56b1f408660d163e75300f9e384bb63be482a8082a21d72a8db9c  org/apache/commons/commons-parent/66/commons-parent-66.pom
 4915a0a3683e9afad03db155ee85050396bbcdc240a83bf04aba58701b36d8ba  org/codehaus/plexus/plexus-i18n/1.1.0/plexus-i18n-1.1.0.pom
 4946e60a547c8eda69f3bc23c5b6f0dadcf8469ea49b1d1da7de34aecfcf18dd  org/apache/apache/9/apache-9.pom
+4977f1ae04e1c77e42c81dd94cca008e0d81ff8d0daa8b85e2a0740c3c1da3cc  org/apache/poi/poi/6.0.0/poi-6.0.0.jar
 4a8f3bc226f6f1b7f7362fa2a6e1da451561f86783ec512176e1c467a03708eb  org/apache/maven/shared/maven-shared-components/48/maven-shared-components-48.pom
 4aee72f9b30b507964c2f52b63f70e7b41fb9d957359cb5dc13c428abb4b6189  org/apache/maven/doxia/doxia-integration-tools/2.0.0/doxia-integration-tools-2.0.0.jar
 4b05895d1cd65013d4b8e7eeb09cde6b567b4c31729fe5c77c0f0898b5e04b88  org/apache/maven/doxia/doxia-sink-api/2.0.0/doxia-sink-api-2.0.0.pom
@@ -98,7 +96,6 @@
 524ec4787aff73af6b3a9fafa154c7f1881b648299b663fdbfcadda1286f2353  org/apache/apache/37/apache-37.pom
 552ad56800bc6010f1e6ea8c7638f24c74230e9991a52568df20d5b5aa5c4b20  commons-beanutils/commons-beanutils/1.8.3/commons-beanutils-1.8.3.pom
 555d0c9eaa69c042aff924927b9381e8f8174136d355eead445224452e6291cc  org/apache/apache/31/apache-31.pom
-5670e6ac1c4ddcc9d413cf87997a5da2efaa4d2abe439363af9ef102a0a09e40  com/fasterxml/oss-parent/58/oss-parent-58.pom
 57014e98ba621d9d254cf79ad4dfcdcf690290fd97a935bab9ebe72bd5be40d3  org/apache/maven/plugins/maven-plugins/48/maven-plugins-48.pom
 5706e8f29a0a07f56efbbea4a0670793414194bb8d24d8143ba1e787a2f32856  org/junit/junit-bom/5.14.4/junit-bom-5.14.4.pom
 570b5e43230f7a13f9ec8ae0b0993208a5f4c763b6593a87af4123112ce47220  org/apache/maven/plugins/maven-dependency-plugin/3.11.0/maven-dependency-plugin-3.11.0.pom
@@ -119,7 +116,6 @@
 68d4eed65a3dbbc342ed80dd138fbe9c67cb7fb4c2abc4f5201cdb5b9f645868  org/codehaus/plexus/plexus/16/plexus-16.pom
 68f9fdef85d2c89f53c63cbc559920e0115bd30eb6f7076c9854931d3829027b  org/apache/maven/shared/maven-shared-utils/3.1.0/maven-shared-utils-3.1.0.pom
 69e5c9fa35da7a51a5fd2099dfe56a2d8d32cf233e2f6d770e796146440263f4  org/apache/commons/commons-lang3/3.20.0/commons-lang3-3.20.0.jar
-6c52e876ca75775a11b56e4b36a7541f682827f56406725fcd87560b792ee3d8  org/apache/poi/poi/5.5.1/poi-5.5.1.jar
 6ca9fd4c6bb967bdb44ba03b3de42a79f81ea71dd13404d08fd7a72e3f5d1219  org/apache/maven/plugins/maven-site-plugin/3.12.1/maven-site-plugin-3.12.1.pom
 6cdee370194f4b9f742d12ef46528042f480d9bdf3de832de2792e1ae9ffc68d  org/apache/maven/doxia/doxia-site-renderer/2.0.0/doxia-site-renderer-2.0.0.jar
 6cf3495fc2e6ac913a2b7f2e03fb5908fb3f229fb06d3358dc45678d5af3e36e  org/apache/commons/commons-parent/65/commons-parent-65.pom
@@ -182,8 +178,6 @@
 9b779d18b22d8de559605558e7bb0a0a31b3f00c2abb9c878117c398aacabeca  org/apache/commons/commons-parent/51/commons-parent-51.pom
 9c56654ceff62d08b19b802d7d4d77dca54b17548b9802a0ba493f72f2adaf34  org/apache/maven/doxia/doxia-modules/2.0.0/doxia-modules-2.0.0.pom
 9c5f7cd5226ac8c3798cb1f800c031f7dedc1606dc50dc29567877c8224459a7  org/sonatype/forge/forge-parent/6/forge-parent-6.pom
-9d20781df09a4832f0ddcbd87f18791ae2f5456f714affd9a8a6b2eb3176be65  org/apache/poi/poi-scratchpad/5.5.1/poi-scratchpad-5.5.1.pom
-9dd23488a3eecd2cc0837a75e9e96bbdfece8591ce1322a56a53b7c997283263  org/apache/poi/poi/5.5.1/poi-5.5.1.pom
 9e64593239bb69d80b2db9e595d8c0fc3cb44cf2aa5c1ed547718b4cfd732efe  org/apache/maven/plugins/maven-plugins/41/maven-plugins-41.pom
 9e9323a26ba8eb2394efef0c96d31b70df570808630dc147cab1e73541cc5194  org/apache/apache/4/apache-4.pom
 9f85ff2fd7d6cb3097aa47fb419ee7f0ebe869109f98aba9f4eca3f49e74a40e  org/apache/apache/16/apache-16.pom
@@ -194,7 +188,6 @@ a3353f6a82feb950d5e7e64b0cd4ceadea7eb62112e447172e34974a510316f4  org/apache/mav
 a343e44ff5796aed0ea60be11454c935ce20ab1c5f164acc8da574482dcbc7e9  org/codehaus/plexus/plexus/5.1/plexus-5.1.pom
 a58c932e967e85e7bcb8d4adaedd14a5221a1750a1d089c5086c4d73df505155  org/apache/maven/resolver/maven-resolver-util/1.4.1/maven-resolver-util-1.4.1.pom
 a5991ead85259ba9f8c985d194aace3b069e14bcd8cde68fce928223714d3968  org/sonatype/sisu/sisu-inject/1.4.2/sisu-inject-1.4.2.pom
-a5c985b56fe1c58433393b5091a6f39e5b9f78518dd8fc92134690599b64d7d0  org/apache/logging/logging-parent/11.3.0/logging-parent-11.3.0.pom
 a6f50cb3f413875c039652269d2a89f8878d0d9fc8cc662fc13591ca20d84758  org/apache/velocity/tools/velocity-tools-generic/3.1/velocity-tools-generic-3.1.pom
 a709ce17111e4149d9b79a5295644e0cd5a8355aec4b2ef4c0436aba7b25d08a  org/iq80/snappy/snappy/0.4/snappy-0.4.pom
 a7702c487026802784b5797b62330a8b8d6592bf0f4737b25c67a5eac82659c0  jakarta/platform/jakartaee-api-parent/9.1.0/jakartaee-api-parent-9.1.0.pom
@@ -211,13 +204,10 @@ ac7cd94f0d9fb39bcba3b28287c4c40005dc0f53a986fb587e4f67a4ccb3e5b6  org/apache/vel
 ad3dcd30a40d45148350f066f2312ed9f946b7fd94f9c197ede0f3b9558b80a3  org/apache/maven/doxia/doxia-sitetools/2.0.0/doxia-sitetools-2.0.0.pom
 ad9df3b73df8bbc0309ad42818fa9779cd10528df0708788f4aceddc514bd031  org/apache/maven/shared/maven-shared-components/30/maven-shared-components-30.pom
 ae47795e721803ec8ff1deed74be28a811a02713bd5a3ab0ac67c2b58cb635ab  commons-io/commons-io/2.21.0/commons-io-2.21.0.pom
-aee6de4a97283b040e43f4dad575e7b74796cd984d89276f7ec7567380c8a29d  com/fasterxml/jackson/jackson-parent/2.17/jackson-parent-2.17.pom
 af10c108da014f17cafac7b52b2b4b5a3a1c18265fa2af97a325d9143537b380  org/apache/apache/21/apache-21.pom
 afaf8e74019b230d3f56fdd7c93fb1070c0dca34f3d2d5ab5dea9fc616bd5ca4  org/slf4j/slf4j-api/1.7.5/slf4j-api-1.7.5.pom
-aff645c58cd41ac5184d976ce8ee38de5694d99ab8764d6ee7f14f70ead5f98b  commons-codec/commons-codec/1.20.0/commons-codec-1.20.0.pom
 b0020d55af2afd9bff042d627dd52b7a4828243014ded0ae89412e1717582056  org/apache/maven/plugins/maven-plugins/36/maven-plugins-36.pom
 b0dacb1479cd4dbe0810d1aa335bf0fb9bc3c4ff55369c87597ba68f5879fe4f  com/github/cliftonlabs/json-simple/3.0.2/json-simple-3.0.2.pom
-b17ab7f328f4586b7e71f8c94fc35a5da2bce80705a5d63004022c1928833558  org/apache/logging/log4j/log4j-bom/2.24.3/log4j-bom-2.24.3.pom
 b2d4341c921981cb35d5570f4fc9732a08a34b1528dee84c0507c7f2719a334f  org/apache/commons/commons-text/1.12.0/commons-text-1.12.0.pom
 b3707bdb06778745b0304985c340a9847eeda20f4ca7f2902faf6c266cc29653  org/apache/maven/doxia/doxia-integration-tools/2.0.0/doxia-integration-tools-2.0.0.pom
 b43ee89c8890b9e5bc48d079fcb4c44f082b5139253356dc455806a33c3dd8fd  org/codehaus/plexus/plexus/18/plexus-18.pom
@@ -228,20 +218,17 @@ b657bef2e1eb11e029a70cd688bde6adad29e4e99dacb18516bf651ecca32435  org/apache/mav
 b826ddd92f9d7cc64371a02fa0830c154d67c98370ea54a2d196e72eb590ad28  commons-codec/commons-codec/1.16.1/commons-codec-1.16.1.pom
 bb388d37fbcdd3cde64c3cede21838693218dc451f04040c5df360a78ed7e812  org/slf4j/slf4j-parent/1.7.36/slf4j-parent-1.7.36.pom
 bc038dcf0d45d16b71270eddeef39119672147306b661705fe4b568aa5d487e7  org/ow2/asm/asm/9.10/asm-9.10.pom
-bc05de33533a1259adbacbfcc826cd66376a2d9c4ee53fb836009f44a45b8239  org/apache/logging/log4j/log4j-api/2.24.3/log4j-api-2.24.3.pom
 bc10624e0623f36577fac5639ca2936d3240ed152fb6d8d533ab4d270543491c  org/apache/apache/23/apache-23.pom
 bdbdf81072c190ee9a8b181a5c58f5bd917a750fb13a256debbf53f5dbd33a2a  commons-io/commons-io/2.20.0/commons-io-2.20.0.pom
 be5e3f8e59edce852a0fdaef8caedb32f364bf13db654d15f98e17930e456487  org/codehaus/plexus/plexus-containers/2.0.0/plexus-containers-2.0.0.pom
 bea12e747708d25e73410ca1c731ebdfa102e8bdb6ec7d81bd4522583b234bcc  org/codehaus/plexus/plexus/2.0.6/plexus-2.0.6.pom
 c0870a6e68e160851cc7c1108ffc77198edf90715520d1a87c50484e7281c06e  org/apache/maven/resolver/maven-resolver/1.9.25/maven-resolver-1.9.25.pom
-c141b4863fc0ceab583894a13e1f9e52c01fc2d758727d6747f6b99d5040f3b1  org/apache/logging/log4j/log4j/2.24.3/log4j-2.24.3.pom
 c1a510a87a62bd2d74ac1472dd31c3f9e9b0b8b8568f37d77c0f135415bebd05  org/codehaus/plexus/plexus-xml/3.0.1/plexus-xml-3.0.1.jar
 c2e591fac5e62327c13a267c41ec21d1330e5fcbb943c56fbd6803132e7b1115  org/apache/maven/doxia/doxia-module-xdoc/2.0.0/doxia-module-xdoc-2.0.0.pom
 c35cca7b61d4678d9578cbc0b901b8717b539abf9254441da78b8fe60de064d0  commons-beanutils/commons-beanutils/1.9.4/commons-beanutils-1.9.4.pom
 c43bc5a022dbfd9de82be232dffe46208cbc7de12c14385b5da824e331e535bb  org/slf4j/slf4j-parent/1.7.5/slf4j-parent-1.7.5.pom
 c5483fc9c8e1a7ef6b0f899e37aaa6ce2f8afae54955bfa559fd63a33dbb065b  org/codehaus/plexus/plexus-component-annotations/2.2.0/plexus-component-annotations-2.2.0.pom
 c6bd81e2588e0f0f87392d4db590e1d81c126a25ee9253252ef89c506cde1e34  org/apache/maven/shared/maven-shared-components/41/maven-shared-components-41.pom
-c700f998e1d7a6a5c0aef1d4ceeb6bac7d1702dd6d6eda73a17d67f5d6f2467d  org/apache/commons/commons-collections4/4.5.0/commons-collections4-4.5.0.pom
 c72124a9c9a79910c1858766b72c350e1a39244cbfb4b076348fbfe078281965  org/junit/junit-bom/5.11.1/junit-bom-5.11.1.pom
 c8ab868f9c532233bd12f311cea90a3f6de65ea07a7aa470c3e2bbf83b5c79fb  org/apache/logging/log4j/log4j-api/2.26.1/log4j-api-2.26.1.pom
 c91557679a0eb9fde3175055628ceb7b8fd5ab6d308340770d236fb06265dc26  org/apache/maven/doxia/doxia-module-xhtml5/2.0.0/doxia-module-xhtml5-2.0.0.jar
@@ -258,6 +245,7 @@ d0f2e16d054e8bb97add9ca26525eb2346f692809fcd2a28787da8ceb3c35ee8  commons-loggin
 d189ff2c0027e96bb65d31e6f227ed2af966169b36af1e973dd5ba08926dc7b5  org/apache/commons/commons-parent/85/commons-parent-85.pom
 d24c3ca2185009d81b1ce3ee90cff1cfeab53b70fadbb3ae0c02a867d7c96034  org/codehaus/plexus/plexus-archiver/4.11.0/plexus-archiver-4.11.0.jar
 d2a68bc43e04adaf767970122de0c44430458fee25dd967d0039401dc260171a  org/apache/maven/resolver/maven-resolver-api/1.9.25/maven-resolver-api-1.9.25.pom
+d2ec73f4b2dbccb31584ce1e370dc5c532145852019580fdac058f4f9d495f63  org/apache/poi/poi-scratchpad/6.0.0/poi-scratchpad-6.0.0.pom
 d2edd4077c0abc9cc8202883c459503180424636cb39a83031ec1112394b2576  org/apache/maven/maven-parent/35/maven-parent-35.pom
 d2ee7efbcdc82206c69559548aef86a99add95378f03cc58b4d9696b3969c8bb  org/sonatype/sisu/inject/guice-bean/1.4.2/guice-bean-1.4.2.pom
 d2f8b6fd4800b6aaf120f5a38226d5f9d5fc6db837af99e2f9b33067868b9872  org/apache/commons/commons-parent/91/commons-parent-91.pom
@@ -303,6 +291,7 @@ f3e804d91571075e6367cff9020641d79d66bc46a6c13a62fcba1d369cd8936d  org/apache/mav
 f43ff6fee0b32533765b3406648d6a5532f85d5e488079480788cb36e79d0980  org/apache/maven/shared/maven-shared-components/33/maven-shared-components-33.pom
 f48e88538aac145eb3ae0345a9ebd055b28f329a35dce8d1e9281325ca9b0ea2  org/junit/junit-bom/5.11.2/junit-bom-5.11.2.pom
 f4a846c448ca85358279184a310f6ee3f46fa39688f74a72961c1bfe222f28a6  org/apache/maven/doxia/doxia-module-apt/2.0.0/doxia-module-apt-2.0.0.jar
+f6970de957d69c8dc60069a6a35edc254fd51610b4f2e19c774705c509901e81  org/apache/poi/poi/6.0.0/poi-6.0.0.pom
 f6d481093e75767cba1ac7e1db38f8f692cbe3e38744693371a75aeb21c6148b  org/springframework/spring-framework-bom/5.3.39/spring-framework-bom-5.3.39.pom
 f6ec9ef75a41d1b826e5ecf02d92c5de90a6bc70ea93d5340988703223bf2205  org/apache/maven/doxia/doxia-site-model/2.0.0/doxia-site-model-2.0.0.jar
 f76b85adb0c00721ae267b7cfde4da7f71d3121cc2160c9fc00c0c89f8c53c8a  com/zaxxer/SparseBitSet/1.3/SparseBitSet-1.3.jar
