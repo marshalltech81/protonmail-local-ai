@@ -712,7 +712,8 @@ A `sender`, `recipient` or `participant` value matched as a substring
 (a name or fragment, not a full address) that matches none of a
 message's stored addresses and display names is unknown, not false,
 when its `participant_names_complete` is not `1`: `0` when the
-indexer's per-message name budget dropped a From/To/Cc name, `null` for mail not
+indexer's per-message name budget or address-formatting identity guard dropped
+a From/To/Cc name, `null` for mail not
 reparsed since the upgrade that added it
 ([#1140](https://github.com/marshalltech81/protonmail-local-ai/issues/1140)).
 A match on a stored address or name still decides it, and a full
