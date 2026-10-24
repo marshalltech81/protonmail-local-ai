@@ -61,6 +61,21 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install pinned Docker Compose for lifecycle-hook coverage
+        env:
+          COMPOSE_SHA256: c57ab918abd5b05ca7e7d0f275875dd1330a695074f309dc9eab1b49efafcd4b # pragma: allowlist secret
+        run: |
+          test "$(uname -m)" = x86_64
+          compose_tmp=$(mktemp -d)
+          trap 'rm -rf "$compose_tmp"' EXIT
+          curl --fail --location --show-error --silent --retry 3 --max-time 120 \
+            "https://github.com/docker/compose/releases/download/v5.5.0/docker-compose-linux-x86_64" \
+            --output "$compose_tmp/docker-compose"
+          printf '%s  %s\n' "$COMPOSE_SHA256" "$compose_tmp/docker-compose" | sha256sum --check
+          mkdir -p "$HOME/.docker/cli-plugins"
+          install -m 0755 "$compose_tmp/docker-compose" "$HOME/.docker/cli-plugins/docker-compose"
+          docker compose version
+
       - name: Run Compose rendering tests
         run: bash scripts/tests/compose_test.sh
 

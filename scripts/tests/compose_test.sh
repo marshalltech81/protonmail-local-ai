@@ -11,7 +11,8 @@ set -Eeuo pipefail
 # compose.accounts.yml from synthetic configurations (#1608).
 # Uses ``docker compose config``, which needs the Compose CLI but no
 # daemon, images or secret files, and Python 3.11 or later for the
-# translator.
+# translator. pre_start regression cases require Docker Compose v5.3.0+;
+# CI installs a checksum-pinned v5.5.0.
 #
 # Run: bash scripts/tests/compose_test.sh
 
@@ -402,16 +403,8 @@ def bounded_logging:
               # and joins the same network and volumes, so it can run
               # arbitrary code with the Bridge password, Maildir/state
               # and bridge-net access a collector keeps, before mbsync
-              # itself starts (review round 9). Untested here: pre_start
-              # is too recent a Compose Specification field (Docker
-              # Compose v5.3.0+) for the CI runner image own bundled
-              # Compose (2.38.2, confirmed via its own readme), which
-              # refuses the property with a schema error before this
-              # check -- or any jq logic -- ever runs, so no render in
-              # this suite can carry it. Verified by hand against
-              # Docker Compose v5.5.0 (reverting this line reopens the
-              # gap); #1631 tracks giving it the same CI coverage every
-              # other check here has.
+              # itself starts (review round 9). CI pins a Compose version
+              # that renders pre_start so this check is regression-tested.
               (if ($s | set("pre_start")) then "\($c.service): sets a pre_start hook" else empty end),
               (if ($s | set("post_start")) then "\($c.service): sets a post_start hook" else empty end),
               (if ($s | set("pre_stop")) then "\($c.service): sets a pre_stop hook" else empty end),
@@ -1717,10 +1710,21 @@ EOF
 # routing field: AGENTS.md forbids it on any mbsync-family service
 # without the #1499 decision, but nothing held a collector to that
 # (review round 3).
+generated_collectors_reject_pre_start_hooks() {
+    expect_generated_rejected three-proton "" \
+        "mbsync: sets a pre_start hook" \
+        "mbsync-$UUID_B: sets a pre_start hook" <<EOF
+services:
+  mbsync:
+    pre_start:
+      - command: ["true"]
+  mbsync-$UUID_B:
+    pre_start:
+      - command: ["true"]
+EOF
+}
+
 generated_collectors_keep_the_mbsync_implementation() {
-    # The pre_start check just above (HARDENING_VIOLATIONS) has no case
-    # here: the CI runner's Compose predates that field and refuses it
-    # with a schema error before this check runs (#1631).
     expect_generated_rejected three-proton "" \
         "mbsync-$UUID_B: image or build differs from mbsync" \
         "mbsync-$UUID_B: sets an entrypoint override" \
@@ -2153,6 +2157,7 @@ check "generated collectors bind trust values to their declarations" \
     generated_collectors_bind_trust_values_to_their_declarations
 check "generated collectors apply the implementation and trust bindings to the legacy service" \
     generated_collectors_apply_bindings_to_the_legacy_service
+check "generated collectors reject pre_start hooks" generated_collectors_reject_pre_start_hooks
 check "generated collectors keep the mbsync implementation" \
     generated_collectors_keep_the_mbsync_implementation
 check "generated collectors reject empty entrypoint and command overrides" \
