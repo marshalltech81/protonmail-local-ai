@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -89,6 +90,7 @@ def test_invalid_keys_and_tool_names_are_refused_before_dispatch(name, args, cap
 
 
 def test_scan_work_is_linear_and_deep_lists_do_not_recurse(monkeypatch):
+    started = time.perf_counter()
     original = argument_validation._SURROGATE
     lengths = []
 
@@ -106,3 +108,4 @@ def test_scan_work_is_linear_and_deep_lists_do_not_recurse(monkeypatch):
     for _ in range(5000):
         deep = [deep]
     assert argument_validation._invalid_unicode(deep)
+    assert time.perf_counter() - started < 5
