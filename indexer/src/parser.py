@@ -887,7 +887,10 @@ def parse_email_bytes(
         caps["in_reply_to_length"] += 1
         in_reply_to = ""
     references: list[str] = []
-    for ref in (_clean_id(r) for r in msg.get("References", "").split() if r.strip()):
+    reference_header = msg.get("References", "")
+    if isinstance(reference_header, email.header.Header):
+        reference_header = _decode_header(reference_header)
+    for ref in (_clean_id(r) for r in reference_header.split() if r.strip()):
         if len(ref) <= MESSAGE_ID_MAX_CHARS:
             references.append(ref)
         else:
@@ -1555,11 +1558,6 @@ def _decode_transport_form(
     return None if decoded is None else _parse_transport_form(decoded, content_type)
 
 
-# The ``message/*`` labels the parser reads as one nested message, whose
-# OLE2 or ZIP contents are recovered from that one child (#1416).
-_SINGLE_CHILD_MESSAGE_TYPES = frozenset(
-    {"message/rfc822", "message/global", "message/external-body"}
-)
 _DELIVERY_STATUS = "message/delivery-status"
 
 
@@ -1580,8 +1578,7 @@ def _identity_container_bytes(
     delivery report with trailing blank lines has a defect-free child
     with no fields), is the guard.
 
-    * ``message/rfc822``, ``message/global``, ``message/external-body``:
-      one child with no fields, whose body is the bytes as sent.
+    * Other ``message/*`` labels: one child with no fields, whose body is the bytes as sent.
     * ``message/delivery-status``: the parser splits the bytes into
       blocks at blank lines, so they are read from a second parse of the
       message that treats that label as a leaf (``_DeliveryStatusBytes``).
@@ -1596,7 +1593,7 @@ def _identity_container_bytes(
     data: bytes | None = None
     if content_type == _DELIVERY_STATUS:
         data = delivery_status.get(part) if delivery_status is not None else None
-    elif content_type in _SINGLE_CHILD_MESSAGE_TYPES and len(children) == 1 and not first.keys():
+    elif content_type.startswith("message/") and len(children) == 1 and not first.keys():
         data = _decoded_payload(first)
     if data and has_container_prefix(data):
         return data
@@ -2490,7 +2487,9 @@ def _read_top_headers(
     return rows, complete
 
 
-def _clean_id(value: str) -> str:
+def _clean_id(value: str | email.header.Header) -> str:
+    if isinstance(value, email.header.Header):
+        value = _decode_header(value)
     return value.strip().strip("<>").strip()
 
 

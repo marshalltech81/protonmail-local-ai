@@ -234,12 +234,12 @@ def _git_commit() -> str:
 
 
 def _hashable_url(value: str) -> str:
-    """``value`` unless it carries userinfo, so the hash cannot be used to
+    """``value`` unless it carries userinfo, a query or a fragment, so the hash cannot be used to
     test guesses at a password offline (#893). Never
     raises: a value ``urlsplit`` rejects is a fixed marker too."""
     try:
         parts = urllib.parse.urlsplit(value)
-        if parts.username is not None or parts.password is not None:
+        if parts.username is not None or parts.password is not None or "?" in value or "#" in value:
             return "<url-with-credentials>"
     except ValueError:
         return "<unparseable-url>"
@@ -464,6 +464,8 @@ def _validate_embed_config() -> str:
             "EMBED_BASE_URL must not embed credentials (user:pass@host). Put "
             "the API key in .secrets/embed_api_key.txt instead."
         )
+    if "?" in base_url or "#" in base_url:
+        raise ValueError("EMBED_BASE_URL must not contain a query string or fragment")
     return base_url
 
 

@@ -10026,3 +10026,13 @@ class TestAttachmentSummaryDebounce:
             main._log_attachment_outcomes(force=True)
         lines = [r for r in caplog.records if r.getMessage().startswith("attachments n=")]
         assert len(lines) == 2
+
+
+@pytest.mark.parametrize("suffix", ["?key=SYNTHETIC_ENDPOINT_1449", "#SYNTHETIC_ENDPOINT_1449"])
+def test_embed_endpoint_rejects_query_and_fragment(monkeypatch, caplog, suffix):
+    monkeypatch.setattr(main, "EMBED_BASE_URL", "https://provider.invalid/v1" + suffix)
+    monkeypatch.setattr(main, "EMBED_MODEL", "synthetic-model")
+    monkeypatch.setattr(main, "EMBED_API_KEY", "unauthenticated")
+    with pytest.raises(ValueError, match="query string or fragment") as exc:
+        main._validate_embed_config()
+    assert "SYNTHETIC_ENDPOINT_1449" not in str(exc.value) + caplog.text
