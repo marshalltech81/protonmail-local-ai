@@ -34,6 +34,14 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
   `attachments[].attachment_occurrence_id` → `get_attachment`, paged by
   `next_offset`).
 
+**Attachment identity.** `attachment_id` is the SHA-256 of a leaf MIME
+part's decoded payload, so identical decoded bytes share an ID across
+messages. For container parts (attached emails, delivery reports and
+multipart bundles), the parser hashes a normalized serialization, or an
+empty payload when serialization is skipped or fails. A container ID
+therefore does not establish byte identity of the original attachment.
+Use `attachment_occurrence_id` to identify one attachment on one message.
+
 **Message-ID and claimant ID.** The sender sets a message's Message-ID,
 so two different indexed files can carry the same one (a reused or
 forged ID). The index keeps both rather than letting one overwrite the
@@ -580,6 +588,16 @@ and the sender filters do not read it
 ([#1235](https://github.com/marshalltech81/protonmail-local-ai/issues/1235)).
 
 ## Filter predicates
+
+To find an organisation's mail, use a known domain (for example,
+`sender="@example.com"`), or call `find_contact` with a fragment to discover
+addresses and the returned `organization` domain. A configured
+`authority_class` can group several domains under one operator-defined
+class. A sender or participant name fragment matches stored addresses or
+display names, not an organisation directory: zero matches for the name
+does not establish absence of that organisation's mail. Authority classes
+require operator rules; an undefined class is not proof of absence either.
+
 
 Every message-level filter is one *leaf* of the predicate module
 `mcp-server/src/lib/predicates.py`
