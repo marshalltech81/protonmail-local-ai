@@ -878,7 +878,9 @@ def _check_authority(authority: dict[str, Any] | None) -> None:
                 where = f"global.classification.authority.{cls}.{key}[{i}]"
                 if key == "domains" and not _is_bare_domain(pattern):
                     raise ConfigError(f"{where} {_BARE_DOMAIN_TEXT}")
-                if key == "addresses" and not _is_bare_address(pattern):
+                if key == "addresses" and (
+                    pattern.startswith("@") or not _is_bare_address(pattern)
+                ):
                     raise ConfigError(f"{where} must be a bare address (name@domain).")
                 if pattern in seen[key]:
                     raise ConfigError(

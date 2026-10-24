@@ -7796,6 +7796,10 @@ _DOCUMENT_FAILS = (
     "counted as unsupported="
 )
 _UNREPORTED_CAPS = {
+    "src.extractors.image:MAX_DRAFT_FACTOR": (
+        "a JPEG needing greater downsampling raises ImagePixelCeilingError, counted as "
+        "unsupported; allowed scale-downs have image child degradation counts"
+    ),
     "src.extractors:max_bytes": (
         "skips the whole attachment as too_large, counted as too_large= in the aggregate"
     ),
@@ -8007,7 +8011,7 @@ def _extractor_caps_in_code() -> set[str]:
     found: set[str] = set()
     for name in _EXTRACTOR_MODULES:
         source = inspect.getsource(importlib.import_module(name))
-        for constant in re.findall(r"^([A-Z_][A-Z0-9_]*MAX[A-Z0-9_]*)\s*[:=]", source, re.M):
+        for constant in re.findall(r"^([A-Z0-9_]*MAX[A-Z0-9_]*)\s*[:=]", source, re.M):
             found.add(f"{name}:{constant}")
     for parameter in inspect.signature(extractors.extract).parameters:
         if parameter.startswith("max_") or parameter.endswith("_seconds"):
@@ -8039,6 +8043,7 @@ class TestExtractorCapsAreReported:
         nothing and pass vacuously."""
         found = _extractor_caps_in_code()
         assert "src.extractors.xlsx:_MAX_TEXT_CHARS" in found
+        assert "src.extractors.image:MAX_DRAFT_FACTOR" in found
         assert "src.extractors:GLOBAL_MAX_IMAGE_PIXELS" in found
         assert "src.extractors:max_extracted_chars" in found
         assert len(found) == len(_REPORTED_CAPS) + len(_UNREPORTED_CAPS)

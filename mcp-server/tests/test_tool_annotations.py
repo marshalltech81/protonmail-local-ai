@@ -170,3 +170,35 @@ def test_search_emails_routes_latest_from_a_person_to_query_messages(empty_db):
     description = _wire_tools(_server(empty_db))["search_emails"]["description"]
     assert "latest" in description
     assert "query_messages(sender=" in description
+
+
+def test_keyword_passage_tools_serve_focused_query_guidance(empty_db):
+    tools = _wire_tools(_server(empty_db))
+    excluded = dict.fromkeys(
+        (
+            "get_thread",
+            "get_message",
+            "list_threads",
+            "query_messages",
+            "query_threads",
+            "aggregate_messages",
+            "query_attachments",
+            "get_attachment",
+            "find_contact",
+            "list_folders",
+            "get_mailbox_status",
+        ),
+        "Direct retrieval, inventory, aggregation or status; no keyword passage ranking.",
+    )
+    excluded["search_attachments"] = "Ranks attachment matches, not per-thread evidence passages."
+    excluded["summarize_thread"] = (
+        "Reads one thread; its resolution search does not request evidence."
+    )
+    assert set(excluded) <= set(tools)
+    for name, tool in tools.items():
+        if name in excluded:
+            continue
+        description = " ".join(tool["description"].split())
+        assert "Lead with names, identifiers and key terms" in description, name
+        assert "keep the query focused" in description, name
+        assert "first 16 distinct query words" in description, name

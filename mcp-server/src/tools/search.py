@@ -249,6 +249,10 @@ def register_search_tools(
         Search the mailbox and return matching THREADS (conversations),
         not individual messages.
 
+        Lead with names, identifiers and key terms and keep the query
+        focused: keyword passage ranking uses only the first 16 distinct
+        query words to order passages; later words can still match.
+
         Use this whenever the user asks about email, threads, messages,
         senders, dates, attachments, or anything else stored in the
         local mailbox index. This is the default tool for any mailbox
@@ -587,6 +591,10 @@ def register_search_tools(
         """
         Return the exact indexed passages (evidence chunks) that back a
         question — no LLM synthesis, just the retrieved source text.
+
+        Lead with names, identifiers and key terms and keep the query
+        focused: keyword passage ranking uses only the first 16 distinct
+        query words to order passages; later words can still match.
 
         Use this to AUDIT or CITE an answer: it surfaces the same chunks
         ask_mailbox feeds its model, so you can show the user precisely
