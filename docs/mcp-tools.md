@@ -1665,7 +1665,9 @@ through the flat parameters' inferred mode:
   the counts are diagnostics that include undecided candidates, while
   the addresses are mail content and come from returned messages only.
   `address_matches` still reports the flat `sender`, `recipient` and
-  `participant` filters only. The counts take one more statement,
+  `participant` filters only. Participant witnesses exclude From rows whose
+  sender attribution is ambiguous or unassessed, even when a visible recipient
+  makes the message match. The counts take one more statement,
   which evaluates each leaf once per message not rejected, and each
   non-negated address leaf takes one grouped query.
 
