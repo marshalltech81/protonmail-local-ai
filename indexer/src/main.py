@@ -4130,11 +4130,48 @@ def _build_embedder(embed_base_url: str) -> OpenAIEmbedder:
     )
 
 
+def _warn_extraction_timeout_config() -> None:
+    """Disclose a watchdog shorter than a configured extraction child.
+
+    This is advisory: neither independent limit is changed or disabled.
+    Fixed-format children fit under the HTML/EML ceiling; a dispatch-
+    derived test checks that whenever a format or its timeout changes.
+    """
+    if not INDEXER_ATTACHMENT_EXTRACTION_ENABLED or not INDEXER_MESSAGE_TIMEOUT_SECONDS:
+        return
+    from .extractors import eml, html, image, pdf
+
+    limits = [
+        eml.CHILD_TIMEOUT_SECONDS,
+        html.CHILD_TIMEOUT_SECONDS,
+        pdf.child_timeout_seconds(
+            ocr_enabled=INDEXER_OCR_ENABLED,
+            max_ocr_pages=INDEXER_OCR_MAX_PAGES,
+            ocr_timeout_seconds=INDEXER_OCR_TIMEOUT_SECONDS or None,
+            max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES,
+        ),
+    ]
+    if INDEXER_OCR_ENABLED:
+        limits.append(
+            image.child_timeout_seconds(INDEXER_OCR_MAX_PAGES, INDEXER_OCR_TIMEOUT_SECONDS or None)
+        )
+    longest = max(limits)
+    if INDEXER_MESSAGE_TIMEOUT_SECONDS <= longest:
+        log.warning(
+            "INDEXER_MESSAGE_TIMEOUT_SECONDS=%d can expire before an extractor child finishes "
+            "(largest_extractor_child_seconds=%.0f); raise INDEXER_MESSAGE_TIMEOUT_SECONDS "
+            "above that limit with time for parent-side work, or lower the extraction limits",
+            INDEXER_MESSAGE_TIMEOUT_SECONDS,
+            longest,
+        )
+
+
 def main():
     embed_base_url = _validate_embed_config()
     # Before the database opens: a missing or malformed ACCOUNT_SCOPE or
     # SOURCE_MODE refuses with fixed text, and no migration runs (#1596).
     account = account_config_from_env(os.environ, maildir_root=MAILDIR_PATH)
+    _warn_extraction_timeout_config()
     log.info("Starting indexer...")
     log.info("  Maildir: %s", MAILDIR_PATH)
     log.info("  SQLite:  %s", SQLITE_PATH)

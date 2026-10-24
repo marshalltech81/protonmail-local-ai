@@ -1406,6 +1406,14 @@ EMBED_MODEL and the embed API key" error.
 | `INDEXER_RETRY_BASE_SECONDS` | `30` | Base backoff. Each attempt multiplies by `2^(attempts-1)`, capped at 6 h. |
 | `INDEXER_MESSAGE_TIMEOUT_SECONDS` | `3600` | Stall guard: the indexer exits (and Compose restarts it) when one message's parse, or one attachment's extraction, runs this long. `0` disables. |
 
+At startup the indexer warns when the nonzero stall timeout is no longer than
+the largest configured extractor-child wall clock. This does not change either
+limit. At default page caps, `INDEXER_OCR_TIMEOUT_SECONDS=0` permits a 7,170 s
+PDF child, exceeding the default 3,600 s watchdog. Raise the watchdog above the
+reported child limit with time for parent-side work, or lower extraction limits;
+otherwise a legitimate slow extraction may be interrupted and eventually
+dead-letter its message. Disabling attachment extraction skips this comparison.
+
 A message that crashes or hangs the indexer is charged one attempt per
 restart, retried on its own (in case the whole batch's memory, not the
 message, caused the crash), and dead-lettered with
