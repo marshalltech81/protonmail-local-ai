@@ -4110,7 +4110,12 @@ or chunk / attachment extraction (Phase 2a) step is running is
 therefore charged one attempt while the step runs
 (`IndexingQueue.begin_attempt`) and marked `last_stage = 'interrupted'`,
 both refunded when the step returns or its outcome is recorded. A
-process that dies mid-step leaves only that message charged and marked
+`MemoryError` or `RecursionError` raised in the indexer escapes both the
+initial drain and the steady-state drain; the latter logs only the type
+and exits with status 1, suppressing the original exception and its chain
+so a terminal traceback cannot expose mail. It does not retry the charged
+step on the next tick. A process that dies mid-step leaves only that
+message charged and marked
 — never its batchmates — so an ordinary restart costs at most one
 attempt. An out-of-memory kill can come from the whole batch's
 footprint rather than the message it landed on, and a restart replays

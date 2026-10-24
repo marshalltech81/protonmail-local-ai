@@ -793,7 +793,7 @@ class TestExperimentalViews:
         output = _brief_output(None, status=status, raw_text='{"chronology": [')
         view = view_of("brief_issue", output)
         assert view.complete is False and view.abstained is False
-        assert view.statements == [] and view.answer == '{"chronology": ['
+        assert len(view.statements) == 1 and view.answer == '{"chronology": ['
         det = grade_run(CASES[BRIEF], _experimental_run("brief_issue", output, []))
         assert det.checks["answer_complete"] == FAIL
         assert not det.passed
@@ -855,7 +855,7 @@ class TestExperimentalViews:
         )
         view = view_of("check_conclusion", output)
         assert (view.complete, view.abstained, view.answer) == (False, False, "not json")
-        assert view.statements == []
+        assert len(view.statements) == 1
         det = grade_run(CASES[CHECK], _experimental_run("check_conclusion", output, []))
         assert det.checks["answer_complete"] == FAIL
 
@@ -1320,3 +1320,60 @@ class TestPlan:
         monkeypatch.setenv("EVAL_MAX_CALLS", str(limit + 3))
         assert cli.main(argv) == cli.EXIT_CONFIG
         assert f"this run can make {limit + 4} provider calls" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("tool,case_id", [("brief_issue", BRIEF), ("check_conclusion", CHECK)])
+@pytest.mark.parametrize("status", ["invalid_json", "truncated"])
+@pytest.mark.parametrize("raw_text", ["not json", ""])
+def test_unparsed_experimental_answer_is_a_judgeable_answer_failure(
+    chunked_db, monkeypatch, tool, case_id, status, raw_text
+):
+    from tests.answer_eval import harness
+    from tests.answer_eval.report import is_incomplete
+
+    case = CASES[case_id]
+    output = (
+        _brief_output(None, status=status, raw_text=raw_text)
+        if tool == "brief_issue"
+        else _check_output(verdict=None, insufficient=None, status=status, raw_text=raw_text)
+    )
+    run = _experimental_run(tool, output, [])
+
+    async def run_case(*args, **kwargs):
+        return run
+
+    monkeypatch.setattr(harness, "run_case", run_case)
+    verdict = json.dumps(
+        {
+            "claims": [
+                {
+                    "claim": "unparsed reply",
+                    "statement": 1,
+                    "cited": [],
+                    "verdict": "insufficient_evidence",
+                    "explanation": "no usable answer",
+                }
+            ],
+            "facts": [{"id": f.id, "covered": False} for f in case.expected_facts],
+            "prohibited": [
+                {"index": i, "asserted": False} for i in range(1, len(case.must_not_assert) + 1)
+            ],
+            "dimensions": {
+                d: {"result": "fail" if case.criteria[d] else "not_applicable"}
+                for d in case.criteria
+            },
+        }
+    )
+    rows, _ = asyncio.run(
+        evaluate(
+            [case],
+            _ctx(chunked_db, ScriptedClient("unused")),
+            judge_client=ScriptedClient(verdict),
+            judge_config=_judge_config(),
+        )
+    )
+    (row,) = rows
+    assert row["judge"]["status"] == "ok", row["judge"]
+    assert row["deterministic"]["checks"]["answer_complete"] == FAIL
+    assert "evaluator_infrastructure" not in row["attribution"]
+    assert not is_incomplete(build_report(_identity(), rows, True))

@@ -874,3 +874,36 @@ class TestAddressCompleteness:
         [line] = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
         assert "'indeterminate_cause_address_list': 1" in line
         assert "indeterminate_cause_sender_ambiguous" not in line
+
+
+def test_exact_payload_filter_counts_and_pages_occurrences(corpus):
+    db, _ = corpus
+    first = db.query_attachments(attachment_id="p-shared", limit=1)
+    assert first.total_matches == 20 and first.indeterminate == 0
+    seen = []
+    page = first
+    while True:
+        seen.extend(page.attachments)
+        if not page.next_cursor:
+            break
+        page = db.query_attachments(attachment_id="p-shared", limit=3, cursor=page.next_cursor)
+    assert len(seen) == 20
+    assert {a.attachment_id for a in seen} == {"p-shared"}
+    assert len({a.claimant_id for a in seen}) == 20
+    own = db.query_attachments(attachment_id="p-shared", claimant_id=claimant_of("m03@example.com"))
+    assert own.total_matches == 1
+    assert db.query_attachments(attachment_id="p-shared", thread_id="t3").total_matches == 5
+    assert db.query_attachments(attachment_id="p-missing").total_matches == 0
+    assert db.query_attachments(attachment_id="  ").total_matches == 60
+    with pytest.raises(InvalidFilterError):
+        db.query_attachments(attachment_id="p-1", cursor=first.next_cursor)
+
+
+def test_payload_filter_is_served_and_withheld_from_logs(fake_server, corpus, caplog):
+    db, _ = corpus
+    handler = _handlers(fake_server, db)["query_attachments"]
+    caplog.set_level(logging.DEBUG)
+    result = asyncio.run(handler(attachment_id="p-shared", limit=2))
+    assert result.structured_content["total_matches"] == 20
+    asyncio.run(handler(attachment_id=MARKER))
+    assert MARKER not in caplog.text

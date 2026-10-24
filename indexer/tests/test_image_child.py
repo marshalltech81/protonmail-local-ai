@@ -1030,3 +1030,34 @@ assert Image.MAX_IMAGE_PIXELS == GLOBAL_MAX_IMAGE_PIXELS == 30_000_000
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_image_degradation_report_survives_a_later_child_failure(monkeypatch, caplog, fails):
+    from src.extractors._runner import ChildReport, ChildResult
+
+    extractors.reset_attempt()
+    extractors.drain_extractor_counts()
+    report = ChildReport([], {extractors.CHILD_IMAGE_SCALE_FACTOR: 2}, [])
+    seen = []
+
+    def run_child(*args, **kwargs):
+        callback = kwargs.get("on_report")
+        if callback:
+            seen.append(1)
+            callback(report)
+        if fails:
+            raise RuntimeError("SYNTHETIC_IMAGE_PRIVATE_1452")
+        return ChildResult("synthetic text", [], report.counts)
+
+    monkeypatch.setattr(image, "run_child", run_child)
+    caplog.set_level(logging.INFO)
+    if fails:
+        with pytest.raises(RuntimeError):
+            image.extract(b"synthetic")
+    else:
+        assert image.extract(b"synthetic")[0] == "synthetic text"
+    assert seen == [1]
+    assert extractors.drain_extractor_counts()["extractor_caps"] == 1
+    assert "image_pixel_ceiling" in caplog.text
+    assert "SYNTHETIC_IMAGE_PRIVATE_1452" not in caplog.text

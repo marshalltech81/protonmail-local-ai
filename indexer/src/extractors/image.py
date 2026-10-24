@@ -191,11 +191,9 @@ def extract(
         counts=CHILD_DEGRADATION_KEYS,
         permanent={"ImagePixelCeilingError": ImagePixelCeilingError},
         on_progress=on_progress,
+        # Counts precede either text or an error; preserve both outcomes.
+        on_report=lambda report: apply_child_degradation(log, "image", report.counts),
     )
-    # Anything the decode or OCR recorded through the package helpers in
-    # the child (#1314), the scale-down factor included; the image caps
-    # below cross as C frames.
-    apply_child_degradation(log, "image", result.counts)
     factor = result.counts.get(CHILD_IMAGE_SCALE_FACTOR)
     if factor and result.text.strip():
         # The scaled-down image was read: its text is indexed (#1401).

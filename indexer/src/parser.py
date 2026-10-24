@@ -2517,7 +2517,18 @@ def _decode_text_header(
     their encoded-words after the address is fixed. The search is one
     linear pass of ``_ENCODED_WORD_RE``, whose groups stop at ``?``.
     """
-    text = _decode_header(value, degraded)
+    try:
+        text = _decode_header(value, degraded)
+    except email.errors.MessageError as exc:
+        if degraded is not None:
+            degraded[HEADER_DEGRADED] += 1
+        warn_rate_limited(
+            log,
+            "header encoded-words could not be decoded (%s); kept 1 header as sent",
+            type(exc).__name__,
+            attachment=False,
+        )
+        return str(value).strip()
     if isinstance(value, email.header.Header) and _ENCODED_WORD_RE.search(text):
         if degraded is not None:
             degraded[HEADER_DEGRADED] += 1

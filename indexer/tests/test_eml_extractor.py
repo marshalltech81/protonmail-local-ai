@@ -127,14 +127,15 @@ class TestDispatch:
         result = extract(content_type=content_type, filename=filename, payload=_text("x"))
         assert result.status == STATUS_SUCCESS
         assert result.extractor == f"eml@{EXTRACTOR_VERSIONS['eml']}"
-        assert EXTRACTOR_VERSIONS["eml"] == 3
+        assert EXTRACTOR_VERSIONS["eml"] == 4
 
     def test_a_version_1_row_is_stale(self):
         """#1398: the cached ``eml@1`` rows counted every
         quoted-printable part as lossy, so they are re-extracted."""
         assert extractors.is_stale_extractor("eml@1") is True
         assert extractors.is_stale_extractor("eml@2") is True  # #1402
-        assert extractors.is_stale_extractor("eml@3") is False
+        assert extractors.is_stale_extractor("eml@3") is True  # #1516
+        assert extractors.is_stale_extractor("eml@4") is False
 
     @pytest.mark.parametrize(
         ("content_type", "filename", "reruns"),
@@ -1346,3 +1347,14 @@ class TestEnvelopeLikeFirstLines:
         result = self._extract(payload, caplog)
         assert result.text == "Subject: s\nFrom: a@example.test\n\nbody words"
         assert extractors.drain_extractor_counts()["eml_charsets_degraded"] == 1
+
+
+def test_attached_email_malformed_header_keeps_text_and_reports_degradation():
+    from src.extractors import child_degradation, eml, reset_attempt
+
+    reset_attempt()
+    raw = _text("Synthetic body.", subject="=?utf-8?b?a?=")
+    text, caps = eml.extract_text(raw)
+    assert "Subject: =?utf-8?b?a?=" in text
+    assert "Synthetic body." in text
+    assert child_degradation()["eml_headers_degraded"] == 1

@@ -6712,6 +6712,72 @@ class TestMainStartupAndLoop:
         assert main._ingestion_state.recovery_pending
         assert caplog.text.count("periodic Maildir rescan failed: OSError") == attempts
 
+    @pytest.mark.parametrize("error", [MemoryError, RecursionError])
+    def test_host_pressure_escapes_the_steady_state_drain(
+        self, tmp_path, monkeypatch, caplog, error
+    ):
+        calls = []
+
+        def drain(*_a, **_kw):
+            calls.append(1)
+            raise error(SYNTHETIC_MARKER)
+
+        with pytest.raises(SystemExit) as info:
+            self._run_main(tmp_path, monkeypatch, sweep_due=False, drain=drain)
+
+        assert info.value.code == 1
+        assert calls == [1]
+        assert f"queue drain stopped by host pressure: {error.__name__}" in caplog.text
+        assert SYNTHETIC_MARKER not in caplog.text
+
+    @pytest.mark.parametrize("error_name", ["MemoryError", "RecursionError"])
+    def test_host_pressure_process_exit_keeps_exception_and_chain_out_of_stderr(
+        self, tmp_path, error_name
+    ):
+        import subprocess  # nosec B404 - runs this test's own interpreter
+        import textwrap
+        from contextlib import closing
+
+        script = textwrap.dedent("""\
+            import builtins
+            import sys
+            from pathlib import Path
+            import pytest
+            from tests.test_main import TestMainStartupAndLoop
+
+            root = Path(sys.argv[1])
+            pressure = getattr(builtins, sys.argv[2])
+            def drain(db, embedder, threader, queue, **kwargs):
+                with (root / "drains").open("a") as out:
+                    out.write("1")
+                path = str(root / "synthetic.eml")
+                queue.enqueue(path, "synthetic")
+                assert queue.begin_attempt(path)
+                raise pressure("SYNTHETIC_PRESSURE_PRIVATE_1692") from ValueError("SYNTHETIC_CHAIN_PRIVATE_1692")
+
+            TestMainStartupAndLoop()._run_main(
+                root, pytest.MonkeyPatch(), sweep_due=False, drain=drain
+            )
+        """)
+        result = subprocess.run(  # nosec B603 - fixed test script and synthetic arguments, no shell
+            [sys.executable, "-c", script, str(tmp_path), error_name],
+            cwd=Path(main.__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 1
+        assert (tmp_path / "drains").read_text() == "1"
+        with closing(sqlite3.connect(tmp_path / "mail.db")) as conn:
+            assert conn.execute(
+                "SELECT status, attempts, last_stage FROM indexing_jobs"
+            ).fetchall() == [("queued", 1, "interrupted")]
+        assert f"queue drain stopped by host pressure: {error_name}" in result.stderr
+        assert "SYNTHETIC_PRESSURE_PRIVATE_1692" not in result.stdout + result.stderr
+        assert "SYNTHETIC_CHAIN_PRIVATE_1692" not in result.stdout + result.stderr
+        assert "Traceback" not in result.stderr
+
     def test_drain_failure_log_keeps_mail_out(self, tmp_path, monkeypatch, caplog):
         """The main loop's drain backstop logs through the same
         classification as ``last_error`` (#257)."""
