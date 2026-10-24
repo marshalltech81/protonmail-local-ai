@@ -385,7 +385,7 @@ test-maven-checksums:
 # not the checkout, and warn (without failing) when an image's
 # revision label is not the checkout's SOURCE_COMMIT (#1103).
 TRIVY ?= trivy
-TRIVY_VERSION := v0.75.0
+TRIVY_VERSION := v0.76.1
 TRIVY_SEVERITY := CRITICAL,HIGH
 TRIVY_MISCONFIG_SKIP_DIRS := .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv,.uv-cache
 
