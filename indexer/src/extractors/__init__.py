@@ -382,6 +382,7 @@ CHILD_DEGRADATION_KEYS = frozenset(
         "eml_headers_degraded",
         "eml_filenames_degraded",
         "eml_charsets_degraded",
+        "text_surrogates_replaced",
         CHILD_EML_BINARY_SKIPPED,
         CHILD_TEXT_LOST,
         CHILD_OCR_PAGES_SKIPPED,
@@ -815,7 +816,7 @@ class ExtractionResult:
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
-    "eml": 5,  # Do not render OLE2/ZIP attachments as nested mail (#1456).
+    "eml": 6,  # Normalize lone surrogates in decoded attached-email text (#1447).
     "image": 6,
     "pdf": 7,
     "ppt": 2,
