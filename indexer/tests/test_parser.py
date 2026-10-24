@@ -6596,3 +6596,31 @@ class TestTransferDecodeLossDetection:
             assert msg is not None
             assert msg.attachments[0].payload_complete is True
         assert len(decodes) == 1
+
+
+@pytest.mark.parametrize("stat_fails", [False, True])
+def test_oversized_message_warnings_share_the_non_attachment_line_budget(
+    tmp_path, monkeypatch, caplog, stat_fails
+):
+    from src import extractors, parser
+
+    monkeypatch.setenv("INDEXER_PARSE_MAX_BYTES", "100")
+    monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
+    extractors.drain_suppressed_lines()
+    if stat_fails:
+
+        def failed_stat(fd):
+            raise OSError("synthetic stat failure")
+
+        monkeypatch.setattr(parser.os, "fstat", failed_stat)
+    caplog.set_level("INFO")
+    path = tmp_path / "oversized.eml"
+    path.write_bytes(b"SYNTHETIC_PRIVATE_BODY_1332" * 20)
+    for _ in range(5):
+        with pytest.raises(parser.OversizedMessageError):
+            parser.parse_email(path)
+    lines = [r for r in caplog.records if "Not parsing oversized email" in r.getMessage()]
+    assert len(lines) == 2
+    assert all(r.levelname == "WARNING" for r in lines)
+    assert extractors.drain_suppressed_lines() == 3
+    assert "SYNTHETIC_PRIVATE_BODY_1332" not in caplog.text
