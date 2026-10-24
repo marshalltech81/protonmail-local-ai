@@ -807,3 +807,38 @@ class TestStructuredOutput:
         llm.structured_output = structured
         _run(brief_db, llm)
         assert reserves == [_schema_reserve_chars(BRIEF_JSON_SCHEMA) if structured else 0]
+
+
+def test_ranked_sample_is_disclosed_in_brief_and_prompt(brief_db):
+    llm = ScriptedInference(lambda _u: _brief(insufficient_evidence=True))
+    out = _run(brief_db, llm, max_threads=1)
+    sample = out.structured_content["retrieval"]
+    assert sample["retrieval_ran"] is True
+    assert sample["max_threads"] == 1 and sample["threads_supplied"] == 1
+    assert sample["threads_retrieved"] >= sample["threads_supplied"]
+    assert sample["exhaustive"] is False and sample["remainder"] == "unknown"
+    assert "ranked sample" in out.content[0].text.lower()
+    assert "ranked, non-exhaustive sample" in llm.complete_calls[0][0]
+
+
+def test_empty_brief_is_scoped_to_retrieved_sample(tmp_path):
+    out = _run(_build(tmp_path / "sample-empty.db", {}), ScriptedInference(), max_threads=99)
+    assert out.structured_content["retrieval"] == dict(
+        retrieval_ran=True,
+        threads_retrieved=0,
+        threads_supplied=0,
+        max_threads=10,
+        exhaustive=False,
+        remainder="unknown",
+    )
+    assert "retrieved sample" in out.content[0].text
+
+
+def test_brief_sample_counts_only_threads_with_rendered_evidence(brief_db, monkeypatch):
+    from src.tools import brief as module
+
+    monkeypatch.setattr(module, "_evidence_budget", lambda *a, **k: ([], 0))
+    llm = ScriptedInference(lambda _u: _brief(insufficient_evidence=True))
+    sample = _run(brief_db, llm).structured_content["retrieval"]
+    assert sample["threads_retrieved"] > 0
+    assert sample["threads_supplied"] == 0

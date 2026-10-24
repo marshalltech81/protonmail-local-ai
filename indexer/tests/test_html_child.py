@@ -196,9 +196,8 @@ class TestDifferentialCatalogue:
         caplog.set_level("DEBUG")
         data = b"<p>a +2DQ- b +2DQ-</p><p>" + MARKER.encode() + b"</p>"
         decoded = parser._safe_decode(data, "utf-7")
-        assert "\ud834" in decoded
-        with pytest.raises(UnicodeEncodeError):
-            _in_process(decoded).encode("utf-8")
+        assert "\ud834" not in decoded
+        assert _in_process(decoded).encode("utf-8")
         msg, _ = _parse(tmp_path, _message(("text/html; charset=utf-7", data)))
         assert msg.body_text.startswith("a ? b ?")
         assert msg.parse_caps == {}
@@ -206,7 +205,10 @@ class TestDifferentialCatalogue:
         lines = [
             (r.levelname, r.getMessage()) for r in caplog.records if r.name == "indexer.parser"
         ]
-        assert ("WARNING", "HTML body text held 2 lone surrogates; converted as ?") in lines
+        assert (
+            "WARNING",
+            "decoded charset_degraded replaced 2 lone surrogate characters as ?",
+        ) in lines
         assert MARKER not in caplog.text
 
     def test_no_surrogate_no_line(self, tmp_path, caplog):

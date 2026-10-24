@@ -707,10 +707,6 @@ make eval-answers EVAL_MAX_CALLS=27 EVAL_ARGS="--case ask-hedge-price-as-of-marc
 
 - No paid baseline run has been recorded yet (#1369), so nothing
   here says how well either tool does on them.
-- A delayed delivery (a receiving time different from the sent date)
-  is not a case either: the runner's synthetic-index check requires
-  every `occurred_at` to be null, as for the outstanding-items cases
-  (#1372).
 - Quoted history is retrievable only because t128's reply has no text
   of its own; when a reply has its own text, the quote is never chunked
   and no tool can return it (#795).
@@ -1166,3 +1162,8 @@ For sender and Trash decoy cases (#894), `must_not_assert` remains the
 judge's check for claiming an out-of-scope value as the answer. Those
 values are absent from `must_not_include`: mentioning a stale or context
 value with its scope stated must not fail plain containment grading.
+
+The delayed-clasp cases (#1372) separate a June 1 send date, June 20
+delivery, and July 9 fitting. A June 10 replacement remains later by
+send date. The synthetic gate verifies the normalized Received date;
+mutation tests reject delivery/event dates used as the position date.

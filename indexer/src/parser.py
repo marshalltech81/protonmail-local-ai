@@ -1116,9 +1116,8 @@ def _decode_filename_words(
     grammar through ``email.header.decode_header``, in one linear pass.
     A charset label the codec rejects (unknown, ``idna``, a NUL in it)
     takes ``_decode_header``'s UTF-8 fallback, as in Subject (#942).
-    The undecoded value is kept when decoding raises, yields text that is not valid
-    Unicode (a ``unicode_escape`` word can decode to a lone surrogate),
-    or leaves nothing:
+    Lone surrogates are replaced as in other decoded headers (#1447).
+    The undecoded value is kept when decoding raises or leaves nothing:
     a filename never becomes empty, so it stays an attachment. The
     exception is reported by type only; the filename is mail content.
     """
@@ -1156,7 +1155,12 @@ def _raw_part_filename(
     is reported by type only; its text and the filename are mail content.
     """
     try:
-        return part.get_filename()
+        filename = part.get_filename()
+        return (
+            _replace_decoded_surrogates(filename, FILENAME_DEGRADED, degraded)
+            if filename
+            else filename
+        )
     except ValueError as exc:
         if degraded is not None:
             degraded[FILENAME_DEGRADED] += 1
@@ -2397,6 +2401,22 @@ def _open_nested(
     return None, True, False
 
 
+def _replace_decoded_surrogates(text: str, kind: str, degraded: Counter[str] | None = None) -> str:
+    """Keep decoded mail UTF-8 safe, with a fixed, rate-limited count."""
+    text, count = html_conversion.replace_lone_surrogates(text)
+    if count:
+        if degraded is not None:
+            degraded[kind] += 1
+        warn_rate_limited(
+            log,
+            "decoded %s replaced %d lone surrogate characters as ?",
+            kind,
+            count,
+            attachment=False,
+        )
+    return text
+
+
 def _safe_decode(payload: bytes, charset: str, degraded: Counter[str] | None = None) -> str:
     """Decode payload bytes, falling back to utf-8 on unknown charsets.
 
@@ -2421,7 +2441,7 @@ def _safe_decode(payload: bytes, charset: str, degraded: Counter[str] | None = N
             payload.decode(charset)
         except ValueError:
             degraded[CHARSET_DEGRADED] += 1
-    return text
+    return _replace_decoded_surrogates(text, CHARSET_DEGRADED, degraded)
 
 
 def _read_top_headers(
@@ -2600,7 +2620,7 @@ def _decode_header_parts(
                 decoded.append(part.decode("utf-8", errors="replace"))
         else:
             decoded.append(part)
-    return " ".join(decoded)
+    return _replace_decoded_surrogates(" ".join(decoded), HEADER_DEGRADED, degraded)
 
 
 # The label compat32 gives header bytes sent without an encoded-word

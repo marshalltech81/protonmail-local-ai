@@ -466,6 +466,7 @@ class CorpusMessage:
     sent_at: str | None  # ``messages.sent_at`` as the indexer stores it
     tokens: set[str] = field(repr=False)
     sent_at_status: str = "parsed"
+    occurred_at: str | None = None
 
 
 def _parsed_message_id(raw: bytes) -> str:
@@ -500,6 +501,27 @@ def claimant_hash_chars(path: Path = PARSER_PATH) -> int:
     raise NonSyntheticIndexError("the indexer's claimant hash length could not be read")
 
 
+def _corpus_received_at(parsed: email.message.Message) -> str | None:
+    """Match parser._parse_received_date for our trusted corpus headers:
+    the topmost header, last semicolon in its 256-character tail, UTC.
+    The baseline compares this value with the real indexer's output.
+    """
+    value = parsed.get("Received")
+    if value is None:
+        return None
+    tail = str(value)[-256:]
+    if ";" not in tail:
+        return None
+    try:
+        value = tail.rsplit(";", 1)[1].encode("ascii", "ignore").decode("ascii")
+        dt = email.utils.parsedate_to_datetime(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC).isoformat()
+    except TypeError, ValueError, OverflowError:
+        return None
+
+
 def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
     """Claimant ID -> its Message-ID, bytes' SHA-256, thread, date and
     word tokens, for every committed corpus message.
@@ -516,8 +538,8 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
     text part and binary attachment, our own trusted bytes, and the text
     the corpus says its images show (``OCR_TEXT``). ``sent_at`` is the
     ``Date:`` header as the indexer normalizes it (``parser._parse_date``:
-    UTC, ISO format, or None with its missing/invalid status); the corpus writes no ``Received:`` header, so the
-    indexer stores no ``occurred_at``.
+    UTC, ISO format, or None with its missing/invalid status); ``occurred_at`` is the topmost ``Received:`` date normalized by the
+    indexer, or None when absent or unparseable.
     """
     spec = importlib.util.spec_from_file_location("answer_eval_baseline_corpus", path)
     if spec is None or spec.loader is None:
@@ -575,6 +597,7 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
                 sent.isoformat() if sent is not None else None,
                 _tokens(" ".join(text)),
                 status,
+                _corpus_received_at(parsed),
             )
     return manifest
 
@@ -610,7 +633,7 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
         if sorted(claimants) != sorted(manifest):
             raise refused
         # The claimant's own Message-ID, and its dates as the indexer
-        # stores them: no Received header, so no occurred_at.
+        # stores them, including the topmost Received date when present.
         for claimant, stored_id, sent_at, occurred_at, sent_at_status in conn.execute(
             "SELECT claimant_id, message_id, sent_at, occurred_at, sent_at_status FROM messages"
         ):
@@ -618,7 +641,7 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
             if entry is None or (stored_id, sent_at, occurred_at, sent_at_status) != (
                 entry.message_id,
                 entry.sent_at,
-                None,
+                entry.occurred_at,
                 entry.sent_at_status,
             ):
                 raise refused

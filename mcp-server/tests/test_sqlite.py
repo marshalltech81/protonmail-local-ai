@@ -6124,3 +6124,24 @@ def test_zero_vector_refill_keeps_the_native_candidate_bound(seeded_db, monkeypa
     assert sizes == [1, 2]
     assert "zero thread vectors" in caplog.text
     assert "candidate cap=2" in caplog.text
+
+
+def test_fts_query_ceiling_precedes_tokenization_and_scratch_database(monkeypatch):
+    from src.lib import sqlite as module
+    from src.lib.predicates import InvalidFilterError
+
+    assert module._sanitize_fts_query("a" * 4096) == '"' + "a" * 4096 + '"'
+    work = []
+
+    def forbidden(*args, **kwargs):
+        work.append(1)
+        raise AssertionError("oversized input must not be processed")
+
+    monkeypatch.setattr(module, "groupby", forbidden)
+    monkeypatch.setattr(module, "_scratch_connection", forbidden)
+    oversized = "x " * 2049
+    with pytest.raises(InvalidFilterError, match="4096 characters"):
+        module._sanitize_fts_query(oversized)
+    with pytest.raises(InvalidFilterError, match="4096 characters"):
+        module._keyword_rank_keys(oversized, [])
+    assert work == []

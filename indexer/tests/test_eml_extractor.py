@@ -127,7 +127,7 @@ class TestDispatch:
         result = extract(content_type=content_type, filename=filename, payload=_text("x"))
         assert result.status == STATUS_SUCCESS
         assert result.extractor == f"eml@{EXTRACTOR_VERSIONS['eml']}"
-        assert EXTRACTOR_VERSIONS["eml"] == 4
+        assert EXTRACTOR_VERSIONS["eml"] == 6
 
     def test_a_version_1_row_is_stale(self):
         """#1398: the cached ``eml@1`` rows counted every
@@ -135,7 +135,9 @@ class TestDispatch:
         assert extractors.is_stale_extractor("eml@1") is True
         assert extractors.is_stale_extractor("eml@2") is True  # #1402
         assert extractors.is_stale_extractor("eml@3") is True  # #1516
-        assert extractors.is_stale_extractor("eml@4") is False
+        assert extractors.is_stale_extractor("eml@4") is True  # #1456
+        assert extractors.is_stale_extractor("eml@5") is True  # #1447
+        assert extractors.is_stale_extractor("eml@6") is False
 
     @pytest.mark.parametrize(
         ("content_type", "filename", "reruns"),
@@ -1358,3 +1360,25 @@ def test_attached_email_malformed_header_keeps_text_and_reports_degradation():
     assert "Subject: =?utf-8?b?a?=" in text
     assert "Synthetic body." in text
     assert child_degradation()["eml_headers_degraded"] == 1
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["message/rfc822", "message/global", "message/external-body", "message/delivery-status"],
+)
+@pytest.mark.parametrize(
+    "encoding", ["none", "7bit", "8bit", "binary", "base64", "quoted-printable"]
+)
+@pytest.mark.parametrize("kind", ["zip", "ole2"])
+def test_attached_container_is_not_rendered_as_nested_email(label, encoding, kind, caplog):
+    from tests import message_label_catalogue as catalogue
+
+    payload = catalogue.message_bytes(label, encoding, catalogue.CONTAINERS[kind])
+    with caplog.at_level("INFO"):
+        text, _ = eml.extract(payload)
+    if label == "message/rfc822":
+        assert "eml_binary_containers_skipped=1" in caplog.text
+    assert "SYNTHETIC_ZIP_MARKER" not in text
+    assert "SYNTHETIC_OLE2_MARKER" not in text
+    assert "PK" not in text
+    assert "PARENT_BODY" in text

@@ -3076,6 +3076,14 @@ model's own context window filled first (Anthropic's
 `model_context_window_exceeded` stop). A reply cut before any text is
 an error with the same distinction.
 
+Search and intelligence retrieval queries accept at most 4,096
+characters. Longer queries are rejected with fixed text before provider
+calls or FTS tokenization; shorten the query rather than splitting it
+into a long OR expression. This applies to `search_emails`,
+`get_evidence`, `search_attachments`, `ask_mailbox`,
+`extract_from_emails`, `brief_issue`, `check_conclusion` and the
+subject-phrase fallback of `summarize_thread`.
+
 ### `summarize_thread`
 Summarize a thread in different styles.
 
@@ -3521,6 +3529,15 @@ An ephemeral, cited brief of one issue across the mailbox (PLAN.md
 Phase 3 item 3, #291): a chronology, actors' positions, decisions, open
 questions and conflicting evidence. Nothing it produces is persisted or
 indexed, so a brief can never come back as evidence.
+
+Both `brief_issue` and `check_conclusion` answer from a ranked,
+non-exhaustive sample. Their always-set `retrieval` object reports
+whether search ran, how many threads it returned (including overfetch
+past chunkless threads), how many threads actually supplied passages
+to the prompt, the effective `max_threads`, `exhaustive: false` and
+`remainder: "unknown"`. Empty sections or no conflicting evidence apply
+only to the retrieved sample. The prose and system prompts state the
+same scope; use population query tools for mailbox-wide claims.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|

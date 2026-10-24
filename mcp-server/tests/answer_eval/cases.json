@@ -1524,6 +1524,238 @@
         ],
         "in_force": []
       }
+    },
+    {
+      "id": "ask-delayed-clasp",
+      "category": "correction",
+      "tool": "ask_mailbox",
+      "arguments": {
+        "question": "Trace the fern cabinet clasp choices from Mira Sedge. Distinguish send dates, delivery dates and the fitting date; which choice replaced which?"
+      },
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [
+        [
+          "t130.2"
+        ],
+        [
+          "t130.3"
+        ]
+      ],
+      "expected_facts": [
+        {
+          "id": "f1",
+          "fact": "Mira sent the copper choice on 1 June 2026. It was delivered on 20 June; 9 July is the fitting date.",
+          "sources": [
+            "t130.2"
+          ],
+          "excerpt": "choose copper for the fitting on 9 July 2026."
+        },
+        {
+          "id": "f2",
+          "fact": "Mira replaced copper with pewter on 10 June, the later send date. Delayed arrival of copper does not reverse that replacement.",
+          "sources": [
+            "t130.3"
+          ],
+          "excerpt": "Replace my copper choice with pewter"
+        }
+      ],
+      "must_not_assert": [
+        "The copper position was sent on 20 June 2026.",
+        "The copper position was sent on 9 July 2026.",
+        "Copper replaced pewter because it arrived later."
+      ],
+      "deterministic": {
+        "must_include": [
+          [
+            "copper"
+          ],
+          [
+            "pewter"
+          ]
+        ],
+        "must_not_include": []
+      },
+      "criteria": {
+        "factual_correctness": true,
+        "citation_support": true,
+        "completeness": true,
+        "temporal_reasoning": true,
+        "conflict_uncertainty": false,
+        "relevance": true
+      },
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {
+            "id": "p1",
+            "actor": [
+              "Mira Sedge",
+              "Mira",
+              "Sedge"
+            ],
+            "kind": "proposal",
+            "source": "t130.2",
+            "date": "2026-06-01",
+            "date_source": "sent",
+            "values": [
+              [
+                "copper"
+              ]
+            ],
+            "excerpt": "choose copper for the fitting on 9 July 2026."
+          },
+          {
+            "id": "p2",
+            "actor": [
+              "Mira Sedge",
+              "Mira",
+              "Sedge"
+            ],
+            "kind": "correction",
+            "source": "t130.3",
+            "date": "2026-06-10",
+            "date_source": "sent",
+            "values": [
+              [
+                "pewter"
+              ],
+              [
+                "copper"
+              ]
+            ],
+            "excerpt": "Replace my copper choice with pewter"
+          }
+        ],
+        "changes": [
+          {
+            "from": "p1",
+            "to": "p2",
+            "kind": "supersession"
+          }
+        ],
+        "in_force": [
+          "p2"
+        ]
+      }
+    },
+    {
+      "id": "brief-delayed-clasp",
+      "category": "correction",
+      "tool": "brief_issue",
+      "arguments": {
+        "topic": "Trace the fern cabinet clasp choices from Mira Sedge. Distinguish send dates, delivery dates and the fitting date; which choice replaced which?"
+      },
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [
+        [
+          "t130.2"
+        ],
+        [
+          "t130.3"
+        ]
+      ],
+      "expected_facts": [
+        {
+          "id": "f1",
+          "fact": "Mira sent the copper choice on 1 June 2026. It was delivered on 20 June; 9 July is the fitting date.",
+          "sources": [
+            "t130.2"
+          ],
+          "excerpt": "choose copper for the fitting on 9 July 2026."
+        },
+        {
+          "id": "f2",
+          "fact": "Mira replaced copper with pewter on 10 June, the later send date. Delayed arrival of copper does not reverse that replacement.",
+          "sources": [
+            "t130.3"
+          ],
+          "excerpt": "Replace my copper choice with pewter"
+        }
+      ],
+      "must_not_assert": [
+        "The copper position was sent on 20 June 2026.",
+        "The copper position was sent on 9 July 2026.",
+        "Copper replaced pewter because it arrived later."
+      ],
+      "deterministic": {
+        "must_include": [
+          [
+            "copper"
+          ],
+          [
+            "pewter"
+          ]
+        ],
+        "must_not_include": []
+      },
+      "criteria": {
+        "factual_correctness": true,
+        "citation_support": true,
+        "completeness": true,
+        "temporal_reasoning": true,
+        "conflict_uncertainty": false,
+        "relevance": true
+      },
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {
+            "id": "p1",
+            "actor": [
+              "Mira Sedge",
+              "Mira",
+              "Sedge"
+            ],
+            "kind": "proposal",
+            "source": "t130.2",
+            "date": "2026-06-01",
+            "date_source": "sent",
+            "values": [
+              [
+                "copper"
+              ]
+            ],
+            "excerpt": "choose copper for the fitting on 9 July 2026."
+          },
+          {
+            "id": "p2",
+            "actor": [
+              "Mira Sedge",
+              "Mira",
+              "Sedge"
+            ],
+            "kind": "correction",
+            "source": "t130.3",
+            "date": "2026-06-10",
+            "date_source": "sent",
+            "values": [
+              [
+                "pewter"
+              ],
+              [
+                "copper"
+              ]
+            ],
+            "excerpt": "Replace my copper choice with pewter"
+          }
+        ],
+        "changes": [
+          {
+            "from": "p1",
+            "to": "p2",
+            "kind": "supersession"
+          }
+        ],
+        "in_force": [
+          "p2"
+        ]
+      }
     }
   ]
 }

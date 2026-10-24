@@ -56,3 +56,47 @@ def test_thread_text_without_message_headers_still_requires_visible_fact_text():
     items = oracle._items("[E1 | thread text]\n" + _EXCERPT)
     assert items
     assert all(item.labels == ["E1"] for item in items)
+
+
+def test_extraction_oracle_returns_every_expected_item_from_one_source():
+    import asyncio
+    import json
+
+    case = next(c for c in load_cases() if c.id == "extract-pool-bids")
+    body = "; ".join(f.excerpt for f in case.expected_facts)
+    prompt = f"[E1 | message t05.1@baseline.example#0000abcd | chunk 0]\n{body}"
+    records = json.loads(asyncio.run(_OracleAnswerer(case).complete("", prompt)))
+    assert len(records) == 3
+    assert [record["contractor"] for record in records] == [
+        "Bluewater Pools",
+        "Crestline Aquatics",
+        "Tidewater Plaster",
+    ]
+    assert all(record["_evidence"] == {"contractor": ["E1"], "bid": ["E1"]} for record in records)
+
+
+def test_extraction_judge_does_not_cover_a_fact_from_a_dropped_record():
+    import asyncio
+    import json
+
+    from tests.baseline.test_answer_eval_cases import _StubJudge
+
+    case = next(c for c in load_cases() if c.id == "extract-pool-bids")
+    judge = _StubJudge()
+    judge.case = case
+    answer = '<untrusted_answer statement="1">\ncontractor: Bluewater Pools; bid: $38,400 [E1]\n</untrusted_answer>'
+    assessment = json.loads(asyncio.run(judge.complete("", answer)))
+    assert [f["covered"] for f in assessment["facts"]] == [True, False, False]
+
+
+def test_extraction_oracle_values_match_the_case_facts_and_schema():
+    from tests.baseline.test_answer_eval_cases import _EXTRACTION_VALUES
+
+    cases = [case for case in load_cases() if case.tool == "extract_from_emails"]
+    assert set(_EXTRACTION_VALUES) == {case.id for case in cases}
+    for case in cases:
+        assert set(_EXTRACTION_VALUES[case.id]) == {fact.id for fact in case.expected_facts}
+        for fact in case.expected_facts:
+            values = _EXTRACTION_VALUES[case.id][fact.id]
+            assert set(values) == set(case.arguments["schema"])
+            assert all(value in fact.fact + " " + fact.excerpt for value in values.values())
