@@ -804,7 +804,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
     "eml": 4,  # Retain malformed encoded-word headers instead of failing (#1516).
-    "image": 7,  # Numeric grayscale modes retain intensity steps before OCR.
+    "image": 8,  # Preserve unreadable-frame cap visibility in the extraction cache.
     "pdf": 7,
     "ppt": 2,
     "pptx": 3,
