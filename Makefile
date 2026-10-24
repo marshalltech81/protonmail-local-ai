@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead reparse rotate-bridge-pin force-deletion clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets init-config migrate-config validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead reparse rotate-bridge-pin force-deletion clean sync sync-indexer sync-mcp verify test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets init-config migrate-config validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -34,6 +34,7 @@ help:
 	@echo "  rotate-bridge-pin  Replace the Bridge certificate pin once with the certificate the app presents, which must match BRIDGE_CERT_FINGERPRINT, then recreate mbsync (docs/troubleshooting.md)"
 	@echo "  force-deletion  Stop the indexer, run one deletion pass past the mass-delete brake (same grace window), then start the indexer again"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
+	@echo "  verify       Run all local checks: hooks, tests, baseline, types, Docker TLS/layout/host aliases and Trivy (needs built images)"
 	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, operator config, config mode, make status, maintenance command, index backup, image pin, Trivy flag and Maven checksum script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
@@ -307,6 +308,13 @@ backup-index:
 # starts mcp-server once the indexer has verified the index.
 restore-index:
 	BACKUP="$(BACKUP)" ./scripts/restore-index.sh
+
+# One local verification entry point (#1429). Keep the checks sequential:
+# runtime work-growth gates marked serial need an otherwise idle test run.
+# Paid-provider evaluation and operator maintenance are opt-in commands.
+verify:
+	pre-commit run --all-files
+	$(MAKE) --jobs=1 test baseline typecheck test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases trivy UPDATE=0
 
 # Run unit tests locally using uv
 test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-index-backup test-image-pins test-trivy-flags test-maven-checksums
