@@ -1657,7 +1657,7 @@ the rows above; they bind #1313's policy, which does not exist yet.
 | U1 | The compiled-harness rows (H1–H10) with Bridge's own connector and Proton in place of the fakes: whether Proton keeps sender-supplied `X-Pm-*` fields (H2), what a real cache refill or event rebuild serves under an existing UID (H7), header-only cost when reads miss Gluon's cache and go to Proton (H10), and whether a released Bridge binary behaves as these commits do. | #1584 |
 | U2 | Proton ID stability across moves, labels, draft replacement, send and imports; whether Proton keeps sender-supplied `X-Pm-*` headers; cache rebuild, resync, account re-add, split or combined address mode and primary-address changes; header-only reads of a real label set and races with moves. | #1584 (owner-approved plan first) |
 | U3 | Account namespace, the acceptance rule, binding an observation to the exact retained bytes through the mbsync handoff (the file is not the served literal, H3), logical lookup and counts (header predicates match stored text only, T9), membership generations and partial scans. | #1313, #1317 |
-| U4 | Independent occurrences of equal bytes (own folder and flags); stored flags still come from the file name. | #1566, #1485 |
+| U4 | Stored occurrence flags still come from the Maildir file name rather than `SourceMetadata.flags`; independent occurrences are implemented (#1601, #1612). | #1485 |
 
 ## Message time
 
