@@ -284,10 +284,13 @@ class TestSummarizeCheck:
         assert problem["kind"] == "uncited_statements" and problem["statements"] == [2]
         assert len(llm.complete_calls) == 2
 
-    def test_an_unknown_style_is_summarized_as_brief(self, plan_db):
+    @pytest.mark.parametrize("style", ["haiku", "x" * 10_000], ids=["unknown", "long"])
+    def test_an_unknown_style_is_summarized_as_brief(self, plan_db, style):
         llm = FakeInferenceClient(_GOOD_SUMMARY)
-        out = _summarize(plan_db, llm, style="haiku")
+        out = _summarize(plan_db, llm, style=style)
         assert out.structured_content["style"] == "brief"
+        assert out.content[0].text.startswith("Summary (brief) — spring launch plan:")
+        assert style not in out.content[0].text
         assert llm.complete_calls[0][1].endswith("Task: Summarize in 2-3 sentences.")
 
     def test_mail_and_model_text_stay_out_of_the_logs(self, plan_db, caplog):
