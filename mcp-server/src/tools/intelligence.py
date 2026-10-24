@@ -51,6 +51,7 @@ from .outputs import (
     ExtractCitationProblem,
     ExtractedField,
     ExtractFromEmailsOutput,
+    ExtractionRetrieval,
     QuoteCheck,
     SummarizeThreadOutput,
     SummaryStyle,
@@ -3852,13 +3853,22 @@ def register_intelligence_tools(
             from_addr = None
             # Reported in the structured output only (#864), never logged.
             resolution = None
+            retrieval = ExtractionRetrieval(
+                retrieval_ran=False,
+                threads_retrieved=0,
+                threads_supplied=0,
+                limit=limit,
+                exhaustive=False,
+                remainder="unknown",
+            )
             if from_name:
                 resolution = await resolve_from_name(db, from_name, folders)
                 from_addr = resolution.address
                 if from_addr is None:
                     return tool_result(
-                        f"No matching emails found (no contact matched from_name={from_name!r}).",
+                        f"Retrieval did not run: no contact matched from_name={from_name!r}.",
                         ExtractFromEmailsOutput(
+                            retrieval=retrieval,
                             records=[],
                             citations=[],
                             fields=[],
@@ -3890,12 +3900,24 @@ def register_intelligence_tools(
                 reranker=reranker,
             )
             count("results", len(results))
+            retrieval = retrieval.model_copy(
+                update={
+                    "retrieval_ran": True,
+                    "threads_retrieved": len(results),
+                }
+            )
 
             def output(texts: list[str], notice: str | None = None) -> CallToolResult:
                 citations = [_citation(evidence_map[label]) for label in used]
+                sample = retrieval.model_copy(
+                    update={
+                        "threads_supplied": len({ref.thread_id for ref in evidence_map.values()})
+                    }
+                )
                 return CallToolResult(
                     content=[TextContent(type="text", text=t) for t in texts],
                     structured_content=ExtractFromEmailsOutput(
+                        retrieval=sample,
                         records=extracted_records,
                         citations=citations,
                         fields=fields,
@@ -3916,7 +3938,7 @@ def register_intelligence_tools(
             problems: list[ExtractCitationProblem] = []
 
             if not results:
-                return output(["No matching emails found."])
+                return output(["No matching emails were retrieved in the ranked sample."])
 
             schema_str = json.dumps(schema, indent=2)
             # Structured outputs (#808): the reply schema each call sends,
