@@ -1194,7 +1194,10 @@ completeness is recorded per occurrence instead (below).
 from occurrence-filter indeterminacy. Its coverage scan includes scoped messages
 without stored occurrences and does not apply attachment-row filters to unknown
 entries. Each returned occurrence carries its message's nullable manifest flag.
-Currentness of retained occurrence rows is a separate concern (#1629).
+`messages_with_noncurrent_inventory` independently counts scoped messages with
+attachments or retained occurrences whose inventory is not committed as current.
+Both counts use one message-scope aggregate in the page's read snapshot; missing
+rows remain visible, and retained rows expose their nullable currentness marker.
 
 `attachments.text_complete` records whether an occurrence's committed
 attachment chunks hold all its text (`1`), whether text was lost or the
