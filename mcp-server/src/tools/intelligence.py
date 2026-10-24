@@ -3671,7 +3671,7 @@ def register_intelligence_tools(
             warn_limits(sent)
             citations = [_citation(evidence_map[label]) for label in check.used]
             lines = [
-                f"Summary ({style}) — {subject}:\n\n{summary}",
+                f"Summary ({used_style}) — {subject}:\n\n{summary}",
                 *_citation_lines(citations),
                 *_problem_lines(check),
                 *([window_note] if window_note else []),
