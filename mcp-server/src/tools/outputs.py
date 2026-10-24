@@ -1761,9 +1761,11 @@ class ExtractionRetrieval(_Output):
     retrieval_ran: bool = Field(
         description="Whether ranked retrieval ran; false when from_name matched no contact."
     )
-    threads_retrieved: int = Field(description="Threads returned by ranked search, at most limit.")
+    threads_retrieved: int = Field(
+        description="Unit: threads returned by ranked search, at most limit."
+    )
     threads_supplied: int = Field(
-        description="Distinct threads whose evidence reached an extraction prompt."
+        description="Unit: distinct threads whose evidence reached an extraction prompt."
     )
     limit: int = Field(description="Effective ranked thread limit after clamping to [1, 50].")
     exhaustive: Literal[False] = Field(
