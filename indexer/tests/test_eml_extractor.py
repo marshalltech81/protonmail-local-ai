@@ -849,11 +849,11 @@ class TestUndecomposedContainers:
         assert ("extractor cap eml_body_structure:" in caplog.text) is cut
         assert MARKER not in caplog.text
 
-    def test_the_default_walk_counts_nothing(self):
+    def test_the_default_walk_counts_undecomposed_body_containers(self):
         msg = email.message_from_bytes(b"Content-Type: multipart/mixed\r\n\r\ntext")
         caps: Counter[str] = Counter()
         parser._extract_body_and_attachments(msg, caps=caps)
-        assert caps == Counter()
+        assert caps == Counter(body_structure=1)
 
     def test_the_walk_counts_each_undecomposed_container(self):
         payload, _, _ = _STRUCTURE_SHAPES["sub_alternative_no_boundary_parameter"]

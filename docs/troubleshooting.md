@@ -1067,6 +1067,13 @@ stack must be up:
 make reparse
 ```
 
+After upgrading to the top-level multipart completeness fix (#1348), run
+`make reparse` once to refresh existing messages' `body_complete` and parser
+cap counts. Unchanged text keeps its chunks and vectors. Dead-lettered jobs
+need `make requeue-dead` after their cause is fixed. A declared multipart body
+that cannot be split records `body_structure` when the body could have kept
+its text. A missing closing boundary alone does not imply text was lost.
+
 ## Back up and restore the index
 
 Take a copy of the index before deploying a release that changes the
