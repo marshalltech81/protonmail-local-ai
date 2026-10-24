@@ -761,6 +761,12 @@ participants, date range, folder, and a short snippet. To read the
 contents of a returned thread, follow up with `get_thread` or
 `summarize_thread` using the result's `Thread ID`.
 
+The thread-vector lane excludes zero-vector placeholders before assigning
+ranks. It refills candidates within the existing native bound of 4,096;
+a refill that reaches that bound without filling the requested result
+count is reported on the timing line as `degraded_thread_vec_cap`. The
+keyword and chunk-vector lanes keep their existing behavior.
+
 For the latest or N most recent messages from a person, use
 `query_messages(sender=..., limit=N)`, newest first. A page holds at most
 100 messages, so follow `next_cursor` until N are collected. This tool
