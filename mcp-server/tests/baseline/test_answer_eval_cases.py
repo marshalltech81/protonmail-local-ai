@@ -11,8 +11,7 @@ has a query vector. Two layers:
    are checked against the corpus, not against what retrieval returns.
 2. The harness end to end. Every case runs through the real handler
    of its tool (``ask_mailbox`` or ``summarize_thread``, #656, or an
-   experimental tool, #1240; ``extract_from_emails`` cases are checked
-   in layer 1 only until #1287) with a
+   experimental tool, #1240, or ``extract_from_emails``, #1287) with a
    scripted answerer (no network) that writes the case's expected
    values citing the supplied passages, and a scripted judge. Each run
    must complete, its captured evidence must match the prompt the model
@@ -54,9 +53,8 @@ from tests.answer_eval.runner import (
 pytestmark = pytest.mark.baseline
 
 CASES = load_cases()
-# Layer 2 leaves out ``extract_from_emails``: the scripted answerer
-# cannot yet return one record per expected item (#1287).
-HARNESS_CASES = [c for c in CASES if c.tool != "extract_from_emails"]
+HARNESS_CASES = CASES
+EXTRACTION_CASES = [c for c in CASES if c.tool == "extract_from_emails"]
 GOLDEN = json.loads((Path(__file__).parent / "golden.json").read_text(encoding="utf-8"))
 _LABEL = re.compile(r"\[(E\d+) \| message ([^ |]+)")
 
@@ -249,6 +247,21 @@ class _Item:
     conflict: bool = False
 
 
+# Structured spellings of the extraction facts. Fact IDs drive the records;
+# the oracle still requires the fact excerpt and each value in supplied text.
+_EXTRACTION_VALUES = {
+    "extract-pool-bids": {
+        "f1": {"contractor": "Bluewater Pools", "bid": "$38,400"},
+        "f2": {"contractor": "Crestline Aquatics", "bid": "$44,900"},
+        "f3": {"contractor": "Tidewater Plaster", "bid": "$47,250"},
+    },
+    "extract-roof-estimate": {
+        "f1": {"contractor": "Harbor Roofing", "total": "$14,200"},
+    },
+    "extract-cabin-wifi": {},
+}
+
+
 class _OracleAnswerer:
     """Writes each case's expected values, citing the passages that hold them.
 
@@ -273,6 +286,8 @@ class _OracleAnswerer:
         experimental tools (#1240) the same sentences as the JSON reply
         their prompts ask for, each sentence one entry citing its label
         (a dated one a chronology entry, a conflict a conflicts entry)."""
+        if self.case.tool == "extract_from_emails":
+            return json.dumps(self._extraction_records(user))
         items = self._items(user)
         if self.case.tool not in ("brief_issue", "check_conclusion"):
             if not items:
@@ -317,6 +332,37 @@ class _OracleAnswerer:
         return json.dumps(
             {"verdict_summary": verdict, "findings": findings, "insufficient_evidence": abstained}
         )
+
+    def _extraction_records(self, user: str) -> list[dict]:
+        """One record per expected fact whose source and values reached this prompt."""
+        if not self.case.answerable:
+            return []
+        labels = dict(_LABEL.findall(user))
+        passages = {
+            block.split(" |", 1)[0][1:]: _fold(
+                block.split("]", 1)[1].split("</untrusted_email>", 1)[0]
+            )
+            for block in re.split(r"(?=\[E\d+ \|)", user)
+            if block.startswith("[E")
+        }
+        records = []
+        for fact in self.case.expected_facts:
+            sources = {_ref_message(source) for source in fact.sources}
+            visible = {
+                label: text
+                for label, text in passages.items()
+                if label in labels and labels[label].split("#")[0] in sources
+            }
+            if not any(_fold(fact.excerpt) in text for text in visible.values()):
+                continue
+            values = _EXTRACTION_VALUES[self.case.id][fact.id]
+            evidence = {
+                field: [label for label, text in visible.items() if _mentions(text, value)]
+                for field, value in values.items()
+            }
+            if all(evidence.values()):
+                records.append({**values, "_evidence": evidence})
+        return records[:-1] if self.mutation == "drop_record" else records
 
     def _items(self, user: str) -> list[_Item]:
         """The answer's statements; none means it abstains."""
@@ -478,15 +524,35 @@ class _StubJudge:
             for index, text in statements
             if "[E" in text
         ]
+        facts = {fact.id: True for fact in case.expected_facts}
+        if case.tool == "extract_from_emails":
+            # All values of one expected item must occur in one record's
+            # statement; values spread across different records do not count.
+            facts = {
+                fact.id: any(
+                    all(
+                        _mentions(_fold(text), value)
+                        for value in _EXTRACTION_VALUES[case.id][fact.id].values()
+                    )
+                    for _, text in statements
+                )
+                for fact in case.expected_facts
+            }
         return json.dumps(
             {
                 "claims": claims,
-                "facts": [{"id": f.id, "covered": True} for f in case.expected_facts],
+                "facts": [{"id": f.id, "covered": facts[f.id]} for f in case.expected_facts],
                 "prohibited": [
                     {"index": i, "asserted": False} for i in range(1, len(case.must_not_assert) + 1)
                 ],
                 "dimensions": {
-                    d: {"result": "pass" if case.criteria[d] else "not_applicable"}
+                    d: {
+                        "result": (
+                            "fail" if d == "completeness" and not all(facts.values()) else "pass"
+                        )
+                        if case.criteria[d]
+                        else "not_applicable"
+                    }
                     for d in DIMENSIONS
                 },
             }
@@ -974,3 +1040,25 @@ def test_cli_run_writes_report(
     assert out.stat().st_mode & 0o777 == 0o600
     assert "unauthenticated" not in out.read_text()
     assert cli.main(["compare", str(out), str(out)]) == cli.EXIT_OK
+
+
+@pytest.mark.parametrize("case", EXTRACTION_CASES, ids=lambda case: case.id)
+def test_extraction_cases_run_and_cover_every_expected_item(case, records):
+    record = records[case.id]
+    assert record["deterministic"]["passed"], record["deterministic"]["checks"]
+    assert record["judge"]["correctness_pass"]
+    assert record["judge"]["facts_covered"] == len(case.expected_facts)
+
+
+def test_dropping_one_extraction_record_fails_completeness(baseline_dir, baseline_db):
+    case = next(c for c in EXTRACTION_CASES if c.id == "extract-pool-bids")
+    good, _, _ = _evaluate(baseline_dir, baseline_db, case)
+    broken, _, _ = _evaluate(baseline_dir, baseline_db, case, "drop_record")
+    assert good["judge"]["facts_covered"] == 3
+    assert good["judge"]["correctness_pass"]
+    # The deterministic required values only cover the first item; the
+    # judge must detect the third item missing even while those still pass.
+    assert broken["deterministic"]["passed"]
+    assert broken["judge"]["facts_covered"] == 2
+    assert broken["judge"]["dimensions"]["completeness"] == "fail"
+    assert not broken["judge"]["correctness_pass"]

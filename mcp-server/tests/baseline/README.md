@@ -103,7 +103,11 @@ as failed extractions.
      through the real handler of its tool (`ask_mailbox`,
      `summarize_thread` or an experimental tool) with a scripted
      answerer and judge (no network); `extract_from_emails` cases are
-     checked against the corpus only (#1287). See `tests/eval/README.md`.
+     checked against the corpus and run through their real handler (#1287).
+     The scripted answerer emits one record per expected fact whose source
+     excerpt and field values reached the prompt. The judge covers a fact
+     only when one returned record states all its values; a dropped-record
+     mutation must fail completeness. See `tests/eval/README.md`.
 
 The hashed embedder has no sense of meaning, so the baseline catches
 broken plumbing (ingestion, schema, lanes, fusion, filters). It does
