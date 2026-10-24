@@ -1422,12 +1422,16 @@ class TestRawOutputCap:
         assert doc._MAX_OUTPUT_BYTES == ppt._MAX_OUTPUT_BYTES == 40 * 1024 * 1024
 
     def test_only_doc_and_ppt_take_the_configured_cap(self):
-        """The dispatcher passes ``max_extracted_chars`` to the raw-tool
-        extractors only; none of the other extractors listed here takes it."""
+        """Only the raw-tool extractors take the configured cap; include
+        every module the dispatch tables or version registry name."""
         import importlib
         import inspect
 
-        modules = ("doc", "docx", "html", "image", "pdf", "ppt", "pptx", "text", "xls", "xlsx")
+        modules = (
+            set(extractors._MIME_DISPATCH.values())
+            | set(extractors._EXT_DISPATCH.values())
+            | set(extractors.EXTRACTOR_VERSIONS)
+        )
         takes = {
             name
             for name in modules

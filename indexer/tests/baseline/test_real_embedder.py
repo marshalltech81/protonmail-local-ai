@@ -555,7 +555,7 @@ def test_one_at_a_time_caches_each_vector_before_the_next_request(tmp_path):
     assert sent == [["a"], ["b"]]
     # "a" was paid for and kept, under a key that ignores its neighbours
     # (each query is sent alone).
-    assert sent == [["a"], ["b"]]
+    assert cache.get(cache.key(1, CachedEmbedder.item(["a"], 0))) == [1.0, 0.0]
     sent.clear()
     assert embedder.embed_batch(["z", "a"]) == [[1.0, 0.0], [1.0, 0.0]]
     assert sent == [["z"]]
