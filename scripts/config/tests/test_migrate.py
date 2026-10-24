@@ -47,6 +47,9 @@ class MigrateConfig(unittest.TestCase):
         )
         (self.root / "config").mkdir()
         self.paths = migrate.Paths(self.root)
+        patcher = unittest.mock.patch.object(migrate, "_check_live_account")
+        self.live_check = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def write_env(self, text: str = BASE_ENV) -> None:
         (self.root / ".env").write_text(text, encoding="utf-8")
@@ -179,6 +182,30 @@ class MigrateConfig(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.paths.config.stat().st_mode), 0o600)
         data = tomllib.loads(self.paths.config.read_text(encoding="utf-8"))
         self.assertEqual(data["accounts"][0]["scope_uuid"], UUID)
+
+    def test_run_checks_the_effective_exported_account(self) -> None:
+        self.write_env()
+        other = "00000000-0000-4000-8000-000000000003"
+        with unittest.mock.patch.dict(os.environ, {"ACCOUNT_SCOPE": other}):
+            self.assertEqual(migrate.run(self.paths), 0)
+        self.assertEqual(self.live_check.call_args.args[0]["accounts"][0]["scope_uuid"], other)
+
+    def test_account_check_failure_writes_neither_file(self) -> None:
+        self.write_env()
+        self.live_check.side_effect = migrate.MigrateError("fixed account mismatch")
+        self.assertEqual(migrate.run(self.paths), 1)
+        self.assertFalse(self.paths.config.exists())
+        self.assertFalse(self.paths.mode.exists())
+
+    def test_account_check_failure_preserves_existing_config_and_mode(self) -> None:
+        self.write_env()
+        text = migrate.migrate(self.paths)
+        self.paths.config.write_text(text)
+        self.paths.mode.write_text("legacy\n")
+        self.live_check.side_effect = migrate.MigrateError("fixed account mismatch")
+        self.assertEqual(migrate.run(self.paths), 1)
+        self.assertEqual(self.paths.config.read_text(), text)
+        self.assertEqual(self.paths.mode.read_text(), "legacy\n")
 
     def test_run_refuses_an_invalid_existing_config_toml(self) -> None:
         self.write_env()
