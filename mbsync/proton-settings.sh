@@ -47,12 +47,12 @@ PROTON_BRIDGE_HOST_ALIASES=(host.docker.internal host.orb.internal host.internal
 readonly PROTON_BRIDGE_HOST_ALIASES
 
 # BRIDGE_HOST as compared and used: surrounding whitespace removed, lower
-# case.
+# case (ASCII only).
 proton_normalize_bridge_host() {
     local LC_ALL=C value="$1"
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
-    printf '%s' "$value" | tr '[:upper:]' '[:lower:]'
+    printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]'
 }
 
 # Proton's folder exclusions: folder patterns separated by |, each
@@ -68,12 +68,12 @@ PROTON_PROTECTED_FOLDER_EXCLUSIONS=("All Mail" "Labels/*" "Starred")
 readonly PROTON_PROTECTED_FOLDER_EXCLUSIONS
 
 # SOURCE_MODE as compared: surrounding whitespace removed, lower case, as
-# every *_MODE setting is read.
+# every *_MODE setting is read; ASCII case only.
 proton_normalize_source_mode() {
     local LC_ALL=C value="$1"
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
-    printf '%s' "$value" | tr '[:upper:]' '[:lower:]'
+    printf '%s' "$value" | LC_ALL=C tr '[:upper:]' '[:lower:]'
 }
 
 # Succeeds when the normalized BRIDGE_HOST is exactly one of the aliases.

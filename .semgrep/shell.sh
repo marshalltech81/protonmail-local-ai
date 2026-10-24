@@ -108,3 +108,39 @@ chmod go+r "$dir"
 chmod 755 "$dir"
 # ok: shell-world-writable
 chmod go+rx "$dir"
+
+# ruleid: shell-xtrace-enabled
+set \
+    -x
+# ruleid: shell-xtrace-enabled
+set -o \
+    xtrace
+# ruleid: shell-xtrace-enabled
+bash \
+    -x ./other.sh
+# ruleid: shell-xtrace-enabled
+sh -o \
+    xtrace ./other.sh
+# ok: shell-xtrace-enabled
+set \
+    +x
+# ok: shell-xtrace-enabled
+# set \
+#    -x
+
+# ruleid: shell-world-writable
+chmod \
+    777 "$dir"
+# ruleid: shell-world-writable
+chmod \
+    -R \
+    0666 "$dir"
+# ruleid: shell-world-writable
+chmod --recursive \
+    o+w "$dir"
+# ok: shell-world-writable
+chmod \
+    755 "$dir"
+# ok: shell-world-writable
+# chmod \
+#    777 "$dir"

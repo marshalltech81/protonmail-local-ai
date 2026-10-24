@@ -320,6 +320,11 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   match but do not rank it, and a rate-limited `Keyword passage
   ranking used the first 16 distinct query words` WARNING says so
   ([#1246](https://github.com/marshalltech81/protonmail-local-ai/issues/1246)).
+  For `get_evidence`, `ask_mailbox`, `extract_from_emails`, `brief_issue`,
+  `check_conclusion`, and `search_emails` when reranking selects evidence,
+  lead with names, identifiers and key terms and keep the query focused.
+  Later words still qualify passages; only the first 16 distinct words
+  affect keyword passage ordering.
 - `evidence_filtered` is 1 when a `get_evidence` call used a
   [precision control](#precision-controls) or `dedupe_attachments`. With `scope=in_scope`,
   `evidence_context_dropped` counts the `context` passages left out and

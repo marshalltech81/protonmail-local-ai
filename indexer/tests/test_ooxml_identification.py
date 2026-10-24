@@ -606,17 +606,33 @@ def test_expat_out_of_memory_is_a_limit_not_malformed_metadata(monkeypatch):
         container_child.extract_text(SHAPES["docx"])
 
 
-def test_a_metadata_bomb_fails_identification_by_type():
-    """Through the identification path (the child run in this process,
-    tests/conftest.py): a deflate bomb in the content types fails
-    identification by type name, in bounded time."""
-    from src.extractors import container
-    from src.extractors._runner import ChildError
+@pytest.mark.serial
+@pytest.mark.real_extractor_child
+def test_a_metadata_bomb_is_failed_by_the_real_child(monkeypatch):
+    """A real resource-limited child rejects the content-types bomb."""
+    from src.extractors import _runner, container
+    from src.extractors._runner import ChildError, process_launches
+
+    calls = []
+    real = _runner.run_tool
+
+    def spy(argv, payload, **kwargs):
+        calls.append({"argv": argv, **kwargs})
+        return real(argv, payload, **kwargs)
+
+    monkeypatch.setattr(_runner, "run_tool", spy)
 
     bomb = b"<Types>" + b" " * (64 * 1024 * 1024) + b"</Types>"
     payload = _deflated({"[Content_Types].xml": bomb, "_rels/.rels": ooxml_rels("/a.xml")})
+    before = process_launches()
     started = time.monotonic()
     with pytest.raises(ChildError) as raised:
         container.identify(payload)
     assert time.monotonic() - started < 10
     assert raised.value.type_name == "ContainerDirectoryBudgetError"
+    assert process_launches() - before == 1
+    [call] = calls
+    assert call["argv"][-1] == "container"
+    assert call["max_address_space_bytes"] == container.CHILD_MAX_ADDRESS_SPACE_BYTES
+    assert call["max_cpu_seconds"] == container.CHILD_MAX_CPU_SECONDS
+    assert call["timeout_seconds"] > container.CHILD_MAX_CPU_SECONDS + 1
