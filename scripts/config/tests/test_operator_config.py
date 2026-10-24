@@ -1054,6 +1054,7 @@ class Reading(unittest.TestCase):
         writer = subprocess.Popen(  # nosec B603 B607 - fixed argv
             ["sh", "-c", 'sleep 2; printf x > "$1"', "sh", str(fifo)]
         )
+        self.addCleanup(writer.wait)
         self.addCleanup(writer.kill)
         self.assertEqual(self.refused(fifo), "config.toml is not a regular file.")
         self.assertIsNone(writer.poll())
