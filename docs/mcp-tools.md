@@ -1089,6 +1089,8 @@ controls, the flag adds `evidence_filtered` to the timing line, with
 collapse attachments, so leave the flag unset for an audit.
 
 ### `search_attachments`
+Attachment results use the carrying message's current thread and subject,
+including after a message is rethreaded.
 Locate indexed attachments by filename, MIME type, and extracted
 text. Use it for attachment-centric questions ("find the quote PDF
 from Acme", "which emails had W-2 attachments?"). With no `query` it
