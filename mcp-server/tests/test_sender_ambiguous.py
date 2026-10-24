@@ -215,18 +215,15 @@ class TestPassages:
 
 
 def test_fixture_dates_are_utc():
-    # Guards the fixed date in _chunk above against a local-time reading.
-    assert datetime.fromisoformat("2024-03-04T10:30:00+00:00").tzinfo == UTC
+    date = TestPassages._chunk(None).message_date
+    assert date is not None
+    assert datetime.fromisoformat(date).tzinfo == UTC
 
 
 # Both causes the indexer stores as 1 (#1144): a repeated From, and a
 # header scan stopped at its field cap with no second From seen. The
 # stored value cannot tell them apart, so every label for 1 is neutral.
-_CAUSES = ["repeated_from", "scan_capped"]
-
-
-@pytest.mark.parametrize("cause", _CAUSES)
-def test_both_causes_get_the_reason_neutral_label(fake_server, messages_db, cause):
+def test_unsafe_sender_flag_gets_the_reason_neutral_label(fake_server, messages_db):
     from src.tools.intelligence import sender_check
 
     _set_flag(messages_db, "message_id = 'm1'", 1)
