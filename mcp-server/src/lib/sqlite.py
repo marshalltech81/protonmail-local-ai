@@ -959,14 +959,18 @@ def _message_records(
     limit: int = -1,
     offset: int = 0,
     participants: bool = True,
+    order: str = "oldest",
 ) -> list[MessageRecord]:
     """Messages matching ``where_sql``, oldest effective time first
     (``claimant_id`` breaks ties), with participants unless
     ``participants`` is false. Dates are stored as UTC ISO 8601, so
     string order is chronological order. ``limit=-1`` means no limit."""
+    if order not in ("oldest", "newest"):
+        raise InvalidFilterError("order", "order must be oldest or newest")
+    direction = "ASC" if order == "oldest" else "DESC"
     rows = conn.execute(
         f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE {where_sql} "  # nosec B608
-        "ORDER BY m.effective_at ASC, m.claimant_id ASC LIMIT ? OFFSET ?",
+        f"ORDER BY m.effective_at {direction}, m.claimant_id {direction} LIMIT ? OFFSET ?",  # nosec B608
         (*params, limit, offset),
     ).fetchall()
     records = [_row_to_message_record(r) for r in rows]
@@ -3190,11 +3194,12 @@ class Database:
         params += sender_params
         where = " AND ".join(clauses)
         joins = (
-            "JOIN threads t ON a.thread_id = t.thread_id "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
+            "JOIN threads t ON m.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
         )
-        columns = "a.attachment_id, a.claimant_id, a.filename, a.thread_id"
+        columns = "a.attachment_id, a.claimant_id, a.filename, m.thread_id"
         if fts_query:
             # The filename lane lists every occurrence; the text lane one
             # anchored occurrence per payload and message
@@ -3219,7 +3224,8 @@ class Database:
                 f"JOIN attachments a ON a.attachment_occurrence_id = {_TEXT_LANE_ANCHOR} "
                 f"{joins}WHERE c.attachment_id IS NOT NULL AND {where} ), "
                 f"x AS MATERIALIZED ( SELECT {columns} FROM xo "
-                "JOIN attachments a ON a.attachment_occurrence_id = xo.occ ), "
+                "JOIN attachments a ON a.attachment_occurrence_id = xo.occ "
+                "JOIN messages m ON m.claimant_id = a.claimant_id ), "
                 "extra AS ( SELECT attachment_id, claimant_id, filename FROM x "
                 "EXCEPT SELECT attachment_id, claimant_id, filename FROM f ), "
                 "cand AS ( SELECT thread_id FROM f UNION ALL "
@@ -3235,7 +3241,7 @@ class Database:
                 *params,
             ]
         else:
-            ctes = f"cand AS ( SELECT a.thread_id FROM attachments a {joins}WHERE {where} )"  # nosec B608
+            ctes = f"cand AS ( SELECT m.thread_id FROM attachments a {joins}WHERE {where} )"  # nosec B608
             candidate_params = list(params)
         if not from_addr:
             sql = "WITH " + ctes + " SELECT COUNT(*) FROM cand"  # nosec B608
@@ -3331,7 +3337,7 @@ class Database:
         # filter-clause literals); every user value is ``?``-bound.
         sql = (
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
-            "a.claimant_id, a.thread_id, a.filename, "
+            "a.claimant_id, m.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             f"t.folder, t.date_last, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
             "t.senders, "
@@ -3341,10 +3347,10 @@ class Database:
             "bm25(attachments_fts) AS score "
             "FROM attachments_fts "
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
-            "JOIN threads t ON a.thread_id = t.thread_id "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
+            "JOIN threads t ON m.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
-            "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
         )
@@ -3402,13 +3408,14 @@ class Database:
             "    SELECT a.attachment_occurrence_id, MIN(h.score) AS score "
             "    FROM hits h JOIN message_chunks c ON c.fts_rowid = h.fts_rowid "
             f"    JOIN attachments a ON a.attachment_occurrence_id = {_TEXT_LANE_ANCHOR} "
-            "    JOIN threads t ON a.thread_id = t.thread_id "
+            "    JOIN messages m ON m.claimant_id = a.claimant_id "
+            "    JOIN threads t ON m.thread_id = t.thread_id "
             "    LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
             "    WHERE " + " AND ".join(where) + " "  # nosec B608
             "    GROUP BY a.attachment_occurrence_id ) "
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
-            "a.claimant_id, a.thread_id, a.filename, "
+            "a.claimant_id, m.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             f"t.folder, t.date_last, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
             "t.senders, "
@@ -3418,10 +3425,10 @@ class Database:
             "best.score AS score "
             "FROM best "
             "JOIN attachments a ON a.attachment_occurrence_id = best.attachment_occurrence_id "
-            "JOIN threads t ON a.thread_id = t.thread_id "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
+            "JOIN threads t ON m.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
-            "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "ORDER BY score LIMIT ?"
         )
         try:
@@ -3455,7 +3462,7 @@ class Database:
         params = [*extra_params, limit]
         sql = (
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
-            "a.claimant_id, a.thread_id, a.filename, "
+            "a.claimant_id, m.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             f"t.folder, t.date_last, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
             "t.senders, "
@@ -3464,10 +3471,10 @@ class Database:
             f"{_SOURCE_COLUMNS}, "
             "0.0 AS score "
             "FROM attachments a "
-            "JOIN threads t ON a.thread_id = t.thread_id "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
+            "JOIN threads t ON m.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
-            "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY m.effective_at DESC LIMIT ?"
         )
@@ -3730,7 +3737,8 @@ class Database:
             "bm25(attachments_fts) AS score "
             "FROM attachments_fts "
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
-            "JOIN threads t ON a.thread_id = t.thread_id "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
+            "JOIN threads t ON m.thread_id = t.thread_id "
             "WHERE " + " AND ".join(where_clauses) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
         )
@@ -3771,11 +3779,12 @@ class Database:
             return {}
         placeholders = ",".join(["?"] * len(thread_ids))
         sql = (
-            "SELECT a.thread_id, a.attachment_id, bm25(attachments_fts) AS score "
+            "SELECT m.thread_id, a.attachment_id, bm25(attachments_fts) AS score "
             "FROM attachments_fts "
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE attachments_fts MATCH ? "
-            f"AND a.thread_id IN ({placeholders}) "  # nosec B608
+            f"AND m.thread_id IN ({placeholders}) "  # nosec B608
             "ORDER BY score"
         )
         try:
@@ -4336,25 +4345,43 @@ class Database:
         ``_chunk_vector_search``); ``[]`` means no matches."""
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
-            rows = self._fetchall(
-                """
-                SELECT
-                    t.thread_id, t.subject, t.participants, t.senders, t.folder,
-                    t.date_first, t.date_last, t.message_ids,
-                    t.snippet, t.has_attachments, t.body_text, t.display_subject,
-                    v.distance AS score
-                FROM threads_vec v
-                JOIN threads t ON v.thread_id = t.thread_id
-                WHERE v.embedding MATCH ?
-                  AND k = ?
-                ORDER BY v.distance
-            """,
-                (serialized, min(limit, _SQLITE_VEC_MAX_K)),
-            )
-            # Tag the dense thread lane so RRF fusion can record it as
-            # ``thread_vec`` provenance on the surviving thread row.
+            requested = min(limit, _SQLITE_VEC_MAX_K)
+            candidate_k = requested
+            while True:
+                rows = self._fetchall(
+                    """
+                    SELECT
+                        t.thread_id, t.subject, t.participants, t.senders, t.folder,
+                        t.date_first, t.date_last, t.message_ids,
+                        t.snippet, t.has_attachments, t.body_text, t.display_subject,
+                        v.distance AS score,
+                        vec_distance_l2(v.embedding, zeroblob(length(v.embedding))) > 0 AS nonzero
+                    FROM threads_vec v
+                    JOIN threads t ON v.thread_id = t.thread_id
+                    WHERE v.embedding MATCH ? AND k = ?
+                    ORDER BY v.distance
+                    """,
+                    (serialized, candidate_k),
+                )
+                eligible = [r for r in rows if r["nonzero"] and _has_valid_distance(r)]
+                if (
+                    len(eligible) >= requested
+                    or len(rows) < candidate_k
+                    or candidate_k == _SQLITE_VEC_MAX_K
+                ):
+                    break
+                # Refilling is bounded by the same native candidate cap. Test
+                # norms only for returned candidates, never in an index-wide scan.
+                candidate_k = min(candidate_k * 2, _SQLITE_VEC_MAX_K)
+            zeros = sum(r["nonzero"] == 0 for r in rows)
+            if zeros:
+                log.info("Skipped %d zero thread vectors from %d candidates", zeros, len(rows))
+                timings.count("excluded_zero_thread_vectors", zeros)
+            if len(eligible) < requested and len(rows) == candidate_k == _SQLITE_VEC_MAX_K:
+                log.info("Thread vector refill reached candidate cap=%d", candidate_k)
+                timings.count("degraded_thread_vec_cap", 1)
             return _tag_lane_ranks(
-                [self._row_to_result(r) for r in rows if _has_valid_distance(r)], "thread_vec"
+                [self._row_to_result(r) for r in eligible[:requested]], "thread_vec"
             )
         except (sqlite3.Error, ValueError) as e:
             # Same catch surface as ``_chunk_vector_search`` —
@@ -4634,9 +4661,15 @@ class Database:
         return found
 
     def get_thread_page(
-        self, thread_id: str, *, offset: int, limit: int, body_char_limit: int
+        self,
+        thread_id: str,
+        *,
+        offset: int,
+        limit: int,
+        body_char_limit: int,
+        order: str = "oldest",
     ) -> ThreadPage | ReapedSource | None:
-        """One page of a thread's messages, oldest first, each with its
+        """One page of a thread's messages in the selected order, each with its
         own headers and its body cut at ``body_char_limit``.
 
         Every read shares one snapshot, so an indexer commit landing
@@ -4655,7 +4688,7 @@ class Database:
                 "SELECT COUNT(*) FROM messages WHERE thread_id = ?", (thread_id,)
             ).fetchone()[0]
             messages = _message_records(
-                conn, "m.thread_id = ?", (thread_id,), limit=limit, offset=offset
+                conn, "m.thread_id = ?", (thread_id,), limit=limit, offset=offset, order=order
             )
             bodies = _message_bodies(conn, [m.claimant_id for m in messages], body_char_limit)
             has_bodies = bool(bodies) or bool(

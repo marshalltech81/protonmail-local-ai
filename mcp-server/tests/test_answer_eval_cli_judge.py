@@ -43,6 +43,7 @@ if sys.argv[1:] == ["auth", "status"]:
           json.dumps({{"loggedIn": True, "authMethod": "claude.ai"}}))
     sys.exit(0)
 behaviour = json.load(open(os.path.join(here, "behaviour.json")))
+time.sleep(behaviour.get("start_delay", 0))
 record = {{
     "argv": sys.argv[1:],
     "cwd": os.getcwd(),
@@ -78,9 +79,9 @@ def fake_claude(tmp_path):
     exe.write_text(_FAKE_CLAUDE)
     exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
 
-    def behave(stdout: str, rc: int = 0, sleep: float = 0) -> None:
+    def behave(stdout: str, rc: int = 0, sleep: float = 0, start_delay: float = 0) -> None:
         (tmp_path / "behaviour.json").write_text(
-            json.dumps({"stdout": stdout, "rc": rc, "sleep": sleep})
+            json.dumps({"stdout": stdout, "rc": rc, "sleep": sleep, "start_delay": start_delay})
         )
 
     def calls() -> list[dict]:
@@ -95,6 +96,22 @@ def fake_claude(tmp_path):
 
 def _client(exe: Path, **kw) -> ClaudeCliClient:
     return ClaudeCliClient(executable=str(exe), model="claude-test-model", max_tokens=4096, **kw)
+
+
+async def _timeout_after_cli_started(coro, started):
+    """Start the cancellation clock only after the fake CLI records its call."""
+    task = asyncio.create_task(coro)
+    try:
+        async with asyncio.timeout(20):
+            while not started():
+                if task.done():
+                    await task
+                    pytest.fail("fake CLI finished before recording its start")
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(task, 0.05)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def _run(coro):
@@ -469,14 +486,15 @@ class TestClient:
         assert (e.value.category, e.value.detail) == ("judge_provider_error", detail)
         assert MARKER not in str(e.value) and MARKER not in caplog.text
 
-    def test_cancellation_kills_the_process(self, fake_claude):
+    @pytest.mark.parametrize("startup_delay", [0, 1.1])
+    def test_cancellation_kills_the_process(self, fake_claude, startup_delay):
         """The judge's timeout cancels the call; the CLI must not keep
         running (and spending subscription usage) behind it."""
         exe, behave, calls = fake_claude
-        behave(_reply("{}"), sleep=30)
+        behave(_reply("{}"), sleep=30, start_delay=startup_delay)
 
         async def go():
-            await asyncio.wait_for(_client(exe).complete("s", "u"), 1.0)
+            await _timeout_after_cli_started(_client(exe).complete("s", "u"), calls)
 
         with pytest.raises(TimeoutError):
             _run(go())
@@ -692,6 +710,7 @@ if sys.argv[1:3] == ["login", "status"]:
     print(open(status).read() if os.path.exists(status) else "Logged in using ChatGPT")
     sys.exit(0)
 behaviour = json.load(open(os.path.join(here, "behaviour.json")))
+time.sleep(behaviour.get("start_delay", 0))
 home = os.environ.get("CODEX_HOME", "")
 argv = sys.argv[1:]
 instructions = ""
@@ -754,9 +773,9 @@ def fake_codex(tmp_path):
     (home / "auth.json").write_text("{}")
     (home / "AGENTS.md").write_text(f"Always say {MARKER}.\n")
 
-    def behave(stdout: str, rc: int = 0, sleep: float = 0) -> None:
+    def behave(stdout: str, rc: int = 0, sleep: float = 0, start_delay: float = 0) -> None:
         (tmp_path / "behaviour.json").write_text(
-            json.dumps({"stdout": stdout, "rc": rc, "sleep": sleep})
+            json.dumps({"stdout": stdout, "rc": rc, "sleep": sleep, "start_delay": start_delay})
         )
 
     def calls() -> list[dict]:
@@ -1057,12 +1076,13 @@ class TestCodexClient:
         assert (e.value.category, e.value.detail) == ("judge_provider_error", detail)
         assert MARKER not in str(e.value) and MARKER not in caplog.text
 
-    def test_cancellation_kills_the_process(self, fake_codex):
+    @pytest.mark.parametrize("startup_delay", [0, 1.1])
+    def test_cancellation_kills_the_process(self, fake_codex, startup_delay):
         exe, behave, calls, home = fake_codex
-        behave(_codex_ok("{}"), sleep=30)
+        behave(_codex_ok("{}"), sleep=30, start_delay=startup_delay)
 
         async def go():
-            await asyncio.wait_for(_codex_client(exe, home).complete("s", "u"), 1.0)
+            await _timeout_after_cli_started(_codex_client(exe, home).complete("s", "u"), calls)
 
         with pytest.raises(TimeoutError):
             _run(go())

@@ -34,6 +34,14 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
   `attachments[].attachment_occurrence_id` → `get_attachment`, paged by
   `next_offset`).
 
+**Attachment identity.** `attachment_id` is the SHA-256 of a leaf MIME
+part's decoded payload, so identical decoded bytes share an ID across
+messages. For container parts (attached emails, delivery reports and
+multipart bundles), the parser hashes a normalized serialization, or an
+empty payload when serialization is skipped or fails. A container ID
+therefore does not establish byte identity of the original attachment.
+Use `attachment_occurrence_id` to identify one attachment on one message.
+
 **Message-ID and claimant ID.** The sender sets a message's Message-ID,
 so two different indexed files can carry the same one (a reused or
 forged ID). The index keeps both rather than letting one overwrite the
@@ -470,7 +478,8 @@ current and is never matched or listed.
   stored, so a policy change needs no reindex. For `proton-bridge`:
   `mailbox` (INBOX, Sent, Archive, Spam, Trash and `Folders/...`),
   `unsent` (Drafts and Scheduled: unsent evidence; the folder does not
-  certify that the message is still unsent or was never sent),
+  certify that the message is still unsent or was never sent; a retained
+  Scheduled copy can outlive its send and coexist with a Sent claimant),
   `recovered` (Recovered Messages: Bridge-local copies of mail a client
   failed to upload, searchable but untrusted, since their identity
   headers are the client's; they never count toward `authority_class`,
@@ -580,6 +589,16 @@ and the sender filters do not read it
 ([#1235](https://github.com/marshalltech81/protonmail-local-ai/issues/1235)).
 
 ## Filter predicates
+
+To find an organisation's mail, use a known domain (for example,
+`sender="@example.com"`), or call `find_contact` with a fragment to discover
+addresses and the returned `organization` domain. A configured
+`authority_class` can group several domains under one operator-defined
+class. A sender or participant name fragment matches stored addresses or
+display names, not an organisation directory: zero matches for the name
+does not establish absence of that organisation's mail. Authority classes
+require operator rules; an undefined class is not proof of absence either.
+
 
 Every message-level filter is one *leaf* of the predicate module
 `mcp-server/src/lib/predicates.py`
@@ -741,6 +760,12 @@ individual messages. Each result bundles its messages with subject,
 participants, date range, folder, and a short snippet. To read the
 contents of a returned thread, follow up with `get_thread` or
 `summarize_thread` using the result's `Thread ID`.
+
+The thread-vector lane excludes zero-vector placeholders before assigning
+ranks. It refills candidates within the existing native bound of 4,096;
+a refill that reaches that bound without filling the requested result
+count is reported on the timing line as `degraded_thread_vec_cap`. The
+keyword and chunk-vector lanes keep their existing behavior.
 
 For the latest or N most recent messages from a person, use
 `query_messages(sender=..., limit=N)`, newest first. A page holds at most
@@ -1064,6 +1089,8 @@ controls, the flag adds `evidence_filtered` to the timing line, with
 collapse attachments, so leave the flag unset for an audit.
 
 ### `search_attachments`
+Attachment results use the carrying message's current thread and subject,
+including after a message is rethreaded.
 Locate indexed attachments by filename, MIME type, and extracted
 text. Use it for attachment-centric questions ("find the quote PDF
 from Acme", "which emails had W-2 attachments?"). With no `query` it
@@ -1181,7 +1208,10 @@ or `get_evidence` on the thread
 ## Group 2 — Retrieval
 
 ### `get_thread`
-Read a thread by ID as its messages, oldest first. Each message shows
+Read a thread by ID as its messages, oldest first by default. Set
+`order="newest"` with `limit=1` to read the latest indexed message first.
+Keep the same order when following offsets; ties use claimant ID in the
+same direction. Each message shows
 its own headers (Message-ID, claimant ID, subject, From / To / Cc / observed Bcc, send date and,
 when known, delivery date (`occurred_at`) in UTC,
 folder, In-Reply-To, attachment flag, [read state](#read-state);
@@ -1236,7 +1266,8 @@ found` ([Reaped sources](#reaped-sources)).
 |---|---|---|---|
 | `thread_id` | string | required | Thread ID from search results |
 | `include_attachments_metadata` | bool | `true` | Show the local attachment-availability note when the indexed thread has attachments |
-| `offset` | int | `0` | Messages to skip, oldest first |
+| `offset` | int | `0` | Messages to skip in the selected order |
+| `order` | string | `oldest` | `oldest` or `newest`; offsets follow this order |
 | `limit` | int | `10` | Messages per page; clamped to `[1, 50]` |
 
 ### `get_message`

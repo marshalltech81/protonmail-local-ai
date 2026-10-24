@@ -186,6 +186,34 @@ class TestGetThread:
         assert "[2/2] Message-ID: m2" in second
         assert "call get_thread with offset" not in second
 
+    def test_newest_first_pages_reverse_the_default(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["get_thread"]
+        first = asyncio.run(handler(thread_id="t1", limit=1, order="newest"))
+        second = asyncio.run(handler(thread_id="t1", offset=1, limit=1, order="newest"))
+        assert "Messages: 2 (showing 1-1, newest first)" in _text(first)
+        assert "Message-ID: m2" in _text(first) and "Message-ID: m1" not in _text(first)
+        assert "Message-ID: m1" in _text(second) and "Message-ID: m2" not in _text(second)
+        assert first.structured_content["next_offset"] == 1
+        assert second.structured_content["next_offset"] is None
+
+    def test_newest_order_reverses_claimant_id_ties(self, fake_server, messages_db):
+        with sqlite3.connect(messages_db.path) as conn:
+            conn.execute("UPDATE messages SET sent_at = '2024-01-10T09:00:00+00:00'")
+        handler = _handlers(fake_server, messages_db)["get_thread"]
+        oldest = asyncio.run(handler(thread_id="t1")).structured_content["messages"]
+        newest = asyncio.run(handler(thread_id="t1", order="newest")).structured_content["messages"]
+        assert [m["claimant_id"] for m in newest] == [m["claimant_id"] for m in reversed(oldest)]
+
+    def test_invalid_order_is_rejected_without_logging_value(
+        self, fake_server, messages_db, caplog
+    ):
+        handler = _handlers(fake_server, messages_db)["get_thread"]
+        marker = "PRIVATE-ORDER-MARKER"
+        with caplog.at_level("INFO"):
+            assert "order" in _error(handler(thread_id="t1", order=marker))
+        assert marker not in caplog.text
+        assert "order" in caplog.text
+
     def test_offset_past_the_end_is_explicit(self, fake_server, messages_db):
         handler = _handlers(fake_server, messages_db)["get_thread"]
         text = _text(asyncio.run(handler(thread_id="t1", offset=5)))

@@ -463,8 +463,9 @@ class CorpusMessage:
     message_id: str  # as the indexer's parser derives it from the built file
     sha256: str  # of the message's bytes, in full
     thread_id: str  # the thread root's ``message_id``
-    sent_at: str  # ``messages.sent_at`` as the indexer stores it
+    sent_at: str | None  # ``messages.sent_at`` as the indexer stores it
     tokens: set[str] = field(repr=False)
+    sent_at_status: str = "parsed"
 
 
 def _parsed_message_id(raw: bytes) -> str:
@@ -515,7 +516,7 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
     text part and binary attachment, our own trusted bytes, and the text
     the corpus says its images show (``OCR_TEXT``). ``sent_at`` is the
     ``Date:`` header as the indexer normalizes it (``parser._parse_date``:
-    UTC, ISO format); the corpus writes no ``Received:`` header, so the
+    UTC, ISO format, or None with its missing/invalid status); the corpus writes no ``Received:`` header, so the
     indexer stores no ``occurred_at``.
     """
     spec = importlib.util.spec_from_file_location("answer_eval_baseline_corpus", path)
@@ -537,9 +538,16 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
                     "the committed synthetic corpus builds one claimant ID more than once"
                 )
             parsed = email.message_from_bytes(raw, policy=email.policy.default)
-            sent = email.utils.parsedate_to_datetime(str(parsed["Date"]))
-            if sent.tzinfo is None:
-                sent = sent.replace(tzinfo=UTC)
+            sent = None
+            status = "missing" if parsed["Date"] is None else "invalid"
+            try:
+                sent = email.utils.parsedate_to_datetime(str(parsed["Date"]))
+                if sent.tzinfo is None:
+                    sent = sent.replace(tzinfo=UTC)
+                sent = sent.astimezone(UTC)
+                status = "parsed"
+            except TypeError, ValueError, OverflowError:
+                pass
             text = [message_id]
             for part in parsed.walk():  # every part's headers: attachment names and types
                 # Names too: an attached email's extracted text labels its
@@ -564,8 +572,9 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
                 message_id,
                 sha256,
                 thread_id,
-                sent.astimezone(UTC).isoformat(),
+                sent.isoformat() if sent is not None else None,
                 _tokens(" ".join(text)),
+                status,
             )
     return manifest
 
@@ -602,14 +611,15 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
             raise refused
         # The claimant's own Message-ID, and its dates as the indexer
         # stores them: no Received header, so no occurred_at.
-        for claimant, stored_id, sent_at, occurred_at in conn.execute(
-            "SELECT claimant_id, message_id, sent_at, occurred_at FROM messages"
+        for claimant, stored_id, sent_at, occurred_at, sent_at_status in conn.execute(
+            "SELECT claimant_id, message_id, sent_at, occurred_at, sent_at_status FROM messages"
         ):
             entry = manifest.get(str(claimant))
-            if entry is None or (stored_id, sent_at, occurred_at) != (
+            if entry is None or (stored_id, sent_at, occurred_at, sent_at_status) != (
                 entry.message_id,
                 entry.sent_at,
                 None,
+                entry.sent_at_status,
             ):
                 raise refused
         # Per-message text a prompt can carry: chunk text, message subject,

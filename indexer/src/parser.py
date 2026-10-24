@@ -758,13 +758,15 @@ def parse_email(
             stat = None
 
         if cap > 0 and stat is not None and stat.st_size > cap:
-            log.warning(
+            warn_rate_limited(
+                log,
                 "Not parsing oversized email %s (%d bytes > %d cap); raise "
                 "INDEXER_PARSE_MAX_BYTES (or 0 to disable), recreate the indexer, "
                 "then run make requeue-dead if it was dead-lettered.",
                 path,
                 stat.st_size,
                 cap,
+                attachment=False,
             )
             raise OversizedMessageError(path, stat.st_size, cap)
 
@@ -784,12 +786,14 @@ def parse_email(
                 # the two so the operator-visible size is never an
                 # under-report relative to either signal.
                 actual = max(stat.st_size, len(raw)) if stat is not None else len(raw)
-                log.warning(
+                warn_rate_limited(
+                    log,
                     "Not parsing oversized email %s (>%d cap, detected during read); raise "
                     "INDEXER_PARSE_MAX_BYTES (or 0 to disable), recreate the indexer, "
                     "then run make requeue-dead if it was dead-lettered.",
                     path,
                     cap,
+                    attachment=False,
                 )
                 raise OversizedMessageError(path, actual, cap)
         else:
@@ -2310,6 +2314,22 @@ def _convert_html_parts(
     ``OSError`` (creating, writing or removing the child's scratch,
     starting it, or its pipes) propagates, so the queue retries the
     message."""
+    # Plain alternatives can be selected before converting HTML. Exclude
+    # only siblings of a known plain winner: an HTML-only alternative's
+    # first part might convert to blank, leaving a later part as its body.
+    hypothetical = [replace(node, children=list(node.children)) for node in nodes]
+    _kept_nodes(hypothetical)
+    unused = [False] * len(nodes)
+    for index, node in enumerate(hypothetical):
+        if node.parent >= 0:
+            parent = hypothetical[node.parent]
+            unused[index] = unused[node.parent] or (
+                parent.alternative and parent.has_plain and parent.chosen != index
+            )
+    # If any HTML is needed, retain the original batch and shared text
+    # budget: dropping a sibling could change which later part hits it.
+    if all(unused[index] for index, _ in parts):
+        return
     sources: list[str] = []
     surrogates = 0
     for _, html in parts:

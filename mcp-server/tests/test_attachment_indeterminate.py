@@ -720,3 +720,38 @@ class TestSearchAttachmentsIndeterminateTool:
         doc = " ".join(prop["description"].split())
         assert "sender" in doc
         assert "unavailable" in doc
+
+
+@pytest.mark.parametrize("query", [None, "ledger", "bravo"])
+@pytest.mark.parametrize("old_thread_exists", [True, False])
+def test_attachment_search_uses_the_current_carrying_thread(tmp_path, query, old_thread_exists):
+    conn, path = _open_built_db_conn(tmp_path, "rethread.db")
+    _add(conn, "v1", "current", "2024-01-10T00:00:00+00:00", VENDOR)
+    _add(conn, "u1", "current", "2024-01-11T00:00:00+00:00", VENDOR, sender_ambiguous=None)
+    _add(conn, "old", "previous", "2024-01-09T00:00:00+00:00", COLLEAGUE)
+    conn.execute("UPDATE threads SET subject = 'current subject' WHERE thread_id = 'current'")
+    conn.execute(
+        "UPDATE attachments SET thread_id = 'previous' WHERE claimant_id IN (?, ?)",
+        (claimant_of("v1"), claimant_of("u1")),
+    )
+    if not old_thread_exists:
+        conn.execute("DELETE FROM threads WHERE thread_id = 'previous'")
+    conn.commit()
+    conn.close()
+    db = Database(str(path))
+    found = db.search_attachments_with_count(query=query, sender="vendor", from_addr="vendor")
+    assert len(found.results) == 1
+    assert found.results[0].thread_id == "current"
+    assert found.results[0].subject == "current subject"
+    assert found.indeterminate == 1
+
+
+def test_attachment_filename_evidence_uses_current_thread(tmp_path):
+    conn, path = _open_built_db_conn(tmp_path, "filename-rethread.db")
+    _add(conn, "v1", "current", "2024-01-10T00:00:00+00:00", VENDOR)
+    conn.execute("UPDATE attachments SET thread_id = 'gone'")
+    conn.commit()
+    conn.close()
+    db = Database(str(path))
+    assert [r.thread_id for r in db._attachment_keyword_search("ledger", 10)] == ["current"]
+    assert db._matched_attachments("ledger", ["current"]) == {"current": ["v1-att"]}
