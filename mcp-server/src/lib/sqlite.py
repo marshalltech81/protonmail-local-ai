@@ -1936,6 +1936,7 @@ def _attachment_clauses(
     extraction_status: str | None,
     claimant_id: str | None,
     thread_id: str | None,
+    attachment_id: str | None = None,
 ) -> tuple[list[tuple[str, str]], list[str], list]:
     """``query_attachments``' own filters as ``(name, value)`` pairs (for
     the cursor digest), SQL clauses over ``attachments a`` and the LEFT
@@ -1966,6 +1967,7 @@ def _attachment_clauses(
         ("extraction_status", extraction_status),
         ("claimant_id", claimant_id),
         ("thread_id", thread_id),
+        ("attachment_id", attachment_id),
     ):
         value = _given(value)
         if value is None:
@@ -5871,6 +5873,7 @@ class Database:
         extraction_status: str | None = None,
         claimant_id: str | None = None,
         thread_id: str | None = None,
+        attachment_id: str | None = None,
         limit: int = 20,
         cursor: str | None = None,
     ) -> AttachmentPage:
@@ -5917,7 +5920,7 @@ class Database:
             flagged=None,
         )
         filters, clauses, clause_params = _attachment_clauses(
-            filename, content_type, extraction_status, claimant_id, thread_id
+            filename, content_type, extraction_status, claimant_id, thread_id, attachment_id
         )
         message_sql, message_params = compile_leaves(leaves)
         where_sql = " AND ".join([message_sql, *clauses])
