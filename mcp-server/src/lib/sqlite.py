@@ -85,7 +85,7 @@ from .sources import (
     default_scope_sql,
     live_sql,
 )
-from .validation import clamp_int
+from .validation import clamp_int, validate_fts_query
 
 log = logging.getLogger("mcp.sqlite")
 
@@ -293,6 +293,7 @@ def _fts_query_units(query: str) -> list[str]:
     """The word-like tokens ``_sanitize_fts_query`` quotes, in query
     order, duplicates kept. None holds a ``"``, so each quotes safely
     as one FTS5 phrase."""
+    validate_fts_query(query)
     return [
         "".join(chars)
         for is_token, chars in groupby(query or "", key=_is_fts_query_token_char)

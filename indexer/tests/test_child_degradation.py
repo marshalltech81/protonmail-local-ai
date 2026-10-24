@@ -86,6 +86,7 @@ class TestChildSends:
                     "pdf_ocr_dpi",
                     "image_normalized_frames",
                     "eml_binary_containers_skipped",
+                    "text_surrogates_replaced",
                 }
             )
             == CHILD_DEGRADATION_KEYS
@@ -253,6 +254,12 @@ _PARENT_ONLY_HTML = (
     "never calls it, so its lines are the parent's"
 )
 _EXCLUDED: dict[tuple[str, str], str] = {
+    ("src.parser", "_replace_decoded_surrogates"): (
+        "the eml child passes a degradation Counter: header/filename replacements "
+        "cross as eml_headers_degraded or eml_filenames_degraded, and BodyWalk "
+        "counts retained body replacements as eml_charsets_degraded; "
+        "test_decoded_surrogates checks the child and parent channels"
+    ),
     ("src.parser", "_convert_html_parts"): _PARENT_ONLY_HTML,
     ("src.extractors", "apply_child_degradation"): (
         "the parent's re-application of a child's counts, reached here only through "

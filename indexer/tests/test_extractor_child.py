@@ -409,7 +409,9 @@ class TestChildSide:
             b"C a\nN text_lost 1\nN extractor_caps 2\nT 0\n"
         )
         # A lone surrogate cannot be UTF-8: replaced, never a broken body.
-        assert extractor_child.result_frames("\ud800", []) == b"T 1\n?"
+        assert (
+            extractor_child.result_frames("\ud800", []) == b"N text_surrogates_replaced 1\nT 1\n?"
+        )
 
     def test_the_child_runs_every_module_the_dispatcher_sends_it(self):
         """The child's list is the dispatcher's child modules, written out

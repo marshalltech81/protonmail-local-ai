@@ -58,6 +58,8 @@ from tests.test_timings import _one_line
 _MARKER = "SYNTHETIC_BUDGET_MARKER_7731"
 # A window small enough that five long threads cannot all fit.
 _SMALL = PromptBudget(context_tokens=4096, max_output_tokens=1024)
+# A valid query below the 4,096-character FTS cap can still exceed this window.
+_MINIMUM_WINDOW = PromptBudget(context_tokens=2112, max_output_tokens=1024)
 # Parsed replies, for the repair reasons that apply to a reply that parsed.
 _BRIEF = Brief(
     chronology=[],
@@ -398,8 +400,8 @@ class TestAskMailboxBudget:
         llm = FakeInferenceClient()
         with pytest.raises(ToolError, match="INFERENCE_CONTEXT_TOKENS"):
             asyncio.run(
-                _tools(_StubDb(_long_threads(n=1)), llm, _SMALL)["ask_mailbox"](
-                    question="why " * 3000
+                _tools(_StubDb(_long_threads(n=1)), llm, _MINIMUM_WINDOW)["ask_mailbox"](
+                    question="why " * 1000
                 )
             )
         assert llm.complete_calls == []
@@ -671,8 +673,8 @@ class TestTokenLimitWarnings:
         llm = FakeInferenceClient()
         with pytest.raises(ToolError) as err:
             asyncio.run(
-                _tools(_StubDb(_long_threads(n=1)), llm, _SMALL)["ask_mailbox"](
-                    question=f"{_MARKER} " + "why " * 3000
+                _tools(_StubDb(_long_threads(n=1)), llm, _MINIMUM_WINDOW)["ask_mailbox"](
+                    question=f"{_MARKER} " + "why " * 1000
                 )
             )
         line = _one_limit_line(caplog)
@@ -681,7 +683,11 @@ class TestTokenLimitWarnings:
         counts = line["counts"]
         # The same estimate the caller's error states.
         assert f"estimated at {counts['prompt_tokens']} tokens" in str(err.value)
-        assert counts["prompt_tokens"] > counts["prompt_budget_tokens"] == _SMALL.prompt_tokens
+        assert (
+            counts["prompt_tokens"]
+            > counts["prompt_budget_tokens"]
+            == _MINIMUM_WINDOW.prompt_tokens
+        )
         assert _MARKER not in caplog.text
 
     def test_summarize_thread_summary_cut_at_max_tokens(self, caplog):
@@ -988,9 +994,9 @@ class TestLimitHitsAreCounted:
         caplog.set_level(logging.INFO)
         with pytest.raises(ToolError):
             asyncio.run(
-                _tools(_StubDb(_long_threads(n=1)), FakeInferenceClient(), _SMALL)["ask_mailbox"](
-                    question="why " * 3000
-                )
+                _tools(_StubDb(_long_threads(n=1)), FakeInferenceClient(), _MINIMUM_WINDOW)[
+                    "ask_mailbox"
+                ](question="why " * 1000)
             )
         timing = _one_line(caplog)
         assert timing["outcome"] == "error"

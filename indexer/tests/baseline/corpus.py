@@ -288,6 +288,7 @@ class Msg:
     # holds two claimants of one Message-ID. Keep it last in its thread,
     # so no later message's derived ID skips its position.
     duplicate_of: int | None = None
+    received: str | None = None
 
 
 def thread_id(n: int) -> str:
@@ -3421,6 +3422,36 @@ THREADS[129] = [
 ]
 
 
+# The earlier position arrives after its dated replacement (#1372).
+THREADS[130] = [
+    Msg(
+        "INBOX",
+        "Sat, 30 May 2026 09:00:00 +0000",
+        "Mira Sedge <mira@fern.example>",
+        ME,
+        "Fern cabinet clasp",
+        "We need to settle the fern cabinet clasp finish before the fitting.",
+    ),
+    Msg(
+        "INBOX",
+        "Mon, 1 Jun 2026 09:00:00 +0000",
+        "Mira Sedge <mira@fern.example>",
+        ME,
+        "Fern cabinet clasp",
+        "For the fern cabinet clasp, choose copper for the fitting on 9 July 2026.",
+        received="from relay.example by mailbox.example; Sat, 20 Jun 2026 11:00:00 -0400",
+    ),
+    Msg(
+        "INBOX",
+        "Wed, 10 Jun 2026 09:00:00 +0000",
+        "Mira Sedge <mira@fern.example>",
+        ME,
+        "Re: Fern cabinet clasp",
+        "Replace my copper choice with pewter for the fern cabinet clasp. The fitting stays on 9 July 2026.",
+    ),
+]
+
+
 def build_message(n: int, index: int, msg: Msg) -> bytes:
     """Serialise message ``index`` (0-based) of thread ``n``.
 
@@ -3436,6 +3467,8 @@ def build_message(n: int, index: int, msg: Msg) -> bytes:
     em["Message-ID"] = f"<{ids[-1]}>"
     if msg.date is not None:
         em["Date"] = msg.date
+    if msg.received is not None:
+        em["Received"] = msg.received
     em["From"] = msg.sender
     em["To"] = msg.to
     if msg.cc:

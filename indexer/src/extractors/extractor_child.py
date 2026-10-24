@@ -165,7 +165,11 @@ def result_frames(
     """The report frames, then the text frame, with the extractor name
     when there is one. A lone surrogate, which UTF-8 cannot hold, is
     written as ``?``."""
-    body = text.encode("utf-8", errors="replace")
+    text, replaced = importlib.import_module(f"{_PACKAGE}.html").replace_lone_surrogates(text)
+    if replaced:
+        counts = dict(counts or {})
+        counts["text_surrogates_replaced"] = counts.get("text_surrogates_replaced", 0) + replaced
+    body = text.encode("utf-8")
     head = f"T {len(body)}\n" if name is None else f"T {len(body)} {name}\n"
     return report_frames(caps, counts, recovered) + head.encode("ascii") + body
 

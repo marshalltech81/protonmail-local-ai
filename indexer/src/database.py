@@ -2626,7 +2626,7 @@ class Database:
 
     @_synchronized
     def restore_attachment_extraction(self, row: sqlite3.Row) -> None:
-        """Put back a cached extraction row ``delete_attachment_occurrences``
+        """Put back a cached extraction row an occurrence or message removal
         purged, as it was (``extracted_at`` included), unless the key
         already has a row (#1375)."""
         cur = self._conn.cursor()

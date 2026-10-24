@@ -841,6 +841,13 @@ class TestRunner:
         assert entries["t129.2@baseline.example"].sent_at_status == "missing"
         assert entries["t129.1@baseline.example"].sent_at_status == "parsed"
 
+    def test_delayed_delivery_manifest_matches_both_dates(self):
+        entries = {e.message_id: e for e in corpus_manifest().values()}
+        entry = entries["t130.2@baseline.example"]
+        assert entry.sent_at == "2026-06-01T09:00:00+00:00"
+        assert entry.occurred_at == "2026-06-20T15:00:00+00:00"
+        assert entries["t130.3@baseline.example"].occurred_at is None
+
     def test_corpus_manifest_hashes_committed_bytes(self):
         manifest = corpus_manifest()
         assert len(manifest) > 50
@@ -1568,6 +1575,15 @@ class TestChronologyGraders:
         case = CASES["brief-undated-alcove"]
         event = self._event(date, source, "Iona Vale", ["E1"])
         run = _run(event.text, [_passage("E1", "t129.2")], ["E1"], statements=[event])
+        assert grade_run(case, run).checks["chronology_dated"] == expected
+
+    @pytest.mark.parametrize(
+        "date,expected", [("2026-06-01", PASS), ("2026-06-20", FAIL), ("2026-07-09", FAIL)]
+    )
+    def test_delayed_delivery_is_not_the_position_date(self, date, expected):
+        case = CASES["brief-delayed-clasp"]
+        event = self._event(date, "sent", "Mira Sedge", ["E1"])
+        run = _run(event.text, [_passage("E1", "t130.2")], ["E1"], statements=[event])
         assert grade_run(case, run).checks["chronology_dated"] == expected
 
     def test_cases_without_labels_skip_the_chronology_checks(self):
