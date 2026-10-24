@@ -1567,22 +1567,23 @@ def _identify_container(
 
 
 def _route_container(module_name: str, payload: bytes) -> str | None:
-    """The extractor for ``payload`` once its container is known, or
-    ``None`` when it is an OLE2 file no extractor reads, by the
-    constant-size prefix alone. ``extraction_module`` (the cache key)
-    uses it; dispatch identifies an OLE2 or ZIP payload by its directory
-    first (``_identify_container``, #1416), so for those bytes the key is
-    the label's cache namespace and the module that ran is the row's
-    stamp.
+    """A constant-size prefix mapping for the extraction cache namespace.
 
-    * A legacy label (``doc``, ``xls``) keeps its legacy extractor for an
-      OLE2 payload; any other payload goes to the OOXML extractor, a
-      best effort for an OOXML file mislabelled as a legacy type.
+    ``extraction_module`` uses it, retaining the label's module when
+    this helper returns ``None``. Actual dispatch identifies an OLE2 or
+    ZIP payload by its directory (``_identify_container``, #1416); the
+    extractor that ran is recorded in the row's stamp and can differ
+    from its cache namespace.
+
+    * A legacy label (``doc``, ``xls``) keeps its legacy cache namespace
+      for an OLE2 payload and maps a ZIP payload to its OOXML namespace.
+      ``extraction_module`` retains the legacy namespace for other bytes
+      before calling this helper.
     * An OLE2 payload under an OOXML label (an encrypted OOXML file is
-      OLE2 too, or a legacy file labelled ``.docx``) is ``None``: no
-      OOXML extractor (DOCX, XLSX, PPTX) can read OLE2, and an attempt
-      would only record ``failed`` and re-run every
-      ``_FAILED_CACHE_MAX_AGE`` (#694).
+      OLE2 too, or a legacy file labelled ``.docx``) returns ``None``;
+      ``extraction_module`` retains the OOXML label's cache namespace.
+      This does not decline extraction: directory identification decides
+      which reader, if any, handles the payload (#1416).
     * A PDF (``%PDF-``) under an image label goes to ``pdf`` (#1415): the
       image extractor cannot read it, and the PDF extractor reads its
       digital text layer whatever the OCR setting.
