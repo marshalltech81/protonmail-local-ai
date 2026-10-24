@@ -505,7 +505,7 @@ class TestDegradedRetrieval:
         ("fragment", "expected"),
         [
             ("vec_distance_l2(v.embedding, ?)", {"degraded_evidence_chunks": 1}),
-            ("SELECT a.thread_id, a.attachment_id, bm25", {"degraded_attachment_match": 1}),
+            ("SELECT m.thread_id, a.attachment_id, bm25", {"degraded_attachment_match": 1}),
         ],
     )
     def test_get_evidence_lane_failure_marks_the_timing_line(
