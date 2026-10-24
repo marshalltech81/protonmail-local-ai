@@ -816,3 +816,34 @@ class TestPartialModuleRowsAndPeerFlag:
         ).fetchone()[0]
         assert flag == 1, "the peer's stored occurrence keeps the flag"
         assert p.rows() and _claimant(p, second) in {r[0] for r in p.rows()}
+
+
+def test_whole_message_removal_does_not_strand_a_prepared_cache_hit(tmp_path, monkeypatch):
+    p = StalePipeline(tmp_path, monkeypatch)
+    shared = [(b"whole-removal-payload", "text/plain", "synthetic.txt")]
+    p.add("removed", shared)
+    p.drain()
+    payload = hashlib.sha256(shared[0][0]).hexdigest()
+    before = _extraction_rows(p, payload)
+    removed = p.db._conn.execute("SELECT claimant_id FROM messages").fetchone()[0]
+    extractions = len(p.extractor.calls)
+    peer = p.add("survivor", shared)
+    real = main._phase2c_commit_vectors
+
+    def remove_before_commit(*args, **kwargs):
+        with p.db.transaction():
+            assert p.db._remove_message_row(p.db._conn.cursor(), removed)
+        assert _extraction_rows(p, payload) == []
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(main, "_phase2c_commit_vectors", remove_before_commit)
+    p.drain()
+    assert p.job(peer) is None
+    assert len(p.extractor.calls) == extractions
+    assert _extraction_rows(p, payload) == before
+    assert [row[1] for row in p.rows()] == [payload]
+    # A subsequent extractor refresh must still find this occurrence.
+    p.db._conn.execute("UPDATE attachment_extractions SET extractor = 'text@1'")
+    p.db._conn.commit()
+    assert main._requeue_stale_extractions(p.db, p.queue) == 1
+    assert p.job(peer) is not None
