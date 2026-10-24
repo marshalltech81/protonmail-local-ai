@@ -1438,6 +1438,10 @@ Every failed row records a `last_error_class`:
 | `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID` or one over 998 characters, nested too deeply for the email parser, input the embedder rejects) — dead-lettered immediately |
 | `operator_action_required` | The embedder rejected a health probe (bad key or model); jobs stay `queued` until you fix the config |
 
+Oversized-message warnings share the indexer's rate limit; withheld lines
+are counted in the queue heartbeat's `suppressed_lines`. The size rejection
+and dead-letter outcome still occur for every oversized file.
+
 Each transition logs one line naming the file: `terminal: <path>
 stage=<stage> error=<error>` (WARNING) for a `permanent_source_failure`,
 `retry: <path> attempt <n>/<max> ...` (WARNING) for a scheduled retry,
