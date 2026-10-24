@@ -937,6 +937,15 @@ in `.env` if a client of yours does not reconnect on its own.
 
 ## Operator configuration file (validated, not yet consumed by Compose)
 
+`make migrate-config` requires the legacy indexer to be running with an
+initialized index. Before writing the imported configuration or switching
+`config/mode`, it reads only the index's account registry through a read-only
+connection and checks the active account UUID and provider. A mismatch or an
+unavailable check leaves both files unchanged. Restore the original
+`ACCOUNT_SCOPE` / `SOURCE_MODE`, or start the legacy stack and retry. Adopting
+an existing TOML file with an enabled account applies the same check. Runtime
+startup still verifies the account independently.
+
 `config/mode` (gitignored, mode `600`) selects which form is active:
 `legacy` (`.env`, the default — everything above this section) or
 `toml` (`config/config.toml`, below). It is written only by an explicit

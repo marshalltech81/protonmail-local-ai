@@ -315,6 +315,67 @@ def render_toml(config: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Runs in the existing indexer container. Reads only its account registry,
+# through SQLite read-only mode; never opens Database or runs migrations.
+_CHECK_ACCOUNT = """
+import os, sqlite3, sys
+from contextlib import closing
+from pathlib import Path
+from src.account import AccountConfig, AccountMismatchError, verified_account_id
+try:
+    uri = Path(os.environ["SQLITE_PATH"]).resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        rows = conn.execute("SELECT id, scope_uuid, provider FROM accounts ORDER BY id LIMIT 2").fetchall()
+    verified_account_id(rows, AccountConfig(sys.argv[1], sys.argv[2], Path("/maildir")))
+except AccountMismatchError:
+    sys.exit(2)
+except Exception:
+    sys.exit(1)
+"""
+
+
+def _check_live_account(config: dict[str, Any]) -> None:
+    """Check the active legacy account before writing either config file.
+
+    Container output is never forwarded: it could contain private paths
+    or exception data. Runtime startup retains its independent check.
+    """
+    enabled = [account for account in config["accounts"] if account["enabled"]]
+    if not enabled:
+        return
+    account = enabled[0]  # check_single_enabled_account already ran
+    try:
+        result = subprocess.run(  # nosec B603 B607 -- fixed probe, public account UUID as argv
+            [
+                "docker",
+                "exec",
+                "indexer",
+                "python",
+                "-c",
+                _CHECK_ACCOUNT,
+                account["scope_uuid"],
+                account["provider"],
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise MigrateError(
+            "could not verify the index account; start the legacy indexer and retry make migrate-config."
+        ) from None
+    if result.returncode == 2:
+        raise MigrateError(
+            "the configured ACCOUNT_SCOPE or SOURCE_MODE does not match the index account; "
+            "restore the values this index was built with before retrying make migrate-config."
+        )
+    if result.returncode:
+        raise MigrateError(
+            "could not verify the index account; start the legacy indexer and retry make migrate-config."
+        )
+
+
 def migrate(paths: Paths) -> str:
     """Build, validate, self-check and render the TOML text. Raises
     ``MigrateError`` or ``operator_config.ConfigError`` with fixed text;
@@ -357,7 +418,8 @@ def _adopt_existing(paths: Paths) -> int:
         data, base = oc.load_file(paths.config)
         config = oc.validate(data, base)
         oc.check_single_enabled_account(config)
-    except oc.ConfigError as exc:
+        _check_live_account(config)
+    except (MigrateError, oc.ConfigError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     try:
@@ -372,6 +434,7 @@ def _adopt_existing(paths: Paths) -> int:
 def _import_from_env(paths: Paths) -> int:
     try:
         text = migrate(paths)
+        _check_live_account(tomllib.loads(text))
     except (MigrateError, oc.ConfigError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
