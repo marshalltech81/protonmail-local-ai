@@ -396,9 +396,12 @@ citations by claimant ID (#217): when two files claim one Message-ID,
 reading one does not cover a citation of the other's claimant ID or
 passage, while a citation of the bare Message-ID names both.
 A source whose decisive text is in an attachment (an `attachment` item
-in the truth's `evidence`) is read only through a `get_evidence`
-passage with `source: attachment`. The scorer does not yet credit a
-`get_attachment` read of the whole extracted text (#1527), and a
+in the truth's `evidence`) is read through a `get_evidence`
+passage with `source: attachment`, or `get_attachment` pages covering
+one occurrence's stored extracted text from offset 0 to the end. Pages
+from different occurrences or claimants cannot be combined; a null text
+page reads nothing. This credits the stored text, without certifying that
+extraction recovered the whole original file. A
 `search_attachments` snippet is a preview the scorer cannot check holds
 the evidence, since traces carry IDs, not text.
 
