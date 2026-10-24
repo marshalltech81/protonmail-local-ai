@@ -459,6 +459,11 @@ REFUSALS += [
         "global.classification.authority.vendor.domains[0] must be a bare domain: dot-separated labels of letters, digits and hyphens, at most 16 labels and 253 characters.",
     ),
     (
+        "authority address with no local part",
+        [("global.classification.authority.personal.addresses", [f"@{MARKER}.example"])],
+        "global.classification.authority.personal.addresses[0] must be a bare address (name@domain).",
+    ),
+    (
         "an authority address with a display name",
         [("global.classification.authority.personal.addresses", [f"A <{MARKER}@mail.example>"])],
         "global.classification.authority.personal.addresses[0] must be a bare address (name@domain).",
