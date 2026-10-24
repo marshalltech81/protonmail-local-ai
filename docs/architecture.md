@@ -4255,7 +4255,13 @@ vectors. This marker certifies currentness, not manifest exhaustiveness:
 incomplete manifest, and reports definite matches whose inventory is not known
 exhaustive (`manifest = 1 AND (has_attachments = 0 OR current = 1)`). Unknown
 inventories make identity counts lower bounds. A disabled-extraction pass leaves
-old rows untouched and cannot certify them as current. The aggregation selects
+old rows untouched and cannot certify them as current. `attachment_text_words`
+likewise accepts a stored hit only from current attachment rows on a message
+with attachments. Absence requires a known exhaustive inventory and complete
+committed text for every retained occurrence; pending or disabled extraction
+therefore cannot turn stale text into a definite positive or negative. A complete
+empty manifest still needs no extraction pass to establish absence.
+The aggregation selects
 its clock through the shared predicates, materializes message memberships once,
 and counts attachment identities separately so occurrence fan-out does not
 inflate message totals or repeat predicate evaluation. Sender/domain period
