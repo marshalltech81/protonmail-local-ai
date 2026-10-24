@@ -375,6 +375,14 @@ def _role_clause(mode: str, value: str, roles: tuple[str, ...], params: list) ->
     if reads_names:
         complete.append("m.participant_names_complete = 1")
     match = match_sql(value, roles, params)
+    if mode == "domain_is":
+        role_sql = ",".join(["?"] * len(roles))
+        complete.append(
+            "NOT EXISTS (SELECT 1 FROM message_participants p "  # nosec B608 -- placeholders only; roles bound below
+            f"WHERE p.claimant_id = m.claimant_id AND p.role IN ({role_sql}) "
+            "AND instr(CAST(p.address AS BLOB), x'00') > 0)"
+        )
+        params.extend(roles)
     # The column names are constants; the values are bound.
     return f"CASE WHEN {match} THEN 1 WHEN {' AND '.join(complete)} THEN 0 ELSE NULL END"
 
@@ -430,7 +438,10 @@ def _domain_rows(value: str, roles: tuple[str, ...], params: list) -> str:
     role_sql = ",".join(["?"] * len(roles))
     suffix = "@" + value.strip().lower()
     params.extend([*roles, -len(suffix), suffix])
-    return f"p.role IN ({role_sql}) AND substr(p.address, ?) = ?"
+    return (
+        f"p.role IN ({role_sql}) AND instr(CAST(p.address AS BLOB), x'00') = 0 "
+        "AND substr(p.address, ?) = ?"
+    )
 
 
 def _substring_participant_rows(value: str, roles: tuple[str, ...], params: list) -> str:
