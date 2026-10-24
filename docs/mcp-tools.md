@@ -3070,9 +3070,10 @@ has a large context window. Attachment text is excluded.
 The tool's `coverage_note` and per-call budget log describe additional
 trimming to fit the model window; they do not disclose these earlier
 character and chunk caps. An absent coverage note does not mean the
-whole thread was read. For complete message coverage, page through
-`query_messages` for the thread and retrieve the individual messages
-with `get_message`.
+whole thread was read. For a fuller review, page through `get_thread`
+using its `offset` and `limit`, then retrieve longer individual bodies
+with `get_message`. Follow those tools' content-read disclosure and
+pagination instructions.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
