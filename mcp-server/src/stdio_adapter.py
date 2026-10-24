@@ -12,8 +12,8 @@ The token is read from a file, by default ``.secrets/mcp_auth_token.txt``
 at the repository root, or the path given with ``--token-file``. It is
 never taken from an argument or an environment variable, which other
 local accounts could read from the process list. The file must be a
-regular file with mode 600 or stricter and hold a non-empty RFC 6750
-token; otherwise the adapter exits with a fixed message before
+regular file with mode 600 or stricter, have no granting macOS ACL,
+and hold a non-empty RFC 6750 token; otherwise the adapter exits with a fixed message before
 connecting.
 
 Nothing the adapter writes to stderr contains the token or a tool's
@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import stat
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -65,6 +66,26 @@ def read_token(path: Path) -> str:
         raise AdapterConfigError(
             f"MCP bearer token file {path} must have mode 600; run chmod 600 on it."
         )
+    if sys.platform == "darwin":
+        # macOS ACL grants override mode bits, even on a mode-600 file.
+        # Follow symlinks as stat() and read_text() do.
+        # Match the host preflight: deny-only ACLs cannot broaden access.
+        try:
+            listing = subprocess.run(  # nosec B603 -- fixed system command, no shell
+                ["/bin/ls", "-lde", "--", str(path.resolve(strict=True))],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+                env={"LC_ALL": "C"},
+            ).stdout
+        except OSError, subprocess.SubprocessError, UnicodeError:
+            raise AdapterConfigError(f"MCP bearer token file {path} ACL cannot be checked.")
+        if re.search(r"^ *[0-9]+: .* allow ", listing, re.MULTILINE):
+            raise AdapterConfigError(
+                f"MCP bearer token file {path} has an ACL granting access; "
+                "run chmod -N on it, then chmod 600."
+            )
     try:
         token = path.read_text(encoding="utf-8").strip()
     except OSError, UnicodeError:

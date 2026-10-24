@@ -697,6 +697,16 @@ stub_host() {
     local os="$1" owner="${2:-}"
     STUBS="$(mktemp -d "$WORK/stubs.XXXXXX")"
     printf '#!/bin/bash\nprintf "%%s\\n" %q\n' "$os" >"$STUBS/uname"
+    if [[ "$os" == Darwin ]]; then
+        # Simulate BSD ls as well as uname: GNU ls does not accept -e.
+        cat >"$STUBS/ls" <<'STUB'
+#!/bin/bash
+[[ ! -e "$(dirname "$0")/ls-error" ]] || exit 1
+printf '%s\n' '-rw------- 1 operator group 1 synthetic-file'
+[[ ! -e "$(dirname "$0")/macos-acl" ]] || cat "$(dirname "$0")/macos-acl"
+exit 0
+STUB
+    fi
     if [[ -n "$owner" ]]; then
         printf '%s\n' "$owner" >"$STUBS/file-owner"
         printf '%s\n' "$owner" >"$STUBS/dir-owner"
@@ -1475,6 +1485,37 @@ endpoint_queries_and_fragments_fail() {
     done
 }
 check "provider endpoint query strings and fragments fail without echoing values" endpoint_queries_and_fragments_fail
+
+macos_secret_acl_fails() {
+    local secret
+    for secret in bridge_pass inference_api_key embed_api_key rerank_api_key mcp_auth_token; do
+        setup
+        chmod +a 'everyone allow search' "$ROOT/.secrets"
+        chmod +a 'everyone allow read' "$ROOT/.secrets/$secret.txt"
+        fails_with 'has an ACL granting access' || return 1
+        ! grep -F 'placeholder-mcp-token-xxxxxxxxxxxxxxxx' "$WORK/output" || return 1
+    done
+}
+if [[ "$(uname -s)" == Darwin ]]; then
+    check "macOS mode-600 secrets with ACL grants fail" macos_secret_acl_fails
+fi
+
+stubbed_macos_acl_contract() {
+    local entry
+    for entry in '0: everyone allow read' '0: group:everyone inherited allow write'; do
+        stub_host Darwin
+        setup
+        printf '%s\n' "$entry" >"$STUBS/macos-acl"
+        fails_with 'has an ACL granting access' || return 1
+    done
+    stub_host Darwin
+    setup
+    printf '0: everyone deny write\n' >"$STUBS/macos-acl"
+    passes || return 1
+    : >"$STUBS/ls-error"
+    fails_with 'unable to check the ACL' || return 1
+}
+check "macOS ACL grants, deny-only entries and inspection failures on any host" stubbed_macos_acl_contract
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
