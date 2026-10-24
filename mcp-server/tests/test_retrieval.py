@@ -197,8 +197,8 @@ class TestGetThread:
         assert second.structured_content["next_offset"] is None
 
     def test_newest_order_reverses_claimant_id_ties(self, fake_server, messages_db):
-        with messages_db._connect() as conn:
-            conn.execute("UPDATE messages SET effective_at = '2024-01-10T09:00:00+00:00'")
+        with sqlite3.connect(messages_db.path) as conn:
+            conn.execute("UPDATE messages SET sent_at = '2024-01-10T09:00:00+00:00'")
         handler = _handlers(fake_server, messages_db)["get_thread"]
         oldest = asyncio.run(handler(thread_id="t1")).structured_content["messages"]
         newest = asyncio.run(handler(thread_id="t1", order="newest")).structured_content["messages"]
