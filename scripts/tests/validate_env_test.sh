@@ -1476,6 +1476,20 @@ endpoint_queries_and_fragments_fail() {
 }
 check "provider endpoint query strings and fragments fail without echoing values" endpoint_queries_and_fragments_fail
 
+macos_secret_acl_fails() {
+    local secret
+    for secret in bridge_pass inference_api_key embed_api_key rerank_api_key mcp_auth_token; do
+        setup
+        chmod +a 'everyone allow search' "$ROOT/.secrets"
+        chmod +a 'everyone allow read' "$ROOT/.secrets/$secret.txt"
+        fails_with 'has an ACL granting access' || return 1
+        ! grep -F 'placeholder-mcp-token-xxxxxxxxxxxxxxxx' "$WORK/output" || return 1
+    done
+}
+if [[ "$(uname -s)" == Darwin ]]; then
+    check "macOS mode-600 secrets with ACL grants fail" macos_secret_acl_fails
+fi
+
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
     exit 1

@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import stat
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -65,6 +66,25 @@ def read_token(path: Path) -> str:
         raise AdapterConfigError(
             f"MCP bearer token file {path} must have mode 600; run chmod 600 on it."
         )
+    if sys.platform == "darwin":
+        # macOS ACL grants override mode bits, even on a mode-600 file.
+        # Match the host preflight: deny-only ACLs cannot broaden access.
+        try:
+            listing = subprocess.run(  # nosec B603 -- fixed system command, no shell
+                ["/bin/ls", "-lde", "--", str(path)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+                env={"LC_ALL": "C"},
+            ).stdout
+        except OSError, subprocess.SubprocessError, UnicodeError:
+            raise AdapterConfigError(f"MCP bearer token file {path} ACL cannot be checked.")
+        if re.search(r"^ *[0-9]+: .* allow ", listing, re.MULTILINE):
+            raise AdapterConfigError(
+                f"MCP bearer token file {path} has an ACL granting access; "
+                "run chmod -N on it, then chmod 600."
+            )
     try:
         token = path.read_text(encoding="utf-8").strip()
     except OSError, UnicodeError:

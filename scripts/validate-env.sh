@@ -68,6 +68,19 @@ require_mode_600() {
         printf 'ERROR: %s must have mode 600, found %s.\n' "$path" "$actual_mode" >&2
         exit 1
     }
+    # macOS ACL grants take precedence over Unix mode bits; chmod 600
+    # alone does not remove them. Deny-only ACLs cannot broaden access.
+    if [[ "$(uname -s)" == Darwin ]]; then
+        local listing
+        listing="$(LC_ALL=C /bin/ls -lde -- "$path")" || {
+            printf 'ERROR: unable to check the ACL on %s.\n' "$path" >&2
+            exit 1
+        }
+        if grep -qE '^ *[0-9]+: .* allow ' <<<"$listing"; then
+            printf 'ERROR: %s has an ACL granting access; run chmod -N on it, then chmod 600.\n' "$path" >&2
+            exit 1
+        fi
+    fi
 }
 
 file_owner() {

@@ -411,6 +411,10 @@ services strip it. It fails fast if:
   required — no SDK has a default model; in `anthropic` mode an empty
   `INFERENCE_MODEL` takes the Compose default `claude-sonnet-5-5`, which
   `openai` mode cannot use)
+- on macOS, a secret file has an ACL `allow` entry, even with mode `600`:
+  remove it with `chmod -N <file>`, then `chmod 600 <file>`. Deny-only ACLs
+  are accepted. The Claude Desktop stdio adapter applies the same check
+  to its token file and refuses to connect if the ACL cannot be checked
 - inference / embed / rerank secret placeholder files are missing or not `600`
   (validation requires the files to exist with `600` permissions even when the
   matching layer is `none`: Compose cannot create a container whose
