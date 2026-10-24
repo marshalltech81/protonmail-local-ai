@@ -91,7 +91,7 @@ class TestGetMailboxStatus:
             "0 parked (trashed), 1 dead" in text
         )
         assert "1 message failed permanently and is incompletely indexed" in text
-        assert "reparse" not in text
+        assert "already indexed and being reparsed" not in text
 
     def test_a_reparse_backlog_is_told_apart(self, fake_server, seeded_db):
         """#1078: a reparse backlog is not an empty queue, and not new
@@ -113,8 +113,8 @@ class TestGetMailboxStatus:
         )
         assert (
             "  1 waiting message is already indexed and being reparsed after an upgrade: "
-            "search finds it, but data the upgrade adds is missing until the reparse "
-            "finishes." in text
+            "search finds it, but data the upgrade adds is unknown until a successful reparse."
+            in text
         )
 
     def test_deferred_attachment_extraction_keeps_the_index_non_current(
@@ -328,3 +328,102 @@ class TestEventLoopResponsiveness:
         out = asyncio.run(scenario())
         assert released_by_loop == [True]
         assert out.structured_content["total_threads"] == 3
+
+
+@pytest.mark.parametrize(
+    ("job", "caught_up", "current"),
+    [
+        (("queued", 0, None, "reparse"), True, False),
+        (("queued", 2, "retryable", "reparse"), True, False),
+        (("queued", 0, "retryable", "reparse", "embed", "outage"), True, False),
+        (("queued", 0, None), False, False),
+        (("queued", 2, "retryable"), False, False),
+        (("queued", 0, "retryable", "x", "embed", "outage"), False, False),
+        (
+            (
+                "queued",
+                0,
+                "retryable",
+                "x",
+                "extract",
+                "attachment extraction deferred: per-message budget reached; continued on a later pass",
+            ),
+            False,
+            False,
+        ),
+        (("dead", 5, "retryable", "reparse"), True, True),
+    ],
+)
+def test_ingestion_caught_up_distinguishes_reparse_jobs(
+    fake_server, seeded_db, job, caught_up, current
+):
+    write_ingestion(
+        seeded_db.path,
+        sync_completed_at=_ago(seconds=30),
+        sync_interval_secs=60,
+        indexer_seen_at=_ago(seconds=5),
+        jobs=(job,),
+    )
+    out = asyncio.run(_handler(fake_server, seeded_db)())
+    assert out.structured_content["ingestion_caught_up"] is caught_up
+    assert out.structured_content["current"] is current
+    assert f"Ingestion caught up: {'yes' if caught_up else 'no'}" in _text(out)
+
+
+@pytest.mark.parametrize(("sync_age", "indexer_age"), [(600, 5), (30, 700), (-300, 5), (30, -300)])
+def test_ingestion_caught_up_requires_fresh_stamps(fake_server, seeded_db, sync_age, indexer_age):
+    write_ingestion(
+        seeded_db.path,
+        sync_completed_at=_ago(seconds=sync_age),
+        sync_interval_secs=60,
+        indexer_seen_at=_ago(seconds=indexer_age),
+        jobs=(("queued", 0, None, "reparse"),),
+    )
+    out = asyncio.run(_handler(fake_server, seeded_db)())
+    assert out.structured_content["ingestion_caught_up"] is False
+    assert out.structured_content["current"] is False
+
+
+def test_reparse_caveat_survives_an_empty_waiting_count(fake_server, seeded_db):
+    write_ingestion(
+        seeded_db.path,
+        sync_completed_at=_ago(seconds=30),
+        sync_interval_secs=60,
+        indexer_seen_at=_ago(seconds=5),
+        jobs=(("dead", 5, "retryable", "reparse"),),
+    )
+    out = asyncio.run(_handler(fake_server, seeded_db)())
+    assert out.structured_content["queue"]["reparse"] == 0
+    text = _text(out)
+    assert "unknown until a successful reparse" in text
+    assert "make requeue-dead" in text
+
+
+def test_status_flag_descriptions_exclude_terminal_failures():
+    from src.tools.outputs import MailboxStatusOutput, QueueCounts
+
+    for name in ("current", "ingestion_caught_up"):
+        assert "terminal failures" in MailboxStatusOutput.model_fields[name].description.lower()
+    assert "even when this waiting count is zero" in QueueCounts.model_fields["reparse"].description
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        ("queued", 0, None),
+        ("queued", 2, "retryable"),
+        ("queued", 0, "retryable", "x", "embed", "outage"),
+    ],
+)
+def test_non_reparse_work_blocks_ingestion_alongside_reparses(fake_server, seeded_db, job):
+    write_ingestion(
+        seeded_db.path,
+        sync_completed_at=_ago(seconds=30),
+        sync_interval_secs=60,
+        indexer_seen_at=_ago(seconds=5),
+        jobs=(("queued", 0, None, "reparse"), job),
+    )
+    out = asyncio.run(_handler(fake_server, seeded_db)())
+    assert out.structured_content["queue"]["reparse"] == 1
+    assert out.structured_content["ingestion_caught_up"] is False
+    assert out.structured_content["current"] is False

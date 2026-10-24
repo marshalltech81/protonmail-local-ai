@@ -202,3 +202,12 @@ def test_keyword_passage_tools_serve_focused_query_guidance(empty_db):
         assert "Lead with names, identifiers and key terms" in description, name
         assert "keep the query focused" in description, name
         assert "first 16 distinct query words" in description, name
+
+
+def test_get_thread_wire_description_distinguishes_attachment_inventory_and_reads(empty_db):
+    description = " ".join(_wire_tools(_server(empty_db))["get_thread"]["description"].split())
+    assert "query_attachments" in description
+    assert "thread_id or claimant_id" in description
+    assert "filename, MIME type, size and extraction status" in description
+    assert "get_attachment" in description and "next_offset" in description
+    assert "ranked passages" in description and "complete document read" in description

@@ -13,8 +13,8 @@ Two layers, each in the repository's ``{LAYER}_MODE`` / ``_BASE_URL`` /
 
 An enabled layer needs a non-empty model, key and base URL; the base
 URL ``default`` means the SDK's documented default (Anthropic API,
-OpenAI proper) and an empty one is refused, as for the server's layers
-(#750). The key comes from ``<secrets_dir>/inference_api_key.txt`` or
+OpenAI proper), resolved to an explicit URL before client construction. An
+empty one is refused, as for the server's layers (#750). The key comes from ``<secrets_dir>/inference_api_key.txt`` or
 ``judge_api_key.txt``, which must be mode 600, or, for local development only,
 the ``{LAYER}_API_KEY`` environment variable. Keys are never logged,
 written to a report or taken as a command argument.
@@ -51,6 +51,10 @@ CLI_MODES = frozenset(cli_judge.EXECUTABLES)
 # The variable each SDK reads for its endpoint when none is passed, and
 # the host it uses when that variable is unset too.
 _SDK_BASE_URL_VARS = {"anthropic": "ANTHROPIC_BASE_URL", "openai": "OPENAI_BASE_URL"}
+_SDK_DEFAULT_URLS = {
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com/v1",
+}
 _SDK_DEFAULT_HOSTS = {"anthropic": "api.anthropic.com", "openai": "api.openai.com"}
 # Hosts that keep a provider call on this machine (as ``main.py``'s
 # privacy warning counts them).
@@ -95,13 +99,14 @@ class LayerConfig:
     cli_path: str = ""
     cli_version: str = ""
     cli_auth_file: str = ""  # codex-cli: the login file each call links
+    default_endpoint: bool = False  # Preserve the report label after resolving `default`.
 
     def endpoint_kind(self) -> str:
         """``host-local``, ``remote`` or ``sdk-default``: the only form of
         the endpoint a report records (never the URL)."""
         if self.mode in CLI_MODES:
             return "remote"
-        if not self.base_url:
+        if self.default_endpoint or not self.base_url:
             return "sdk-default"
         host = urllib.parse.urlsplit(self.base_url).hostname
         return "host-local" if host in _HOST_LOCAL else "remote"
@@ -116,7 +121,7 @@ class LayerConfig:
             # (a hash of the base URL; null for the SDK default).
             "endpoint_id": (
                 hashlib.sha256(self.base_url.rstrip("/").encode()).hexdigest()[:12]
-                if self.base_url
+                if self.base_url and not self.default_endpoint
                 else None
             ),
             "max_tokens": self.max_tokens,
@@ -228,14 +233,15 @@ def load_layer(
             f"{layer}_BASE_URL is empty: set it to the provider's URL, or to `default` "
             f"to use the SDK's default endpoint (sends prompts to {_SDK_DEFAULT_HOSTS[mode]})."
         )
-    if base_url.lower() == "default":
-        base_url = ""
+    default_endpoint = base_url.lower() == "default"
+    if default_endpoint:
+        base_url = _SDK_DEFAULT_URLS[mode]
     if base_url and "@" in urllib.parse.urlsplit(base_url).netloc:
         raise ConfigError(f"{layer}_BASE_URL must not embed credentials (user:pass@host)")
-    # With ``default`` the SDK would read its own endpoint variable,
-    # and the report would call a custom endpoint "sdk-default".
+    # Keep the ambient-variable refusal as an independent configuration
+    # guard, even though the explicit URL also prevents SDK fallback.
     ambient = _SDK_BASE_URL_VARS[mode]
-    if not base_url and env.get(ambient, "").strip():
+    if default_endpoint and env.get(ambient, "").strip():
         raise ConfigError(f"{ambient} is set: set {layer}_BASE_URL explicitly instead")
     if mode == "anthropic" and base_url.rstrip("/").endswith("/v1"):
         raise ConfigError(f"{layer}_BASE_URL must not end with '/v1' when {layer}_MODE=anthropic")
@@ -268,6 +274,7 @@ def load_layer(
         layer=layer,
         mode=mode,
         base_url=base_url,
+        default_endpoint=default_endpoint,
         model=model,
         api_key=api_key,
         timeout_secs=timeout,

@@ -73,8 +73,8 @@ check_health() {
     return 1
 }
 
-if [[ ! "$SYNC_INTERVAL" =~ ^[0-9]+$ ]]; then
-    echo "SYNC_INTERVAL must be an integer number of seconds" >&2
+if [[ ! "$SYNC_INTERVAL" =~ ^[1-9][0-9]{0,8}$ ]]; then
+    echo "SYNC_INTERVAL must be a positive integer number of seconds (at most 999999999)" >&2
     exit 1
 fi
 if [[ ! "$SYNC_DEADLINE_SECONDS" =~ ^[1-9][0-9]{0,8}$ ]]; then

@@ -1324,7 +1324,8 @@ class QueueCounts(_Output):
         "those already indexed "
         "and being "
         "read again after an upgrade (a reparse): search finds them meanwhile, but data the "
-        "upgrade adds is missing until the reparse finishes.",
+        "upgrade adds is unknown until a successful reparse. A dead-lettered reparse "
+        "needs make requeue-dead and a successful retry even when this waiting count is zero.",
     )
 
 
@@ -1444,7 +1445,12 @@ class MailboxStatusOutput(_Output):
         "running, no message is pending, retrying, deferred or extraction_deferred, and no "
         "failed collection is unrecovered (collection.failure_unrecovered). "
         "Mail that reached Proton "
-        "after last_sync_at is not searchable either way."
+        "after last_sync_at is not searchable either way. Terminal failures are excluded."
+    )
+    ingestion_caught_up: bool = Field(
+        description="The same sync/heartbeat freshness and collection checks as current, "
+        "but only non-reparse pending, retrying, deferred or extraction_deferred jobs "
+        "block it. Terminal failures are excluded; true does not establish completeness."
     )
     not_current_reasons: list[str] = Field(description="Why current is false; empty when true.")
     collection: CollectionStatus = Field(

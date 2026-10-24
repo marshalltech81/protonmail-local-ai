@@ -12,7 +12,7 @@ dependencies = [
     # (LM Studio / vLLM / TEI / DeepInfra / OpenRouter)
     # target the SDK as their reference client by design, so pointing
     # the SDK at them via ``base_url`` is the supported path.
-    "openai==3.31.0",
+    "openai==3.37.0",
     # Real BPE tokenizer for chunk-size estimation. Counting chunk tokens
     # with a char-count heuristic undercounts CJK / URL / Base64 / code
     # text by 4-6×, producing chunks that blow past the embed model's
@@ -25,7 +25,7 @@ dependencies = [
     # by exactly one extractor module under src/extractors/; lazy import
     # there means a missing one downgrades to ``unsupported`` rather
     # than crashing the indexer.
-    "pypdf==6.21.1",               # digital PDF text layer
+    "pypdf==6.21.2",               # digital PDF text layer
     "cryptography==50.0.2",        # pypdf AES decryption (owner-password-only PDFs)
     "pdf2image==1.17.0",           # render PDF pages → PIL.Image (needs Poppler)
     "pytesseract==0.3.13",         # OCR via Tesseract binary
@@ -43,7 +43,7 @@ dependencies = [
 dev = [
     # httpx2 is only imported by tests (transport stubs for the openai
     # SDK); the runtime gets it transitively via openai.
-    "httpx2==2.13.1",
+    "httpx2==2.16.0",
     "mypy==2.4.0",
     "pytest==9.1.1",
     "pytest-cov==7.1.0",

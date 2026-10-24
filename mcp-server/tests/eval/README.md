@@ -396,9 +396,12 @@ citations by claimant ID (#217): when two files claim one Message-ID,
 reading one does not cover a citation of the other's claimant ID or
 passage, while a citation of the bare Message-ID names both.
 A source whose decisive text is in an attachment (an `attachment` item
-in the truth's `evidence`) is read only through a `get_evidence`
-passage with `source: attachment`. The scorer does not yet credit a
-`get_attachment` read of the whole extracted text (#1527), and a
+in the truth's `evidence`) is read through a `get_evidence`
+passage with `source: attachment`, or `get_attachment` pages covering
+one occurrence's stored extracted text from offset 0 to the end. Pages
+from different occurrences or claimants cannot be combined; a null text
+page reads nothing. This credits the stored text, without certifying that
+extraction recovered the whole original file. A
 `search_attachments` snippet is a preview the scorer cannot check holds
 the evidence, since traces carry IDs, not text.
 
@@ -947,7 +950,9 @@ cap below, count launches, not model requests.
   0.160.1, `gpt-6-astra`, `gpt-6-sol` and `gpt-6-luna` advertise `clock`
   and `send_user_message_async`, so with those models the judge is not
   tool-free. Pick a model that advertises none, such as `gpt-5.5`.
-- Either layer with the base URL `default` is refused while the SDK's own
+- For the HTTP modes, `default` resolves to the documented vendor URL
+  before client construction; inference backends refuse empty URLs.
+  Either layer with the base URL `default` is refused while the SDK's own
   endpoint variable (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`) is set, so
   the report's `sdk-default` label is never a custom endpoint.
 - Each case runs under `--case-timeout-secs` (900) and the whole run

@@ -326,6 +326,26 @@ class _OracleAnswerer:
             b.split(" |", 1)[0][1:]: _fold(b.split("]", 1)[1]) for b in blocks if b.startswith("[E")
         }
 
+        # A source ID alone is not evidence: a budget cut may have kept
+        # only the passage's opening words. Cite only a passage that still
+        # shows a reference-fact excerpt from that same message.
+        passages = {
+            label: text
+            for label, text in passages.items()
+            if any(
+                _fold(fact.excerpt) in text
+                and (
+                    label not in labels  # Thread-text blocks have no per-message header.
+                    or any(
+                        _ref_message(source) == labels[label].split("#")[0]
+                        for source in fact.sources
+                    )
+                )
+                for fact in self.case.expected_facts
+            )
+        }
+        labels = {label: claimant for label, claimant in labels.items() if label in passages}
+
         def label_of(ref: str) -> str | None:
             wanted = _ref_message(ref)
             return next((lbl for lbl, c in labels.items() if c.split("#")[0] == wanted), None)

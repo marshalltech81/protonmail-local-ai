@@ -239,6 +239,12 @@ class _OpenAIBackend:
         max_tokens: int,
         timeout_secs: float,
     ) -> None:
+        base_url = base_url.strip()
+        if not base_url:
+            raise ValueError(
+                "Inference base_url must be non-empty; resolve default to an explicit URL"
+            )
+
         from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
         self.model = model
@@ -255,18 +261,6 @@ class _OpenAIBackend:
         # of "what did we send as the credential" is exactly what the
         # operator wrote — no silent rewrite to a literal that could
         # surface in a misconfigured remote provider's request log.
-        #
-        # ``base_url`` may be empty: an empty value omits the kwarg so
-        # the SDK's documented fallback chain fires
-        # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``
-        # literal). Symmetric with the ``_AnthropicBackend`` empty-URL
-        # path. Passing an empty string through would defeat the
-        # fallback because the SDK only treats ``None`` as "missing."
-        # ``main.py`` never passes an empty value: it resolves
-        # ``INFERENCE_BASE_URL=default`` to the official URL and an
-        # empty ``INFERENCE_BASE_URL`` fails startup (#750). Only the
-        # answer evaluation passes one, for ``default``, after refusing
-        # a set ``OPENAI_BASE_URL`` (``tests/answer_eval/config.py``).
         #
         # ``max_retries=0`` disables SDK-internal retries so one
         # ``complete()`` call makes one request and ``timeout_secs`` is
@@ -291,25 +285,14 @@ class _OpenAIBackend:
             lambda: self.client.base_url, "Inference provider (mode=openai)", log
         )
         http_client = DefaultAsyncHttpxClient(event_hooks={"request": [same_origin_only]})
-        if base_url:
-            self.client = AsyncOpenAI(
-                base_url=base_url.rstrip("/"),
-                api_key=api_key,
-                timeout=timeout_secs,
-                max_retries=0,
-                http_client=http_client,
-            )
-        else:
-            self.client = AsyncOpenAI(
-                api_key=api_key,
-                timeout=timeout_secs,
-                max_retries=0,
-                http_client=http_client,
-            )
-        # After the SDK resolves its fallback chain, read the URL back
-        # so ``self.base_url`` always reflects the wire endpoint —
-        # useful for log lines that name what the backend is actually
-        # talking to.
+        self.client = AsyncOpenAI(
+            base_url=base_url.rstrip("/"),
+            api_key=api_key,
+            timeout=timeout_secs,
+            max_retries=0,
+            http_client=http_client,
+        )
+        # Read back the SDK-normalized wire endpoint for diagnostics.
         self.base_url = str(self.client.base_url).rstrip("/")
 
     async def complete(self, system: str, user: str, json_schema: dict | None = None) -> str:
@@ -369,6 +352,12 @@ class _AnthropicBackend:
         timeout_secs: float,
         structured_output: bool = True,
     ) -> None:
+        base_url = base_url.strip()
+        if not base_url:
+            raise ValueError(
+                "Inference base_url must be non-empty; resolve default to an explicit URL"
+            )
+
         from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 
         self.model = model
@@ -386,7 +375,7 @@ class _AnthropicBackend:
         # silently would hide the misconfiguration; rejecting forces
         # the operator to confirm they meant the SDK base, not a
         # versioned path.
-        stripped = base_url.rstrip("/") if base_url else ""
+        stripped = base_url.rstrip("/")
         if stripped.endswith("/v1"):
             raise ValueError(
                 "INFERENCE_BASE_URL must not end with '/v1' when "
@@ -396,15 +385,8 @@ class _AnthropicBackend:
                 "'default' to use the SDK default)."
             )
 
-        # Pass ``base_url`` only when it is non-empty: an empty string
-        # would override the SDK default with a malformed URL. ``main.py``
-        # always passes one (``default`` resolves to
-        # ``https://api.anthropic.com``); only the answer evaluation
-        # passes an empty value, for ``default``, after refusing a set
-        # ``ANTHROPIC_BASE_URL``. ``max_retries=0`` for the same reason as
-        # ``_OpenAIBackend``: retries must not multiply ``timeout_secs``,
-        # which is a per-operation HTTP timeout, not a total-call
-        # deadline.
+        # ``max_retries=0`` keeps retries from multiplying ``timeout_secs``,
+        # which is a per-operation HTTP timeout, not a total-call deadline.
         #
         # The SDK's HTTP client follows redirects and re-sends the body
         # and ``x-api-key`` to wherever ``Location`` points (#325). The
@@ -415,26 +397,14 @@ class _AnthropicBackend:
             lambda: self.client.base_url, "Inference provider (mode=anthropic)", log
         )
         http_client = DefaultAsyncHttpxClient(event_hooks={"request": [same_origin_only]})
-        if stripped:
-            self.client = AsyncAnthropic(
-                base_url=stripped,
-                api_key=api_key,
-                timeout=timeout_secs,
-                max_retries=0,
-                http_client=http_client,
-            )
-        else:
-            self.client = AsyncAnthropic(
-                api_key=api_key,
-                timeout=timeout_secs,
-                max_retries=0,
-                http_client=http_client,
-            )
-        # After the SDK resolves its fallback chain, read the URL back
-        # so ``self.base_url`` always reflects the wire endpoint — the
-        # same pattern used by ``_OpenAIBackend``, ``EmbedClient``,
-        # and ``OpenAIEmbedder``. Useful for diagnostic log lines that
-        # name what the backend is actually talking to.
+        self.client = AsyncAnthropic(
+            base_url=stripped,
+            api_key=api_key,
+            timeout=timeout_secs,
+            max_retries=0,
+            http_client=http_client,
+        )
+        # Read back the SDK-normalized wire endpoint for diagnostics.
         self.base_url = str(self.client.base_url).rstrip("/")
 
     async def complete(self, system: str, user: str, json_schema: dict | None = None) -> str:

@@ -11,7 +11,8 @@ set -Eeuo pipefail
 # compose.accounts.yml from synthetic configurations (#1608).
 # Uses ``docker compose config``, which needs the Compose CLI but no
 # daemon, images or secret files, and Python 3.11 or later for the
-# translator.
+# translator. pre_start regression cases require Docker Compose v5.3.0+;
+# CI installs a checksum-pinned v5.5.0.
 #
 # Run: bash scripts/tests/compose_test.sh
 
@@ -402,16 +403,8 @@ def bounded_logging:
               # and joins the same network and volumes, so it can run
               # arbitrary code with the Bridge password, Maildir/state
               # and bridge-net access a collector keeps, before mbsync
-              # itself starts (review round 9). Untested here: pre_start
-              # is too recent a Compose Specification field (Docker
-              # Compose v5.3.0+) for the CI runner image own bundled
-              # Compose (2.38.2, confirmed via its own readme), which
-              # refuses the property with a schema error before this
-              # check -- or any jq logic -- ever runs, so no render in
-              # this suite can carry it. Verified by hand against
-              # Docker Compose v5.5.0 (reverting this line reopens the
-              # gap); #1631 tracks giving it the same CI coverage every
-              # other check here has.
+              # itself starts (review round 9). CI pins a Compose version
+              # that renders pre_start so this check is regression-tested.
               (if ($s | set("pre_start")) then "\($c.service): sets a pre_start hook" else empty end),
               (if ($s | set("post_start")) then "\($c.service): sets a post_start hook" else empty end),
               (if ($s | set("pre_stop")) then "\($c.service): sets a pre_stop hook" else empty end),
@@ -619,12 +612,30 @@ def bounded_logging:
         (if $bs.mem_limit != null
             and ($s.mem_limit == null or ($s.mem_limit | tonumber) > ($bs.mem_limit | tonumber))
             then "mem_limit is missing or above the base" else empty end),
+        # A base service must retain the resources its entrypoint needs,
+        # including their mount destinations, even without declared collectors.
+        ($bs | list("secrets")[] | . as $secret
+            | (($secret.target // $secret.source) | ltrimstr("/run/secrets/")) as $target
+            | select([$s | list("secrets")[] | select(.source == $secret.source
+                and (((.target // .source) | ltrimstr("/run/secrets/")) == $target))] | length == 0)
+            | "lacks base secret \($secret.source) at \($target)"),
+        ($bs | list("volumes")[] | . as $v
+            | select([$s | list("volumes")[]
+                | select(.type == $v.type and .source == $v.source and .target == $v.target)] | length == 0)
+            | "lacks base volume \($v.source // $v.type) at \($v.target)"),
+        ($bs.networks // {} | keys[] | . as $network
+            | select(($s.networks // {} | has($network)) | not)
+            | "lacks base network \($network)"),
         ($s.networks // {} | keys[] | select(. as $n | $bs.networks // {} | has($n) | not)
             | "joins network \(.), which the base does not give it"),
         ($s | list("volumes")[] | . as $v
             | select([$bs | list("volumes")[]
                 | select(.type == $v.type and .source == $v.source and .target == $v.target)] == [])
             | "mounts \($v.source // $v.type) at \($v.target), which the base does not"),
+        ($bs | list("volumes")[] | select(.read_only != true) | . as $v
+            | select([$s | list("volumes")[] | select(.type == $v.type
+                and .source == $v.source and .target == $v.target and .read_only == true)] | length > 0)
+            | "volume at \($v.target) is no longer writable"),
         ($bs | list("volumes")[] | select(.read_only == true) | .target as $t
             | select([$s | list("volumes")[] | select(.target == $t and .read_only == true)] == [])
             | "volume at \($t) is no longer read-only")
@@ -786,6 +797,47 @@ services:
   indexer:
     security_opt: !override
       - label:type:container_t
+EOF
+}
+
+merged_hardening_rejects_removed_base_resources() {
+    expect_overlay_rejected reset-base-secret "mbsync: lacks base secret bridge_pass at bridge_pass" <<'EOF' || return 1
+services:
+  mbsync:
+    secrets: !reset []
+EOF
+    expect_overlay_rejected retarget-base-secret "mbsync: lacks base secret bridge_pass at bridge_pass" <<'EOF' || return 1
+services:
+  mbsync:
+    secrets: !override
+      - source: bridge_pass
+        target: another_name
+EOF
+    expect_overlay_rejected reset-base-volumes "mbsync: lacks base volume maildir-volume at /maildir" "mbsync: lacks base volume mbsync-state at /state" <<'EOF' || return 1
+services:
+  mbsync:
+    volumes: !reset []
+EOF
+    expect_overlay_rejected drop-one-base-volume "mbsync: lacks base volume maildir-volume at /maildir" <<'EOF' || return 1
+services:
+  mbsync:
+    volumes: !override
+      - mbsync-state:/state
+EOF
+    expect_overlay_rejected reset-base-network "mbsync: lacks base network bridge-net" <<'EOF'
+services:
+  mbsync:
+    networks: !reset []
+EOF
+}
+
+merged_hardening_rejects_read_only_base_writable_mounts() {
+    expect_overlay_rejected read-only-base-data "mbsync: volume at /maildir is no longer writable" "mbsync: volume at /state is no longer writable" <<'EOF'
+services:
+  mbsync:
+    volumes: !override
+      - maildir-volume:/maildir:ro
+      - mbsync-state:/state:ro
 EOF
 }
 
@@ -1658,10 +1710,21 @@ EOF
 # routing field: AGENTS.md forbids it on any mbsync-family service
 # without the #1499 decision, but nothing held a collector to that
 # (review round 3).
+generated_collectors_reject_pre_start_hooks() {
+    expect_generated_rejected three-proton "" \
+        "mbsync: sets a pre_start hook" \
+        "mbsync-$UUID_B: sets a pre_start hook" <<EOF
+services:
+  mbsync:
+    pre_start:
+      - command: ["true"]
+  mbsync-$UUID_B:
+    pre_start:
+      - command: ["true"]
+EOF
+}
+
 generated_collectors_keep_the_mbsync_implementation() {
-    # The pre_start check just above (HARDENING_VIOLATIONS) has no case
-    # here: the CI runner's Compose predates that field and refuses it
-    # with a schema error before this check runs (#1631).
     expect_generated_rejected three-proton "" \
         "mbsync-$UUID_B: image or build differs from mbsync" \
         "mbsync-$UUID_B: sets an entrypoint override" \
@@ -2033,6 +2096,10 @@ check "merged hardening rejects !reset on pids_limit and logging" \
 check "merged hardening rejects !reset on tmpfs" merged_hardening_rejects_reset_tmpfs
 check "merged hardening rejects !override on security_opt" \
     merged_hardening_rejects_override_security_opt
+check "merged hardening keeps base writable volumes writable" \
+    merged_hardening_rejects_read_only_base_writable_mounts
+check "merged hardening rejects missing or retargeted base resources" \
+    merged_hardening_rejects_removed_base_resources
 check "merged hardening rejects !override of a read-only volume" \
     merged_hardening_rejects_override_of_a_read_only_volume
 check "merged hardening rejects !override on ports and networks" \
@@ -2090,6 +2157,7 @@ check "generated collectors bind trust values to their declarations" \
     generated_collectors_bind_trust_values_to_their_declarations
 check "generated collectors apply the implementation and trust bindings to the legacy service" \
     generated_collectors_apply_bindings_to_the_legacy_service
+check "generated collectors reject pre_start hooks" generated_collectors_reject_pre_start_hooks
 check "generated collectors keep the mbsync implementation" \
     generated_collectors_keep_the_mbsync_implementation
 check "generated collectors reject empty entrypoint and command overrides" \

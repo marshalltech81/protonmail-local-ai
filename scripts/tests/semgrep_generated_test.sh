@@ -13,7 +13,7 @@ set -Eeuo pipefail
 # docker-compose.yml.
 #
 # Run (needs semgrep and Python 3.11 or later on PATH):
-#   uvx --from semgrep==1.180.0 bash scripts/tests/semgrep_generated_test.sh
+#   uvx --from semgrep==1.182.1 bash scripts/tests/semgrep_generated_test.sh
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="$(mktemp -d)"
