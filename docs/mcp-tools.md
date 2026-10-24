@@ -637,7 +637,7 @@ different filters"), never read against them.
 | `address_contains` | role, text | `query_messages` `where` | an address in the role contains the text, lowercased; display names are not read |
 | `display_name_contains` | role, text | `query_messages` `where` | a display name written for an address in the role contains the text, casefolded, each name on its own; also unknown when its `participant_names_complete` is not `1` and none does |
 | `address_or_name_contains` | role, text | `sender`, `recipient` and `participant` given anything else (a domain such as `@example.com`, a name or a fragment); `query_messages` `where` | an address in the role, or a display name written for it, contains the text; also unknown when its `participant_names_complete` is not `1` and none does |
-| `domain_is` | role, domain | `query_messages` `where` | an address in the role has exactly that domain, lowercased; a subdomain does not match |
+| `domain_is` | role, domain | `query_messages` `where` | an address in the role has exactly that domain, lowercased; a subdomain does not match. An embedded NUL makes that address's domain unknown: another valid address may still decide a positive, otherwise the leaf is indeterminate |
 | `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded; unknown when it does not and the stored subject was cut or not checked |
 | `text` | words | `query_messages` `text` | as `body_words`, which it compiles to |
 | `header_exists` | header name | `query_messages` and `aggregate_messages` `where` | any occurrence of the named top-level header exists, even with an empty value; absence is unknown unless header evidence is complete |
@@ -2191,7 +2191,7 @@ filters and `date_basis`, and, for a key accepted by its selector, a group's `me
 | `group_by` | Group value | The group's own filter |
 |---|---|---|
 | `sender_address` | a From address | a `where` `address_is` leaf, role `from` |
-| `sender_domain` | the domain of a From address | a `where` `domain_is` leaf, role `from` |
+| `sender_domain` | the domain of a From address; a NUL-bearing address has no known domain and groups under `null` | a `where` `domain_is` leaf, role `from` |
 | `recipient_domain` | an observed To/Cc domain | a `where` `domain_is` leaf, role `visible_recipient`, when the key meets its operand validation |
 | `attachment_content_type` | declared MIME type on a current occurrence | a `where` `attachment_content_type_is` leaf, when `value_clipped=false` |
 | `folder` | the folder | `folder` |
