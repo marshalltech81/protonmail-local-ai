@@ -33,10 +33,34 @@ def test_registered_status_reports_actual_backend(fake_server, seeded_db, candid
     )
 
 
-def test_standalone_status_reads_container_configuration(monkeypatch, seeded_db):
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, 20),
+        ("", 20),
+        (" \t ", 20),
+        ("37", 37),
+        (" 37 ", 37),
+    ],
+)
+def test_standalone_status_reads_container_configuration(monkeypatch, seeded_db, raw, expected):
+    monkeypatch.setenv("SQLITE_PATH", seeded_db.path)
+    monkeypatch.setenv("RERANK_MODE", " CoHeRe ")
+    if raw is None:
+        monkeypatch.delenv("RERANK_CANDIDATES", raising=False)
+    else:
+        monkeypatch.setenv("RERANK_CANDIDATES", raw)
+    data = system.get_mailbox_status()
+    assert data["status"] == "ok"
+    assert data["rerank_mode"] == "cohere"
+    assert data["rerank_candidates"] == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "PRIVATE_CONFIG_MARKER", "1.5"])
+def test_invalid_candidates_fail_with_fixed_error(monkeypatch, seeded_db, raw):
     monkeypatch.setenv("SQLITE_PATH", seeded_db.path)
     monkeypatch.setenv("RERANK_MODE", "cohere")
-    monkeypatch.setenv("RERANK_CANDIDATES", "37")
+    monkeypatch.setenv("RERANK_CANDIDATES", raw)
     data = system.get_mailbox_status()
-    assert data["rerank_mode"] == "cohere"
-    assert data["rerank_candidates"] == 37
+    assert data["status"] == "error"
+    assert "PRIVATE_CONFIG_MARKER" not in repr(data)

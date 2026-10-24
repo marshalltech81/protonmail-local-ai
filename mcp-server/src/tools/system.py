@@ -523,7 +523,7 @@ def get_mailbox_status() -> dict:
         output = _mailbox_status(
             Database(os.environ.get("SQLITE_PATH", "/data/mail.db")),
             rerank_mode="cohere" if mode == "cohere" else "none",
-            rerank_candidates=int(os.environ.get("RERANK_CANDIDATES", "20"))
+            rerank_candidates=int(os.environ.get("RERANK_CANDIDATES", "20").strip() or "20")
             if mode == "cohere"
             else None,
         )
