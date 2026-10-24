@@ -3079,6 +3079,22 @@ an error with the same distinction.
 ### `summarize_thread`
 Summarize a thread in different styles.
 
+**Context limitation.** A summary uses at most 8,000 characters of the
+indexed thread body (or its snippet) plus 4,000 characters from the six
+most recent body chunks; section headers consume those budgets too.
+The indexed body is itself front-preserved under the indexer's
+`THREAD_BODY_TEXT_MAX_TOKENS` cap. Replies between that retained start
+and the six recent chunks can therefore be absent, even when the model
+has a large context window. Attachment text is excluded.
+
+The tool's `coverage_note` and per-call budget log describe additional
+trimming to fit the model window; they do not disclose these earlier
+character and chunk caps. An absent coverage note does not mean the
+whole thread was read. For a fuller review, page through `get_thread`
+using its `offset` and `limit`, then retrieve longer individual bodies
+with `get_message`. Follow those tools' content-read disclosure and
+pagination instructions.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `thread_id` | string | required | Thread ID to summarize |
