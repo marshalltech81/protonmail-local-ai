@@ -46,7 +46,6 @@ from dataclasses import dataclass, replace
 from threading import Lock, local
 
 import defusedxml
-from PIL import Image
 
 from ..rate_limited_log import LineBudget
 from ._runner import ChildError
@@ -63,24 +62,10 @@ from ._runner import ChildError
 defusedxml.defuse_stdlib()
 
 
-# Process-wide cap for every PIL consumer except the image extractor's
-# child, which sets its own ceiling (``image.CHILD_MAX_IMAGE_PIXELS``):
-# transitive PIL users (pypdf rendering embedded document images,
-# openpyxl chart graphics, etc.). Set at module import
-# time so the cap applies uniformly the first time any indexer code
-# path reaches PIL.
-#
-# 30 Mpx is comfortably above any legitimate attachment image (a
-# 300 DPI letter page is ~8 Mpx; a 600 DPI A3 is ~24 Mpx; a modern
-# phone shot is ~12 Mpx) and well below the host-pressure threshold
-# (decoding a 30 Mpx RGB image is ~90 MB of pixel buffer). PIL's
-# default limit (~89 Mpx) is a HINT — it emits a
-# ``DecompressionBombWarning`` and otherwise lets processing proceed —
-# and was observed during a real indexer backfill to admit a 94 Mpx
-# image embedded in a marketing PDF, contributing to OOM kills.
-# Lowering the cap converts those into a hard rejection.
+# Initialized by extractor_child.run before loading any decoder, including
+# transitive Pillow users in PDF/Office readers. The image child temporarily
+# uses its separate ceiling. Keep Pillow out of the indexer process (#1465).
 GLOBAL_MAX_IMAGE_PIXELS = 30_000_000
-Image.MAX_IMAGE_PIXELS = GLOBAL_MAX_IMAGE_PIXELS
 
 log = logging.getLogger("indexer.extractor")
 
