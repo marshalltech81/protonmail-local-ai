@@ -1471,7 +1471,8 @@ account provider (`PROVIDER_POLICIES`). The category (`mailbox`,
 does not name) is derived from the folder at read time and never
 stored, so a policy change needs no migration (#1569, decided in
 #1317): Drafts and Scheduled are unsent evidence whose folder does not
-certify that they are still unsent, and Recovered Messages are
+certify that they are still unsent: a retained Scheduled copy can outlive
+its send and coexist with a separate Sent claimant. Recovered Messages are
 searchable but untrusted, never counting toward an `authority_class`.
 Folder membership records where mbsync last filed a copy, not its
 current state upstream. Each occurrence is returned with its account,
@@ -2575,7 +2576,7 @@ the child's limits (each process has its own) and is killed with the
 child's process group when the run ends; pytesseract's temporary files
 go to the run's scratch directory, which the runner removes. The child
 has its own pixel ceiling, 48,000,000 pixels (#1401; the package's
-30,000,000-pixel cap stays the cap of every other PIL consumer); the
+30,000,000-pixel cap stays the cap of every other extractor-child PIL consumer); the
 indexer itself no longer imports pytesseract or pillow-heif for images.
 A frame at or under the ceiling is OCR'd at full resolution. A JPEG or
 MPO over it (up to 192,000,000 pixels) is decoded at half scale with
@@ -2638,6 +2639,9 @@ for a Tesseract timeout, its own
 `MemoryError` or `RecursionError`) is recorded `failed` under its type
 name; in process a `MemoryError` or `RecursionError` was host
 pressure.
+The shared Pillow limit is initialized inside the resource-limited extractor
+child before a decoder is imported. The indexer process does not import
+Pillow; the image child's separate temporary limit remains unchanged.
 
 The limits were measured plainly in the indexer image (Tesseract 5.5.0,
 which runs up to four OpenMP threads), through the real launcher, on
@@ -2745,6 +2749,11 @@ at WARNING (`HTML body text held <n> lone surrogates; converted as ?`),
 rate limited; like any decoder replacement it does not mark the body
 incomplete (#1315). In process the surrogate stayed in the body and
 the chunker's UTF-8 encode then failed the message.
+When every HTML part is an unused alternative of a non-blank plain
+part, the legacy body conversion is skipped (#1457). If any HTML can
+contribute, the whole original batch keeps its shared text budget.
+Full-body capture still converts HTML separately; its stored text and
+completeness are unchanged.
 
 An attachment the child cannot convert is recorded `failed` by type,
 as for the other child extractors, and one the budget cut reports the

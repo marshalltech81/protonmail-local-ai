@@ -573,7 +573,7 @@ class TestPixelCeiling:
             image_child.extract_text(payload, "20", "0")
         except image.ImagePixelCeilingError:
             pass
-        assert Image.MAX_IMAGE_PIXELS == before == extractors.GLOBAL_MAX_IMAGE_PIXELS
+        assert Image.MAX_IMAGE_PIXELS == before
 
 
 def test_the_child_ceiling_is_not_the_global_cap():
@@ -987,6 +987,49 @@ def _limit(limits: str, name: str) -> tuple[int, int]:
     [line] = [line for line in limits.splitlines() if line.startswith(name)]
     soft, hard = line[len(name) :].split()[:2]
     return int(soft), int(hard)
+
+
+def test_parent_import_and_image_dispatch_do_not_load_pillow(tmp_path):
+    import subprocess  # nosec B404 - fixed synthetic subprocess probe
+
+    payload = tmp_path / "synthetic.png"
+    payload.write_bytes(_png((2, 2)))
+    code = """
+import sys
+from pathlib import Path
+import src.main
+from src.extractors import extract
+extract(content_type='image/png', filename='synthetic.png', payload=Path(sys.argv[1]).read_bytes())
+assert not any(name == 'PIL' or name.startswith('PIL.') for name in sys.modules)
+"""
+    result = subprocess.run(  # nosec B603 - own interpreter, fixed code and synthetic path
+        [sys.executable, "-c", code, str(payload)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_extractor_child_initializes_pixel_cap_before_loading_a_decoder():
+    import subprocess  # nosec B404 - fixed child initialization probe
+
+    code = """
+from PIL import Image
+from src.extractors import extractor_child, GLOBAL_MAX_IMAGE_PIXELS
+Image.MAX_IMAGE_PIXELS = 89_478_485
+extractor_child.run('html', b'<p>synthetic</p>')
+assert Image.MAX_IMAGE_PIXELS == GLOBAL_MAX_IMAGE_PIXELS == 30_000_000
+"""
+    result = subprocess.run(  # nosec B603 - own interpreter and fixed code
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("fails", [False, True])
