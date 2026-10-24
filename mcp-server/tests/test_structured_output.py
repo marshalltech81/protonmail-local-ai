@@ -39,6 +39,8 @@ from tests.test_retrieval import _open_fixture_db
 # ``list[TextContent]`` annotation also yields an output schema — FastMCP
 # wraps it as ``{"result": [TextContent...]}``, a second copy of the
 # prose — so "has a schema" alone would not prove typed fields exist.
+# Checked against the client-listed tools below: new registrations must
+# be classified here rather than silently escaping the schema assertion.
 STRUCTURED_TOOLS = {
     "search_emails": "results",
     "get_evidence": "threads",
@@ -49,6 +51,9 @@ STRUCTURED_TOOLS = {
     "list_folders": "folders",
     "find_contact": "contacts",
     "query_messages": "total_matches",
+    "query_threads": "total_threads",
+    "query_attachments": "total_matches",
+    "get_attachment": "attachment",
     "aggregate_messages": "groups",
     "get_mailbox_status": "current",
 }
@@ -95,10 +100,12 @@ def _call(server: FastMCP, name: str, **args) -> dict:
     return result.structured_content
 
 
-def test_each_tool_in_structured_tools_publishes_a_typed_output_schema(messages_db):
+def test_every_registered_tool_publishes_a_typed_output_schema(messages_db):
     tools = _tools(_server(messages_db))
-    for name, key in STRUCTURED_TOOLS.items():
-        schema = tools[name].output_schema
+    assert set(tools) == set(STRUCTURED_TOOLS)
+    for name, tool in tools.items():
+        key = STRUCTURED_TOOLS[name]
+        schema = tool.output_schema
         assert schema is not None, name
         assert key in schema["properties"], name
         assert "result" not in schema["properties"], name
