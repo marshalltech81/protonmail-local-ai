@@ -314,6 +314,10 @@ restore-index:
 # Paid-provider evaluation and operator maintenance are opt-in commands.
 verify:
 	pre-commit run --all-files
+	uvx --from semgrep==1.182.1 semgrep test .semgrep
+	uvx --from semgrep==1.182.1 bash scripts/tests/semgrep_paths_test.sh
+	uvx --from semgrep==1.182.1 semgrep scan --metrics=off --disable-version-check --strict --error --config .semgrep/compose.yaml --config .semgrep/shell.yaml .
+	uvx --from semgrep==1.182.1 bash scripts/tests/semgrep_generated_test.sh
 	$(MAKE) --jobs=1 test baseline typecheck test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases trivy UPDATE=0
 
 # Run unit tests locally using uv

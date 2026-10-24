@@ -347,7 +347,7 @@ make clean        # Remove everything (destructive)
 ## Local verification
 
 Run `UV_PYTHON=3.14 make verify` for the full local check sequence:
-all pre-commit hooks, `make test`, the synthetic retrieval/answer
+all pre-commit hooks, the four CI Semgrep checks, `make test`, the synthetic retrieval/answer
 baseline, both service typechecks, Docker TLS and Maildir layout
 checks, host-loopback alias checks, and the Trivy dependency,
 configuration and built-image scans. Checks run sequentially and stop
@@ -355,8 +355,11 @@ at the first failure. The baseline is checked with `UPDATE=0`, even
 when an inherited `UPDATE` would otherwise rewrite its snapshot.
 
 Install `uv`, `pre-commit`, Docker/OrbStack and Trivy first, and build
-the checkout's images with `make build`. The host-alias check requires
-macOS. Dependencies, pinned test images and vulnerability databases may
+the checkout's images with `make build`. The host also needs Tesseract
+and Poppler (`brew install tesseract poppler`) for the baseline's OCR
+fixtures. Semgrep 1.182.1 is supplied by `uvx`; it runs the rule fixtures,
+Compose filename checks, repository scan and generated-Compose scan.
+The host-alias check requires macOS. Dependencies, pinned test images and vulnerability databases may
 need downloading. Provider-backed `baseline-real-embedder` and
 `eval-answers` remain separate opt-in commands; `verify` does not start
 the mailbox stack or run operator maintenance.
