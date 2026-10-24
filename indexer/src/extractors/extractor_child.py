@@ -108,6 +108,11 @@ def run(
     ``on_progress`` per page, which writes the progress frames."""
     kwargs = {"on_progress": on_progress} if module in REPORTS_PROGRESS else {}
     package = importlib.import_module(_PACKAGE)
+    # This process is already resource-limited. Apply the shared Pillow cap
+    # before importing any decoder, including transitive PDF/Office users.
+    from PIL import Image
+
+    Image.MAX_IMAGE_PIXELS = package.GLOBAL_MAX_IMAGE_PIXELS
     package.reset_attempt()
     try:
         extractor = importlib.import_module(f"{_PACKAGE}.{MODULES[module]}")

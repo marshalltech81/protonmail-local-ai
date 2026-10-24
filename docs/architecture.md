@@ -2575,7 +2575,7 @@ the child's limits (each process has its own) and is killed with the
 child's process group when the run ends; pytesseract's temporary files
 go to the run's scratch directory, which the runner removes. The child
 has its own pixel ceiling, 48,000,000 pixels (#1401; the package's
-30,000,000-pixel cap stays the cap of every other PIL consumer); the
+30,000,000-pixel cap stays the cap of every other extractor-child PIL consumer); the
 indexer itself no longer imports pytesseract or pillow-heif for images.
 A frame at or under the ceiling is OCR'd at full resolution. A JPEG or
 MPO over it (up to 192,000,000 pixels) is decoded at half scale with
@@ -2638,6 +2638,9 @@ for a Tesseract timeout, its own
 `MemoryError` or `RecursionError`) is recorded `failed` under its type
 name; in process a `MemoryError` or `RecursionError` was host
 pressure.
+The shared Pillow limit is initialized inside the resource-limited extractor
+child before a decoder is imported. The indexer process does not import
+Pillow; the image child's separate temporary limit remains unchanged.
 
 The limits were measured plainly in the indexer image (Tesseract 5.5.0,
 which runs up to four OpenMP threads), through the real launcher, on

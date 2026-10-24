@@ -67,7 +67,7 @@ CAP_MPO_FRAMES = "mpo_frames"
 # resolution, 48,000,000 (an 8000 x 6000 phone photo). It is sized with
 # ``CHILD_MAX_ADDRESS_SPACE_BYTES`` below. It applies in the child only;
 # ``GLOBAL_MAX_IMAGE_PIXELS`` (30,000,000) stays the cap of every other
-# PIL consumer.
+# extractor-child PIL consumer.
 CHILD_MAX_IMAGE_PIXELS = 48_000_000
 
 # A JPEG or MPO over the ceiling is decoded at 1/2 scale through
