@@ -501,7 +501,7 @@ class TestExtractCheck:
     def test_no_results_still_has_structured_output(self, invoice_db):
         invoice_db.hybrid_search = lambda **_kw: []  # type: ignore[assignment]
         out = _extract(invoice_db, _ByThread({}))
-        assert out.content[0].text == "No matching emails found."
+        assert out.content[0].text == "No matching emails were retrieved in the ranked sample."
         assert out.structured_content["records"] == []
 
     def test_mail_and_model_text_stay_out_of_the_logs(self, invoice_db, caplog):

@@ -362,6 +362,10 @@ reject_url_userinfo() {
         printf 'ERROR: %s must not embed credentials (user:pass@host). Put the API key in the matching .secrets/<layer>_api_key.txt file instead.\n' "$name" >&2
         exit 1
     fi
+    if [[ "$value" == *\?* || "$value" == *\#* ]]; then
+        printf 'ERROR: %s must not contain a query string or fragment\n' "$name" >&2
+        exit 1
+    fi
 }
 
 # Print VALUE without leading or trailing whitespace.
