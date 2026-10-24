@@ -79,7 +79,13 @@ class TestChildSends:
         assert (
             frozenset(
                 counters
-                | {"text_lost", "result_ocr_pages_skipped", "image_scale_factor", "pdf_ocr_dpi"}
+                | {
+                    "text_lost",
+                    "result_ocr_pages_skipped",
+                    "image_scale_factor",
+                    "pdf_ocr_dpi",
+                    "eml_binary_containers_skipped",
+                }
             )
             == CHILD_DEGRADATION_KEYS
         )

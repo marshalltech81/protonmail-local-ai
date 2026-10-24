@@ -92,6 +92,7 @@ from . import (
     _runner,
     apply_child_degradation,
     note_eml_degraded,
+    record_eml_binary_skip,
     warn_extractor_cap,
 )
 
@@ -343,6 +344,7 @@ def _inner_message(
         encoding in parser._IDENTITY_ENCODINGS
         and parser._identity_container_bytes(part, None) is not None
     ):
+        record_eml_binary_skip()
         return None, False
     if encoding in ("base64", "quoted-printable"):
         try:
@@ -357,6 +359,7 @@ def _inner_message(
         if raw is None:
             return None, True
         if parser.has_container_prefix(raw):
+            record_eml_binary_skip()
             return None, False
         decoded = parser._parse_transport_form(raw, content_type)
         if decoded is None:

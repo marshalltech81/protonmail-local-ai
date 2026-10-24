@@ -356,6 +356,7 @@ def drain_counters() -> dict[str, int]:
 # child's suppressed-line count is not sent: none of the child's lines
 # reach the log (the runner discards its stderr), so the parent's own
 # line below stands for them.
+CHILD_EML_BINARY_SKIPPED = "eml_binary_containers_skipped"
 CHILD_TEXT_LOST = "text_lost"
 CHILD_OCR_PAGES_SKIPPED = "result_ocr_pages_skipped"
 # The factor (2, 4 or 8) by which the image child scaled down a JPEG over
@@ -381,6 +382,7 @@ CHILD_DEGRADATION_KEYS = frozenset(
         "eml_headers_degraded",
         "eml_filenames_degraded",
         "eml_charsets_degraded",
+        CHILD_EML_BINARY_SKIPPED,
         CHILD_TEXT_LOST,
         CHILD_OCR_PAGES_SKIPPED,
         CHILD_IMAGE_SCALE_FACTOR,
@@ -395,6 +397,7 @@ def reset_attempt() -> None:
     reports besides its counts; the child calls it before its
     extraction. The cap record (``CAP_COLUMNS``) is the parent's alone:
     the child reports a cap that cut by name and the parent records it."""
+    _attempt.eml_binary_containers_skipped = 0
     _attempt.text_lost = False
     _attempt.ocr_pages_skipped = None
     _attempt.image_scale_factor = None
@@ -453,10 +456,20 @@ def record_image_scale_factor(factor: int) -> None:
     _attempt.image_scale_factor = factor
 
 
+def record_eml_binary_skip() -> None:
+    """Count a binary container deliberately omitted from attached-email text."""
+    _attempt.eml_binary_containers_skipped = (
+        getattr(_attempt, "eml_binary_containers_skipped", 0) + 1
+    )
+
+
 def child_degradation() -> dict[str, int]:
     """In the child, after the extraction: the degradation it recorded,
     by ``CHILD_DEGRADATION_KEYS`` key, zero counts left out."""
     state = {key: n for key, n in drain_counters().items() if n}
+    skipped_binary = getattr(_attempt, "eml_binary_containers_skipped", 0)
+    if skipped_binary:
+        state[CHILD_EML_BINARY_SKIPPED] = skipped_binary
     if getattr(_attempt, "text_lost", False):
         state[CHILD_TEXT_LOST] = 1
     skipped = getattr(_attempt, "ocr_pages_skipped", None)
@@ -479,6 +492,16 @@ def apply_child_degradation(logger: logging.Logger, module: str, counts: Mapping
     whether or not the line is logged. An image scale-down
     (``CHILD_IMAGE_SCALE_FACTOR``) is an extractor cap instead, logged
     on its own line with the factor (#1401)."""
+    skipped_binary = counts.get(CHILD_EML_BINARY_SKIPPED)
+    if skipped_binary:
+        warn_rate_limited(
+            logger,
+            "extractor %s omitted binary containers: eml_binary_containers_skipped=%d",
+            module,
+            skipped_binary,
+            level=logging.INFO,
+        )
+        counts = {key: n for key, n in counts.items() if key != CHILD_EML_BINARY_SKIPPED}
     factor = counts.get(CHILD_IMAGE_SCALE_FACTOR)
     if factor:
         warn_extractor_cap(

@@ -1369,11 +1369,14 @@ def test_attached_email_malformed_header_keeps_text_and_reports_degradation():
     "encoding", ["none", "7bit", "8bit", "binary", "base64", "quoted-printable"]
 )
 @pytest.mark.parametrize("kind", ["zip", "ole2"])
-def test_attached_container_is_not_rendered_as_nested_email(label, encoding, kind):
+def test_attached_container_is_not_rendered_as_nested_email(label, encoding, kind, caplog):
     from tests import message_label_catalogue as catalogue
 
     payload = catalogue.message_bytes(label, encoding, catalogue.CONTAINERS[kind])
-    text, _ = eml.extract(payload)
+    with caplog.at_level("INFO"):
+        text, _ = eml.extract(payload)
+    if label == "message/rfc822":
+        assert "eml_binary_containers_skipped=1" in caplog.text
     assert "SYNTHETIC_ZIP_MARKER" not in text
     assert "SYNTHETIC_OLE2_MARKER" not in text
     assert "PK" not in text
