@@ -598,8 +598,8 @@ is exactly what this forbids.
   `run_tool` (PLAN.md decision 42, #1290); parent-side byte limits and
   constant-size signature routing may stay in the parent. Only `text`
   is exempt: a fixed codec set and constant-pass decoding with no
-  structural parsing; the CI test that is to lock that implementation
-  is not written yet (#1295). The OOXML ZIP-size guard
+  structural parsing; `indexer/tests/test_extractor_isolation_contract.py`
+  locks its audited executable AST and codec set (#1295). The OOXML ZIP-size guard
   (`_validate_zip_payload`) still reads the central directory in the
   parent until #1438 moves it. `run_tool` enforces
   a wall-clock timeout and an output cap, and starts the tool through
