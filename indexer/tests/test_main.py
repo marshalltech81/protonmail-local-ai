@@ -6346,6 +6346,14 @@ class TestMainStartupAndLoop:
         init = next(e for e in events if e.startswith("initial_index"))
         assert events.index("stall_guard:1234") < events.index(init)
 
+    def test_unsafe_child_timeout_is_warned_at_startup(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(main, "INDEXER_OCR_TIMEOUT_SECONDS", 0)
+        monkeypatch.setattr(main, "INDEXER_MESSAGE_TIMEOUT_SECONDS", 3600)
+        with caplog.at_level(logging.WARNING):
+            self._run_main(tmp_path, monkeypatch, sweep_due=False)
+        assert "can expire before an extractor child finishes" in caplog.text
+        assert "largest_extractor_child_seconds=7170" in caplog.text
+
     def test_stall_guard_disabled_at_zero(self, tmp_path, monkeypatch):
         monkeypatch.setattr(main, "INDEXER_MESSAGE_TIMEOUT_SECONDS", 0)
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
