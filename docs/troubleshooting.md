@@ -2758,3 +2758,8 @@ and re-pins the cert Bridge presents once it matches
 `BRIDGE_CERT_FINGERPRINT`. `make clean` leaves `.secrets/` alone: the
 Bridge app keeps its own login on the host, so its IMAP password stays
 valid.
+
+Identity-encoded OLE2 and ZIP attachments under any `message/*` subtype
+are preserved as container bytes. To revisit occurrences indexed before
+this handling, run `make reparse`; dead-lettered jobs first need
+`make requeue-dead`. The genuine attached-email path is unchanged.
