@@ -296,6 +296,8 @@ CREATE UNIQUE INDEX idx_message_occurrences_path
     ON message_occurrences(account_id, relative_path) WHERE state = 'active';
 CREATE INDEX idx_message_occurrences_claimant
     ON message_occurrences(claimant_id);
+CREATE UNIQUE INDEX idx_message_occurrences_id_account
+    ON message_occurrences(id, account_id);
 """
 
 # Longest Message-ID the indexer accepts (indexer/src/parser.py
@@ -1660,6 +1662,70 @@ CREATE TABLE IF NOT EXISTS message_headers (
 );
 CREATE INDEX IF NOT EXISTS idx_message_headers_name_claimant
     ON message_headers(name_normalized, claimant_id);
+-- Provider-identity assessments (#1598): the indexer's table and the triggers that
+-- invalidate them as a message's header rows or its occurrence change. The
+-- benchmark writes no assessment; the triggers are here because a trigger
+-- changes the statements a write traces and the WAL writer must match the
+-- indexer's. Copies: indexer/tests/test_reconcile_bench_fidelity.py checks them.
+CREATE TABLE IF NOT EXISTS provider_identity_assessments (
+    occurrence_id         INTEGER NOT NULL,
+    account_id            INTEGER NOT NULL REFERENCES accounts(id),
+    policy_version        TEXT NOT NULL CHECK (length(policy_version) BETWEEN 1 AND 64),
+    outcome               TEXT NOT NULL CHECK (outcome IN ('accepted', 'unresolved', 'rejected')),
+    reason                TEXT NOT NULL CHECK (reason IN ('recovered_folder', 'headers_unknown',
+                              'headers_incomplete', 'no_identity_header',
+                              'duplicate_identity_header', 'malformed_identity',
+                              'no_acceptance_rule')),
+    candidate             TEXT CHECK (candidate IS NULL OR (length(candidate) BETWEEN 1 AND 256 AND candidate NOT GLOB '*[^!-~]*')),
+    identity_header_count INTEGER NOT NULL CHECK (identity_header_count >= 0),
+    headers_complete      INTEGER CHECK (headers_complete IN (0, 1)),
+    state                 TEXT NOT NULL CHECK (state IN ('current', 'invalidated')),
+    assessed_at           TEXT NOT NULL,
+    CHECK (candidate IS NULL OR reason = 'no_acceptance_rule'),
+    PRIMARY KEY (occurrence_id, policy_version),
+    FOREIGN KEY (occurrence_id, account_id)
+        REFERENCES message_occurrences(id, account_id) ON DELETE CASCADE
+);
+CREATE TRIGGER IF NOT EXISTS message_headers_invalidate_assessments_insert
+AFTER INSERT ON message_headers
+WHEN NEW.name_normalized = 'x-pm-internal-id'
+BEGIN
+    UPDATE provider_identity_assessments SET state = 'invalidated'
+    WHERE state = 'current' AND occurrence_id IN (
+        SELECT id FROM message_occurrences WHERE claimant_id = NEW.claimant_id);
+END;
+CREATE TRIGGER IF NOT EXISTS message_headers_invalidate_assessments_update
+AFTER UPDATE ON message_headers
+WHEN OLD.name_normalized = 'x-pm-internal-id' OR NEW.name_normalized = 'x-pm-internal-id'
+BEGIN
+    UPDATE provider_identity_assessments SET state = 'invalidated'
+    WHERE state = 'current' AND occurrence_id IN (
+        SELECT id FROM message_occurrences
+        WHERE claimant_id IN (OLD.claimant_id, NEW.claimant_id));
+END;
+CREATE TRIGGER IF NOT EXISTS message_headers_invalidate_assessments_delete
+AFTER DELETE ON message_headers
+WHEN OLD.name_normalized = 'x-pm-internal-id'
+BEGIN
+    UPDATE provider_identity_assessments SET state = 'invalidated'
+    WHERE state = 'current' AND occurrence_id IN (
+        SELECT id FROM message_occurrences WHERE claimant_id = OLD.claimant_id);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_invalidate_assessments
+AFTER UPDATE OF headers_complete ON messages
+WHEN OLD.headers_complete IS NOT NEW.headers_complete
+BEGIN
+    UPDATE provider_identity_assessments SET state = 'invalidated'
+    WHERE state = 'current' AND occurrence_id IN (
+        SELECT id FROM message_occurrences WHERE claimant_id = NEW.claimant_id);
+END;
+CREATE TRIGGER IF NOT EXISTS message_occurrences_invalidate_assessments
+AFTER UPDATE OF folder, state ON message_occurrences
+WHEN OLD.folder IS NOT NEW.folder OR OLD.state IS NOT NEW.state
+BEGIN
+    UPDATE provider_identity_assessments SET state = 'invalidated'
+    WHERE state = 'current' AND occurrence_id = NEW.id;
+END;
 CREATE TABLE IF NOT EXISTS threads (
     thread_id       TEXT PRIMARY KEY,
     subject         TEXT NOT NULL,

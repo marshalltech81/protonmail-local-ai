@@ -331,6 +331,7 @@ VALUES (1, 'unconfigured', 0,
         CREATE UNIQUE INDEX idx_message_occurrences_path
             ON message_occurrences(account_id, relative_path) WHERE state = 'active';
         CREATE INDEX idx_message_occurrences_claimant ON message_occurrences(claimant_id);
+        CREATE UNIQUE INDEX idx_message_occurrences_id_account ON message_occurrences(id, account_id);
 
         -- Reconciler tombstones (indexer schema), keyed by occurrence
         -- (#1567): written while a message has no live occurrence,

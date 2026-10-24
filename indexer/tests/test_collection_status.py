@@ -716,7 +716,7 @@ class TestMigrationV20:
         migrated = Database(tmp_path / "v19.db", account=TEST_ACCOUNT)
         fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
-            assert SCHEMA_VERSION == 20
+            assert SCHEMA_VERSION == 21
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             assert migrated.get_collection_state() is None
             state = migrated._conn.execute(
@@ -728,7 +728,7 @@ class TestMigrationV20:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [20]" in caplog.text
+        assert "applied migrations: [20, 21]" in caplog.text
 
     def test_a_row_must_name_a_registered_account(self, db):
         with pytest.raises(sqlite3.IntegrityError):

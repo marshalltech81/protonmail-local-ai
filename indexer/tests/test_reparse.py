@@ -32,7 +32,7 @@ from src.threader import Threader
 from src.timings import TimingAggregator
 
 from tests.conftest import TEST_ACCOUNT, make_mock_embedder, message_path_sql
-from tests.test_database import _drop_v14_tables, _v7_from_fresh
+from tests.test_database import _drop_v14_tables, _revert_v21, _v7_from_fresh
 
 MARKER = "SYNTHETIC_REPARSE_MARKER"
 _VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
@@ -439,7 +439,9 @@ _V5_COLUMNS = (
 def _drop_v5_columns(db: Database) -> None:
     """The v4 shape's missing columns: v5's and v6's (#1242), v7's
     tables (#824), v9's column (#1236), v10's table (#1356), v11's
-    columns (#1418) and v12's (#1416)."""
+    columns (#1418) and v12's (#1416). The v21 triggers read
+    ``messages.headers_complete``, so they go first."""
+    _revert_v21(db)
     db._conn.execute("DROP TABLE message_headers")
     db._conn.execute("ALTER TABLE messages DROP COLUMN headers_complete")
     db._conn.execute("ALTER TABLE attachment_extractions DROP COLUMN identifier")

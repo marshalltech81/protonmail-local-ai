@@ -49,7 +49,7 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 from watchdog.utils import UnsupportedLibcError
 
-from . import full_body
+from . import full_body, provider_identity
 from .account import AccountConfig, account_config_from_env, maildir_root_from_env
 from .attachment_indexing import (
     AttachmentWritePlan,
@@ -712,6 +712,7 @@ WAL_CHECKPOINT = "wal checkpoint"
 REAPED_RECORD_PRUNE = "reaped-record prune"
 VECTOR_SUMS_BACKFILL = "thread vector sums backfill"
 VECTOR_SUMS_CHECK = "thread vector sums check"
+IDENTITY_ASSESSMENT = "identity assessment"
 RECOVERY_COMPONENTS = frozenset(
     {
         HEALTH_FILE_REFRESH,
@@ -724,6 +725,7 @@ RECOVERY_COMPONENTS = frozenset(
         REAPED_RECORD_PRUNE,
         VECTOR_SUMS_BACKFILL,
         VECTOR_SUMS_CHECK,
+        IDENTITY_ASSESSMENT,
     }
 )
 
@@ -740,6 +742,19 @@ VECTOR_SUMS_BATCH_ROWS = 2000
 _vector_sums_backfill_done = False
 # Where the check resumes: the last thread it checked (None: the start).
 _vector_sums_check_cursor: str | None = None
+
+# Provider-identity assessment (#1598). Each batch assesses at most
+# ``IDENTITY_ASSESSMENT_BATCH`` occurrences with no current assessment;
+# a full batch is followed by the next one on the next tick, and a short
+# one by a pause of ``IDENTITY_ASSESSMENT_IDLE_SECS``, so an idle index
+# is not scanned every tick.
+IDENTITY_ASSESSMENT_BATCH = 200
+IDENTITY_ASSESSMENT_IDLE_SECS = 60.0
+_identity_next_due = 0.0
+# Keyset cursor of the current pass over the account (occurrence ID), so a
+# pass reads each row once; 0 starts a new pass. Lost on restart, which
+# only restarts the pass.
+_identity_cursor = 0
 
 
 class _FailureStreak:
@@ -3871,6 +3886,41 @@ def _run_vector_sums_backfill(db: Database) -> None:
         log.info("thread vector sums backfill: every thread is filled")
 
 
+def _run_identity_assessment(db: Database) -> None:
+    """One bounded batch of provider-identity assessment (#1598): one
+    INFO line of counts when it assessed or found a stale write, and a
+    failure logged by type alone and retried on a later tick. Progress
+    is the rows themselves, so a restart resumes it."""
+    global _identity_next_due, _identity_cursor
+    now = _monotonic()
+    if now < _identity_next_due:
+        return
+    try:
+        result = provider_identity.reassess_batch(
+            db, limit=IDENTITY_ASSESSMENT_BATCH, after=_identity_cursor
+        )
+    except Exception as e:
+        _streaks[IDENTITY_ASSESSMENT].failed()
+        log.error("identity assessment failed: %s", type(e).__name__)
+        _identity_next_due = now + IDENTITY_ASSESSMENT_IDLE_SECS
+        return
+    _streaks[IDENTITY_ASSESSMENT].succeeded()
+    if result.assessed or result.stale:
+        log.info(
+            "identity assessment: assessed=%d unresolved=%d rejected=%d pass_done=%d stale=%d",
+            result.assessed,
+            result.counts.get("unresolved", 0),
+            result.counts.get("rejected", 0),
+            int(result.exhausted),
+            result.stale,
+        )
+    if result.exhausted:
+        _identity_cursor = 0
+        _identity_next_due = now + IDENTITY_ASSESSMENT_IDLE_SECS
+    else:
+        _identity_cursor = result.last_id
+
+
 def _run_vector_sums_check(db: Database) -> None:
     """One bounded batch of the thread vector sums check (#1356): the
     next filled threads' sums recomputed exactly and any that differ
@@ -4309,6 +4359,7 @@ def main():
                 _run_watch_refresh(folder_watches, db, queue, skip_trashed=reconciler is not None)
 
             _run_vector_sums_backfill(db)
+            _run_identity_assessment(db)
 
             now = time.monotonic()
             if now - last_reconcile >= reconciler_config.sweep_interval_secs:
