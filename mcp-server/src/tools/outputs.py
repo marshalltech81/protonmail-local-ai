@@ -1332,6 +1332,12 @@ class ListedAttachment(_Output):
         description="The extractor, with its version, that recorded the result; null when none did."
     )
     extracted_at: str | None = Field(description="When the extraction ran; null without one.")
+    attachment_rows_current: bool | None = Field(
+        description="Whether the carrying message's stored attachment inventory was committed "
+        "as current: true after enabled extraction commits, false with extraction disabled, "
+        "null pending/unassessed. A retained row with false/null may be obsolete; independent "
+        "of manifest exhaustiveness and extracted-text completeness."
+    )
     attachments_manifest_complete: bool | None = Field(
         description="Whether the carrying message's parsed attachment manifest is complete; "
         "false means a parse cap lost entries, null means unassessed. Independent of text extraction."
@@ -1356,7 +1362,8 @@ class QueryAttachmentsOutput(_Output):
         description="Unit: attachment occurrences; the same claimant in several folders does not repeat an occurrence. "
         + (
             "Every attachment occurrence the filters definitely match, not just this "
-            "page; completeness also requires indeterminate=0 and messages_with_incomplete_manifest=0."
+            "page; completeness also requires indeterminate=0, messages_with_incomplete_manifest=0 "
+            "and messages_with_noncurrent_inventory=0."
         )
     )
     indeterminate: int = Field(
@@ -1379,6 +1386,13 @@ class QueryAttachmentsOutput(_Output):
         "Includes messages with no stored attachment rows. Independent of attachment-row filters "
         "(filename, MIME type, payload ID, extraction status), pagination and filter indeterminacy; "
         "when nonzero, further matching occurrences may be missing."
+    )
+    messages_with_noncurrent_inventory: int = Field(
+        description="Unit: claimant messages. Messages in the same coverage scope as "
+        "messages_with_incomplete_manifest that have attachments or retained occurrence rows "
+        "but whose inventory is not committed as current (attachment_rows_current false/null). "
+        "Includes messages with no stored rows; independent of attachment filters and paging. "
+        "Stored matches may be stale or current occurrences missing, even with a complete manifest."
     )
     status_counts: dict[str, int] = Field(
         description="Unit: attachment occurrences, split by extraction status. "

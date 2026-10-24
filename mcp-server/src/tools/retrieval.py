@@ -686,6 +686,7 @@ def _listed_attachment(a: AttachmentOccurrenceRecord) -> ListedAttachment:
         extracted_at=a.extracted_at,
         ocr_pages_skipped=a.ocr_pages_skipped,
         attachments_manifest_complete=a.attachments_manifest_complete,
+        attachment_rows_current=a.attachment_rows_current,
     )
 
 
@@ -2498,6 +2499,12 @@ def register_retrieval_tools(server, db):
         filename, MIME type, payload ID, extraction status and paging: missing
         occurrences cannot be ruled out with those filters. Report nonzero
         coverage counts; indeterminate=0 alone never proves a complete inventory.
+        ``messages_with_noncurrent_inventory`` separately counts scoped messages
+        with attachments or retained rows whose inventory is not committed as
+        current (extraction off, pending, or unassessed). Stored rows can be
+        stale or current occurrences missing even with a complete manifest.
+        Each row's ``attachment_rows_current`` exposes that nullable marker;
+        it does not certify complete extracted text.
         ``indeterminate`` counts occurrences a filter could not decide (a
         sender or participant filter on a carrying message whose sender
         is ambiguous or not yet checked; an address filter that finds
@@ -2530,7 +2537,7 @@ def register_retrieval_tools(server, db):
         filters plus ``cursor`` set to ``next_cursor``; ``limit`` may
         change between pages. Never report a partial page as the
         complete answer; report ``total_matches``, ``indeterminate`` and
-        ``messages_with_incomplete_manifest`` together. Each page uses a fresh index snapshot, so an
+        ``messages_with_incomplete_manifest`` and ``messages_with_noncurrent_inventory`` together. Each page uses a fresh index snapshot, so an
         attachment indexed or moved while paging can be missed; a
         changed ``total_matches`` signals churn, but matching totals do
         not prove nothing was missed.
@@ -2624,6 +2631,7 @@ def register_retrieval_tools(server, db):
         timings.count("indeterminate", page.indeterminate)
         timings.count("returned", len(page.attachments))
         timings.count("messages_with_incomplete_manifest", page.messages_with_incomplete_manifest)
+        timings.count("messages_with_noncurrent_inventory", page.messages_with_noncurrent_inventory)
         uses = _filter_uses(args)
         if page.indeterminate:
             # Why, by fixed key, as query_messages does (#1086).
@@ -2637,6 +2645,7 @@ def register_retrieval_tools(server, db):
             indeterminate=page.indeterminate,
             status_counts=page.status_counts,
             messages_with_incomplete_manifest=page.messages_with_incomplete_manifest,
+            messages_with_noncurrent_inventory=page.messages_with_noncurrent_inventory,
             returned=len(page.attachments),
             offset=page.offset,
             has_more=page.has_more,
@@ -2653,6 +2662,11 @@ def register_retrieval_tools(server, db):
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}")
+        if page.messages_with_noncurrent_inventory:
+            lines.append(
+                f"messages_with_noncurrent_inventory: {page.messages_with_noncurrent_inventory}; "
+                "stored rows may be stale or current occurrences missing."
+            )
         if page.messages_with_incomplete_manifest:
             lines.append(
                 f"messages_with_incomplete_manifest: {page.messages_with_incomplete_manifest}; "
@@ -2677,7 +2691,11 @@ def register_retrieval_tools(server, db):
             lines.append("has_more: false")
             if page.offset:
                 lines.append("No further attachments.")
-            elif page.indeterminate or page.messages_with_incomplete_manifest:
+            elif (
+                page.indeterminate
+                or page.messages_with_incomplete_manifest
+                or page.messages_with_noncurrent_inventory
+            ):
                 lines.append("No attachments are known to match.")
             else:
                 lines.append("No attachments match.")

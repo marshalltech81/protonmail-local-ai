@@ -124,7 +124,7 @@ def test_manifest_count_adds_one_bounded_message_scan(tmp_path, monkeypatch):
 
     monkeypatch.setattr(db, "_connect", traced)
     db.query_attachments()
-    counts = [s for s in statements if "COUNT(*) FROM messages m" in s]
+    counts = [s for s in statements if "FROM messages m WHERE" in s]
     assert len(counts) == 1
     assert "attachments" not in counts[0].split("FROM messages m", 1)[1].replace(
         "attachments_manifest_complete", ""

@@ -1903,6 +1903,7 @@ class AttachmentOccurrenceRecord:
     extracted_at: str | None
     ocr_pages_skipped: int | None
     attachments_manifest_complete: bool | None
+    attachment_rows_current: bool | None
 
 
 @dataclass
@@ -1924,6 +1925,7 @@ class AttachmentPage:
     has_more: bool
     next_cursor: str | None
     messages_with_incomplete_manifest: int
+    messages_with_noncurrent_inventory: int
 
 
 def _clipped_text(head: bytes) -> tuple[str, bool]:
@@ -2105,7 +2107,7 @@ _OCCURRENCE_COLUMNS = (
     f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
     "AS content_type_head, "
     f"a.size_bytes, {_representative('folder')} AS folder, {_SENT_AT_COLUMN}, "
-    "m.sent_at_status, m.occurred_at, m.attachments_manifest_complete, "
+    "m.sent_at_status, m.occurred_at, m.attachments_manifest_complete, m.attachment_rows_current, "
     "m.effective_at, "
     f"{_SOURCE_COLUMNS}, {OCCURRENCE_STATUS_SQL} AS extraction_status, "
     f"{_unless_deferred('extractor')} AS extractor, "
@@ -2218,6 +2220,9 @@ def _row_to_occurrence(r) -> AttachmentOccurrenceRecord:
             None
             if r["attachments_manifest_complete"] is None
             else bool(r["attachments_manifest_complete"])
+        ),
+        attachment_rows_current=(
+            None if r["attachment_rows_current"] is None else bool(r["attachment_rows_current"])
         ),
     )
 
@@ -6034,11 +6039,14 @@ class Database:
             scope_sql, scope_params = _attachment_message_scope(
                 message_sql, message_params, filters
             )
-            incomplete_manifest = conn.execute(
-                "SELECT COUNT(*) FROM messages m WHERE "  # nosec B608 -- compiled scope, bound values
-                f"({scope_sql}) AND m.attachments_manifest_complete IS NOT 1",
+            incomplete_manifest, noncurrent_inventory = conn.execute(
+                "SELECT COUNT(*) FILTER (WHERE m.attachments_manifest_complete IS NOT 1), "  # nosec B608 -- compiled scope, bound values
+                "COUNT(*) FILTER (WHERE m.attachment_rows_current IS NOT 1 AND "
+                "(m.has_attachments IS NOT 0 OR EXISTS (SELECT 1 FROM attachments old "
+                "WHERE old.claimant_id=m.claimant_id))) FROM messages m WHERE "
+                f"{scope_sql}",
                 scope_params,
-            ).fetchone()[0]
+            ).fetchone()
             status_counts = dict.fromkeys(EXTRACTION_STATUS_FILTERS, 0)
             for status, n in conn.execute(
                 f"SELECT COALESCE({OCCURRENCE_STATUS_SQL}, 'none') AS status, "  # nosec B608
@@ -6080,6 +6088,7 @@ class Database:
             indeterminate=indeterminate,
             status_counts=status_counts,
             messages_with_incomplete_manifest=incomplete_manifest,
+            messages_with_noncurrent_inventory=noncurrent_inventory,
             offset=offset,
             attachments=records,
             has_more=has_more,
