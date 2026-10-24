@@ -707,10 +707,6 @@ make eval-answers EVAL_MAX_CALLS=27 EVAL_ARGS="--case ask-hedge-price-as-of-marc
 
 - No paid baseline run has been recorded yet (#1369), so nothing
   here says how well either tool does on them.
-- A delayed delivery (a receiving time different from the sent date)
-  is not a case either: the runner's synthetic-index check requires
-  every `occurred_at` to be null, as for the outstanding-items cases
-  (#1372).
 - Quoted history is retrievable only because t128's reply has no text
   of its own; when a reply has its own text, the quote is never chunked
   and no tool can return it (#795).
@@ -1161,3 +1157,8 @@ claim; none of these cases is used to tune the dev scenario.
 The loom-alcove chronology cases (#1370) include an undated preference.
 Golden labels keep it in an unknown-date partition; the judge must reject
 invented dates and treating file/reply order as the newest dated position.
+
+The delayed-clasp cases (#1372) separate a June 1 send date, June 20
+delivery, and July 9 fitting. A June 10 replacement remains later by
+send date. The synthetic gate verifies the normalized Received date;
+mutation tests reject delivery/event dates used as the position date.

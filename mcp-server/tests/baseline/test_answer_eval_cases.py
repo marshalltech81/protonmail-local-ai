@@ -187,6 +187,7 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
         "UPDATE messages SET occurred_at = '2031-01-01T00:00:00+00:00' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
         "UPDATE messages SET sent_at_status = 'invalid' WHERE sent_at IS NULL",
+        "UPDATE messages SET occurred_at = NULL WHERE message_id = 't130.2@baseline.example'",
         # #674: the stored Message-ID is each passage's origin in the judge prompt.
         "UPDATE messages SET message_id = 'privatemarker@private.example' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
@@ -231,7 +232,7 @@ _HEADER = re.compile(r"\[(E\d+) \| message ([^ |]+) \| from (.*?) \| sent ([0-9-
 # and passes the tool's checks), keep only the newest side of a
 # conflict, or date each event by its message's sent date and give it
 # to the message's sender.
-MUTATIONS = ("omit_correction", "cite_superseded", "newest_only", "sender_dated")
+MUTATIONS = ("omit_correction", "cite_superseded", "newest_only", "sender_dated", "delivery_dated")
 
 
 @dataclass
@@ -424,12 +425,35 @@ class _OracleAnswerer:
                 sides = sorted((chron.position(i) for i in group), key=lambda p: p.date or "9999")
                 older = {label_of(p.source) for p in sides[:-1]}
                 items = [i for i in items if not older & set(i.labels)]
+        elif mutation == "delivery_dated":
+            source_label = label_of(chron.positions[0].source)
+            for item in items:
+                if item.date is not None and item.labels == [source_label]:
+                    item.date = "2026-06-20"
+                    item.date_source = "sent"
+                    break
         elif mutation == "sender_dated":
             for i in items:
                 if i.date is not None:
                     i.actor, i.date = senders[i.labels[0]]
                     i.date_source = "sent"
         return items
+
+
+def test_delivery_mutation_changes_the_dated_position_not_its_placeholder():
+    case = next(c for c in CASES if c.id == "brief-delayed-clasp")
+    items = [
+        _Item("Required evidence", ["E1"]),
+        _Item("Mira's copper proposal", ["E1"], "2026-06-01", "sent", "Mira Sedge"),
+        _Item("Mira's pewter correction", ["E2"], "2026-06-10", "sent", "Mira Sedge"),
+    ]
+    answerer = _OracleAnswerer(case, "delivery_dated")
+    labels = {"t130.2": "E1", "t130.3": "E2"}
+    result = answerer._mutate(items, case.chronology, labels.get, [])
+    assert result[0].date is None and result[0].actor is None
+    assert result[1].date == "2026-06-20"
+    assert result[1].actor == "Mira Sedge" and result[1].date_source == "sent"
+    assert result[2].date == "2026-06-10"
 
 
 class _StubJudge:
@@ -589,6 +613,8 @@ _MUTATION_CATCHES = {
     ("ask-reading-room-deposit", "newest_only"): "chronology_cited",
     ("brief-reading-room-deposit", "newest_only"): "chronology_cited",
     ("brief-footbridge-closure", "sender_dated"): "chronology_dated",
+    ("ask-delayed-clasp", "omit_correction"): "chronology_cited",
+    ("brief-delayed-clasp", "delivery_dated"): "chronology_dated",
     ("ask-undated-alcove", "newest_only"): "chronology_cited",
     ("brief-undated-alcove", "newest_only"): "chronology_cited",
 }
@@ -628,6 +654,9 @@ def test_mutated_answer_is_caught(
     checks = record["deterministic"]["checks"]
     assert record["status"] == "ok", record["error"]
     assert checks[check] == "fail", checks
+    if mutation == "delivery_dated":
+        assert checks["answer_complete"] == "pass", checks
+        assert checks["citation_checks"] == "pass", checks
     if mutation == "cite_superseded":
         assert checks["citations_resolve"] == "pass", checks
         assert checks["citation_checks"] == "pass", checks
