@@ -388,3 +388,27 @@ def db(tmp_path: Path) -> Database:
 @pytest.fixture
 def threader(db: Database) -> Threader:
     return Threader(db)
+
+
+@pytest.fixture
+def header_work(monkeypatch):
+    from tests.work_counts import HeaderWork
+
+    work = HeaderWork()
+    work.install(monkeypatch)
+    return work
+
+
+@pytest.fixture
+def reply_work(monkeypatch):
+    from src import quoting
+
+    from tests.work_counts import CountedReplyPattern
+
+    lengths = []
+    monkeypatch.setattr(
+        quoting,
+        "_REPLY_HEADER_PATTERNS",
+        tuple(CountedReplyPattern(pattern, lengths) for pattern in quoting._REPLY_HEADER_PATTERNS),
+    )
+    return lengths

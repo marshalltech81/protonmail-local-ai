@@ -1077,6 +1077,14 @@ its text. A missing closing boundary alone does not imply text was lost.
 New messages record known base64 decoding defects as `body_decode`; retained text remains usable,
 but a missing word stays indeterminate, including under negation.
 
+After upgrading to the dropped-display-name completeness fix (#1250),
+run `make reparse` once to refresh `participant_names_complete` and
+parser cap counts. Names discarded by the address-formatting identity
+guard count as `participant_names` (or `bcc_participant_names` for Bcc);
+the address remains usable. Dead-lettered jobs need `make requeue-dead`
+after their cause is fixed. Bcc-only loss does not change visible-name
+completeness.
+
 ## Back up and restore the index
 
 Take a copy of the index before deploying a release that changes the
