@@ -99,9 +99,9 @@ ENUMERATING_TOOL = "query_messages"
 # start and the next page's start (``None`` at the end).
 READ_FIELDS = ("message", "body", "body_offset", "next_offset")
 READING_TOOL = "get_message"
-# ``query_messages`` arguments that page rather than filter: the agent
-# picks the page size, and the cursor is checked against the previous page.
-_PAGING_ARGUMENTS = ("limit", "cursor")
+# ``query_messages`` arguments that control paging or projection rather
+# than filter membership. The cursor is checked against the previous page.
+_NON_FILTER_ARGUMENTS = ("limit", "cursor", "fields")
 # Its string filters that ``Database.query_messages`` strips, a blank one
 # being absent (``src/lib/predicates.py`` ``query_messages_leaves``).
 _STRIPPED_FILTERS = (
@@ -402,7 +402,7 @@ def _query_predicates(arguments: dict[str, Any]) -> dict[str, Any]:
     """
     filters: dict[str, Any] = {}
     for name, value in arguments.items():
-        if name in _PAGING_ARGUMENTS:
+        if name in _NON_FILTER_ARGUMENTS:
             continue
         if name in _STRIPPED_FILTERS and isinstance(value, str):
             value = value.strip()
