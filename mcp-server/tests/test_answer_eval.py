@@ -449,12 +449,28 @@ class TestConfig:
         assert cfg is not None and cfg.max_tokens == 4096
 
     @pytest.mark.parametrize("value", ["default", " Default "])
-    def test_default_selects_the_sdk_default(self, value):
-        cfg = load_layer("JUDGE", {**self.ENV, "JUDGE_BASE_URL": value, "JUDGE_API_KEY": "k"})
+    @pytest.mark.parametrize("layer", ["INFERENCE", "JUDGE"])
+    @pytest.mark.parametrize(
+        ("mode", "url"),
+        [("openai", "https://api.openai.com/v1"), ("anthropic", "https://api.anthropic.com")],
+    )
+    def test_default_resolves_to_an_explicit_endpoint(self, value, layer, mode, url, monkeypatch):
+        cfg = load_layer(
+            layer,
+            {
+                f"{layer}_MODE": mode,
+                f"{layer}_BASE_URL": value,
+                f"{layer}_MODEL": "m",
+                f"{layer}_API_KEY": "k",
+            },
+        )
         assert cfg is not None
-        assert cfg.base_url == ""
+        assert cfg.base_url == url
         assert cfg.endpoint_kind() == "sdk-default"
-        assert cfg.client().base_url.startswith("https://api.openai.com/")
+        assert cfg.label()["endpoint_id"] is None
+        # Even an ambient endpoint introduced after validation cannot redirect it.
+        monkeypatch.setenv(f"{mode.upper()}_BASE_URL", "https://ambient.example")
+        assert cfg.client().base_url == url
 
     def test_key_file_is_read_and_must_be_mode_600(self, tmp_path):
         secrets = self._secrets(tmp_path, "judge_api_key.txt", "file-key")

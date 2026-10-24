@@ -947,7 +947,9 @@ cap below, count launches, not model requests.
   0.160.1, `gpt-6-astra`, `gpt-6-sol` and `gpt-6-luna` advertise `clock`
   and `send_user_message_async`, so with those models the judge is not
   tool-free. Pick a model that advertises none, such as `gpt-5.5`.
-- Either layer with the base URL `default` is refused while the SDK's own
+- For the HTTP modes, `default` resolves to the documented vendor URL
+  before client construction; inference backends refuse empty URLs.
+  Either layer with the base URL `default` is refused while the SDK's own
   endpoint variable (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`) is set, so
   the report's `sdk-default` label is never a custom endpoint.
 - Each case runs under `--case-timeout-secs` (900) and the whole run
