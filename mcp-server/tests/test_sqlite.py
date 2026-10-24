@@ -4408,10 +4408,9 @@ class TestSearchAttachments:
 
 
 class TestFindContactHostileParticipants:
-    def test_entry_the_writer_skips_does_not_break_lookup(self, tmp_path):
-        """One indexed message whose participant string blows up parseaddr
-        (nested-comment recursion) must not take down every find_contact
-        call. The writer skips such entries, so the lookup never sees it."""
+    def test_hostile_stored_display_name_does_not_break_lookup(self, tmp_path):
+        """The lookup must read the hostile name, rather than a fixture
+        writer discarding it before it reaches the participant tables."""
         from tests.conftest import _insert_thread
 
         conn, path = _open_built_db_conn(tmp_path, "hostile.db")
@@ -4419,15 +4418,20 @@ class TestFindContactHostileParticipants:
             conn,
             thread_id="t-hostile",
             subject="hostile",
-            participants=[
-                "(" * 1200 + ")" * 1200 + " <mallory@example.com>",
-                "Bob <bob@example.com>",
-            ],
+            participants=["Mallory <mallory@example.com>", "Bob <bob@example.com>"],
         )
+        hostile_name = "(" * 1200 + ")" * 1200 + " <mallory@example.com>"
+        conn.execute(
+            "UPDATE message_participant_names SET name = ? WHERE claimant_id = ? AND address = ?",
+            (hostile_name, claimant_of("t-hostile"), "mallory@example.com"),
+        )
+        conn.commit()
         conn.close()
         db = Database(str(path))
-        contacts = db.find_contact("bob")
-        assert [c["email"] for c in contacts] == ["bob@example.com"]
+        contacts = {c["email"]: c for c in db.find_contact("example.com")}
+        assert set(contacts) == {"bob@example.com", "mallory@example.com"}
+        assert contacts["bob@example.com"]["names"] == ["Bob"]
+        assert contacts["mallory@example.com"]["names"] == [hostile_name]
 
 
 _NESTED_COMMENT_SENDER = "(" * 1200 + "nested" + ")" * 1200 + " mallory@example.com"

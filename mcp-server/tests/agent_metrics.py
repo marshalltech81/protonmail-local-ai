@@ -99,9 +99,9 @@ ENUMERATING_TOOL = "query_messages"
 # start and the next page's start (``None`` at the end).
 READ_FIELDS = ("message", "body", "body_offset", "next_offset")
 READING_TOOL = "get_message"
-# ``query_messages`` arguments that page rather than filter: the agent
-# picks the page size, and the cursor is checked against the previous page.
-_PAGING_ARGUMENTS = ("limit", "cursor")
+# ``query_messages`` arguments that control paging or projection rather
+# than filter membership. The cursor is checked against the previous page.
+_NON_FILTER_ARGUMENTS = ("limit", "cursor", "fields")
 # Its string filters that ``Database.query_messages`` strips, a blank one
 # being absent (``src/lib/predicates.py`` ``query_messages_leaves``).
 _STRIPPED_FILTERS = (
@@ -402,7 +402,7 @@ def _query_predicates(arguments: dict[str, Any]) -> dict[str, Any]:
     """
     filters: dict[str, Any] = {}
     for name, value in arguments.items():
-        if name in _PAGING_ARGUMENTS:
+        if name in _NON_FILTER_ARGUMENTS:
             continue
         if name in _STRIPPED_FILTERS and isinstance(value, str):
             value = value.strip()
@@ -842,7 +842,12 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         expected = set(scenario.expected_messages)
         enumeration_recall, exhausted = 0.0, False
         for chain in _enumeration_chains(calls, scenario.expected_arguments):
-            listed = {m["message_id"] for page in chain for m in page.get("messages", [])}
+            listed = {
+                m["message_id"]
+                for page in chain
+                for m in page.get("messages", [])
+                if isinstance(m.get("message_id"), str)
+            }
             chain_score = (
                 len(expected & listed) / len(expected),
                 chain[-1].get("has_more") is False,
