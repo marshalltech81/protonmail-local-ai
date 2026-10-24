@@ -1166,7 +1166,9 @@ superseded entries keep their number and one line.
     owner after #1664 (APPEND and recovery through Bridge's own
     connector), #1665 (only an account's collector mounts its Maildir
     writable) and the owner-approved #1584 run; the `X-Pm-Gluon-Id` shape
-    check is then an anomaly filter, not provenance.
+    check is then an anomaly filter, not provenance. *2026-10-23
+    (#1665):* the Compose assertion is in place, so the rule now waits
+    on #1664 and #1584.
 53. **Upstream Gluon and Bridge harness (2026-10-12, #1583):** the
     pinned Gluon and Bridge commits are built and run locally for
     #1316's identity evidence matrix, with acquisition kept apart from

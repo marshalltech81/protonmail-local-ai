@@ -158,6 +158,12 @@ def bounded_logging:
          volumes: {"/maildir": "maildir-volume", "/state": "mbsync-state"},
          network: "bridge-net", password_file, environment}))
     + $own) as $declared
+# Every Maildir volume of an account and the one service that may write it
+# (#1665): the legacy account base volume and mbsync, and the own volume of
+# each generated collector. Derived from the declared accounts and the base
+# file, never from the render under test.
+| ([{volume: "maildir-volume", owner: "mbsync"}]
+    + [$own[] | {volume: .volumes["/maildir"], owner: .service}]) as $maildirs
 # Every service and network the base defines is still there; a network
 # keeps its engine name, and no two networks share one, since services
 # join networks by key and the name picks the engine network.
@@ -518,6 +524,20 @@ def bounded_logging:
         | "\($svc): mounts the volume \(.source) of \($c.service)"),
       (if (.networks // {} | has($c.network)) then "\($svc): joins the network of \($c.service)"
         else empty end)),
+  # The Maildir provenance invariant (#1665): only the own collector of an
+  # account writes its Maildir. Any other service that mounts the volume
+  # without read_only, at any target and under any name, or takes it
+  # through volumes_from (every volume of the named service, writable
+  # unless the entry ends in :ro), is a second writer whose files the
+  # index would read as the collector own. A read-only mount (the
+  # indexer reading) is not a writer. This holds the rule on its own,
+  # whatever the checks above and below also say about the same mount.
+  ($maildirs[] | . as $d | $m.services | to_entries[] | select(.key != $d.owner)
+    | .key as $k | .value
+    | (list("volumes")[] | select(.source == $d.volume and .read_only != true)
+        | "\($k): mounts the Maildir volume \($d.volume) of \($d.owner) writable at \(.target)"),
+      (list("volumes_from")[] | select(split(":")[0] == $d.owner and (endswith(":ro") | not))
+        | "\($k): takes the Maildir volume \($d.volume) of \($d.owner) writable through volumes_from")),
   # A declared account whose provider is not Proton (imap, #1606) gets
   # neither the Bridge password nor bridge-net, wherever its Maildir is.
   ($collectors[0][] | select(.provider != "proton-bridge")
@@ -879,6 +899,47 @@ services:
     volumes:
       - mbsync-state:/state:ro
 EOF
+}
+
+# The Maildir provenance invariant (#1665): no service but an account's own
+# collector mounts that account's Maildir volume writable, whatever the
+# service is called, wherever it mounts the volume, and also by
+# volumes_from, which takes every volume of the named service. A read-only
+# mount (the indexer's) is not a writer.
+merged_hardening_rejects_a_second_maildir_writer() {
+    expect_overlay_rejected second-maildir-writer \
+        "indexer: takes the Maildir volume maildir-volume of mbsync writable through volumes_from" \
+        "any-name: mounts the Maildir volume maildir-volume of mbsync writable at /anywhere" \
+        "mcp-server: mounts the Maildir volume maildir-volume of mbsync writable at /srv/other" <<'EOF' || return 1
+services:
+  indexer:
+    volumes_from: [mbsync]
+  mcp-server:
+    volumes:
+      - maildir-volume:/srv/other:rw
+  any-name:
+    image: example.invalid/extra:1
+    user: "1234:1234"
+    volumes:
+      - maildir-volume:/anywhere
+EOF
+    # Read-only is not a writer: only the generic added-volume rules
+    # object to it, never the invariant.
+    expect_overlay_rejected read-only-maildir-reader \
+        "any-name: mounts the base volume maildir-volume" <<'EOF' || return 1
+services:
+  any-name:
+    image: example.invalid/extra:1
+    user: "1234:1234"
+    volumes_from: ["mbsync:ro"]
+    volumes:
+      - maildir-volume:/anywhere:ro
+EOF
+    if grep -q 'writable' "$WORK/rejected"; then
+        printf 'a read-only mount was called a writer:\n'
+        cat "$WORK/rejected"
+        return 1
+    fi
 }
 
 # A decimal UID of zeros, signed or not, is still root: Docker parses it
@@ -1257,6 +1318,28 @@ EOF
 
 # No other service, base or new, gets a collector's secret, volumes or
 # network.
+# The same invariant for an account the translator generates: a service
+# of any name mounting its Maildir volume writable, at any target, or
+# taking it through volumes_from, is a second writer (#1665).
+generated_maildir_has_one_writer() {
+    expect_generated_rejected three-proton "" \
+        "any-name: mounts the Maildir volume maildir-$UUID_B of mbsync-$UUID_B writable at /anywhere" \
+        "mbsync-$UUID_C: takes the Maildir volume maildir-$UUID_B of mbsync-$UUID_B writable through volumes_from" \
+        "indexer: mounts the Maildir volume maildir-$UUID_C of mbsync-$UUID_C writable at /accounts/x" <<EOF
+services:
+  any-name:
+    image: example.invalid/extra:1
+    user: "1234:1234"
+    volumes:
+      - maildir-$UUID_B:/anywhere
+  mbsync-$UUID_C:
+    volumes_from: [mbsync-$UUID_B]
+  indexer:
+    volumes:
+      - maildir-$UUID_C:/accounts/x
+EOF
+}
+
 generated_collectors_resources_stay_their_own() {
     expect_generated_rejected two-proton "" \
         "extra: uses a secret" \
@@ -1959,6 +2042,8 @@ check "merged hardening rejects redefined secrets" merged_hardening_rejects_rede
 check "merged hardening rejects a new image or build without a user" \
     merged_hardening_rejects_a_new_image_without_a_user
 check "merged hardening rejects volumes an overlay adds" merged_hardening_rejects_added_volumes
+check "merged hardening rejects a second writer of the account Maildir" \
+    merged_hardening_rejects_a_second_maildir_writer
 check "merged hardening rejects leading-zero root users" \
     merged_hardening_rejects_leading_zero_root_users
 check "merged hardening rejects an !override that drops a service" \
@@ -1986,6 +2071,7 @@ check "generated collectors reject another account's secret" \
     generated_collectors_reject_another_accounts_secret
 check "generated collectors reject a wrong network" generated_collectors_reject_a_wrong_network
 check "generated collectors reject an extra mount" generated_collectors_reject_an_extra_mount
+check "generated Maildir volumes have one writer" generated_maildir_has_one_writer
 check "generated collectors' secret, volumes and network stay their own" \
     generated_collectors_resources_stay_their_own
 check "generated collectors are declared, present and checked as new services" \
