@@ -792,7 +792,7 @@ class ExtractionResult:
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
-    "eml": 4,  # Retain malformed encoded-word headers instead of failing (#1516).
+    "eml": 5,  # Do not render OLE2/ZIP attachments as nested mail (#1456).
     "image": 6,
     "pdf": 7,
     "ppt": 2,

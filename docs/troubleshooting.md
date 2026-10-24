@@ -2758,3 +2758,8 @@ and re-pins the cert Bridge presents once it matches
 `BRIDGE_CERT_FINGERPRINT`. `make clean` leaves `.secrets/` alone: the
 Bridge app keeps its own login on the host, so its IMAP password stays
 valid.
+
+Attached-email extraction leaves OLE2 and ZIP container attachments out
+of its rendered text, even when labelled as nested mail. The eml
+extractor version refreshes cached text once; dead-lettered messages
+keep their old chunks until `make requeue-dead`.
