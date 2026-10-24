@@ -639,6 +639,10 @@ def bounded_logging:
             | select([$bs | list("volumes")[]
                 | select(.type == $v.type and .source == $v.source and .target == $v.target)] == [])
             | "mounts \($v.source // $v.type) at \($v.target), which the base does not"),
+        ($bs | list("volumes")[] | select(.read_only != true) | . as $v
+            | select([$s | list("volumes")[] | select(.type == $v.type
+                and .source == $v.source and .target == $v.target and .read_only == true)] | length > 0)
+            | "volume at \($v.target) is no longer writable"),
         ($bs | list("volumes")[] | select(.read_only == true) | .target as $t
             | select([$s | list("volumes")[] | select(.target == $t and .read_only == true)] == [])
             | "volume at \($t) is no longer read-only")
@@ -831,6 +835,16 @@ EOF
 services:
   mbsync:
     networks: !reset []
+EOF
+}
+
+merged_hardening_rejects_read_only_base_writable_mounts() {
+    expect_overlay_rejected read-only-base-data "mbsync: volume at /maildir is no longer writable" "mbsync: volume at /state is no longer writable" <<'EOF'
+services:
+  mbsync:
+    volumes: !override
+      - maildir-volume:/maildir:ro
+      - mbsync-state:/state:ro
 EOF
 }
 
@@ -2078,6 +2092,8 @@ check "merged hardening rejects !reset on pids_limit and logging" \
 check "merged hardening rejects !reset on tmpfs" merged_hardening_rejects_reset_tmpfs
 check "merged hardening rejects !override on security_opt" \
     merged_hardening_rejects_override_security_opt
+check "merged hardening keeps base writable volumes writable" \
+    merged_hardening_rejects_read_only_base_writable_mounts
 check "merged hardening rejects missing or retargeted base resources" \
     merged_hardening_rejects_removed_base_resources
 check "merged hardening rejects !override of a read-only volume" \
