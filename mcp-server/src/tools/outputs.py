@@ -687,7 +687,26 @@ class AttachmentHit(_Output):
     )
 
 
+class AttachmentSenderMatch(_Output):
+    mode: Literal["exact", "substring"] = Field(
+        description="Full address exactly, otherwise a case-insensitive address or display-name substring."
+    )
+    scope: Literal["returned_occurrences"] = Field(
+        description="Only carrying messages of returned attachment occurrences, never the whole matching population."
+    )
+    distinct_addresses: int = Field(
+        description="Unit: distinct matched From addresses among returned attachment occurrences, before the address-list cap."
+    )
+    addresses: list[str] = Field(
+        description=f"Matched canonical From addresses, at most {MAX_LISTED_MATCHED_ADDRESSES}, most matching carrying messages first."
+    )
+
+
 class SearchAttachmentsOutput(_Output):
+    sender_match: AttachmentSenderMatch | None = Field(
+        default=None,
+        description="Match mode and page-local addresses when sender was given; null without that filter.",
+    )
     date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     results: list[AttachmentHit]
     indeterminate: int | None = Field(

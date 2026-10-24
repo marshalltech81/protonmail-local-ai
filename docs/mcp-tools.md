@@ -1146,9 +1146,17 @@ carries `degraded_attachment_indeterminate`. The lanes and the
 count read one snapshot. It is applied in
 each lane's SQL before the lane's limit, so unlike `from_addr` it does
 not depend on a candidate window. Each result's `senders` is still its
-thread's senders, not the carrying message's From. The response does
-not say which match mode applied or how many distinct addresses
-matched; `query_messages(sender=..., has_attachments=true)` does.
+thread's senders, not the carrying message's From. With `sender`,
+`sender_match` reports `mode` (`exact` or `substring`),
+`scope: "returned_occurrences"`, the full distinct matched From-address
+count among the returned attachment occurrences, and at most ten
+canonical addresses (most matching carrying messages first). The prose
+states this same page-local scope, including for an empty result. It
+uses the lanes' read snapshot and applies after the returned-result
+limit and `from_addr` filter. It does not count addresses on omitted
+occurrences; use `query_messages(sender=..., has_attachments=true)`
+for population-wide address counts. Without `sender`, `sender_match`
+is null.
 
 Check `extraction_status`: any value other than `success` (`failed`,
 `unsupported`, `too_large`, `empty` or null) means no extracted text
