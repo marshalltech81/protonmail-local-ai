@@ -365,6 +365,9 @@ class TestEvidenceGuards:
         data = out.structured_content
         assert data["insufficient_evidence"] is True
         assert [t["thread_id"] for t in data["threads"]] == ["t-nochunks"]
+        assert data["retrieval"]["threads_retrieved"] == 1
+        assert data["retrieval"]["threads_supplied"] == 0
+        assert "retrieved sample" in out.content[0].text
 
     def test_chunkless_threads_ranked_first_do_not_take_the_evidence_slots(
         self, tmp_path, monkeypatch
@@ -718,3 +721,15 @@ class TestStructuredOutput:
         llm.structured_output = structured
         _run(check_db, llm)
         assert reserves == [_schema_reserve_chars(CHECK_JSON_SCHEMA) if structured else 0]
+
+
+def test_ranked_sample_is_disclosed_in_check_and_prompt(check_db):
+    llm = ScriptedInference(lambda _u: _check(insufficient_evidence=True))
+    out = _run(check_db, llm, max_threads=1)
+    sample = out.structured_content["retrieval"]
+    assert sample["retrieval_ran"] is True
+    assert sample["max_threads"] == 1 and sample["threads_supplied"] == 1
+    assert sample["threads_retrieved"] >= sample["threads_supplied"]
+    assert sample["exhaustive"] is False and sample["remainder"] == "unknown"
+    assert "ranked sample" in out.content[0].text.lower()
+    assert "ranked, non-exhaustive sample" in llm.complete_calls[0][0]

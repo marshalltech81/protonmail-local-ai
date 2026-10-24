@@ -71,6 +71,7 @@ from .intelligence import (
     _evidence_prompt,
     _reply_cut_limits,
     _ReplyCut,
+    _retrieval_sentence,
     _schema_reserve_chars,
     _scope_block,
     _sort_labels,
@@ -81,6 +82,7 @@ from .intelligence import (
 from .outputs import (
     EXTRACTION_DEFERRED_NOTE,
     MAX_CONCLUSION_FINDINGS,
+    AskRetrieval,
     Brief,
     BriefCitationProblem,
     BriefIssueOutput,
@@ -115,6 +117,9 @@ _EVIDENCE_OVERFETCH = 3
 BRIEF_SYSTEM = (
     """You are an email analyst preparing an issue brief from excerpts of a
 person's mailbox. Use only the evidence passages provided.
+These passages are a ranked, non-exhaustive sample of threads, never the
+whole mailbox. Absence, empty sections and lack of conflicting evidence
+apply only to this sample; whether other mail matches is unknown.
 
 Each evidence passage starts with a header line in square brackets whose
 first field is its evidence label (E1, E2, ...), followed by the message it
@@ -520,6 +525,9 @@ _RELATIONS = frozenset({"supports", "contradicts", "qualifies", "supersedes"})
 CHECK_SYSTEM = (
     """You are an email analyst checking a conclusion against excerpts of a
 person's mailbox. Use only the evidence passages provided.
+These passages are a ranked, non-exhaustive sample of threads, never the
+whole mailbox. Absence, empty sections and lack of conflicting evidence
+apply only to this sample; whether other mail matches is unknown.
 
 Each evidence passage starts with a header line in square brackets whose
 first field is its evidence label (E1, E2, ...), followed by the message it
@@ -984,6 +992,14 @@ def register_experimental_tools(
             )
             evidenced, results = _evidenced(fetched, max_threads)
             count("results", len(results))
+            retrieval = AskRetrieval(
+                retrieval_ran=True,
+                threads_retrieved=len(fetched),
+                threads_supplied=0,
+                max_threads=max_threads,
+                exhaustive=False,
+                remainder="unknown",
+            )
             if not evidenced:
                 empty = Brief(
                     chronology=[],
@@ -994,8 +1010,10 @@ def register_experimental_tools(
                     insufficient_evidence=True,
                 )
                 return tool_result(
-                    "EXPERIMENTAL brief: no relevant message passages found for this topic.",
+                    "EXPERIMENTAL brief: no relevant message passages found in the retrieved sample for this topic.\n"
+                    + _retrieval_sentence(retrieval),
                     BriefIssueOutput(
+                        retrieval=retrieval,
                         experimental=True,
                         status="ok",
                         brief=empty,
@@ -1040,6 +1058,9 @@ def register_experimental_tools(
                 evidence_map=evidence_map,
                 scope=scope,
                 show_scope=bool(scope_text),
+            )
+            retrieval = retrieval.model_copy(
+                update={"threads_supplied": len({ref.thread_id for ref in evidence_map.values()})}
             )
             coverage.threads_dropped = len(evidenced) - len(shown)
             _count_capped_threads(coverage, evidence_chars, len(shown))
@@ -1129,11 +1150,13 @@ def register_experimental_tools(
                 detail = f": {', '.join(p.labels)}" if p.labels else ""
                 lines.append(f"\nCitation check: {p.section} entry {p.item + 1}: {p.kind}{detail}.")
             lines += _quote_count_line([q.status for q in quotes])
+            lines.append(_retrieval_sentence(retrieval))
             lines.append(_sources_searched(results))
 
             return tool_result(
                 "\n".join(lines),
                 BriefIssueOutput(
+                    retrieval=retrieval,
                     experimental=True,
                     status=status,
                     truncation_reason=truncation_reason,
@@ -1275,11 +1298,20 @@ def register_experimental_tools(
             # has no claimant, sender or sent date to quote as a source.
             evidenced, results = _evidenced(fetched, max_threads)
             count("results", len(results))
+            retrieval = AskRetrieval(
+                retrieval_ran=True,
+                threads_retrieved=len(fetched),
+                threads_supplied=0,
+                max_threads=max_threads,
+                exhaustive=False,
+                remainder="unknown",
+            )
             if not evidenced:
                 return tool_result(
-                    "EXPERIMENTAL conclusion check: no relevant message passages found for "
-                    "this conclusion.",
+                    "EXPERIMENTAL conclusion check: no relevant message passages found in the "
+                    "retrieved sample for this conclusion.\n" + _retrieval_sentence(retrieval),
                     CheckConclusionOutput(
+                        retrieval=retrieval,
                         experimental=True,
                         status="ok",
                         verdict_summary=None,
@@ -1327,6 +1359,9 @@ def register_experimental_tools(
                 evidence_map=evidence_map,
                 scope=scope,
                 show_scope=bool(scope_text),
+            )
+            retrieval = retrieval.model_copy(
+                update={"threads_supplied": len({ref.thread_id for ref in evidence_map.values()})}
             )
             coverage.threads_dropped = len(evidenced) - len(shown)
             _count_capped_threads(coverage, evidence_chars, len(shown))
@@ -1443,11 +1478,13 @@ def register_experimental_tools(
                     where = "the check as a whole"
                 lines.append(f"\nCitation check: {where}: {p.kind}{detail}.")
             lines += _quote_count_line([q.status for q in quotes])
+            lines.append(_retrieval_sentence(retrieval))
             lines.append(_sources_searched(results))
 
             return tool_result(
                 "\n".join(lines),
                 CheckConclusionOutput(
+                    retrieval=retrieval,
                     experimental=True,
                     status=status,
                     truncation_reason=truncation_reason,
