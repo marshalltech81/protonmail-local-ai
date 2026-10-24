@@ -3190,11 +3190,12 @@ class Database:
         params += sender_params
         where = " AND ".join(clauses)
         joins = (
-            "JOIN threads t ON a.thread_id = t.thread_id "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
+            "JOIN threads t ON m.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
         )
-        columns = "a.attachment_id, a.claimant_id, a.filename, a.thread_id"
+        columns = "a.attachment_id, a.claimant_id, a.filename, m.thread_id"
         if fts_query:
             # The filename lane lists every occurrence; the text lane one
             # anchored occurrence per payload and message
@@ -3219,7 +3220,8 @@ class Database:
                 f"JOIN attachments a ON a.attachment_occurrence_id = {_TEXT_LANE_ANCHOR} "
                 f"{joins}WHERE c.attachment_id IS NOT NULL AND {where} ), "
                 f"x AS MATERIALIZED ( SELECT {columns} FROM xo "
-                "JOIN attachments a ON a.attachment_occurrence_id = xo.occ ), "
+                "JOIN attachments a ON a.attachment_occurrence_id = xo.occ "
+                "JOIN messages m ON m.claimant_id = a.claimant_id ), "
                 "extra AS ( SELECT attachment_id, claimant_id, filename FROM x "
                 "EXCEPT SELECT attachment_id, claimant_id, filename FROM f ), "
                 "cand AS ( SELECT thread_id FROM f UNION ALL "
@@ -3235,7 +3237,7 @@ class Database:
                 *params,
             ]
         else:
-            ctes = f"cand AS ( SELECT a.thread_id FROM attachments a {joins}WHERE {where} )"  # nosec B608
+            ctes = f"cand AS ( SELECT m.thread_id FROM attachments a {joins}WHERE {where} )"  # nosec B608
             candidate_params = list(params)
         if not from_addr:
             sql = "WITH " + ctes + " SELECT COUNT(*) FROM cand"  # nosec B608
@@ -3331,7 +3333,7 @@ class Database:
         # filter-clause literals); every user value is ``?``-bound.
         sql = (
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
-            "a.claimant_id, a.thread_id, a.filename, "
+            "a.claimant_id, m.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             f"t.folder, t.date_last, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
             "t.senders, "
@@ -3341,10 +3343,10 @@ class Database:
             "bm25(attachments_fts) AS score "
             "FROM attachments_fts "
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
-            "JOIN threads t ON a.thread_id = t.thread_id "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
+            "JOIN threads t ON m.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
-            "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
         )
@@ -3402,13 +3404,14 @@ class Database:
             "    SELECT a.attachment_occurrence_id, MIN(h.score) AS score "
             "    FROM hits h JOIN message_chunks c ON c.fts_rowid = h.fts_rowid "
             f"    JOIN attachments a ON a.attachment_occurrence_id = {_TEXT_LANE_ANCHOR} "
-            "    JOIN threads t ON a.thread_id = t.thread_id "
+            "    JOIN messages m ON m.claimant_id = a.claimant_id "
+            "    JOIN threads t ON m.thread_id = t.thread_id "
             "    LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
             "    WHERE " + " AND ".join(where) + " "  # nosec B608
             "    GROUP BY a.attachment_occurrence_id ) "
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
-            "a.claimant_id, a.thread_id, a.filename, "
+            "a.claimant_id, m.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             f"t.folder, t.date_last, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
             "t.senders, "
@@ -3418,10 +3421,10 @@ class Database:
             "best.score AS score "
             "FROM best "
             "JOIN attachments a ON a.attachment_occurrence_id = best.attachment_occurrence_id "
-            "JOIN threads t ON a.thread_id = t.thread_id "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
+            "JOIN threads t ON m.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
-            "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "ORDER BY score LIMIT ?"
         )
         try:
@@ -3455,7 +3458,7 @@ class Database:
         params = [*extra_params, limit]
         sql = (
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
-            "a.claimant_id, a.thread_id, a.filename, "
+            "a.claimant_id, m.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             f"t.folder, t.date_last, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
             "t.senders, "
@@ -3464,10 +3467,10 @@ class Database:
             f"{_SOURCE_COLUMNS}, "
             "0.0 AS score "
             "FROM attachments a "
-            "JOIN threads t ON a.thread_id = t.thread_id "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
+            "JOIN threads t ON m.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
-            "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY m.effective_at DESC LIMIT ?"
         )
@@ -3730,7 +3733,8 @@ class Database:
             "bm25(attachments_fts) AS score "
             "FROM attachments_fts "
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
-            "JOIN threads t ON a.thread_id = t.thread_id "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
+            "JOIN threads t ON m.thread_id = t.thread_id "
             "WHERE " + " AND ".join(where_clauses) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
         )
@@ -3771,11 +3775,12 @@ class Database:
             return {}
         placeholders = ",".join(["?"] * len(thread_ids))
         sql = (
-            "SELECT a.thread_id, a.attachment_id, bm25(attachments_fts) AS score "
+            "SELECT m.thread_id, a.attachment_id, bm25(attachments_fts) AS score "
             "FROM attachments_fts "
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
+            "JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE attachments_fts MATCH ? "
-            f"AND a.thread_id IN ({placeholders}) "  # nosec B608
+            f"AND m.thread_id IN ({placeholders}) "  # nosec B608
             "ORDER BY score"
         )
         try:
