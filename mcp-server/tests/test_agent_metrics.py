@@ -589,6 +589,56 @@ class TestEnumeration:
         assert score.exhausted is True
         assert score.failures == []
 
+    @pytest.mark.parametrize(
+        ("first_fields", "second_fields"),
+        [
+            (["message_id"], ["message_id", "subject"]),
+            (["message_id"], None),
+            (None, ["message_id"]),
+        ],
+        ids=["both-projected", "first-projected", "second-projected"],
+    )
+    def test_projection_does_not_change_predicates_or_break_a_cursor_chain(
+        self, first_fields, second_fields
+    ) -> None:
+        trace = _trace(
+            [
+                _page(
+                    ["m1@x.example", "m2@x.example"],
+                    has_more=True,
+                    filters={"folder": "Sent", "fields": first_fields},
+                ),
+                _page(
+                    ["m3@x.example"],
+                    has_more=False,
+                    cursor="next",
+                    filters={"folder": "Sent", "fields": second_fields},
+                ),
+            ]
+        )
+        score = score_trace(self._scenario(), trace)
+        assert score.enumeration_recall == 1.0
+        assert score.exhausted is True
+        assert score.failures == []
+
+    @pytest.mark.parametrize("fields", [[], ["subject"]], ids=["empty", "subject-only"])
+    def test_projection_without_message_ids_scores_without_crashing(self, fields) -> None:
+        page = _page(
+            ["m1@x.example", "m2@x.example", "m3@x.example"],
+            has_more=False,
+            filters={"folder": "Sent", "fields": fields},
+        )
+        for row in page["result"]["messages"]:
+            del row["message_id"]
+            if "subject" in fields:
+                row["subject"] = "synthetic subject"
+        score = score_trace(self._scenario(), _trace([page]))
+        # The chain is exhausted, but omitted Message-IDs cannot earn
+        # recall against a ground truth expressed in Message-IDs.
+        assert score.enumeration_recall == 0.0
+        assert score.exhausted is True
+        assert score.failures == ["enumeration_recall"]
+
     def test_stopping_after_the_first_page_is_incomplete(self) -> None:
         trace = _trace([_page(["m1@x.example", "m2@x.example"], has_more=True)])
         score = score_trace(self._scenario(), trace)
