@@ -75,6 +75,7 @@ class TestLoad:
             ('[counsel]\ndomains = [""]\n', "bare domain"),
             ('[counsel]\ndomains = ["x .example"]\n', "bare domain"),
             ('[counsel]\naddresses = ["x.example"]\n', "bare address"),
+            ('[counsel]\naddresses = ["@x.example"]\n', "bare address"),
             ('[counsel]\naddresses = ["Jo <jo@x.example>"]\n', "bare address"),
             (
                 '[counsel]\ndomains = ["x.example"]\n[vendor]\ndomains = ["X.example"]\n',
