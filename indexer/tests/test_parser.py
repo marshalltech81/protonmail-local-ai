@@ -4563,6 +4563,14 @@ _CAP_SHAPES = {
 }
 
 
+_CAP_SHAPES["body_structure"] = (
+    _CAP_HEAD + b"Content-Type: multipart/mixed\r\n\r\nSYNTHETIC_TEXT_MARKER",
+    False,
+    "body_structure=1",
+    lambda msg: msg.body_text == "",
+)
+
+
 def _parse_cap_shape(tmp_path, monkeypatch, shape: str):
     from src import parser
 
@@ -4645,6 +4653,7 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     "container_serialize_decoded_eml": _MANIFEST,
     "body_parts": {"body_complete"},
     "html_body": {"body_complete"},
+    "body_structure": {"body_complete"},
     "mime_parts": {"body_complete", *_MANIFEST},
     "delivery_status_parts": _MANIFEST,
     "address_header": {"to_addresses_complete"},

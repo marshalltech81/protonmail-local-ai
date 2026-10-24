@@ -1067,11 +1067,14 @@ stack must be up:
 make reparse
 ```
 
-After upgrading to the top-level base64 completeness fix (#1360), run
-`make reparse` once to refresh `body_complete` and parser cap counts on
-existing messages. Unchanged text keeps its chunks and vectors. Dead-lettered
-jobs need `make requeue-dead` after their cause is fixed. New messages record
-known base64 decoding defects as `body_decode`; retained text remains usable,
+After upgrading to the top-level multipart (#1348) or base64 (#1360)
+completeness fixes, run `make reparse` once to refresh existing messages'
+`body_complete` and parser
+cap counts. Unchanged text keeps its chunks and vectors. Dead-lettered jobs
+need `make requeue-dead` after their cause is fixed. A declared multipart body
+that cannot be split records `body_structure` when the body could have kept
+its text. A missing closing boundary alone does not imply text was lost.
+New messages record known base64 decoding defects as `body_decode`; retained text remains usable,
 but a missing word stays indeterminate, including under negation.
 
 ## Back up and restore the index
