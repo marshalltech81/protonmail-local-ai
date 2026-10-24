@@ -501,6 +501,46 @@ def _fully_read(calls: Sequence[dict]) -> dict[str, str]:
     return read
 
 
+def _fully_read_attachments(calls: Sequence[dict]) -> dict[str, str]:
+    """Credit stored text paged from 0 to the end of one occurrence on one claimant.
+
+    As with body reads, use returned offsets and text availability, never
+    arguments. Equal payload hashes cannot join pages from different occurrences.
+    """
+    pages: dict[tuple[str, str], dict[int, int | None]] = defaultdict(dict)
+    message_of: dict[tuple[str, str], str] = {}
+    for call in calls:
+        if call["tool"] != "get_attachment":
+            continue
+        result = call.get("result") or {}
+        attachment = result.get("attachment")
+        offset = result.get("text_offset")
+        if (
+            not isinstance(attachment, dict)
+            or not isinstance(result.get("text"), str)
+            or not isinstance(offset, int)
+            or "next_offset" not in result
+        ):
+            continue
+        claimant = attachment.get("claimant_id")
+        occurrence = attachment.get("attachment_occurrence_id")
+        message = attachment.get("message_id")
+        if isinstance(claimant, str) and isinstance(occurrence, str) and isinstance(message, str):
+            key = (claimant, occurrence)
+            pages[key][offset] = result["next_offset"]
+            message_of[key] = message
+    read: dict[str, str] = {}
+    for key, chain in pages.items():
+        start: int | None = 0
+        while isinstance(start, int) and start in chain:
+            following = chain[start]
+            if following is None:
+                read[key[0]] = message_of[key]
+                break
+            start = following if isinstance(following, int) and following > start else None
+    return read
+
+
 def _content_reads(calls: Sequence[dict]) -> tuple[dict[str, str], dict[str, str]]:
     """The message ID, by claimant ID, of each message whose whole body,
     and of each with an attachment passage, some result returned.
@@ -510,16 +550,16 @@ def _content_reads(calls: Sequence[dict]) -> tuple[dict[str, str], dict[str, str
     nothing. A body is read when ``get_message`` pages it from offset 0 to
     the end (``_fully_read``) or a ``get_thread`` row returns it uncut
     (``body`` a string, ``body_omitted_chars`` 0): evidence past a cut needs
-    ``get_message``. Attachment text is read only through a ``get_evidence``
-    passage whose ``source`` is ``attachment``; a ``get_attachment`` read
-    of the whole extracted text is not credited yet (#1527), and a
+    ``get_message``. Attachment text is read through a ``get_evidence``
+    passage whose ``source`` is ``attachment`` or a ``get_attachment`` read
+    paged from 0 to the end of one occurrence's stored extracted text. A
     ``search_attachments`` snippet is a preview the scorer cannot check
     holds the evidence, since traces carry IDs, not text. Reads are keyed
     by claimant ID (#217): reading one file that claims a Message-ID says
     nothing about another file claiming it.
     """
     bodies = _fully_read(calls)
-    attachments: dict[str, str] = {}
+    attachments = _fully_read_attachments(calls)
     for call in calls:
         result = call.get("result") or {}
         if call["tool"] == "get_thread":

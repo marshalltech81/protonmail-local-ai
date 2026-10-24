@@ -126,6 +126,26 @@ def _read(
     }
 
 
+def _attachment_read(offset, next_offset, *, claimant=None, occurrence="occ-1", text=""):
+    message = "c.1@x.example"
+    return {
+        "tool": "get_attachment",
+        "arguments": {"attachment_occurrence_id": occurrence, "offset": offset},
+        "result": {
+            "attachment": {
+                "attachment_occurrence_id": occurrence,
+                "attachment_id": "same-bytes",
+                "claimant_id": claimant or _claim(message),
+                "message_id": message,
+                "thread_id": "t.1@x.example",
+            },
+            "text": text,
+            "text_offset": offset,
+            "next_offset": next_offset,
+        },
+    }
+
+
 def _counted(
     cited: list[str],
     count: object = 2,
@@ -412,8 +432,7 @@ class TestMessageCitations:
         ("source", "recall"), [("attachment", 1.0), ("body", 0.0)], ids=["attachment", "body"]
     )
     def test_an_attachment_passage_credits_a_citation(self, source: str, recall: float) -> None:
-        # A get_evidence attachment passage is the credited read; a
-        # get_attachment read of the whole text is not credited yet (#1527).
+        # A get_evidence attachment passage is a credited content read.
         trace = _trace([_attachment_passage("a.2@x.example", source)], cited=["c-a.2@x.example"])
         assert score_trace(self._correction(), trace).message_citation_recall == recall
 
@@ -1309,6 +1328,51 @@ class TestOutstandingReads:
         assert score.conclusion_citation_support == 2 / 3
         trace["calls"].append(_attachment_passage("c.1@x.example"))
         assert score_trace(scenario, trace).failures == []
+
+    @pytest.mark.parametrize(
+        "pages",
+        [
+            [(0, None)],
+            [(0, 20), (20, None)],
+            [(20, None), (0, 20)],
+        ],
+    )
+    def test_complete_attachment_pages_credit_the_read(self, pages):
+        scenario = _outstanding(outstanding=_truth(attachment_sources=["c.1@x.example"]))
+        trace = _outstanding_trace()
+        trace["calls"].extend(_attachment_read(start, end) for start, end in pages)
+        score = score_trace(scenario, trace)
+        assert score.required_evidence_coverage == 1.0
+        assert score.conclusion_citation_support == 1.0
+
+    @pytest.mark.parametrize(
+        "calls",
+        [
+            [_attachment_read(0, 20)],
+            [_attachment_read(20, None)],
+            [_attachment_read(0, 20), _attachment_read(40, None)],
+            [_attachment_read(0, 20), _attachment_read(20, 0)],
+            [_attachment_read(0, 20), _attachment_read(20, None, occurrence="occ-2")],
+            [_attachment_read(0, 20), _attachment_read(20, None, claimant="c.1@x.example#other")],
+            [_attachment_read(0, None, text=None)],
+        ],
+    )
+    def test_incomplete_or_other_claimant_attachment_pages_do_not_credit_the_read(self, calls):
+        scenario = _outstanding(outstanding=_truth(attachment_sources=["c.1@x.example"]))
+        trace = _outstanding_trace()
+        trace["calls"].extend(calls)
+        score = score_trace(scenario, trace)
+        assert score.required_evidence_coverage == 3 / 4
+        assert score.conclusion_citation_support == 2 / 3
+
+    def test_complete_other_claimant_attachment_read_does_not_support_the_cited_claimant(self):
+        scenario = _outstanding(outstanding=_truth(attachment_sources=["c.1@x.example"]))
+        trace = _outstanding_trace()
+        trace["calls"].append(_attachment_read(0, None, claimant="c.1@x.example#other"))
+        score = score_trace(scenario, trace)
+        # Coverage is by Message-ID; support must match the cited claimant.
+        assert score.required_evidence_coverage == 1.0
+        assert score.conclusion_citation_support == 2 / 3
 
     def test_a_search_attachments_hit_is_not_a_read(self) -> None:
         scenario = _outstanding(outstanding=_truth(attachment_sources=["c.1@x.example"]))
