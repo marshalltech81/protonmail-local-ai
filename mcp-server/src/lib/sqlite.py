@@ -959,14 +959,18 @@ def _message_records(
     limit: int = -1,
     offset: int = 0,
     participants: bool = True,
+    order: str = "oldest",
 ) -> list[MessageRecord]:
     """Messages matching ``where_sql``, oldest effective time first
     (``claimant_id`` breaks ties), with participants unless
     ``participants`` is false. Dates are stored as UTC ISO 8601, so
     string order is chronological order. ``limit=-1`` means no limit."""
+    if order not in ("oldest", "newest"):
+        raise InvalidFilterError("order", "order must be oldest or newest")
+    direction = "ASC" if order == "oldest" else "DESC"
     rows = conn.execute(
         f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE {where_sql} "  # nosec B608
-        "ORDER BY m.effective_at ASC, m.claimant_id ASC LIMIT ? OFFSET ?",
+        f"ORDER BY m.effective_at {direction}, m.claimant_id {direction} LIMIT ? OFFSET ?",  # nosec B608
         (*params, limit, offset),
     ).fetchall()
     records = [_row_to_message_record(r) for r in rows]
@@ -4652,9 +4656,15 @@ class Database:
         return found
 
     def get_thread_page(
-        self, thread_id: str, *, offset: int, limit: int, body_char_limit: int
+        self,
+        thread_id: str,
+        *,
+        offset: int,
+        limit: int,
+        body_char_limit: int,
+        order: str = "oldest",
     ) -> ThreadPage | ReapedSource | None:
-        """One page of a thread's messages, oldest first, each with its
+        """One page of a thread's messages in the selected order, each with its
         own headers and its body cut at ``body_char_limit``.
 
         Every read shares one snapshot, so an indexer commit landing
@@ -4673,7 +4683,7 @@ class Database:
                 "SELECT COUNT(*) FROM messages WHERE thread_id = ?", (thread_id,)
             ).fetchone()[0]
             messages = _message_records(
-                conn, "m.thread_id = ?", (thread_id,), limit=limit, offset=offset
+                conn, "m.thread_id = ?", (thread_id,), limit=limit, offset=offset, order=order
             )
             bodies = _message_bodies(conn, [m.claimant_id for m in messages], body_char_limit)
             has_bodies = bool(bodies) or bool(
