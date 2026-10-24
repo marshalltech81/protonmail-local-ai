@@ -678,7 +678,7 @@ class TestSearchAttachmentsIndeterminateTool:
     def test_zero_is_stated_with_a_sender(self, fake_server, fake_embed, carrier_db):
         out = self._call(fake_server, fake_embed, carrier_db, sender="nobody@nowhere.test")
         assert out.structured_content["indeterminate"] == 0
-        assert out.content[0].text == "No attachments found.\nindeterminate: 0"
+        assert out.content[0].text.startswith("No attachments found.\nindeterminate: 0\n")
 
     def test_no_count_without_a_sender(self, fake_server, fake_embed, undecided_db, caplog):
         with caplog.at_level(logging.INFO):

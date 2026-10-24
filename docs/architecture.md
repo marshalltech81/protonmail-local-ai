@@ -5149,3 +5149,8 @@ unavailable. Shared header outputs show bounded observed Bcc plus retained
 counts; find_contact and thread participant discovery remain visible-only.
 The approved split leaves #1090 open; #1644 owns provenance-backed negatives,
 self and effective completeness at the metadata boundary (#1598/#1584).
+
+Raw 8-bit identity headers (`Message-ID`, `In-Reply-To`, `References`)
+use the existing header-byte decoder before ID trimming and splitting.
+The decoded ID retains the existing length limit; raw bytes still
+determine the claimant hash.
