@@ -283,33 +283,39 @@ def test_request_shapes_count_their_elements(report):
 @pytest.fixture(scope="module")
 def extracted(bench, tmp_path_factory):
     work = tmp_path_factory.mktemp("extracted")
-    return bench.main(
-        [
-            "--workdir",
-            str(work),
-            "--messages",
-            "40",
-            "--per-message",
-            "1",
-            "--k",
-            "3,10",
-            "--missing",
-            "10",
-            "--repeat",
-            "1",
-            "--extracted-chars",
-            "100",
-        ]
-    )
+    reports = {}
+    for chars in (0, 100):
+        reports[chars] = bench.main(
+            [
+                "--workdir",
+                str(work / str(chars)),
+                "--messages",
+                "40",
+                "--per-message",
+                "1",
+                "--k",
+                "3,10",
+                "--missing",
+                "10",
+                "--repeat",
+                "1",
+                "--extracted-chars",
+                str(chars),
+            ]
+        )
+    return reports
 
 
 def test_occurrence_rounds_read_rows_with_extracted_text(extracted):
-    # Every extraction row carries 100 four-byte characters (400 bytes)
-    # of text the round never returns; each record stays under 1,600 bytes.
-    assert extracted["config"]["extracted_chars"] == 100
-    for round_ in extracted["reconcile"]["occurrences"]["stream"].values():
-        assert round_["returned"] > 0
-        assert round_["record_bytes_max"] < 4 * 100 * 4
+    # Increasing cached extraction text must not increase returned record size.
+    baseline = extracted[0]["reconcile"]["occurrences"]["stream"]
+    stressed = extracted[100]["reconcile"]["occurrences"]["stream"]
+    assert extracted[0]["config"]["extracted_chars"] == 0
+    assert extracted[100]["config"]["extracted_chars"] == 100
+    assert baseline.keys() == stressed.keys()
+    for k, round_ in stressed.items():
+        assert round_["returned"] == baseline[k]["returned"] > 0
+        assert round_["record_bytes_max"] == baseline[k]["record_bytes_max"]
 
 
 def test_failed_phase_reports_its_stderr(bench, tmp_path):
