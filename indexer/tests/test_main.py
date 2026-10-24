@@ -6712,6 +6712,23 @@ class TestMainStartupAndLoop:
         assert main._ingestion_state.recovery_pending
         assert caplog.text.count("periodic Maildir rescan failed: OSError") == attempts
 
+    @pytest.mark.parametrize("error", [MemoryError, RecursionError])
+    def test_host_pressure_escapes_the_steady_state_drain(
+        self, tmp_path, monkeypatch, caplog, error
+    ):
+        calls = []
+
+        def drain(*_a, **_kw):
+            calls.append(1)
+            raise error(SYNTHETIC_MARKER)
+
+        with pytest.raises(error):
+            self._run_main(tmp_path, monkeypatch, sweep_due=False, drain=drain)
+
+        assert calls == [1]
+        assert f"queue drain stopped by host pressure: {error.__name__}" in caplog.text
+        assert SYNTHETIC_MARKER not in caplog.text
+
     def test_drain_failure_log_keeps_mail_out(self, tmp_path, monkeypatch, caplog):
         """The main loop's drain backstop logs through the same
         classification as ``last_error`` (#257)."""

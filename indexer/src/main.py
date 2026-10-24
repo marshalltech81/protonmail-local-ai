@@ -4347,6 +4347,9 @@ def main():
                     _log_attachment_outcomes()
                     drained_since_log = 0
                     last_summary = now
+            except (MemoryError, RecursionError) as e:
+                log.critical("queue drain stopped by host pressure: %s", type(e).__name__)
+                raise
             except Exception as e:
                 log.error("queue drain failed: %s", _stage_error(e))
 
