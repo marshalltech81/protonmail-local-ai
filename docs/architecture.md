@@ -1142,7 +1142,8 @@ for From/To/Cc or `bcc_participant_names` for Bcc
 
 `messages.participant_names_complete` records, per message, whether
 that name stage kept every distinct From/To/Cc name: `1` when those
-names finished within the budget, `0` when the budget dropped one, `NULL` for mail not yet
+names finished within the budget and survived address formatting, `0` when
+the budget or formatting identity guard dropped one, `NULL` for mail not yet
 reparsed since the v4 upgrade (and for a dead-lettered message until
 `make requeue-dead`). It is written in the same transaction as the
 participant and name rows. Bcc names use the same budget after visible
