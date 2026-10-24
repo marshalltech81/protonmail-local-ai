@@ -449,7 +449,7 @@ ACCOUNT = Table(
         ),
         "sync": Table(
             {
-                "interval_seconds": Integer(minimum=1, default=60),
+                "interval_seconds": Integer(minimum=1, maximum=999999999, default=60),
                 # Nine digits at most, so mbsync's healthcheck arithmetic
                 # cannot overflow (mbsync/entrypoint.sh).
                 "deadline_seconds": Integer(minimum=1, maximum=999999999, default=86400),

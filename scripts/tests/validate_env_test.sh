@@ -309,9 +309,23 @@ zero_sync_interval_fails() {
 }
 
 zero_padded_sync_interval_fails() {
-    # mbsync accepts only ^[1-9][0-9]*$.
+    # mbsync accepts only ^[1-9][0-9]{0,8}$.
     setup 'SYNC_INTERVAL=08'
     fails_with 'SYNC_INTERVAL'
+}
+
+sync_interval_values() {
+    local value
+    for value in 1 60 999999999; do
+        setup "SYNC_INTERVAL=$value"
+        passes || return 1
+    done
+    for value in 1000000000 9223372036854775808 999999999999999999999999999999999; do
+        setup "SYNC_INTERVAL=$value"
+        fails_with 'SYNC_INTERVAL' || return 1
+    done
+    setup 'SYNC_INTERVAL=60'
+    fails_with 'SYNC_INTERVAL' SYNC_INTERVAL=1000000000
 }
 
 # mbsync's per-run deadline (#282): the entrypoint and healthcheck accept
@@ -1242,6 +1256,7 @@ check "fractional timeouts pass" fractional_timeouts_pass
 check "a timeout below 1 fails" timeout_below_one_fails
 check "a non-numeric timeout fails" non_numeric_timeout_fails
 check "SYNC_INTERVAL=0 fails" zero_sync_interval_fails
+check "SYNC_INTERVAL accepts only a bounded positive integer" sync_interval_values
 check "a zero-padded SYNC_INTERVAL fails" zero_padded_sync_interval_fails
 check "SYNC_DEADLINE_SECONDS accepts only a bounded positive integer" sync_deadline_values
 check "an out-of-range MCP_PORT fails" out_of_range_port_fails

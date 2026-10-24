@@ -218,6 +218,11 @@ REFUSALS: list[tuple[str, list[tuple[str, Any]], str]] = [
         "global.indexer.retry.max_attempts must be an integer from 1 or more.",
     ),
     (
+        "interval over nine digits",
+        [("accounts.0.sync.interval_seconds", 1000000000)],
+        "accounts[0].sync.interval_seconds must be an integer from 1 to 999999999.",
+    ),
+    (
         "deadline over nine digits",
         [("accounts.0.sync.deadline_seconds", 1000000000)],
         "accounts[0].sync.deadline_seconds must be an integer from 1 to 999999999.",
