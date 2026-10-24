@@ -1268,3 +1268,27 @@ class TestPersonFilters:
             )
         assert "private-person-sentinel" not in caplog.text
         assert field in caplog.text
+
+
+@pytest.mark.parametrize("tool", ["ask_mailbox", "extract_from_emails", "summarize_thread"])
+def test_oversized_query_rejections_keep_actionable_errors(
+    fake_server, seeded_db, fake_embed, fake_inference, monkeypatch, caplog, tool
+):
+    marker = "SYNTHETIC_PRIVATE_SUMMARY_1271"
+    query = marker + "x" * 4096
+    search_calls = []
+    monkeypatch.setattr(seeded_db, "hybrid_search", lambda **kw: search_calls.append(kw) or [])
+    handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)[tool]
+    kwargs = {
+        "ask_mailbox": {"question": query},
+        "extract_from_emails": {"query": query, "schema": {"value": "string"}},
+        "summarize_thread": {"thread_id": query},
+    }[tool]
+    with caplog.at_level("WARNING"), pytest.raises(ToolError) as error:
+        asyncio.run(handler(**kwargs))
+    assert "4096 characters" in str(error.value)
+    assert f"rejected invalid argument: {tool}.query" in caplog.text
+    assert marker not in str(error.value) + caplog.text
+    assert search_calls == []
+    assert fake_embed.embed_calls == []
+    assert fake_inference.complete_calls == []

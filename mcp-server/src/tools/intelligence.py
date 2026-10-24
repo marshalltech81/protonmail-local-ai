@@ -2938,7 +2938,7 @@ def register_intelligence_tools(
     secret_values = list(secret_values or ())
     prompt_budget = prompt_budget or PromptBudget()
     # A client can repeat a rejected argument as fast as it likes (#1039).
-    rejections = ArgumentRejections(log, ("ask_mailbox", "extract_from_emails"))
+    rejections = ArgumentRejections(log, ("ask_mailbox", "extract_from_emails", "summarize_thread"))
 
     async def llm_complete(system: str, user: str, json_schema: dict | None = None) -> str:
         count("inference_calls", 1)
