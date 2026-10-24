@@ -1001,8 +1001,8 @@ if [[ -n "$INDEXER_DELETION_MAX_BATCH_PCT" ]]; then
 fi
 
 # Same pattern as mbsync/entrypoint.sh, which reads the value unstripped.
-[[ "$SYNC_INTERVAL" =~ ^[1-9][0-9]*$ ]] || {
-    echo "ERROR: SYNC_INTERVAL must be a positive integer without leading zeros." >&2
+[[ "$SYNC_INTERVAL" =~ ^[1-9][0-9]{0,8}$ ]] || {
+    echo "ERROR: SYNC_INTERVAL must be a positive integer of seconds without leading zeros, at most 999999999." >&2
     exit 1
 }
 

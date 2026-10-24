@@ -4533,6 +4533,30 @@ toml_projection_renders_the_golden_file() {
 
 check "the TOML projection renders the golden mbsyncrc" toml_projection_renders_the_golden_file
 
+sync_interval_is_bounded_at_all_sites() {
+    local value expected
+    for value in 1 999999999 1000000000 9223372036854775808; do
+        validate_env_with "SYNC_INTERVAL=$value"
+        order_setup "bounded-interval-$value"
+        printf '%s\n' "$WORK/cert-a.pem" >"$ORDER_DIR/served"
+        order_run BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-a.pem")" "SYNC_INTERVAL=$value"
+        if [[ "$value" == 1 || "$value" == 999999999 ]]; then
+            [[ "$VALIDATE_RC" == 0 ]] || return 1
+            order_is "$SYNCED_START" 143 || return 1
+            expected=healthy
+        else
+            [[ "$VALIDATE_RC" == 1 ]] || return 1
+            order_is "identity error" 1 || return 1
+            grep -qxF '>>> ERROR: SYNC_INTERVAL must be a positive integer number of seconds (at most 999999999).' "$ORDER_LOG" || return 1
+            [[ ! -e "$ORDER_DIR/runtime/mbsyncrc" ]] || return 1
+            expected=unhealthy
+        fi
+        [[ "$(health_run "bounded-interval-$value" 0 "" "SYNC_INTERVAL=$value")" == "$expected" ]] || return 1
+    done
+}
+
+check "SYNC_INTERVAL is bounded at validation, startup and healthcheck" sync_interval_is_bounded_at_all_sites
+
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
     exit 1

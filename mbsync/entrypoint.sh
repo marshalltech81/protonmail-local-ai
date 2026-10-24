@@ -475,8 +475,8 @@ require_prerequisites() {
         exit 1
     fi
 
-    if [[ ! "$SYNC_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
-        echo ">>> ERROR: SYNC_INTERVAL must be a positive integer number of seconds." >&2
+    if [[ ! "$SYNC_INTERVAL" =~ ^[1-9][0-9]{0,8}$ ]]; then
+        echo ">>> ERROR: SYNC_INTERVAL must be a positive integer number of seconds (at most 999999999)." >&2
         exit 1
     fi
 

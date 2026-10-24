@@ -1064,7 +1064,7 @@ largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
 | `PROTON_LOCAL_STORE_NAME` | `accounts[].sync.local_store_name` | protonmail-local | text; proton-settings.sh names | mbsync (mbsyncrc) | recreate mbsync |
 | `PROTON_CHANNEL_NAME` | `accounts[].sync.channel_name` | protonmail | text; proton-settings.sh names | mbsync (mbsyncrc, output filter) | recreate mbsync |
 | `PROTON_FOLDER_EXCLUSIONS` | `accounts[].sync.mailboxes.exclude` | All Mail, Labels/\*, Starred (proton-bridge) | list of text, at most 256; joined with \|; must keep All Mail, Labels/\*, Starred | mbsync (mbsyncrc Patterns) | recreate mbsync; mail already synced stays |
-| `SYNC_INTERVAL` | `accounts[].sync.interval_seconds` | 60 | integer >= 1 | mbsync (entrypoint, healthcheck) | recreate mbsync |
+| `SYNC_INTERVAL` | `accounts[].sync.interval_seconds` | 60 | integer 1 to 999999999 | mbsync (entrypoint, healthcheck) | recreate mbsync |
 | `SYNC_DEADLINE_SECONDS` | `accounts[].sync.deadline_seconds` | 86400 | integer 1 to 999999999 | mbsync (entrypoint, healthcheck) | recreate mbsync |
 | `EMBED_BASE_URL` | `global.embedding.base_url` | required | text; URL or default | indexer, mcp-server | recreate indexer and mcp-server; on an existing index it must match the recorded embedder |
 | `EMBED_MODEL` | `global.embedding.model` | required | text | indexer, mcp-server | recreate indexer and mcp-server; on an existing index it must match the recorded embedder |
