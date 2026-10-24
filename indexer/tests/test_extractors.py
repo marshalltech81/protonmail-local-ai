@@ -3588,7 +3588,9 @@ class TestPdfExtractorVersion:
     dropped by host pressure, and #931 records a PDF that needs an open
     password or exceeds pypdf's limits ``unsupported``, so rows written
     before any of them must re-extract. Pypdf 6.20 changes stream decoding
-    and malformed page-tree recovery, so version 5 rows also refresh."""
+    and malformed page-tree recovery, so version 5 rows also refresh.
+    Pypdf 6.21 adds the content-stream token cap, so version 6 rows
+    refresh under PDF extractor version 7 (#1659)."""
 
     @pytest.mark.parametrize(
         "name",
