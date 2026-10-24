@@ -6596,3 +6596,24 @@ class TestTransferDecodeLossDetection:
             assert msg is not None
             assert msg.attachments[0].payload_complete is True
         assert len(decodes) == 1
+
+
+@pytest.mark.parametrize("field", ["Subject", "From"])
+def test_malformed_base64_encoded_word_keeps_the_message(tmp_path, caplog, field):
+    from src import parser
+
+    marker = "SYNTHETIC_HEADER_PRIVATE_1516"
+    word = "=?utf-8?b?a?="
+    headers = {"From": "sender@example.test", "Subject": "synthetic"}
+    headers[field] = f"{marker} {word}" + (" <>" if field == "From" else "")
+    path = tmp_path / "malformed.eml"
+    path.write_text(
+        "".join(f"{k}: {v}\r\n" for k, v in headers.items())
+        + "Message-ID: <malformed@example.test>\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\n\r\nSynthetic body."
+    )
+    msg = parser.parse_email(path)
+    assert msg is not None and "Synthetic body." in msg.body_text
+    if field == "Subject":
+        assert msg.subject == headers[field]
+    assert "header encoded-words could not be decoded (HeaderParseError)" in caplog.text
+    assert marker not in caplog.text
