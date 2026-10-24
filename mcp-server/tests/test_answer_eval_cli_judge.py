@@ -532,7 +532,8 @@ def test_cleanup_wait_is_bounded_even_if_wait_never_returns(tmp_path, monkeypatc
     assert time.perf_counter() - start < 10
 
 
-def test_timeout_kills_the_whole_process_tree(tmp_path):
+@pytest.mark.parametrize("startup_delay", [0, 3.0])
+def test_timeout_kills_the_whole_process_tree(tmp_path, startup_delay):
     """An npm-installed launcher spawns the native CLI
     and cannot forward SIGKILL, so the timeout kills the process group."""
     pids = tmp_path / "pids.json"
@@ -540,6 +541,7 @@ def test_timeout_kills_the_whole_process_tree(tmp_path):
     script.write_text(
         f"#!{sys.executable}\n"
         "import json, os, subprocess, sys, time\n"
+        f"time.sleep({startup_delay!r})\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
         f"open({str(pids)!r}, 'w').write(json.dumps([os.getpid(), child.pid]))\n"
         "time.sleep(60)\n"
@@ -547,14 +549,25 @@ def test_timeout_kills_the_whole_process_tree(tmp_path):
     script.chmod(0o700)
 
     async def go():
-        await asyncio.wait_for(
-            cli_judge._run_cli([str(script)], "", str(tmp_path), dict(os.environ)), 2.0
+        task = asyncio.create_task(
+            cli_judge._run_cli([str(script)], "", str(tmp_path), dict(os.environ))
         )
+        try:
+            async with asyncio.timeout(20):
+                while not pids.exists() or not pids.stat().st_size:
+                    if task.done():
+                        await task
+                        pytest.fail("launcher finished before recording its process tree")
+                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(task, 0.05)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     with pytest.raises(TimeoutError):
         _run(go())
     for pid in json.loads(pids.read_text()):
-        for _ in range(50):  # the child is reaped by init after the kill
+        for _ in range(200):  # the child is reaped by init after the kill
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
