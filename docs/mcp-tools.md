@@ -18,6 +18,18 @@ registered only when `INFERENCE_MODE` is not `none` (the default is
 
 The server retrieves and reports mail. Linking threads and tracking matters are left to the client; see PLAN.md decision 44.
 
+
+Counts in structured output declare their unit in each field's schema
+description. A stored claimant is identified by Message-ID plus a hash
+of the raw file: identical copies in several folders count once, while
+different raw files claiming the same Message-ID count separately.
+Thread counts deduplicate threads within a result or group; folder and
+other overlapping groups can count the same item in each group.
+Attachment occurrences are separate positions on a claimant, while
+payload-identity counts deduplicate attachment bytes. Queue counts are
+Maildir-file jobs, one per queued path, so they can count copies in
+different folders separately.
+
 ## Response format
 
 The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
@@ -1146,9 +1158,17 @@ carries `degraded_attachment_indeterminate`. The lanes and the
 count read one snapshot. It is applied in
 each lane's SQL before the lane's limit, so unlike `from_addr` it does
 not depend on a candidate window. Each result's `senders` is still its
-thread's senders, not the carrying message's From. The response does
-not say which match mode applied or how many distinct addresses
-matched; `query_messages(sender=..., has_attachments=true)` does.
+thread's senders, not the carrying message's From. With `sender`,
+`sender_match` reports `mode` (`exact` or `substring`),
+`scope: "returned_occurrences"`, the full distinct matched From-address
+count among the returned attachment occurrences, and at most ten
+canonical addresses (most matching carrying messages first). The prose
+states this same page-local scope, including for an empty result. It
+uses the lanes' read snapshot and applies after the returned-result
+limit and `from_addr` filter. It does not count addresses on omitted
+occurrences; use `query_messages(sender=..., has_attachments=true)`
+for population-wide address counts. Without `sender`, `sender_match`
+is null.
 
 Check `extraction_status`: any value other than `success` (`failed`,
 `unsupported`, `too_large`, `empty` or null) means no extracted text
@@ -3059,6 +3079,22 @@ an error with the same distinction.
 ### `summarize_thread`
 Summarize a thread in different styles.
 
+**Context limitation.** A summary uses at most 8,000 characters of the
+indexed thread body (or its snippet) plus 4,000 characters from the six
+most recent body chunks; section headers consume those budgets too.
+The indexed body is itself front-preserved under the indexer's
+`THREAD_BODY_TEXT_MAX_TOKENS` cap. Replies between that retained start
+and the six recent chunks can therefore be absent, even when the model
+has a large context window. Attachment text is excluded.
+
+The tool's `coverage_note` and per-call budget log describe additional
+trimming to fit the model window; they do not disclose these earlier
+character and chunk caps. An absent coverage note does not mean the
+whole thread was read. For a fuller review, page through `get_thread`
+using its `offset` and `limit`, then retrieve longer individual bodies
+with `get_message`. Follow those tools' content-read disclosure and
+pagination instructions.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `thread_id` | string | required | Thread ID to summarize |
@@ -3125,6 +3161,13 @@ Extract structured data from emails matching a query. Attachment text
 (digital and OCR'd PDFs, images) that ranks for the query is included in
 each thread's context, so fields that appear only in an attachment can be
 extracted.
+
+Every response sets `retrieval`: whether ranked search ran, how many
+threads it returned, how many actually supplied evidence to an
+extraction prompt, the effective `limit` (clamped to 1–50),
+`exhaustive: false` and `remainder: "unknown"`. An empty result says
+only what this sample returned. If `from_name` matches no contact,
+retrieval did not run and both thread counts are zero.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
