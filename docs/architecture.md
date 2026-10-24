@@ -242,6 +242,13 @@ No container is reachable from outside the machine.
 
 ## Health and Readiness Signals
 
+`get_mailbox_status.ingestion_caught_up` uses `current`'s freshness and
+collection checks but ignores waiting reparse jobs. Other pending, retrying,
+deferred and extraction-deferred jobs still block it. Both flags exclude
+terminal failures and do not certify completeness. Fields added by a reparse
+stay unknown until it succeeds; a dead-lettered reparse needs
+`make requeue-dead` and a successful retry even when the waiting count is zero.
+
 "Bridge is healthy" does not mean "mail is syncing". The path from
 Proton to a searchable index passes through seven states, each reported
 by a different signal, and each later state depends on the earlier
