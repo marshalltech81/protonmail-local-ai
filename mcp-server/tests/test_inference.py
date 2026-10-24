@@ -52,48 +52,31 @@ class TestFactory:
         assert c.mode == "anthropic"
         assert isinstance(c._backend, _AnthropicBackend)
 
-    def test_anthropic_with_empty_base_url_omits_kwarg_so_sdk_default_applies(self, monkeypatch):
-        # An empty ``base_url`` leaves the endpoint to the Anthropic SDK.
-        # ``main.py`` never passes one: it resolves
-        # INFERENCE_BASE_URL=default to https://api.anthropic.com (#750);
-        # only the answer evaluation passes it, for ``default``.
-        # The backend must NOT substitute a hardcoded URL constant or
-        # pass an empty ``base_url`` kwarg — either would override the
-        # SDK default. Verify the kwarg is genuinely ABSENT from the
-        # construction call by intercepting ``AsyncAnthropic`` itself.
-        captured: dict = {}
+    @pytest.mark.parametrize("mode", ["anthropic", "openai"])
+    @pytest.mark.parametrize("base_url", ["", " ", "\t\n"])
+    def test_empty_base_url_is_refused_before_building_sdk_clients(
+        self, monkeypatch, mode, base_url
+    ):
+        import importlib
 
-        class FakeAsyncAnthropic:
-            def __init__(self, **kwargs):
-                captured["kwargs"] = kwargs
-                # Mimic the SDK's resolved base_url so the constructor
-                # can read it back into ``self.base_url``.
-                self.base_url = "https://api.anthropic.com"
+        sdk = importlib.import_module(mode)
+        monkeypatch.setenv(f"{mode.upper()}_BASE_URL", "https://ambient.example")
+        calls = []
 
-        import anthropic
+        def forbidden_client(**kwargs):
+            calls.append(kwargs)
+            pytest.fail("An empty endpoint must not build an SDK or HTTP client")
 
-        monkeypatch.setattr(anthropic, "AsyncAnthropic", FakeAsyncAnthropic)
-
-        c = InferenceClient.create(
-            mode="anthropic",
-            base_url="",
-            model="claude-x",
-            api_key="sk-ant-test",  # pragma: allowlist secret
+        monkeypatch.setattr(
+            sdk, "AsyncAnthropic" if mode == "anthropic" else "AsyncOpenAI", forbidden_client
         )
-        assert isinstance(c._backend, _AnthropicBackend)
-        # The contract: no ``base_url`` kwarg reaches AsyncAnthropic
-        # for an empty ``base_url``; ``api_key`` still flows through.
-        assert "base_url" not in captured["kwargs"]
-        assert captured["kwargs"]["api_key"] == "sk-ant-test"  # pragma: allowlist secret
-        # After construction, ``self.base_url`` reflects the SDK's
-        # resolved endpoint — same pattern as ``_OpenAIBackend``,
-        # ``EmbedClient``, and ``OpenAIEmbedder``.
-        assert c._backend.base_url == "https://api.anthropic.com"
+        monkeypatch.setattr(sdk, "DefaultAsyncHttpxClient", forbidden_client)
+        with pytest.raises(ValueError, match="base_url must be non-empty"):
+            InferenceClient.create(mode=mode, base_url=base_url, model="m", api_key="k")
+        assert calls == []
 
     def test_anthropic_with_explicit_base_url_passes_kwarg(self, monkeypatch):
-        # Counterpart to the empty-base_url test: when the operator DOES
-        # set INFERENCE_BASE_URL (compatible gateway, region override,
-        # proxy), that exact value must reach AsyncAnthropic.
+        # An explicit gateway URL must reach AsyncAnthropic unchanged.
         captured: dict = {}
 
         class FakeAsyncAnthropic:
@@ -148,46 +131,6 @@ class TestFactory:
                 api_key="sk-ant-test",  # pragma: allowlist secret
             )
 
-    def test_openai_with_empty_base_url_falls_back_to_sdk_default(self, monkeypatch):
-        # An empty ``base_url`` means "use the SDK default" (OpenAI
-        # proper). ``main.py`` never passes one: it resolves
-        # ``INFERENCE_BASE_URL=default`` to https://api.openai.com/v1
-        # (#750); only the answer evaluation passes it, for ``default``.
-        # Symmetric with ``_AnthropicBackend``'s empty-URL path and with
-        # ``EmbedClient`` / ``OpenAIEmbedder``.
-        #
-        # Intercept ``AsyncOpenAI`` to confirm ``base_url`` is NOT
-        # passed as a kwarg when empty — passing an empty string would
-        # defeat the SDK's fallback because the SDK only treats
-        # ``None`` as "missing."
-        captured: dict = {}
-
-        class FakeAsyncOpenAI:
-            def __init__(self, **kwargs):
-                captured["kwargs"] = kwargs
-                # Mimic the SDK's resolved base_url so the constructor
-                # can read it back into ``self.base_url``.
-                self.base_url = "https://api.openai.com/v1/"
-
-        import openai
-
-        monkeypatch.setattr(openai, "AsyncOpenAI", FakeAsyncOpenAI)
-
-        c = InferenceClient.create(
-            mode="openai",
-            base_url="",
-            model="gpt-4",
-            api_key="sk-real",  # pragma: allowlist secret
-        )
-        # ``base_url`` kwarg is genuinely absent — the SDK fallback
-        # chain fires when the kwarg is missing, not when it is
-        # passed as empty string.
-        assert "base_url" not in captured["kwargs"]
-        assert captured["kwargs"]["api_key"] == "sk-real"  # pragma: allowlist secret
-        # After construction, ``self.base_url`` reflects the SDK's
-        # resolved endpoint, not the empty string passed in.
-        assert c._backend.base_url == "https://api.openai.com/v1"
-
     def test_openai_with_explicit_base_url_passes_kwarg(self, monkeypatch):
         # Counterpart: when the operator DOES set INFERENCE_BASE_URL
         # (host-side server, alternative provider, gateway), that
@@ -226,7 +169,7 @@ class TestFactory:
 
         c = InferenceClient.create(
             mode="anthropic",
-            base_url="",
+            base_url="https://api.anthropic.com",
             model="claude-x",
             api_key="sk-ant-test",  # pragma: allowlist secret
         )
@@ -458,7 +401,9 @@ class TestTruncatedOutput:
         return InferenceClient.create(mode="openai", base_url="http://x/v1", model="m", api_key="k")
 
     def _anthropic(self):
-        return InferenceClient.create(mode="anthropic", base_url="", model="m", api_key="k")
+        return InferenceClient.create(
+            mode="anthropic", base_url="https://api.anthropic.com", model="m", api_key="k"
+        )
 
     def test_openai_length_finish_raises_with_the_partial_text(self, monkeypatch):
         c = self._openai()
@@ -544,7 +489,9 @@ class TestFilteredOutput:
             asyncio.run(c.complete("sys", "user"))
 
     def test_anthropic_refusal_is_an_error(self, monkeypatch):
-        c = InferenceClient.create(mode="anthropic", base_url="", model="m", api_key="k")
+        c = InferenceClient.create(
+            mode="anthropic", base_url="https://api.anthropic.com", model="m", api_key="k"
+        )
 
         async def fake_create(**_kwargs):
             return SimpleNamespace(
@@ -558,7 +505,9 @@ class TestFilteredOutput:
     def test_anthropic_context_window_stop_is_truncation(self, monkeypatch):
         """A context-window stop cuts the answer off just
         like max_tokens does."""
-        c = InferenceClient.create(mode="anthropic", base_url="", model="m", api_key="k")
+        c = InferenceClient.create(
+            mode="anthropic", base_url="https://api.anthropic.com", model="m", api_key="k"
+        )
 
         async def fake_create(**_kwargs):
             return SimpleNamespace(
