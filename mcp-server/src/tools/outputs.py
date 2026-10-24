@@ -1774,7 +1774,31 @@ class ExtractCitationProblem(_Output):
     )
 
 
+class ExtractionRetrieval(_Output):
+    """The ranked sample searched by structured extraction (#1579)."""
+
+    retrieval_ran: bool = Field(
+        description="Whether ranked retrieval ran; false when from_name matched no contact."
+    )
+    threads_retrieved: int = Field(
+        description="Unit: threads returned by ranked search, at most limit."
+    )
+    threads_supplied: int = Field(
+        description="Unit: distinct threads whose evidence reached an extraction prompt."
+    )
+    limit: int = Field(description="Effective ranked thread limit after clamping to [1, 50].")
+    exhaustive: Literal[False] = Field(
+        description="Always false: only a ranked sample was searched."
+    )
+    remainder: Literal["unknown"] = Field(
+        description="Whether matching mail exists outside the sample is unknown."
+    )
+
+
 class ExtractFromEmailsOutput(_Output):
+    retrieval: ExtractionRetrieval = Field(
+        description="Always set: retrieval and prompt sample coverage, never exhaustive."
+    )
     records: list[dict[str, Any]] = Field(
         description="The extracted records, as in the first content item. Each carries "
         "_source_thread (thread subject), _date (the thread's last date) and _evidence (each "
