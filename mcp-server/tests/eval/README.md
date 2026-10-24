@@ -1147,3 +1147,9 @@ real-model synthetic index, and token usage.
   every required group is in the top 10 and fail otherwise; the
   aggregate summary always passes. CI does not enforce a floor on any
   of the three scores because the right floor is mailbox-dependent.
+
+Unparsed `brief_issue` and `check_conclusion` replies (`invalid_json` or
+`truncated`) remain incomplete answers and fail `answer_complete`. Their raw
+text is one uncited statement the judge can assess, with a fixed placeholder
+when empty; inability to parse an answer is not itself a judge infrastructure
+error. This does not excuse an actual judge error.
