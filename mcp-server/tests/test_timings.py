@@ -726,6 +726,7 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
             "indeterminate": 0,
             "returned": 1,
             "messages_with_incomplete_manifest": 0,
+            "messages_with_noncurrent_inventory": 0,
         },
     ),
     "get_attachment": ({"attachment_occurrence_id": _MARKER_OCCURRENCE_ID}, {"attachments": 1}),
