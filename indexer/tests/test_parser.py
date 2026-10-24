@@ -4613,7 +4613,14 @@ def test_cap_that_drops_content_logs_one_warning(tmp_path, monkeypatch, caplog, 
 # headers of every role.
 _ROLES = {"from_addresses_complete", "to_addresses_complete", "cc_addresses_complete"}
 _MANIFEST = {"attachments_manifest_complete"}
+_CAP_SHAPES["body_decode"] = (
+    _CAP_HEAD + b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\nc2VjcmV0A",
+    False,
+    "body_decode=1",
+    lambda msg: msg.body_text == "c2VjcmV0A",
+)
 _CAP_COMPLETENESS: dict[str, set[str]] = {
+    "body_decode": {"body_complete"},
     "headers_budget": set(),
     "headers_parse": set(),
     "attached_depth": _MANIFEST,
