@@ -250,6 +250,14 @@ jobs:
             --env FULL_BODY_ROOT=/task --entrypoint python full-body-runtime - \
             < mcp-server/tests/runtime_full_body.py
 
+      # The #1584 evidence-run code (evidence-run/, not part of any image)
+      # runs on the indexer's environment, since its probe reuses the
+      # indexer's parser and policy. Offline and synthetic; the coverage
+      # floor is the services', so it is off here.
+      - name: Run the evidence-run tests
+        working-directory: indexer
+        run: uv run pytest -c pyproject.toml ../evidence-run/tests -q --no-cov -p no:cacheprovider
+
       - name: Upload indexer coverage report
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

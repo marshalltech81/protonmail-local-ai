@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead reparse rotate-bridge-pin force-deletion clean sync sync-indexer sync-mcp verify test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets init-config migrate-config validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead reparse rotate-bridge-pin force-deletion clean sync sync-indexer sync-mcp verify test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-image-pins test-trivy-flags test-maven-checksums test-evidence-run ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets init-config migrate-config validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -52,6 +52,7 @@ help:
 	@echo "  test-maintenance-commands  Run rotate-bridge-pin and force-deletion tests against a fake docker (no daemon)"
 	@echo "  test-image-pins  Check tls_check.sh pins the python image the indexer and mcp-server Dockerfiles build from, and docker.yml and tests.yml the same BuildKit image"
 	@echo "  test-trivy-flags  Check that make trivy and the Trivy jobs in .github/workflows/security.yml and docker.yml agree (no Trivy install)"
+	@echo "  test-evidence-run  Run the offline tests of the #1584 evidence-run code (evidence-run/) on the indexer environment"
 	@echo "  test-maven-checksums  Check the indexer build and security.yml verify every Maven artifact against the committed checksums, which cover indexer/java/pom.xml (no Maven)"
 	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository, then the image gates (needs trivy and the built images)"
 	@echo "  trivy-images Run the CI Trivy image gates of .github/workflows/docker.yml on the built indexer, mcp-server and mbsync images (needs trivy, make build)"
@@ -321,7 +322,7 @@ verify:
 	$(MAKE) --jobs=1 test baseline typecheck test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases trivy UPDATE=0
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-index-backup test-image-pins test-trivy-flags test-maven-checksums
+test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-index-backup test-image-pins test-trivy-flags test-maven-checksums test-evidence-run
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -375,6 +376,11 @@ test-trivy-flags:
 
 test-maven-checksums:
 	bash scripts/tests/maven_checksums_test.sh
+
+# The #1584 evidence-run code (evidence-run/), on the indexer's
+# environment: offline, synthetic, no accounts, no Bridge, no network.
+test-evidence-run: sync-indexer
+	cd indexer && uv run pytest -c pyproject.toml ../evidence-run/tests -q --no-cov -p no:cacheprovider
 
 # The Trivy scans of .github/workflows/security.yml and the image gates
 # of .github/workflows/docker.yml, locally (#1017, #1065): the
