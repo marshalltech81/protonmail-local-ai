@@ -8461,7 +8461,9 @@ class TestMessageRecordsEndToEnd:
         assert not any("(" in addr for _role, addr, _name in participants)
 
     @pytest.mark.serial
-    def test_group_syntax_inside_encoded_words_parses_within_the_time_bound(self, tmp_path):
+    def test_group_syntax_inside_encoded_words_parses_within_the_time_bound(
+        self, tmp_path, header_work
+    ):
         """Group syntax carried inside encoded-words drove the standard
         library's group parser quadratic via the From header (3.1 s at
         200 KB)."""
@@ -8484,11 +8486,12 @@ class TestMessageRecordsEndToEnd:
         start = time.perf_counter()
         msg = parse_email(path, maildir_root=tmp_path)
         elapsed = time.perf_counter() - start
+        header_work.check(path.stat().st_size)
         assert msg is not None
         assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
 
     @pytest.mark.serial
-    def test_rejected_huge_group_header_parses_within_the_time_bound(self, tmp_path):
+    def test_rejected_huge_group_header_parses_within_the_time_bound(self, tmp_path, header_work):
         """A header strict parsing rejects must not fall through to work that
         grows quadratically with its size: a 600 KB ``)Group: ...;`` header
         took ~2 s through a lenient re-parse (the worker is synchronous)."""
@@ -8512,11 +8515,12 @@ class TestMessageRecordsEndToEnd:
         start = time.perf_counter()
         msg = parse_email(path, maildir_root=tmp_path)
         elapsed = time.perf_counter() - start
+        header_work.check(path.stat().st_size)
         assert msg is not None
         assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
 
     @pytest.mark.serial
-    def test_malformed_encoded_prefixes_parse_within_the_time_bound(self, tmp_path):
+    def test_malformed_encoded_prefixes_parse_within_the_time_bound(self, tmp_path, header_work):
         """Thousands of unfinished ``=?utf-8?q?`` prefixes in one name must
         not trigger a quadratic re-scan (the worker is synchronous, so a
         slow parse stalls every queued message behind it)."""
@@ -8539,6 +8543,7 @@ class TestMessageRecordsEndToEnd:
         start = time.perf_counter()
         msg = parse_email(path, maildir_root=tmp_path)
         elapsed = time.perf_counter() - start
+        header_work.check(path.stat().st_size)
         assert msg is not None
         assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
 
