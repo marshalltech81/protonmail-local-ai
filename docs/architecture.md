@@ -1471,7 +1471,8 @@ account provider (`PROVIDER_POLICIES`). The category (`mailbox`,
 does not name) is derived from the folder at read time and never
 stored, so a policy change needs no migration (#1569, decided in
 #1317): Drafts and Scheduled are unsent evidence whose folder does not
-certify that they are still unsent, and Recovered Messages are
+certify that they are still unsent: a retained Scheduled copy can outlive
+its send and coexist with a separate Sent claimant. Recovered Messages are
 searchable but untrusted, never counting toward an `authority_class`.
 Folder membership records where mbsync last filed a copy, not its
 current state upstream. Each occurrence is returned with its account,

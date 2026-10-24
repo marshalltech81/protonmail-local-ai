@@ -470,7 +470,8 @@ current and is never matched or listed.
   stored, so a policy change needs no reindex. For `proton-bridge`:
   `mailbox` (INBOX, Sent, Archive, Spam, Trash and `Folders/...`),
   `unsent` (Drafts and Scheduled: unsent evidence; the folder does not
-  certify that the message is still unsent or was never sent),
+  certify that the message is still unsent or was never sent; a retained
+  Scheduled copy can outlive its send and coexist with a Sent claimant),
   `recovered` (Recovered Messages: Bridge-local copies of mail a client
   failed to upload, searchable but untrusted, since their identity
   headers are the client's; they never count toward `authority_class`,

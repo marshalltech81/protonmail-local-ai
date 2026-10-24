@@ -361,10 +361,27 @@ To see which local folders are affected, run one sync by hand:
 docker exec mbsync mbsync -c /tmp/mbsync/mbsyncrc -a 2>&1 | grep 'cannot be opened'
 ```
 
+`Scheduled` can produce the same warning after a scheduled send. The
+[pinned Bridge connector](https://github.com/ProtonMail/proton-bridge/blob/b9c5dac1651437100c40896dacd778a0518a26f2/internal/services/imapservice/connector.go#L249)
+marks that mailbox hidden when empty. A retained local `Scheduled` copy
+can therefore outlive the send; it is the pre-send version, while a `Sent`
+copy is indexed separately. The send-transition explanation follows the
+connector's visibility rule; it has not been established by a synthetic
+Bridge lifecycle run. A `Scheduled` occurrence alone does not prove the
+message is still awaiting transmission.
+
 The warning repeats for as long as the local copy exists. Nothing removes
 it automatically. Removing or moving the folder out of the Maildir yourself
 stops the warning, but its messages then count as deleted for the indexer
 (see [Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)).
+
+For `Scheduled`, removing or moving the stale local folder out of the
+Maildir stops this warning. Stop the stack first and retain a backup before
+removing local mail. In mirror mode, reconciliation removes only those
+claimants after the configured grace period; a separately stored `Sent`
+claimant remains. Archive mode retains the indexed rows. This does not
+exclude `Scheduled` from future syncs: another scheduled message can create
+it again. Do not change folder exclusions or `Expunge None` for this recovery.
 
 ## get_mailbox_status reports a failed or unknown mail collection
 
