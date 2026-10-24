@@ -614,7 +614,7 @@
       "must_not_assert": [
         "The dog walker asks $30 per half-hour walk (Callum's rate, from a message the sender filter does not select)."
       ],
-      "deterministic": {"must_include": [["$22"]], "must_not_include": ["$30"]},
+      "deterministic": {"must_include": [["$22"]], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
       "review": "ai_drafted"
     },
@@ -673,7 +673,7 @@
         "Sam's plot is C-3 (from a stale list in a message filed in Trash).",
         "The season price is $70 (from a stale list in a message filed in Trash)."
       ],
-      "deterministic": {"must_include": [["B-14"], ["$45"]], "must_not_include": ["C-3", "$70"]},
+      "deterministic": {"must_include": [["B-14"], ["$45"]], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
       "review": "ai_drafted"
     },

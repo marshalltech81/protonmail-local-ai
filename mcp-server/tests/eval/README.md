@@ -1161,3 +1161,8 @@ claim; none of these cases is used to tune the dev scenario.
 The loom-alcove chronology cases (#1370) include an undated preference.
 Golden labels keep it in an unknown-date partition; the judge must reject
 invented dates and treating file/reply order as the newest dated position.
+
+For sender and Trash decoy cases (#894), `must_not_assert` remains the
+judge's check for claiming an out-of-scope value as the answer. Those
+values are absent from `must_not_include`: mentioning a stale or context
+value with its scope stated must not fail plain containment grading.
