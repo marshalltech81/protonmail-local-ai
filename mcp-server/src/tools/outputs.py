@@ -174,6 +174,14 @@ class Participant(_Output):
     address: str = Field(description="Canonical (lowercased) email address.")
 
 
+# A claimant is not a distinct communication or a file occurrence.
+_CLAIMANT_COUNT_UNIT = (
+    "Unit: stored claimants (Message-ID plus raw-byte hash). The same claimant in "
+    "several folders counts once here; different claimants sharing a Message-ID "
+    "count separately. "
+)
+
+
 class ThreadSummary(_Output):
     thread_id: str = Field(
         description="Opaque thread ID; pass it to get_thread, get_evidence, or summarize_thread."
@@ -186,10 +194,10 @@ class ThreadSummary(_Output):
     participants: list[str] = Field(
         description=f"Thread participants, at most {MAX_LISTED}; see participant_count."
     )
-    participant_count: int
+    participant_count: int = Field(description="Unit: distinct canonical From/To/Cc addresses. ")
     date_first: datetime
     date_last: datetime
-    message_count: int
+    message_count: int = Field(description=_CLAIMANT_COUNT_UNIT)
     has_attachments: bool
     snippet: str = Field(description="Start of the latest message body; body text only.")
 
@@ -288,21 +296,26 @@ class MessageHeaders(_Output):
         description="The message's current Maildir copies, representative first; may be "
         "shortened, see occurrence_count."
     )
-    occurrence_count: int
+    occurrence_count: int = Field(
+        description="Unit: recorded Maildir-file occurrences across folders. "
+    )
     in_reply_to: str | None
     references: list[str] = Field(description="References; may be shortened, see references_count.")
-    references_count: int
+    references_count: int = Field(description="Unit: retained References Message-ID entries. ")
     from_: list[Participant] = Field(validation_alias="from", serialization_alias="from")
-    from_count: int
+    from_count: int = Field(description="Unit: distinct retained claimed From addresses. ")
     to: list[Participant]
-    to_count: int
+    to_count: int = Field(description="Unit: distinct retained claimed To addresses. ")
     cc: list[Participant]
-    cc_count: int
+    cc_count: int = Field(description="Unit: distinct retained claimed Cc addresses. ")
     bcc: list[Participant] = Field(
         description="Observed claimed Bcc header participants; not an exhaustive delivery-recipient list."
     )
     bcc_count: int = Field(
-        description="Distinct retained claimed Bcc addresses before display limits; not the original recipient total."
+        description="Unit: distinct retained claimed Bcc addresses. "
+        + (
+            "Distinct retained claimed Bcc addresses before display limits; not the original recipient total."
+        )
     )
     sender_ambiguous: bool | None = Field(
         description=_SENDER_AMBIGUOUS_DESCRIPTION.format(subject="The message's")
@@ -493,7 +506,10 @@ _EXTRACT_FROM_NAME_MATCHES_DESCRIPTION = (
 class SearchEmailsOutput(_Output):
     mode: str = Field(description="The search mode used: hybrid, semantic, or keyword.")
     resolved_from_addr: str | None = Field(description=_RESOLVED_FROM_ADDR_DESCRIPTION)
-    from_name_matches: int | None = Field(description=_FROM_NAME_MATCHES_DESCRIPTION)
+    from_name_matches: int | None = Field(
+        description="Unit: distinct sender addresses, capped at 10. "
+        + (_FROM_NAME_MATCHES_DESCRIPTION)
+    )
     date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     results: list[ThreadSummary] = Field(description="Threads, best match first.")
 
@@ -599,7 +615,8 @@ class EvidenceChunk(_Output):
     carried_by_count: int | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
-        description="Only with carried_by: every message counted there, listed or not.",
+        description="Unit: stored claimants carrying the collapsed attachment passage. "
+        + ("Only with carried_by: every message counted there, listed or not."),
     )
 
 
@@ -618,35 +635,48 @@ class EvidenceThread(_Output):
     context_passages_left_out: int | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
-        description="Only with scope=in_scope: this thread's context passages (of the "
-        "chosen source) left out. A thread with no chunks and a non-zero count has no "
-        "in-scope passage.",
+        description="Unit: evidence passages. "
+        + (
+            "Only with scope=in_scope: this thread's context passages (of the "
+            "chosen source) left out. A thread with no chunks and a non-zero count has no "
+            "in-scope passage."
+        ),
     )
 
 
 class EvidenceOutput(_Output):
-    chunk_count: int
+    chunk_count: int = Field(description="Unit: returned evidence passages. ")
     resolved_from_addr: str | None = Field(description=_RESOLVED_FROM_ADDR_DESCRIPTION)
-    from_name_matches: int | None = Field(description=_FROM_NAME_MATCHES_DESCRIPTION)
+    from_name_matches: int | None = Field(
+        description="Unit: distinct sender addresses, capped at 10. "
+        + (_FROM_NAME_MATCHES_DESCRIPTION)
+    )
     threads: list[EvidenceThread] = Field(
         description="Threads in rank order, chunks ranked within."
     )
     context_passages_left_out: int | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
-        description="Only with scope=in_scope: context passages left out in all.",
+        description="Unit: evidence passages. "
+        + ("Only with scope=in_scope: context passages left out in all."),
     )
     threads_without_source_passages: int | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
-        description="Only with source=body or attachment on the mailbox-wide path: "
-        "ranked threads left out because none of their passages has that source.",
+        description="Unit: threads, each once in this result or group; folder groups can overlap. "
+        + (
+            "Only with source=body or attachment on the mailbox-wide path: "
+            "ranked threads left out because none of their passages has that source."
+        ),
     )
     attachment_copies_collapsed: int | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
-        description="Only with dedupe_attachments: repeated attachment passages folded "
-        "into the returned ones (the carried_by entries in all).",
+        description="Unit: repeated attachment passages collapsed. "
+        + (
+            "Only with dedupe_attachments: repeated attachment passages folded "
+            "into the returned ones (the carried_by entries in all)."
+        ),
     )
 
 
@@ -675,7 +705,9 @@ class AttachmentHit(_Output):
         "the message was first indexed (#1373)."
     )
     senders: list[str] = Field(description=f"Thread senders, at most {MAX_LISTED}.")
-    sender_count: int
+    sender_count: int = Field(
+        description="Unit: distinct primary From addresses stored on the whole thread, before display limits; includes senders of other messages in that thread. "
+    )
     extraction_status: str | None = Field(
         description="Null when no extraction has run; deferred when the indexer will "
         "extract it on a later pass."
@@ -711,13 +743,16 @@ class SearchAttachmentsOutput(_Output):
     results: list[AttachmentHit]
     indeterminate: int | None = Field(
         default=None,
-        description="Only with a sender filter: indexed attachments the other filters and "
-        "the query reach whose carrying message sender could neither accept nor reject (its "
-        "sender ambiguous or not yet checked; its From address list incomplete or not yet "
-        "checked; for a name or domain fragment, its display names not all indexed); left "
-        "out of results, and not limited by limit. Null without sender, and when the count "
-        "was unavailable (the text says so); never read null as 0. When not 0, report it "
-        "with the results.",
+        description="Unit: attachment occurrences on undecidable carrying messages. "
+        + (
+            "Only with a sender filter: indexed attachments the other filters and "
+            "the query reach whose carrying message sender could neither accept nor reject (its "
+            "sender ambiguous or not yet checked; its From address list incomplete or not yet "
+            "checked; for a name or domain fragment, its display names not all indexed); left "
+            "out of results, and not limited by limit. Null without sender, and when the count "
+            "was unavailable (the text says so); never read null as 0. When not 0, report it "
+            "with the results."
+        ),
     )
 
 
@@ -731,7 +766,9 @@ class ThreadMessage(MessageHeaders):
             "limit; null when no body is indexed for the message."
         )
     )
-    body_omitted_chars: int = Field(description="Characters of the body not included.")
+    body_omitted_chars: int = Field(
+        description="Unit: characters. " + ("Characters of the body not included.")
+    )
 
 
 class ReapedMessage(_Output):
@@ -757,7 +794,7 @@ def reaped_source(kind: str, identifier: str, reaped_at: str) -> str:
 
 class GetThreadOutput(_Output):
     thread: ThreadSummary
-    total_messages: int
+    total_messages: int = Field(description=_CLAIMANT_COUNT_UNIT)
     offset: int
     messages: list[ThreadMessage] = Field(
         description="This page's messages in the requested order (oldest first by default)."
@@ -803,7 +840,9 @@ class GetMessageOutput(_Output):
         "body's end; null when no body is indexed."
     )
     body_offset: int = Field(description="Body character this page starts at.")
-    body_total_chars: int = Field(description="Characters in the whole body; 0 when none.")
+    body_total_chars: int = Field(
+        description="Unit: characters. " + ("Characters in the whole body; 0 when none.")
+    )
     next_offset: int | None = Field(
         description="Pass as offset for the next page of the body; null when this page "
         "reaches the end. Paging from 0 to the end returns the whole body."
@@ -837,9 +876,12 @@ class FilterUse(_Output):
 class AddressFilterMatch(_Output):
     filter: Literal["sender", "recipient", "participant"]
     distinct_addresses: int = Field(
-        description="Distinct addresses this filter matched across every match, not just "
-        "this page; 1 for an exact address that matched. Above 1, a name or fragment "
-        "matched several addresses, possibly different people."
+        description="Unit: distinct matched addresses. "
+        + (
+            "Distinct addresses this filter matched across every match, not just "
+            "this page; 1 for an exact address that matched. Above 1, a name or fragment "
+            "matched several addresses, possibly different people."
+        )
     )
     addresses: list[str] = Field(
         description=f"The matched addresses, most matching messages first, at most "
@@ -852,18 +894,27 @@ class WhereLeafResult(_Output):
     id: str | None = Field(description="The leaf's id as given; null without one.")
     leaf: str
     true: int = Field(
-        description="Of the messages the query does not reject (total_matches plus "
-        "indeterminate), how many this leaf on its own is true of, before negate."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Of the messages the query does not reject (total_matches plus "
+            "indeterminate), how many this leaf on its own is true of, before negate."
+        )
     )
-    false: int = Field(description="Of the same messages, how many this leaf is false of.")
+    false: int = Field(
+        description=_CLAIMANT_COUNT_UNIT + ("Of the same messages, how many this leaf is false of.")
+    )
     indeterminate: int = Field(
-        description="Of the same messages, how many this leaf could not decide."
+        description=_CLAIMANT_COUNT_UNIT
+        + ("Of the same messages, how many this leaf could not decide.")
     )
     negate: bool = Field(description="The leaf's negate, as given.")
     distinct_addresses: int | None = Field(
-        description="Address leaves: distinct addresses this leaf matched across every "
-        "match (total_matches only) it is itself true of, not just this page. Null for "
-        "non-address and negated leaves."
+        description="Unit: distinct matched addresses. "
+        + (
+            "Address leaves: distinct addresses this leaf matched across every "
+            "match (total_matches only) it is itself true of, not just this page. Null for "
+            "non-address and negated leaves."
+        )
     )
     addresses: list[str] | None = Field(
         description=f"Address leaves: the matched addresses, most matching messages first, "
@@ -875,7 +926,10 @@ class QueryMessagesOutput(_Output):
     metadata_diagnostics: dict[str, dict[str, int]] = Field(
         default_factory=dict,
         exclude_if=lambda v: not v,
-        description="Fixed normalization status counts over all evaluated indexed claimants, including Trash; not just matches or this page.",
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Fixed normalization status counts over all evaluated indexed claimants, including Trash; not just matches or this page."
+        ),
     )
     date_basis: Literal["effective", "sent", "occurred"] = Field(
         description="Clock for date bounds, ordering and cursors: effective (delivery, else "
@@ -895,20 +949,26 @@ class QueryMessagesOutput(_Output):
     )
     date_bounds: QueryDateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(
-        description="Every message the filters definitely match, not just this page; the "
-        "complete count only when indeterminate is 0."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Every message the filters definitely match, not just this page; the "
+            "complete count only when indeterminate is 0."
+        )
     )
     indeterminate: int = Field(
-        description="Messages the filters could neither accept nor reject (a filtered size, "
-        "date, subject, body, attachment list, address or display name the index does not "
-        "hold, holds cut by a parse limit, or has not checked yet; a sender or participant "
-        "filter, or an authority_class filter on a message outside Spam and Recovered "
-        "Messages whose sender is "
-        "ambiguous or not yet checked; the prose names the causes the given filters can "
-        "have), in neither total_matches nor the pages. 0 when every filter could be "
-        "decided for every message; when not 0, report it with any count."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Messages the filters could neither accept nor reject (a filtered size, "
+            "date, subject, body, attachment list, address or display name the index does not "
+            "hold, holds cut by a parse limit, or has not checked yet; a sender or participant "
+            "filter, or an authority_class filter on a message outside Spam and Recovered "
+            "Messages whose sender is "
+            "ambiguous or not yet checked; the prose names the causes the given filters can "
+            "have), in neither total_matches nor the pages. 0 when every filter could be "
+            "decided for every message; when not 0, report it with any count."
+        )
     )
-    returned: int
+    returned: int = Field(description="Unit: returned stored claimants. ")
     offset: int = Field(description="Matches returned by earlier pages.")
     has_more: bool
     next_cursor: str | None = Field(
@@ -932,10 +992,15 @@ def query_messages_output_schema() -> dict[str, Any]:
 class QueriedThreadRow(_Output):
     thread_id: str
     subject: str = Field(description="Whole-thread display label; need not satisfy the filters.")
-    matching_message_count: int = Field(description="Definitely matching claimants in this thread.")
-    indeterminate_message_count: int = Field(description="Request-scoped undecided claimants.")
+    matching_message_count: int = Field(
+        description=_CLAIMANT_COUNT_UNIT + ("Definitely matching claimants in this thread.")
+    )
+    indeterminate_message_count: int = Field(
+        description=_CLAIMANT_COUNT_UNIT + ("Request-scoped undecided claimants.")
+    )
     total_message_count: int = Field(
-        description="All indexed claimants in the thread, including Trash and out-of-query messages."
+        description=_CLAIMANT_COUNT_UNIT
+        + ("All indexed claimants in the thread, including Trash and out-of-query messages.")
     )
     first_matching_at: str | None = Field(
         description="Earliest known delivery or parsed send date among matches; null without date evidence."
@@ -947,7 +1012,10 @@ class QueriedThreadRow(_Output):
         description="Newest match by effective_at, then claimant_id; undated messages use first-indexed time for ordering only."
     )
     participant_count: int | None = Field(
-        description="Whole-thread distinct canonical claimed From/To/Cc addresses, not people or Bcc; null if any role is incomplete or unchecked."
+        description="Unit: distinct canonical From/To/Cc addresses. "
+        + (
+            "Whole-thread distinct canonical claimed From/To/Cc addresses, not people or Bcc; null if any role is incomplete or unchecked."
+        )
     )
     has_attachments: bool | None = Field(
         description="Whole-thread attachment presence: true if observed, false only with complete manifests, otherwise null."
@@ -958,23 +1026,38 @@ class QueryThreadsOutput(_Output):
     metadata_diagnostics: dict[str, dict[str, int]] = Field(
         default_factory=dict,
         exclude_if=lambda v: not v,
-        description="Fixed normalization status counts over all evaluated indexed claimants, including Trash; not just matches or this page.",
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Fixed normalization status counts over all evaluated indexed claimants, including Trash; not just matches or this page."
+        ),
     )
     filters: list[FilterUse]
     date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_threads: int = Field(
-        description="Threads containing a definite match in this call's snapshot; complete qualifying count only when indeterminate_threads is 0."
+        description="Unit: threads, each once in this result or group; folder groups can overlap. "
+        + (
+            "Threads containing a definite match in this call's snapshot; complete qualifying count only when indeterminate_threads is 0."
+        )
     )
     total_matching_messages: int = Field(
-        description="Definitely matching claimants; equals query_messages.total_matches for the same filters."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Definitely matching claimants; equals query_messages.total_matches for the same filters."
+        )
     )
     indeterminate_messages: int = Field(
-        description="All undecided claimants, including those in listed threads; equals query_messages.indeterminate."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "All undecided claimants, including those in listed threads; equals query_messages.indeterminate."
+        )
     )
     indeterminate_threads: int = Field(
-        description="Threads containing undecided claimants but no definite match; excluded from total_threads and rows."
+        description="Unit: threads, each once in this result or group; folder groups can overlap. "
+        + (
+            "Threads containing undecided claimants but no definite match; excluded from total_threads and rows."
+        )
     )
-    returned: int
+    returned: int = Field(description="Unit: returned threads. ")
     offset: int = Field(
         description="Thread rows returned by earlier pages; not proof of unchanged population coverage."
     )
@@ -1003,7 +1086,10 @@ class MessageGroupRow(_Output):
         default_factory=list,
         description="Definite memberships spread through chronological order, not statistically representative or exhaustive reading.",
     )
-    samples_returned: int = 0
+    samples_returned: int = Field(
+        default=0,
+        description="Unit: sample membership rows; a claimant in overlapping groups counts in each group. ",
+    )
     value_clipped: bool = Field(
         default=False,
         description="MIME grouping only: display differs from full stored type; not an exact selector. "
@@ -1013,8 +1099,13 @@ class MessageGroupRow(_Output):
         description="The group's address, domain, folder, year (YYYY), month (YYYY-MM) or "
         "authority class or declared MIME display label; null for no observed value."
     )
-    messages: int = Field(description="Messages the filters definitely match in this group.")
-    threads: int = Field(description="Distinct threads of those messages.")
+    messages: int = Field(
+        description=_CLAIMANT_COUNT_UNIT + ("Messages the filters definitely match in this group.")
+    )
+    threads: int = Field(
+        description="Unit: threads, each once in this result or group; folder groups can overlap. "
+        + ("Distinct threads of those messages.")
+    )
     first_at: str | None = Field(
         description="Earliest evidence date on the selected date_basis of those messages; "
         "null without one. Year and month group by it too: an undated message is in the "
@@ -1023,10 +1114,12 @@ class MessageGroupRow(_Output):
     last_at: str | None = Field(
         description="Latest selected-basis evidence date; null without one."
     )
-    with_attachments: int = Field(description="Of those messages, how many have an attachment.")
+    with_attachments: int = Field(
+        description=_CLAIMANT_COUNT_UNIT + ("Of those messages, how many have an attachment.")
+    )
     indeterminate: int = Field(
-        description="Messages in this group the filters could neither accept nor reject; "
-        "not in messages."
+        description=_CLAIMANT_COUNT_UNIT
+        + ("Messages in this group the filters could neither accept nor reject; not in messages.")
     )
     display_name: str | None = Field(
         description="sender_address only: the display name on the group's latest match "
@@ -1038,22 +1131,36 @@ class MessageGroupRow(_Output):
         description="UTC YYYY-MM or YYYY cell in period_breakdown; null without date evidence or in summary mode.",
     )
     active_periods: int = Field(
-        description="Distinct non-null UTC periods with definite matches; never inferred report series."
+        description="Unit: distinct UTC periods. "
+        + ("Distinct non-null UTC periods with definite matches; never inferred report series.")
     )
     distinct_message_ids: int = Field(
-        description="Distinct stored Message-ID strings among definite matches; sender controlled, not distinct reports."
+        description="Unit: distinct stored Message-ID strings. "
+        + (
+            "Distinct stored Message-ID strings among definite matches; sender controlled, not distinct reports."
+        )
     )
     distinct_attachment_ids: int = Field(
-        description="Distinct payload identities from current occurrence rows on definite matches; MIME groups scope these to their type. A lower bound when attachment_inventory_unknown_messages is nonzero; not distinct reports."
+        description="Unit: distinct attachment payload identities. "
+        + (
+            "Distinct payload identities from current occurrence rows on definite matches; MIME groups scope these to their type. A lower bound when attachment_inventory_unknown_messages is nonzero; not distinct reports."
+        )
     )
     eligible_total: int = Field(
-        description="messages + indeterminate in this group. Sender groups can overlap."
+        description=_CLAIMANT_COUNT_UNIT
+        + ("messages + indeterminate in this group. Sender groups can overlap.")
     )
     undated_messages: int = Field(
-        description="Definite matches without selected-clock evidence; zero for sent/occurred where missing dates are indeterminate."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Definite matches without selected-clock evidence; zero for sent/occurred where missing dates are indeterminate."
+        )
     )
     attachment_inventory_unknown_messages: int = Field(
-        description="Definite matches whose current attachment inventory is not known exhaustive. When nonzero, distinct_attachment_ids is a lower bound."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Definite matches whose current attachment inventory is not known exhaustive. When nonzero, distinct_attachment_ids is a lower bound."
+        )
     )
 
 
@@ -1061,67 +1168,101 @@ class AggregateMessagesOutput(_Output):
     unknown_group_messages: int | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
-        description="Definite filter matches excluded from normalized metadata groups because membership is unknown; null group is known absence only.",
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Definite filter matches excluded from normalized metadata groups because membership is unknown; null group is known absence only."
+        ),
     )
     unknown_group_indeterminate_messages: int | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
-        description="Filter-indeterminate messages excluded from normalized metadata groups because membership is unknown.",
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Filter-indeterminate messages excluded from normalized metadata groups because membership is unknown."
+        ),
     )
     metadata_diagnostics: dict[str, dict[str, int]] = Field(
         default_factory=dict,
         exclude_if=lambda v: not v,
-        description="Fixed normalization status counts over all evaluated indexed claimants, including Trash; not just matches or this page.",
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Fixed normalization status counts over all evaluated indexed claimants, including Trash; not just matches or this page."
+        ),
     )
     sample_per_group: int = 0
     samples_returned: int = Field(
         default=0,
-        description="Sample membership rows returned on this page; overlapping groups may repeat claimant IDs.",
+        description="Unit: sample membership rows; a claimant in overlapping groups counts in each group. "
+        + (
+            "Sample membership rows returned on this page; overlapping groups may repeat claimant IDs."
+        ),
     )
     group_by: str
     date_basis: str
     period: str
     period_breakdown: bool
     eligible_total: int = Field(
-        description="total_matches + indeterminate, each indexed message not rejected by the filters counted once before group memberships."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "total_matches + indeterminate, each indexed message not rejected by the filters counted once before group memberships."
+        )
     )
     undated_messages: int = Field(
-        description="Definite matches without selected-clock evidence, counted once across the call."
+        description=_CLAIMANT_COUNT_UNIT
+        + ("Definite matches without selected-clock evidence, counted once across the call.")
     )
     attachment_inventory_unknown_messages: int = Field(
-        description="Definite matches with unknown exhaustive current attachment inventory, each once across the call. Attachment identity counts are lower bounds when nonzero."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Definite matches with unknown exhaustive current attachment inventory, each once across the call. Attachment identity counts are lower bounds when nonzero."
+        )
     )
     filters: list[FilterUse] = Field(description="How each given filter was applied; empty: none.")
     date_bounds: QueryDateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(
-        description="Messages the filters definitely match, as query_messages counts them."
+        description=_CLAIMANT_COUNT_UNIT
+        + ("Messages the filters definitely match, as query_messages counts them.")
     )
     indeterminate: int = Field(
-        description="Messages the filters could neither accept nor reject, as query_messages "
-        "counts them; in no group's messages. When not 0, report it with any count."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Messages the filters could neither accept nor reject, as query_messages "
+            "counts them; in no group's messages. When not 0, report it with any count."
+        )
     )
-    total_groups: int = Field(description="Every group, not just this page's.")
+    total_groups: int = Field(
+        description="Unit: distinct groups. " + ("Every group, not just this page's.")
+    )
     incomplete_from_messages: int | None = Field(
         default=None,
-        description="sender_address, sender_domain and authority_class only (absent "
-        "otherwise): messages the filters do not reject whose sender is attributable but "
-        "whose stored From list is not known to be complete, each counted once over the "
-        "whole result; further sender groups or memberships may be missing for them. It "
-        "counts messages, not missing addresses, and includes a message with no stored "
-        "From address (also in the null group). authority_class leaves out Spam and "
-        "Recovered Messages.",
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "sender_address, sender_domain and authority_class only (absent "
+            "otherwise): messages the filters do not reject whose sender is attributable but "
+            "whose stored From list is not known to be complete, each counted once over the "
+            "whole result; further sender groups or memberships may be missing for them. It "
+            "counts messages, not missing addresses, and includes a message with no stored "
+            "From address (also in the null group). authority_class leaves out Spam and "
+            "Recovered Messages."
+        ),
     )
     incomplete_recipient_messages: int | None = Field(
         default=None,
-        description="recipient_domain only: eligible messages whose To/Cc lists "
-        "are not known complete, once globally; further memberships may be missing.",
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "recipient_domain only: eligible messages whose To/Cc lists "
+            "are not known complete, once globally; further memberships may be missing."
+        ),
     )
     incomplete_attachment_type_messages: int | None = Field(
         default=None,
-        description="attachment_content_type only: eligible messages with unknown "
-        "exhaustive current inventories, once globally; further types may be missing.",
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "attachment_content_type only: eligible messages with unknown "
+            "exhaustive current inventories, once globally; further types may be missing."
+        ),
     )
-    returned: int
+    returned: int = Field(description="Unit: returned groups. ")
     offset: int = Field(description="Groups returned by earlier pages.")
     has_more: bool
     next_cursor: str | None = Field(
@@ -1192,7 +1333,8 @@ class ListedAttachment(_Output):
     )
     extracted_at: str | None = Field(description="When the extraction ran; null without one.")
     ocr_pages_skipped: int | None = Field(
-        description="Scanned PDF pages the OCR page cap left unread; null when unknown."
+        description="Unit: scanned PDF pages. "
+        + ("Scanned PDF pages the OCR page cap left unread; null when unknown.")
     )
 
 
@@ -1207,26 +1349,37 @@ class QueryAttachmentsOutput(_Output):
     filters: list[FilterUse] = Field(description="How each given filter was applied; empty: none.")
     date_bounds: QueryDateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(
-        description="Every attachment occurrence the filters definitely match, not just this "
-        "page; the complete count only when indeterminate is 0."
+        description="Unit: attachment occurrences; the same claimant in several folders does not repeat an occurrence. "
+        + (
+            "Every attachment occurrence the filters definitely match, not just this "
+            "page; the complete count only when indeterminate is 0."
+        )
     )
     indeterminate: int = Field(
-        description="Occurrences the filters could neither accept nor reject (a missing selected clock "
-        "under sent or occurred, even without bounds; an effective date bound "
-        "on a carrying message with no delivery or parsed send date; a sender or "
-        "participant filter on a carrying message whose sender is ambiguous or not yet "
-        "checked; an address filter that finds nothing on one whose stored addresses for "
-        "that role were cut by a parse limit or are not checked yet; a name or fragment "
-        "address filter on one whose display names are not all indexed; an "
-        "extraction_status other than none on an occurrence with no extraction recorded), "
-        "in neither total_matches nor the pages. When not 0, report it with any count."
+        description="Unit: attachment occurrences; the same claimant in several folders does not repeat an occurrence. "
+        + (
+            "Occurrences the filters could neither accept nor reject (a missing selected clock "
+            "under sent or occurred, even without bounds; an effective date bound "
+            "on a carrying message with no delivery or parsed send date; a sender or "
+            "participant filter on a carrying message whose sender is ambiguous or not yet "
+            "checked; an address filter that finds nothing on one whose stored addresses for "
+            "that role were cut by a parse limit or are not checked yet; a name or fragment "
+            "address filter on one whose display names are not all indexed; an "
+            "extraction_status other than none on an occurrence with no extraction recorded), "
+            "in neither total_matches nor the pages. When not 0, report it with any count."
+        )
     )
     status_counts: dict[str, int] = Field(
-        description="total_matches split by extraction status over every match, not just "
-        "this page; deferred counts occurrences the indexer will extract on a later pass; "
-        "none counts occurrences with no extraction recorded."
+        description="Unit: attachment occurrences, split by extraction status. "
+        + (
+            "total_matches split by extraction status over every match, not just "
+            "this page; deferred counts occurrences the indexer will extract on a later pass; "
+            "none counts occurrences with no extraction recorded."
+        )
     )
-    returned: int
+    returned: int = Field(
+        description="Unit: attachment occurrences; the same claimant in several folders does not repeat an occurrence. "
+    )
     offset: int = Field(description="Matches returned by earlier pages.")
     has_more: bool
     next_cursor: str | None = Field(
@@ -1248,7 +1401,8 @@ class GetAttachmentOutput(_Output):
     )
     text_offset: int = Field(description="Character of the stored text this page starts at.")
     text_total_chars: int = Field(
-        description="Characters in the whole stored text; 0 when there is none."
+        description="Unit: characters. "
+        + ("Characters in the whole stored text; 0 when there is none.")
     )
     next_offset: int | None = Field(
         description="Pass as offset for the next page; null when this page reaches the end. "
@@ -1276,8 +1430,10 @@ class Contact(_Output):
         description=f"Display names the contact was written with, at most {MAX_LISTED}; "
         "see name_count."
     )
-    name_count: int
-    thread_count: int
+    name_count: int = Field(description="Unit: distinct retained display-name strings. ")
+    thread_count: int = Field(
+        description="Unit: threads, each once in this result or group; folder groups can overlap. "
+    )
     organization: str | None = Field(
         description="The contact's organization: its exact address domain, or null for a "
         "free-mail provider. Never inferred from display names."
@@ -1302,8 +1458,11 @@ class FindContactOutput(_Output):
 class Folder(_Output):
     name: str
     thread_count: int = Field(
-        description="Threads with at least one message in this folder; "
-        "a thread spanning folders counts in each."
+        description="Unit: threads, each once in this result or group; folder groups can overlap. "
+        + (
+            "Threads with at least one message in this folder; "
+            "a thread spanning folders counts in each."
+        )
     )
 
 
@@ -1315,48 +1474,71 @@ class ListFoldersOutput(_Output):
 
 
 class QueueCounts(_Output):
-    pending: int = Field(description="Messages found in the Maildir, not yet indexed.")
-    retrying: int = Field(description="Messages that failed to index and will be retried.")
+    pending: int = Field(
+        description="Unit: Maildir-file jobs, one per queued path; cross-folder copies have separate jobs. "
+        + ("Messages found in the Maildir, not yet indexed.")
+    )
+    retrying: int = Field(
+        description="Unit: Maildir-file jobs, one per queued path; cross-folder copies have separate jobs. "
+        + ("Messages that failed to index and will be retried.")
+    )
     deferred: int = Field(
         default=0,
-        description="Messages the indexer postponed without a failure of their own (a file "
-        "it cannot read yet, an embedder outage or configuration error, or a job waiting "
-        "for a rename); retried without spending attempts. They make current false.",
+        description="Unit: Maildir-file jobs, one per queued path; cross-folder copies have separate jobs. "
+        + (
+            "Messages the indexer postponed without a failure of their own (a file "
+            "it cannot read yet, an embedder outage or configuration error, or a job waiting "
+            "for a rename); retried without spending attempts. They make current false."
+        ),
     )
     extraction_deferred: int = Field(
         default=0,
-        description="Messages already indexed whose attachment extraction reached the "
-        "indexer's per-message budget: the rest of their attachments are extracted on later "
-        "passes; until then search has only text indexed for them earlier (flagged "
-        "extraction_deferred), or none. They make current false.",
+        description="Unit: Maildir-file jobs, one per queued path; cross-folder copies have separate jobs. "
+        + (
+            "Messages already indexed whose attachment extraction reached the "
+            "indexer's per-message budget: the rest of their attachments are extracted on later "
+            "passes; until then search has only text indexed for them earlier (flagged "
+            "extraction_deferred), or none. They make current false."
+        ),
     )
     parked_trashed: int = Field(
         default=0,
-        description="Trashed files already indexed and waiting for the reaper to remove "
-        "them (or for the file to be restored). They do not make current false.",
+        description="Unit: Maildir-file jobs, one per queued path; cross-folder copies have separate jobs. "
+        + (
+            "Trashed files already indexed and waiting for the reaper to remove "
+            "them (or for the file to be restored). They do not make current false."
+        ),
     )
     dead: int = Field(
-        description="Messages that failed permanently and are incompletely indexed: "
-        "missing from search, or found only by keyword, until an operator requeues them."
+        description="Unit: Maildir-file jobs, one per queued path; cross-folder copies have separate jobs. "
+        + (
+            "Messages that failed permanently and are incompletely indexed: "
+            "missing from search, or found only by keyword, until an operator requeues them."
+        )
     )
     reparse: int = Field(
         default=0,
-        description="Of the pending, retrying, deferred and extraction_deferred messages, "
-        "those already indexed "
-        "and being "
-        "read again after an upgrade (a reparse): search finds them meanwhile, but data the "
-        "upgrade adds is unknown until a successful reparse. A dead-lettered reparse "
-        "needs make requeue-dead and a successful retry even when this waiting count is zero.",
+        description="Unit: Maildir-file jobs, one per queued path; cross-folder copies have separate jobs. "
+        + (
+            "Of the pending, retrying, deferred and extraction_deferred messages, "
+            "those already indexed "
+            "and being "
+            "read again after an upgrade (a reparse): search finds them meanwhile, but data the "
+            "upgrade adds is unknown until a successful reparse. A dead-lettered reparse "
+            "needs make requeue-dead and a successful retry even when this waiting count is zero."
+        ),
     )
 
 
 class HeaderPredicateCapability(_Output):
     status: Literal["supported", "supported after backfill", "unavailable"]
     unassessed_messages: int | None = Field(
-        description="Indexed messages awaiting header evidence assessment, including Trash."
+        description=_CLAIMANT_COUNT_UNIT
+        + ("Indexed messages awaiting header evidence assessment, including Trash.")
     )
     incomplete_messages: int | None = Field(
-        description="Indexed messages whose header budget or parse lost fields, including Trash."
+        description=_CLAIMANT_COUNT_UNIT
+        + ("Indexed messages whose header budget or parse lost fields, including Trash.")
     )
 
 
@@ -1383,8 +1565,11 @@ class CollectionStatus(_Output):
     )
     outcome_at: datetime | None = Field(description="When that collection ended.")
     withheld_far_side_folders: int | None = Field(
-        description="How many far-side folders that collection could not open; null when "
-        "unknown. Folder names are never reported."
+        description="Unit: far-side folders. "
+        + (
+            "How many far-side folders that collection could not open; null when "
+            "unknown. Folder names are never reported."
+        )
     )
     failure_class: (
         Literal["deadline", "killed", "error", "permission_repair", "interrupted"] | None
@@ -1441,17 +1626,20 @@ class QueryCapability(_Output):
         "unavailable",
         "unmeasured",
     ]
-    available_messages: int | None
-    unassessed_messages: int | None
-    missing_messages: int | None
+    available_messages: int | None = Field(description=_CLAIMANT_COUNT_UNIT)
+    unassessed_messages: int | None = Field(description=_CLAIMANT_COUNT_UNIT)
+    missing_messages: int | None = Field(description=_CLAIMANT_COUNT_UNIT)
     condition: str | None
 
 
 class OperatorIdentityStatus(_Output):
     state: Literal["configured", "unconfigured", "unavailable"]
-    address_count: int | None
+    address_count: int | None = Field(description="Unit: configured own addresses. ")
     sent_conflicts: int | None = Field(
-        description="Sent messages with complete unambiguous single external From: possible omitted own aliases, not authenticated direction. Null when unavailable."
+        description=_CLAIMANT_COUNT_UNIT
+        + (
+            "Sent messages with complete unambiguous single external From: possible omitted own aliases, not authenticated direction. Null when unavailable."
+        )
     )
 
 
@@ -1491,14 +1679,19 @@ class MailboxStatusOutput(_Output):
         description="When the indexer last reported that it was running."
     )
     queue: QueueCounts
-    total_threads: int
-    total_messages: int
+    total_threads: int = Field(
+        description="Unit: threads, each once in this result or group; folder groups can overlap. "
+    )
+    total_messages: int = Field(description=_CLAIMANT_COUNT_UNIT)
     oldest_message: str | None
     newest_message: str | None
     conflicting_message_ids: int = Field(
-        description="How many Message-IDs are claimed by more than one indexed file. "
-        "get_message on such a Message-ID lists its claimant IDs; pass one to read "
-        "that file."
+        description="Unit: distinct conflicting Message-ID strings. "
+        + (
+            "How many Message-IDs are claimed by more than one indexed file. "
+            "get_message on such a Message-ID lists its claimant IDs; pass one to read "
+            "that file."
+        )
     )
     header_predicates: HeaderPredicateCapability
     index_schema_version: int | None = Field(
@@ -1510,7 +1703,8 @@ class MailboxStatusOutput(_Output):
         "Counts are null when schema evidence is unavailable or normalized metadata coverage is unmeasured."
     )
     extra_claimant_files: int = Field(
-        description="Indexed files beyond the first claimant of each conflicting Message-ID."
+        description="Unit: extra stored claimants beyond the first per Message-ID. "
+        + ("Indexed files beyond the first claimant of each conflicting Message-ID.")
     )
     checked_at: datetime
 
@@ -1635,13 +1829,17 @@ class AskRetrieval(_Output):
         "ranked search ran, whether or not it returned threads."
     )
     threads_retrieved: int = Field(
-        description="Threads the ranked search returned, at most max_threads."
+        description="Unit: threads, each once in this result or group; folder groups can overlap. "
+        + ("Threads the ranked search returned, at most max_threads.")
     )
     threads_supplied: int = Field(
-        description="Distinct threads with at least one passage in the prompt the model "
-        "answered from. Lower than threads_retrieved when the prompt budget left a thread "
-        "out or had no room for its passages (coverage_note then says so), or when a thread "
-        "has no indexed text to show (no coverage_note for that)."
+        description="Unit: threads, each once in this result or group; folder groups can overlap. "
+        + (
+            "Distinct threads with at least one passage in the prompt the model "
+            "answered from. Lower than threads_retrieved when the prompt budget left a thread "
+            "out or had no room for its passages (coverage_note then says so), or when a thread "
+            "has no indexed text to show (no coverage_note for that)."
+        )
     )
     max_threads: int = Field(description="The effective max_threads, after clamping to [1, 10].")
     exhaustive: Literal[False] = Field(
@@ -1686,7 +1884,10 @@ class AskMailboxOutput(_Output):
         description="True when the first answer failed the check and the model was asked once more."
     )
     resolved_from_addr: str | None = Field(description=_RESOLVED_FROM_ADDR_DESCRIPTION)
-    from_name_matches: int | None = Field(description=_FROM_NAME_MATCHES_DESCRIPTION)
+    from_name_matches: int | None = Field(
+        description="Unit: distinct sender addresses, capped at 10. "
+        + (_FROM_NAME_MATCHES_DESCRIPTION)
+    )
     threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")
 
 
@@ -1821,7 +2022,10 @@ class ExtractFromEmailsOutput(_Output):
         "counts of threads that could not be extracted or whose passages were cut."
     )
     resolved_from_addr: str | None = Field(description=_RESOLVED_FROM_ADDR_DESCRIPTION)
-    from_name_matches: int | None = Field(description=_EXTRACT_FROM_NAME_MATCHES_DESCRIPTION)
+    from_name_matches: int | None = Field(
+        description="Unit: distinct sender addresses, capped at 10. "
+        + (_EXTRACT_FROM_NAME_MATCHES_DESCRIPTION)
+    )
     threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")
 
 
