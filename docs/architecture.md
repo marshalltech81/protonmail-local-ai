@@ -2749,6 +2749,11 @@ at WARNING (`HTML body text held <n> lone surrogates; converted as ?`),
 rate limited; like any decoder replacement it does not mark the body
 incomplete (#1315). In process the surrogate stayed in the body and
 the chunker's UTF-8 encode then failed the message.
+When every HTML part is an unused alternative of a non-blank plain
+part, the legacy body conversion is skipped (#1457). If any HTML can
+contribute, the whole original batch keeps its shared text budget.
+Full-body capture still converts HTML separately; its stored text and
+completeness are unchanged.
 
 An attachment the child cannot convert is recorded `failed` by type,
 as for the other child extractors, and one the budget cut reports the

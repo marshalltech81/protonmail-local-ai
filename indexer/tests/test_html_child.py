@@ -342,7 +342,7 @@ class TestBodyDegradation:
 
     def test_a_part_the_body_would_not_keep_is_not_counted(self, tmp_path, monkeypatch, caplog):
         """An HTML alternative after a plain one with text is not a loss:
-        the failure is logged, no cap is counted."""
+        the legacy child is skipped, no cap is counted."""
         caplog.set_level("DEBUG")
         stub_child_output(monkeypatch, b"E MemoryError\n")
         raw = (
@@ -355,7 +355,7 @@ class TestBodyDegradation:
         assert msg.body_text == "plain body"
         assert msg.parse_caps == {}
         assert msg.body_complete is True
-        assert "HTML body conversion failed (MemoryError)" in caplog.text
+        assert "HTML body conversion failed" not in caplog.text
         assert "parser work caps" not in caplog.text
 
     def test_an_html_only_alternative_is_counted(self, tmp_path, monkeypatch):
@@ -639,3 +639,41 @@ def test_stubbed_output_shape_is_the_childs(monkeypatch):
     output = extractor_child.run("html", b"<p>a</p><p>b</p>", ["8", "8"])
     stub_child_output(monkeypatch, output)
     assert html.convert([b"<p>a</p>", b"<p>b</p>"]) == (["a", "b"], False)
+
+
+@pytest.mark.parametrize("plain", [b"PLAIN", b"", b" \t\r\n"])
+def test_unused_html_alternative_skips_only_legacy_conversion(tmp_path, monkeypatch, plain):
+    """Full-body capture still needs the HTML rendering; the selected
+    legacy body only needs it when the plain alternative is blank."""
+    calls = []
+    real = _runner.run_tool
+
+    def run_tool(argv, payload, **kwargs):
+        calls.append(argv)
+        return real(argv, payload, **kwargs)
+
+    monkeypatch.setattr(_runner, "run_tool", run_tool)
+    raw = (
+        b"Message-ID: <alternative@example.test>\r\n"
+        b"From: a@example.test\r\nDate: Tue, 2 Jun 2026 09:00:00 +0000\r\n"
+        b'Content-Type: multipart/alternative; boundary="a"\r\n\r\n'
+        b"--a\r\nContent-Type: text/plain\r\n\r\n" + plain + b"\r\n"
+        b"--a\r\nContent-Type: text/html\r\n\r\n<p>HTML</p>\r\n--a--\r\n"
+    )
+    msg, _ = _parse(tmp_path, raw)
+    assert msg.body_text == ("PLAIN" if plain.strip() else "HTML")
+    assert msg.body_complete is True and "html_body" not in msg.parse_caps
+    assert sum("html" in argv for argv in calls) == (0 if plain.strip() else 1)
+    assert sum("html_full_body" in argv for argv in calls) == 1
+
+
+def test_html_only_alternative_keeps_later_nonblank_rendering(tmp_path):
+    raw = (
+        b"Message-ID: <blank-first@example.test>\r\n"
+        b'Content-Type: multipart/alternative; boundary="a"\r\n\r\n'
+        b"--a\r\nContent-Type: text/html\r\n\r\n<p> </p>\r\n"
+        b"--a\r\nContent-Type: text/html\r\n\r\n<p>LATER</p>\r\n--a--\r\n"
+    )
+    msg, _ = _parse(tmp_path, raw)
+    assert msg.body_text == "LATER"
+    assert msg.body_complete and not msg.parse_caps

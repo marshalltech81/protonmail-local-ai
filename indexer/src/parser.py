@@ -2314,6 +2314,22 @@ def _convert_html_parts(
     ``OSError`` (creating, writing or removing the child's scratch,
     starting it, or its pipes) propagates, so the queue retries the
     message."""
+    # Plain alternatives can be selected before converting HTML. Exclude
+    # only siblings of a known plain winner: an HTML-only alternative's
+    # first part might convert to blank, leaving a later part as its body.
+    hypothetical = [replace(node, children=list(node.children)) for node in nodes]
+    _kept_nodes(hypothetical)
+    unused = [False] * len(nodes)
+    for index, node in enumerate(hypothetical):
+        if node.parent >= 0:
+            parent = hypothetical[node.parent]
+            unused[index] = unused[node.parent] or (
+                parent.alternative and parent.has_plain and parent.chosen != index
+            )
+    # If any HTML is needed, retain the original batch and shared text
+    # budget: dropping a sibling could change which later part hits it.
+    if all(unused[index] for index, _ in parts):
+        return
     sources: list[str] = []
     surrogates = 0
     for _, html in parts:
