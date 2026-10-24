@@ -619,6 +619,20 @@ def bounded_logging:
         (if $bs.mem_limit != null
             and ($s.mem_limit == null or ($s.mem_limit | tonumber) > ($bs.mem_limit | tonumber))
             then "mem_limit is missing or above the base" else empty end),
+        # A base service must retain the resources its entrypoint needs,
+        # including their mount destinations, even without declared collectors.
+        ($bs | list("secrets")[] | . as $secret
+            | (($secret.target // $secret.source) | ltrimstr("/run/secrets/")) as $target
+            | select([$s | list("secrets")[] | select(.source == $secret.source
+                and (((.target // .source) | ltrimstr("/run/secrets/")) == $target))] | length == 0)
+            | "lacks base secret \($secret.source) at \($target)"),
+        ($bs | list("volumes")[] | . as $v
+            | select([$s | list("volumes")[]
+                | select(.type == $v.type and .source == $v.source and .target == $v.target)] | length == 0)
+            | "lacks base volume \($v.source // $v.type) at \($v.target)"),
+        ($bs.networks // {} | keys[] | . as $network
+            | select(($s.networks // {} | has($network)) | not)
+            | "lacks base network \($network)"),
         ($s.networks // {} | keys[] | select(. as $n | $bs.networks // {} | has($n) | not)
             | "joins network \(.), which the base does not give it"),
         ($s | list("volumes")[] | . as $v
@@ -786,6 +800,37 @@ services:
   indexer:
     security_opt: !override
       - label:type:container_t
+EOF
+}
+
+merged_hardening_rejects_removed_base_resources() {
+    expect_overlay_rejected reset-base-secret "mbsync: lacks base secret bridge_pass at bridge_pass" <<'EOF' || return 1
+services:
+  mbsync:
+    secrets: !reset []
+EOF
+    expect_overlay_rejected retarget-base-secret "mbsync: lacks base secret bridge_pass at bridge_pass" <<'EOF' || return 1
+services:
+  mbsync:
+    secrets: !override
+      - source: bridge_pass
+        target: another_name
+EOF
+    expect_overlay_rejected reset-base-volumes "mbsync: lacks base volume maildir-volume at /maildir" "mbsync: lacks base volume mbsync-state at /state" <<'EOF' || return 1
+services:
+  mbsync:
+    volumes: !reset []
+EOF
+    expect_overlay_rejected drop-one-base-volume "mbsync: lacks base volume maildir-volume at /maildir" <<'EOF' || return 1
+services:
+  mbsync:
+    volumes: !override
+      - mbsync-state:/state
+EOF
+    expect_overlay_rejected reset-base-network "mbsync: lacks base network bridge-net" <<'EOF'
+services:
+  mbsync:
+    networks: !reset []
 EOF
 }
 
@@ -2033,6 +2078,8 @@ check "merged hardening rejects !reset on pids_limit and logging" \
 check "merged hardening rejects !reset on tmpfs" merged_hardening_rejects_reset_tmpfs
 check "merged hardening rejects !override on security_opt" \
     merged_hardening_rejects_override_security_opt
+check "merged hardening rejects missing or retargeted base resources" \
+    merged_hardening_rejects_removed_base_resources
 check "merged hardening rejects !override of a read-only volume" \
     merged_hardening_rejects_override_of_a_read_only_volume
 check "merged hardening rejects !override on ports and networks" \
