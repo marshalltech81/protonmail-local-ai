@@ -85,3 +85,33 @@ def test_body_decode_loss_persists_with_committed_chunks(tmp_path, caplog):
         assert MARKER not in caplog.text
     finally:
         box.close()
+
+
+@pytest.mark.parametrize("content_type", ["text/calendar", "text/enriched", "text/xml"])
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("loss", [False, True])
+def test_source_only_text_does_not_change_legacy_body_completeness(
+    tmp_path, content_type, capture, loss
+):
+    payload = b"c2VjcmV0A" if loss else base64.b64encode(b"intact source")
+    other = encoded(payload).replace(b"text/plain", content_type.encode())
+    path = tmp_path / "source.eml"
+    path.write_bytes(HEAD + multipart(PLAIN, other))
+    msg = parser.parse_email(path, capture_full_body=capture)
+    assert msg.body_text == "intact words"
+    assert msg.body_complete
+    assert msg.parse_caps == {}
+    if capture and loss:
+        from src import full_body
+
+        assert any(part.losses & full_body.TRANSFER_LOSS for part in msg.full_body.parts)
+
+
+@pytest.mark.parametrize("content_type", ["text/calendar", "text/enriched", "text/xml"])
+def test_nonplain_root_text_is_still_legacy_body_evidence(tmp_path, content_type):
+    path = tmp_path / "root.eml"
+    path.write_bytes(HEAD + encoded(b"c2VjcmV0A").replace(b"text/plain", content_type.encode()))
+    msg = parser.parse_email(path)
+    assert msg.body_text == "c2VjcmV0A"
+    assert not msg.body_complete
+    assert msg.parse_caps == {"body_decode": 1}

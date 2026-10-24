@@ -2185,7 +2185,10 @@ def _extract_body_and_attachments(
         # default body (#1360); selection below excludes unused alternatives.
         if (
             walk is not None
-            or str(part.get("Content-Transfer-Encoding", "")).strip().lower() == "base64"
+            or (
+                legacy_text
+                and str(part.get("Content-Transfer-Encoding", "")).strip().lower() == "base64"
+            )
         ) and (_decode_lost_bytes(part, payload) or _transfer_decode_unchecked(part)):
             decode_lossy.append((len(nodes) - 1, not is_html))
         if (
