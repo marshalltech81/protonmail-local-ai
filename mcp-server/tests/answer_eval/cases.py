@@ -142,7 +142,7 @@ CHANGE_KINDS = frozenset({"correction", "cancellation", "supersession"})
 # plus ``relative``: the message dates the event relative to itself
 # ("this morning"), so the date is its sent date and an answer may call
 # it either (``Position.date_sources``).
-DATE_SOURCES = frozenset({"sent", "mentioned", "relative"})
+DATE_SOURCES = frozenset({"sent", "mentioned", "relative", "unknown"})
 _CHRONOLOGY_KEYS = frozenset({"as_of", "positions", "changes", "conflicts", "in_force"})
 _POSITION_KEYS = frozenset(
     {"id", "actor", "kind", "source", "date", "date_source", "values", "excerpt"}
@@ -206,7 +206,7 @@ class Position:
     actor: tuple[str, ...]
     kind: str
     source: str
-    date: str
+    date: str | None
     date_source: str
     values: tuple[tuple[str, ...], ...]
     excerpt: str
@@ -384,7 +384,12 @@ def _parse_chronology(cid: str, raw: object, groups: list[list[str]]) -> Chronol
         _require(p["kind"] in POSITION_KINDS, cid, "position kind")
         source = p["source"]
         _require(_refs([source]) and "." in source, cid, "position source must be a message")
-        _require(_iso_date(p["date"]), cid, "position date")
+        _require(
+            (p["date"] is None and p["date_source"] == "unknown")
+            or (_iso_date(p["date"]) and p["date_source"] != "unknown"),
+            cid,
+            "position date",
+        )
         _require(p["date_source"] in DATE_SOURCES, cid, "position date_source")
         _require(
             isinstance(p["values"], list) and all(_str_list(g) and g for g in p["values"]),

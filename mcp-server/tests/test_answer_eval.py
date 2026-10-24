@@ -835,6 +835,12 @@ class TestRunner:
         with pytest.raises(ProviderResponseError, match="rebuild"):
             asyncio.run(emb.embed("other"))
 
+    def test_undated_manifest_keeps_the_missing_status(self):
+        entries = {e.message_id: e for e in corpus_manifest().values()}
+        assert entries["t129.2@baseline.example"].sent_at is None
+        assert entries["t129.2@baseline.example"].sent_at_status == "missing"
+        assert entries["t129.1@baseline.example"].sent_at_status == "parsed"
+
     def test_corpus_manifest_hashes_committed_bytes(self):
         manifest = corpus_manifest()
         assert len(manifest) > 50
@@ -1553,6 +1559,16 @@ class TestChronologyGraders:
         assert det.checks["chronology_dated"] == PASS
         assert det.checks["chronology_cited"] == FAIL
         assert det.checks["required_evidence_cited"] == FAIL
+
+    @pytest.mark.parametrize(
+        "date,source,expected",
+        [(None, "unknown", PASS), ("2026-06-02", "sent", FAIL), ("2026-06-03", "sent", FAIL)],
+    )
+    def test_undated_position_cannot_be_dated(self, date, source, expected):
+        case = CASES["brief-undated-alcove"]
+        event = self._event(date, source, "Iona Vale", ["E1"])
+        run = _run(event.text, [_passage("E1", "t129.2")], ["E1"], statements=[event])
+        assert grade_run(case, run).checks["chronology_dated"] == expected
 
     def test_cases_without_labels_skip_the_chronology_checks(self):
         case = CASES["ask-recital-date"]

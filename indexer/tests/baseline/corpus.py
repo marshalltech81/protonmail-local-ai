@@ -275,7 +275,7 @@ class Attachment:
 @dataclass(frozen=True)
 class Msg:
     folder: str
-    date: str  # RFC 5322 date
+    date: str | None  # RFC 5322 date; None omits Date
     sender: str
     to: str
     subject: str
@@ -3327,6 +3327,27 @@ THREADS.update(
 )
 
 
+# Undated position: MIME/file order must never become a send date (#1370).
+THREADS[129] = [
+    Msg(
+        "INBOX",
+        "Tue, 2 Jun 2026 09:00:00 +0000",
+        "Iona Vale <iona@loom.example>",
+        ME,
+        "Loom alcove finish",
+        "The loom alcove finish will be indigo.",
+    ),
+    Msg(
+        "INBOX",
+        None,
+        "Iona Vale <iona@loom.example>",
+        ME,
+        "Re: Loom alcove finish",
+        "I prefer amber for the loom alcove finish. This note has no send date.",
+    ),
+]
+
+
 def build_message(n: int, index: int, msg: Msg) -> bytes:
     """Serialise message ``index`` (0-based) of thread ``n``.
 
@@ -3340,7 +3361,8 @@ def build_message(n: int, index: int, msg: Msg) -> bytes:
     ids = [f"t{n:02d}.{i + 1}@{DOMAIN}" for i in range(index + 1)]
     em = EmailMessage(policy=email.policy.SMTP)
     em["Message-ID"] = f"<{ids[-1]}>"
-    em["Date"] = msg.date
+    if msg.date is not None:
+        em["Date"] = msg.date
     em["From"] = msg.sender
     em["To"] = msg.to
     if msg.cc:
