@@ -1192,6 +1192,14 @@ also carries quoted replies) is shown instead, headed as context and
 not any one message's text, with `indexed_thread_text_scope:
 "context"` in the structured output.
 
+For attachment inventory (filename, MIME type, size and extraction status),
+call `query_attachments` with `thread_id` or a message's `claimant_id`;
+add `folder="Trash"` for messages in Trash. Read one occurrence's stored
+extracted text with `get_attachment`, following `next_offset` until null.
+`search_attachments` and `get_evidence` find ranked passages; they do not
+replace a complete document read. Extraction may be partial or unavailable:
+check the occurrence's status and completeness fields.
+
 Responses are bounded: messages are paged (the response states the
 thread's message count and the `offset` for the next page), and each
 body is cut at 4,000 characters with a marker stating how many were

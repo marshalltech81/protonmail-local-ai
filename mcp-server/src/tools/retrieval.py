@@ -848,23 +848,12 @@ def register_retrieval_tools(server, db):
         limits: paging cannot recover removed messages. Pages use separate
         snapshots, so concurrent indexing can change the conversation.
 
-        DO NOT use this to read attachment content (PDFs, OCR'd
-        images, scans). It returns the message bodies only; the
-        attachment chunks are not in the result. For any question
-        that requires the text of an attached PDF or image — "what
-        does the quote PDF say?", "compare the attached statement
-        against the email body" — call ``ask_mailbox``,
-        ``get_evidence`` or ``search_attachments`` instead, or list the
-        thread's attachments with ``query_attachments`` (``thread_id``,
-        plus ``folder="Trash"`` for messages in Trash) and read one
-        whole with ``get_attachment``. Iterating
-        ``get_thread`` across multiple threads to find attachment
-        content is the wrong shape and will not surface it; the
-        extracted attachment text lives in a separate chunk lane that
-        get_thread never reads. Reaching for an external tool (Google
-        Drive, web search) to read a PDF that arrived as an email
-        attachment is also wrong — when its extraction succeeded, the
-        local index already holds that PDF's text.
+        For attachment inventory (filename, MIME type, size and extraction status),
+        use ``query_attachments`` with thread_id or claimant_id; add
+        ``folder="Trash"`` for messages in Trash. Read an occurrence's
+        stored extracted text with ``get_attachment``, following ``next_offset``
+        until null. ``search_attachments`` and ``get_evidence`` find ranked passages,
+        not a complete document read. This tool returns no attachment text.
 
         ``thread_id`` is OPAQUE: pass only a ``Thread ID`` that a tool
         result returned. Do NOT pass a subject line, a
@@ -995,10 +984,11 @@ def register_retrieval_tools(server, db):
             if include_attachments_metadata and thread.has_attachments:
                 lines.append("")
                 lines.append(
-                    "Attachments are present in this thread; use search_attachments "
-                    "to search their extracted text, or query_attachments (thread_id, "
-                    'plus folder="Trash" for messages in Trash) and get_attachment to '
-                    "read one whole."
+                    "Attachments are present in this thread; use query_attachments with "
+                    "thread_id or claimant_id to list filename, MIME type, size and extraction status "
+                    '(add folder="Trash" for messages in Trash). Read stored extracted text with '
+                    "get_attachment, following next_offset until null. search_attachments and "
+                    "get_evidence find ranked passages, not a complete document read."
                 )
 
             next_offset = offset + len(messages)

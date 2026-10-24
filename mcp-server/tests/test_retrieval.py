@@ -101,7 +101,12 @@ class TestGetThread:
     def test_attachment_note_present_when_thread_has_attachments(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["get_thread"]
         out = asyncio.run(handler(thread_id="t-alpha", include_attachments_metadata=True))
-        assert "Attachments are present" in _text(out)
+        note = _text(out).split("Attachments are present", 1)[1]
+        assert "query_attachments" in note
+        assert "thread_id or claimant_id" in note
+        assert "filename, MIME type, size and extraction status" in note
+        assert "get_attachment" in note and "next_offset" in note
+        assert "ranked passages" in note and "complete document read" in note
 
     def test_attachment_note_omitted_when_flag_false(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["get_thread"]
