@@ -286,8 +286,10 @@ def load_authority_rules(path: Path) -> AuthorityRules:
                 pattern = entry.strip().lower()
                 where = f"{cls}.{key}[{index}]"
                 if key == "addresses":
-                    if canonical_addr(pattern) != pattern or not _is_bare_domain(
-                        address_domain(pattern)
+                    if (
+                        pattern.startswith("@")
+                        or canonical_addr(pattern) != pattern
+                        or not _is_bare_domain(address_domain(pattern))
                     ):
                         raise AuthorityRulesError(
                             f"authority rules {path}: {where} must be a bare address (name@domain)"
