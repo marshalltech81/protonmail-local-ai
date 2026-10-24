@@ -56,6 +56,7 @@ def db(db):
 @pytest.fixture(autouse=True)
 def _reset_identity_tick(monkeypatch):
     monkeypatch.setattr(main, "_identity_next_due", 0.0)
+    monkeypatch.setattr(main, "_identity_cursor", 0)
 
 
 def _eml(message_id: str, fields: tuple[tuple[str, str], ...] = (), body: str = "body") -> bytes:
@@ -112,8 +113,8 @@ def _tuples(cursor) -> list[tuple]:
     return [tuple(r) for r in cursor.fetchall()]
 
 
-def _run(db: Database, limit: int = 100):
-    return provider_identity.reassess_batch(db, limit=limit)
+def _run(db: Database, limit: int = 100, after: int = 0):
+    return provider_identity.reassess_batch(db, limit=limit, after=after)
 
 
 def _leaks(text: str) -> bool:
@@ -476,17 +477,60 @@ class TestReassessment:
         for i in range(5):
             _index(db, f"m{i}", ((_INTERNAL, f"SYNTH{i}"),))
         first = _run(db, limit=2)
-        assert (first.assessed, first.remaining) == (2, 3)
-        # A second connection to the same file resumes from the rows alone.
-        second = _run(db, limit=2)
-        assert (second.assessed, second.remaining) == (2, 1)
-        third = _run(db, limit=2)
-        assert (third.assessed, third.remaining) == (1, 0)
+        assert (first.assessed, first.exhausted) == (2, False)
+        second = _run(db, limit=2, after=first.last_id)
+        assert (second.assessed, second.exhausted) == (2, False)
+        third = _run(db, limit=2, after=second.last_id)
+        assert (third.assessed, third.exhausted) == (1, True)
         assert _run(db, limit=2).assessed == 0
         assert (
             db._conn.execute("SELECT COUNT(*) FROM provider_identity_assessments").fetchone()[0]
             == 5
         )
+
+    def test_a_pass_reads_each_row_once(self, db):
+        """Work gate (#1670): the cost of one batch must not grow with
+        the rows already assessed or still pending. Measured in SQLite VM
+        steps (a plain count, not a profiler): the dearest batch of a
+        corpus four times larger costs the same as the dearest of the small
+        one (1.0x); the known-bad shape (a scan from the first occurrence
+        and a whole-account recount per batch) measured 2.1x at these
+        sizes (24,579 against 51,924 steps), and worsens with size."""
+
+        def dearest_batch(count: int) -> int:
+            for i in range(count):
+                _index(db, f"w{count}-{i}", ((_INTERNAL, f"SYNTH{count}x{i}"),))
+            steps: list[int] = []
+            after = 0
+            while True:
+                n = 0
+
+                def tick() -> int:
+                    nonlocal n
+                    n += 1
+                    return 0
+
+                db._conn.set_progress_handler(tick, 1)
+                result = _run(db, limit=50, after=after)
+                db._conn.set_progress_handler(None, 1)
+                steps.append(n)
+                after = result.last_id
+                if result.exhausted:
+                    assert (
+                        db._conn.execute(
+                            "SELECT COUNT(*) FROM provider_identity_assessments"
+                        ).fetchone()[0]
+                        == db._conn.execute("SELECT COUNT(*) FROM message_occurrences").fetchone()[
+                            0
+                        ]
+                    )
+                    # The first batch also seeks past rows assessed by an
+                    # earlier pass, once per pass.
+                    return max(steps[1:])
+
+        small = dearest_batch(300)
+        large = dearest_batch(1200)
+        assert large < 1.3 * small, (small, large)
 
     def test_a_retired_occurrence_is_not_assessed(self, db):
         msg = _index(db, "gone", ((_INTERNAL, _PM_ID),))
@@ -632,8 +676,9 @@ class TestInvalidation:
 
         monkeypatch.setattr(db, "record_identity_assessment", changed_first)
         result = _run(db)
-        assert (result.assessed, result.stale, result.remaining) == (0, 1, 1)
+        assert (result.assessed, result.stale, result.exhausted) == (0, 1, True)
         monkeypatch.undo()
+        # The next pass starts at 0 and picks the row up.
         assert _run(db).assessed == 1
 
     def test_a_worker_of_an_earlier_policy_is_refused(self, db):
@@ -903,8 +948,17 @@ class TestMainLoop:
         _index(db, "rec", ((_INTERNAL, _PM_OTHER),), folder="Recovered Messages")
         main._run_identity_assessment(db)
         text = caplog.text
-        assert "identity assessment: assessed=2 unresolved=1 rejected=1 remaining=0" in text
+        assert "identity assessment: assessed=2 unresolved=1 rejected=1 pass_done=1" in text
         assert not _leaks(text)
+
+    def test_ticks_carry_the_cursor_and_reset_it_at_the_end_of_a_pass(self, db, monkeypatch):
+        monkeypatch.setattr(main, "IDENTITY_ASSESSMENT_BATCH", 2)
+        for i in range(3):
+            _index(db, f"c{i}", ((_INTERNAL, f"SYNTH{i}"),))
+        main._run_identity_assessment(db)
+        assert main._identity_cursor > 0 and main._identity_next_due == 0.0
+        main._run_identity_assessment(db)
+        assert main._identity_cursor == 0 and main._identity_next_due > 0.0
 
     def test_an_idle_tick_logs_nothing(self, db, caplog):
         caplog.set_level(logging.INFO)

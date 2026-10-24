@@ -4250,41 +4250,34 @@ class Database:
         return self.account.provider == provider_identity.POLICY_PROVIDER
 
     @_synchronized
-    def pending_identity_evidence(self, *, limit: int) -> list[provider_identity.Pending]:
-        """Up to ``limit`` active occurrences of this account with no
-        current assessment under the selected policy version, in
-        occurrence order, each with the evidence read for it. Nothing for
-        an account of another provider."""
+    def pending_identity_evidence(
+        self, *, limit: int, after: int = 0
+    ) -> list[provider_identity.Pending]:
+        """Up to ``limit`` active occurrences of this account with an ID
+        above ``after`` and no current assessment under the selected
+        policy version, in occurrence order, each with the evidence read
+        for it. ``after`` is a keyset cursor, so a pass over the account
+        reads each row once. Nothing for an account of another provider."""
         if not self._identity_policy_applies():
             return []
         version = self._conn.execute("SELECT policy_version FROM identity_policy_state").fetchone()[
             0
         ]
         rows = self._conn.execute(
+            # The inner query walks occurrences by ID from the cursor
+            # (NOT INDEXED keeps the planner off the account index and its
+            # sort, which would read every remaining row's evidence per
+            # batch); evidence is read for the chosen rows only.
             self._IDENTITY_EVIDENCE_SQL  # nosec B608 - constant fragments, values bound
+            + " WHERE o.id IN (SELECT o.id FROM message_occurrences o NOT INDEXED"
             + self._IDENTITY_PENDING_SQL
-            + " ORDER BY o.id LIMIT ?",
-            (version, self.account_id, limit),
+            + " AND o.id > ? ORDER BY o.id LIMIT ?) ORDER BY o.id",
+            (version, self.account_id, after, limit),
         ).fetchall()
         return [
             provider_identity.Pending(r["occurrence_id"], version, self._identity_evidence(r))
             for r in rows
         ]
-
-    @_synchronized
-    def count_pending_identity(self) -> int:
-        """How many occurrences ``pending_identity_evidence`` would still
-        offer."""
-        if not self._identity_policy_applies():
-            return 0
-        version = self._conn.execute("SELECT policy_version FROM identity_policy_state").fetchone()[
-            0
-        ]
-        return self._conn.execute(
-            "SELECT COUNT(*) FROM message_occurrences o"  # nosec B608 - constant fragments
-            + self._IDENTITY_PENDING_SQL,
-            (version, self.account_id),
-        ).fetchone()[0]
 
     @_synchronized
     def record_identity_assessment(

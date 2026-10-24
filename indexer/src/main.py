@@ -751,6 +751,10 @@ _vector_sums_check_cursor: str | None = None
 IDENTITY_ASSESSMENT_BATCH = 200
 IDENTITY_ASSESSMENT_IDLE_SECS = 60.0
 _identity_next_due = 0.0
+# Keyset cursor of the current pass over the account (occurrence ID), so a
+# pass reads each row once; 0 starts a new pass. Lost on restart, which
+# only restarts the pass.
+_identity_cursor = 0
 
 
 class _FailureStreak:
@@ -3887,12 +3891,14 @@ def _run_identity_assessment(db: Database) -> None:
     INFO line of counts when it assessed or found a stale write, and a
     failure logged by type alone and retried on a later tick. Progress
     is the rows themselves, so a restart resumes it."""
-    global _identity_next_due
+    global _identity_next_due, _identity_cursor
     now = _monotonic()
     if now < _identity_next_due:
         return
     try:
-        result = provider_identity.reassess_batch(db, limit=IDENTITY_ASSESSMENT_BATCH)
+        result = provider_identity.reassess_batch(
+            db, limit=IDENTITY_ASSESSMENT_BATCH, after=_identity_cursor
+        )
     except Exception as e:
         _streaks[IDENTITY_ASSESSMENT].failed()
         log.error("identity assessment failed: %s", type(e).__name__)
@@ -3901,15 +3907,18 @@ def _run_identity_assessment(db: Database) -> None:
     _streaks[IDENTITY_ASSESSMENT].succeeded()
     if result.assessed or result.stale:
         log.info(
-            "identity assessment: assessed=%d unresolved=%d rejected=%d remaining=%d stale=%d",
+            "identity assessment: assessed=%d unresolved=%d rejected=%d pass_done=%d stale=%d",
             result.assessed,
             result.counts.get("unresolved", 0),
             result.counts.get("rejected", 0),
-            result.remaining,
+            int(result.exhausted),
             result.stale,
         )
-    if result.assessed + result.stale < IDENTITY_ASSESSMENT_BATCH:
+    if result.exhausted:
+        _identity_cursor = 0
         _identity_next_due = now + IDENTITY_ASSESSMENT_IDLE_SECS
+    else:
+        _identity_cursor = result.last_id
 
 
 def _run_vector_sums_check(db: Database) -> None:

@@ -86,7 +86,8 @@ class Pending:
 class BatchResult:
     counts: dict[str, int]
     stale: int
-    remaining: int
+    last_id: int
+    exhausted: bool
 
     @property
     def assessed(self) -> int:
@@ -116,14 +117,15 @@ def assess(evidence: Evidence) -> Assessment:
     return Assessment("unresolved", "no_acceptance_rule", value)
 
 
-def reassess_batch(db: Database, *, limit: int) -> BatchResult:
-    """Assess up to ``limit`` active occurrences that have no current
-    assessment under the selected policy version (never assessed, or
-    invalidated by a change of their evidence). The pending set is the
-    cursor, so a restart resumes where the rows stop; each write is its
-    own transaction and a stale one is counted, left pending and retried
-    in a later batch."""
-    pending = db.pending_identity_evidence(limit=limit)
+def reassess_batch(db: Database, *, limit: int, after: int = 0) -> BatchResult:
+    """Assess up to ``limit`` active occurrences above the ``after``
+    cursor that have no current assessment under the selected policy
+    version (never assessed, or invalidated by a change of their
+    evidence). Each write is its own transaction; a stale one is
+    counted and left pending for the next pass. The caller carries
+    ``last_id`` forward until ``exhausted``, then starts a new pass at 0,
+    so one pass reads each row once and a restart loses only its place."""
+    pending = db.pending_identity_evidence(limit=limit, after=after)
     counts: Counter[str] = Counter()
     stale = 0
     for item in pending:
@@ -132,7 +134,9 @@ def reassess_batch(db: Database, *, limit: int) -> BatchResult:
             counts[assessment.outcome] += 1
         else:
             stale += 1
-    # A short batch took everything that was pending, apart from what
-    # was stale; only a full one needs the count.
-    remaining = db.count_pending_identity() if len(pending) >= limit else stale
-    return BatchResult(counts=dict(counts), stale=stale, remaining=remaining)
+    return BatchResult(
+        counts=dict(counts),
+        stale=stale,
+        last_id=pending[-1].occurrence_id if pending else after,
+        exhausted=len(pending) < limit,
+    )

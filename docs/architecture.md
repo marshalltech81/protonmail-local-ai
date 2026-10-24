@@ -1699,6 +1699,11 @@ stores what a policy read from header evidence, and accepts nothing.
   read, in one transaction; a stale write is refused and counted.
   Revocation stops later joins; it cannot take back an answer already
   given.
+- **Reassessment work.** The indexer assesses 200 occurrences per
+  batch, walking occurrence IDs from an in-memory cursor, so one pass
+  reads each row once whatever the account's size. A restart or the end
+  of a pass starts at ID 0; a stale or invalidated row below the cursor
+  waits for the next pass, a minute after the previous one ended.
 - **Label observations.** `label_membership_observations` holds
   `(account, provider ID, label)` with the generation that first and last
   saw it. It has no key to an assessment or a source, keeps its own
