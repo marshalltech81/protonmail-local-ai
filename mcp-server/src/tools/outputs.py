@@ -1332,6 +1332,10 @@ class ListedAttachment(_Output):
         description="The extractor, with its version, that recorded the result; null when none did."
     )
     extracted_at: str | None = Field(description="When the extraction ran; null without one.")
+    attachments_manifest_complete: bool | None = Field(
+        description="Whether the carrying message's parsed attachment manifest is complete; "
+        "false means a parse cap lost entries, null means unassessed. Independent of text extraction."
+    )
     ocr_pages_skipped: int | None = Field(
         description="Unit: scanned PDF pages. "
         + ("Scanned PDF pages the OCR page cap left unread; null when unknown.")
@@ -1352,7 +1356,7 @@ class QueryAttachmentsOutput(_Output):
         description="Unit: attachment occurrences; the same claimant in several folders does not repeat an occurrence. "
         + (
             "Every attachment occurrence the filters definitely match, not just this "
-            "page; the complete count only when indeterminate is 0."
+            "page; completeness also requires indeterminate=0 and messages_with_incomplete_manifest=0."
         )
     )
     indeterminate: int = Field(
@@ -1368,6 +1372,13 @@ class QueryAttachmentsOutput(_Output):
             "extraction_status other than none on an occurrence with no extraction recorded), "
             "in neither total_matches nor the pages. When not 0, report it with any count."
         )
+    )
+    messages_with_incomplete_manifest: int = Field(
+        description="Unit: claimant messages. Messages not rejected by the carrying-message filters "
+        "and claimant_id/thread_id scope whose attachment manifest is incomplete or unassessed. "
+        "Includes messages with no stored attachment rows. Independent of attachment-row filters "
+        "(filename, MIME type, payload ID, extraction status), pagination and filter indeterminacy; "
+        "when nonzero, further matching occurrences may be missing."
     )
     status_counts: dict[str, int] = Field(
         description="Unit: attachment occurrences, split by extraction status. "

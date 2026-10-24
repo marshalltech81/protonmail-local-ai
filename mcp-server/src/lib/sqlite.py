@@ -1902,6 +1902,7 @@ class AttachmentOccurrenceRecord:
     extractor: str | None
     extracted_at: str | None
     ocr_pages_skipped: int | None
+    attachments_manifest_complete: bool | None
 
 
 @dataclass
@@ -1922,6 +1923,7 @@ class AttachmentPage:
     attachments: list[AttachmentOccurrenceRecord]
     has_more: bool
     next_cursor: str | None
+    messages_with_incomplete_manifest: int
 
 
 def _clipped_text(head: bytes) -> tuple[str, bool]:
@@ -1999,6 +2001,24 @@ def _attachment_clauses(
             clauses.append(f"a.{name} = ?")
             params.append(value)
     return filters, clauses, params
+
+
+def _attachment_message_scope(
+    message_sql: str, message_params: list, filters: list[tuple[str, str]]
+) -> tuple[str, list]:
+    """Messages not rejected by message filters and identity scope.
+
+    Attachment-row filters cannot rule out missing occurrences: their
+    filenames, MIME types, payloads and statuses are not known yet.
+    Count messages, including those with no stored occurrences, once.
+    """
+    scope = [f"({message_sql}) IS NOT 0"]
+    params = list(message_params)
+    for name, value in filters:
+        if name in ("claimant_id", "thread_id"):
+            scope.append(f"m.{name} = ?")
+            params.append(value)
+    return " AND ".join(scope), params
 
 
 def _attachment_digest(
@@ -2085,7 +2105,7 @@ _OCCURRENCE_COLUMNS = (
     f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
     "AS content_type_head, "
     f"a.size_bytes, {_representative('folder')} AS folder, {_SENT_AT_COLUMN}, "
-    "m.sent_at_status, m.occurred_at, "
+    "m.sent_at_status, m.occurred_at, m.attachments_manifest_complete, "
     "m.effective_at, "
     f"{_SOURCE_COLUMNS}, {OCCURRENCE_STATUS_SQL} AS extraction_status, "
     f"{_unless_deferred('extractor')} AS extractor, "
@@ -2194,6 +2214,11 @@ def _row_to_occurrence(r) -> AttachmentOccurrenceRecord:
         extractor=r["extractor"],
         extracted_at=r["extracted_at"],
         ocr_pages_skipped=r["ocr_pages_skipped"],
+        attachments_manifest_complete=(
+            None
+            if r["attachments_manifest_complete"] is None
+            else bool(r["attachments_manifest_complete"])
+        ),
     )
 
 
@@ -6006,6 +6031,14 @@ class Database:
             # One read transaction: the counts and the page come from the
             # same snapshot even while the indexer commits.
             conn.execute("BEGIN")
+            scope_sql, scope_params = _attachment_message_scope(
+                message_sql, message_params, filters
+            )
+            incomplete_manifest = conn.execute(
+                "SELECT COUNT(*) FROM messages m WHERE "  # nosec B608 -- compiled scope, bound values
+                f"({scope_sql}) AND m.attachments_manifest_complete IS NOT 1",
+                scope_params,
+            ).fetchone()[0]
             status_counts = dict.fromkeys(EXTRACTION_STATUS_FILTERS, 0)
             for status, n in conn.execute(
                 f"SELECT COALESCE({OCCURRENCE_STATUS_SQL}, 'none') AS status, "  # nosec B608
@@ -6046,6 +6079,7 @@ class Database:
             total_matches=sum(status_counts.values()),
             indeterminate=indeterminate,
             status_counts=status_counts,
+            messages_with_incomplete_manifest=incomplete_manifest,
             offset=offset,
             attachments=records,
             has_more=has_more,
