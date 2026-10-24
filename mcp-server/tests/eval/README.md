@@ -943,7 +943,8 @@ cap below, count launches, not model requests.
   pytest --no-cov tests/test_answer_eval_cli_judge.py -k live_codex`
   makes one real call (to `ANSWER_EVAL_LIVE_CODEX_MODEL`, default
   `gpt-5.5`, not `JUDGE_MODEL`) to check that planted `AGENTS.md`
-  files, the global `AGENTS.md` and an `OPENAI_API_KEY` never reach it
+  files, a controlled global `CODEX_HOME/AGENTS.md` canary and an
+  `OPENAI_API_KEY` never reach it
   and that it cannot read a file.
   **Known limitation (#827):** Codex also registers tools that a model's
   catalog entry advertises, and no setting turns those off. In Codex
