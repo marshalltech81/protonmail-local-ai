@@ -141,6 +141,7 @@ def test_a_failure_makes_the_index_not_current(fake_server, seeded_db, failure_c
     assert data["collection"]["failure_class"] == failure_class
     assert data["collection"]["failure_unrecovered"] is True
     assert data["current"] is False
+    assert data["ingestion_caught_up"] is False
     assert data["not_current_reasons"] == [
         f"mbsync's latest collection attempt failed ({failure_class}); the index is not "
         "current until a later successful sync is delivered to it"
@@ -166,6 +167,7 @@ def test_a_retry_in_progress_keeps_the_failure(fake_server, seeded_db):
     assert data["collection"]["latest_attempt"]["outcome"] == "in_progress"
     assert data["collection"]["outcome"] == "failed"
     assert data["current"] is False
+    assert data["ingestion_caught_up"] is False
     assert "with no outcome recorded yet; this does not show whether mbsync is still running" in (
         text
     )
@@ -180,6 +182,7 @@ def test_a_success_not_yet_delivered_after_a_failure_is_not_current(fake_server,
     assert data["collection"]["outcome"] == "succeeded"
     assert data["collection"]["failure_unrecovered"] is True
     assert data["current"] is False
+    assert data["ingestion_caught_up"] is False
     assert data["not_current_reasons"] == [
         "mbsync's last failed collection attempt has not yet been followed by a successful "
         "sync delivered to the index"
@@ -201,6 +204,7 @@ def test_a_success_not_yet_delivered_with_no_observed_failure_is_not_current(
     assert data["collection"]["failure_unrecovered"] is False
     assert data["collection"]["success_undelivered"] is True
     assert data["current"] is False
+    assert data["ingestion_caught_up"] is False
     assert data["not_current_reasons"] == [
         "mbsync's latest successful collection has not yet been confirmed delivered to the index"
     ]
@@ -250,6 +254,7 @@ def test_an_unknown_status_keeps_an_unrecovered_failure(fake_server, seeded_db):
     )
     assert data["collection"]["failure_unrecovered"] is True
     assert data["current"] is False
+    assert data["ingestion_caught_up"] is False
 
 
 def test_an_unexpected_stored_value_reports_its_type_only(fake_server, seeded_db, caplog):

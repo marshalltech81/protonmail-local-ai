@@ -144,6 +144,7 @@ class TestGetMailboxStatusStandalone:
         assert status["status"] == "ok"
         assert status["server_version"] == "abc1234-dirty"
         assert status["current"] is True
+        assert status["ingestion_caught_up"] is True
         assert status["total_threads"] == 3
         assert status["total_messages"] == 3
         assert status["queue"] == {
@@ -162,6 +163,7 @@ class TestGetMailboxStatusStandalone:
         status = get_mailbox_status()
         assert status["status"] == "ok"
         assert status["current"] is False
+        assert status["ingestion_caught_up"] is False
         assert status["total_threads"] == 0
         assert status["last_sync_at"] is None
 

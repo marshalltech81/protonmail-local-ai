@@ -56,24 +56,14 @@ def _messages(n: int) -> str:
     return f"{n:,} message" + ("" if n == 1 else "s")
 
 
-def not_current_reasons(
+def _freshness_reasons(
     *,
     last_sync_at: datetime | None,
     sync_interval_secs: int | None,
     indexer_last_seen_at: datetime | None,
-    queue: QueueCounts,
     now: datetime,
 ) -> list[str]:
-    """Why the index is not current; empty when it is.
-
-    Current means: mbsync completed a sync recently, the indexer has
-    reported recently (it read that sync's stamp after the sync's mail
-    was already queued), and nothing is waiting in the queue (pending,
-    retrying, deferred, or continued for deferred attachment extraction,
-    #1236). Dead messages are terminal and parked trashed
-    files are already indexed (#1165): both are reported separately, not
-    waited on.
-    """
+    """Sync and heartbeat freshness failures shared by both status flags."""
     reasons = []
     if last_sync_at is None or sync_interval_secs is None:
         reasons.append("no successful mail sync has been recorded")
@@ -96,6 +86,24 @@ def not_current_reasons(
             reasons.append(f"the indexer last reported {_age(-age)} in the future")
         elif age > INDEXER_STALE_SECS:
             reasons.append(f"the indexer last reported {_age(age)} ago")
+    return reasons
+
+
+def not_current_reasons(
+    *,
+    last_sync_at: datetime | None,
+    sync_interval_secs: int | None,
+    indexer_last_seen_at: datetime | None,
+    queue: QueueCounts,
+    now: datetime,
+) -> list[str]:
+    """Freshness failures and waiting work; terminal and parked jobs are excluded."""
+    reasons = _freshness_reasons(
+        last_sync_at=last_sync_at,
+        sync_interval_secs=sync_interval_secs,
+        indexer_last_seen_at=indexer_last_seen_at,
+        now=now,
+    )
     waiting = queue.pending + queue.retrying + queue.deferred + queue.extraction_deferred
     if waiting:
         deferred = f", {queue.deferred:,} deferred"
@@ -221,10 +229,22 @@ def _mailbox_status(db) -> MailboxStatusOutput:
         now=now,
     )
     collection = collection_status(stats["collection"])
-    reasons += collection_reasons(collection)
+    collection_failures = collection_reasons(collection)
+    reasons += collection_failures
+    freshness_failures = _freshness_reasons(
+        last_sync_at=last_sync_at,
+        sync_interval_secs=state.get("sync_interval_secs"),
+        indexer_last_seen_at=indexer_seen,
+        now=now,
+    )
+    waiting = queue.pending + queue.retrying + queue.deferred + queue.extraction_deferred
+    ingestion_caught_up = (
+        not (freshness_failures or collection_failures) and waiting == queue.reparse
+    )
     return MailboxStatusOutput(
         server_version=git_commit(),
         current=not reasons,
+        ingestion_caught_up=ingestion_caught_up,
         not_current_reasons=reasons,
         collection=collection,
         last_sync_at=last_sync_at,
@@ -259,6 +279,9 @@ def _render(out: MailboxStatusOutput) -> str:
         f"Current:        {'yes' if out.current else 'no'}",
     ]
     lines += [f"  - {reason}" for reason in out.not_current_reasons]
+    lines.append(
+        f"Ingestion caught up: {'yes' if out.ingestion_caught_up else 'no'} (excludes reparses and terminal failures)"
+    )
     identity = out.operator_identity
     lines.append(
         f"Operator identity: {identity.state}; addresses={identity.address_count}; Sent conflicts={identity.sent_conflicts}"
@@ -293,8 +316,13 @@ def _render(out: MailboxStatusOutput) -> str:
             f"  {q.reparse:,} waiting message{'' if one else 's'} "
             f"{'is' if one else 'are'} already indexed and being reparsed after an "
             f"upgrade: search finds {'it' if one else 'them'}, but data the upgrade "
-            "adds is missing until the reparse finishes."
+            "adds is unknown until a successful reparse."
         )
+    lines.append(
+        "Reparse-added fields remain unknown until a successful reparse; "
+        "a dead-lettered reparse needs make requeue-dead and a successful retry, "
+        "even when the waiting reparse count is zero."
+    )
     if q.deferred:
         one = q.deferred == 1
         lines.append(
@@ -421,7 +449,12 @@ def register_system_tools(server, db):
         current, the reasons are listed: say so before relying on the
         results, since recent mail or attachment text may be missing.
         Mail that reached Proton after the last sync is not in the index
-        yet, even when the index is current. collection reports mbsync's
+        yet, even when the index is current. ingestion_caught_up uses the
+        same freshness and collection checks but excludes waiting reparses;
+        both flags exclude terminal failures. Fields added by a reparse
+        stay unknown until it succeeds; dead-lettered reparses need
+        make requeue-dead and a successful retry even when queue.reparse is zero.
+        collection reports mbsync's
         latest collection from the Bridge app: succeeded, succeeded with
         a count of far-side folders it could not open, failed (with a
         class) or unknown.
