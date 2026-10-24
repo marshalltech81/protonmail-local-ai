@@ -61,6 +61,14 @@ class HeaderWork:
             monkeypatch.setattr(parser, name, CountedPattern(getattr(parser, name), self.regex))
 
     def check(self, input_chars):
+        # Production deliberately catches Exception around these calls.
+        # Recheck recorded sizes here so a swallowed assertion cannot pass.
+        assert all(n <= parser._MAX_ENCODED_WORD_CHARS for n in self.decoded), (
+            "whole header reached decode_header"
+        )
+        assert all(n <= parser._MAX_ADDRESS_ELEMENT_CHARS for n in self.addresses), (
+            "whole address list reached parseaddr"
+        )
         assert self.regex, "the guarded scan was not exercised"
         assert sum(self.regex) <= 12 * input_chars
         assert sum(self.addresses) <= 12 * input_chars
