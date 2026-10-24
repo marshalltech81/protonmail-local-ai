@@ -740,7 +740,9 @@ class GetThreadOutput(_Output):
     thread: ThreadSummary
     total_messages: int
     offset: int
-    messages: list[ThreadMessage] = Field(description="This page's messages, oldest first.")
+    messages: list[ThreadMessage] = Field(
+        description="This page's messages in the requested order (oldest first by default)."
+    )
     next_offset: int | None = Field(description="offset for the next page; null on the last page.")
     indexed_thread_text: str | None = Field(
         description=(
