@@ -378,6 +378,8 @@ class OpenAIEmbedder:
                 "OpenAIEmbedder needs a resolved base URL; startup resolves "
                 "EMBED_BASE_URL (or `default`) before building it."
             )
+        if "?" in base_url or "#" in base_url:
+            raise ValueError("EMBED_BASE_URL must not contain a query string or fragment")
         self.model = model
         self.batch_size = batch_size
         self.concurrency = concurrency

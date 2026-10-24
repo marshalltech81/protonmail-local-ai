@@ -664,6 +664,7 @@ class AttachmentSearch:
 
     results: list[AttachmentResult]
     indeterminate: int | None = None
+    sender_matches: AddressMatches | None = None
 
 
 def _row_to_attachment_result(r) -> AttachmentResult:
@@ -3106,7 +3107,9 @@ class Database:
             # A query that sanitized to nothing (pure punctuation) is an
             # explicit no-match rather than a silent unfiltered scan; it
             # has no candidates, so none is undecided either.
-            return AttachmentSearch([], 0 if sender else None)
+            return AttachmentSearch(
+                [], 0 if sender else None, AddressMatches(0, []) if sender else None
+            )
 
         with closing(self._connect()) as conn:
             # One read transaction: the lanes and the count read the same
@@ -3150,12 +3153,25 @@ class Database:
                     name = type(e).__name__
                     self._count_failures.record(name if name in _COUNT_FAILURE_KEYS else "other")
                     timings.count("degraded_attachment_indeterminate", 1)
+            if from_addr:
+                fa = from_addr.lower()
+                results = [r for r in results if _addr_matches(r.senders, fa)]
+            results = results[:limit]
+            matches = None
+            if sender:
+                # Only the returned occurrences, in the lanes' snapshot.
+                # The shared helper caps the address list at ten while
+                # keeping the full distinct count over these claimants.
+                matches = _address_matches(
+                    conn,
+                    sender,
+                    ("from",),
+                    "m.claimant_id IN (SELECT value FROM json_each(?))",
+                    [json.dumps(list({r.claimant_id for r in results}))],
+                    len(results),
+                )
             conn.rollback()
-
-        if from_addr:
-            fa = from_addr.lower()
-            results = [r for r in results if _addr_matches(r.senders, fa)]
-        return AttachmentSearch(results[:limit], indeterminate)
+        return AttachmentSearch(results, indeterminate, matches)
 
     def _attachment_undecided_count(
         self,

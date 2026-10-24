@@ -1292,3 +1292,45 @@ def test_oversized_query_rejections_keep_actionable_errors(
     assert search_calls == []
     assert fake_embed.embed_calls == []
     assert fake_inference.complete_calls == []
+
+
+def test_extraction_empty_retrieval_reports_its_sample(fake_server, seeded_db):
+    seeded_db.hybrid_search = lambda **_kw: []
+    embed, llm = FakeEmbedClient(), FakeInferenceClient(response="null")
+    handler = _handlers(fake_server, seeded_db, embed, llm)["extract_from_emails"]
+    out = asyncio.run(handler(query="synthetic", schema={}, limit=500))
+    assert out.structured_content["retrieval"] == dict(
+        retrieval_ran=True,
+        threads_retrieved=0,
+        threads_supplied=0,
+        limit=50,
+        exhaustive=False,
+        remainder="unknown",
+    )
+    assert "No matching emails were retrieved" in _all_text(out)
+    assert llm.complete_calls == []
+
+
+def test_extraction_unmatched_name_reports_retrieval_did_not_run(fake_server, person_db):
+    embed, llm = FakeEmbedClient(), FakeInferenceClient(response="null")
+    handler = _handlers(fake_server, person_db, embed, llm)["extract_from_emails"]
+    out = asyncio.run(handler(query="synthetic", schema={}, from_name="zzznosuchcontact"))
+    sample = out.structured_content["retrieval"]
+    assert sample["retrieval_ran"] is False
+    assert sample["threads_retrieved"] == sample["threads_supplied"] == 0
+    assert "retrieval did not run" in _all_text(out).lower()
+    assert embed.embed_calls == llm.complete_calls == []
+
+
+@pytest.mark.parametrize("reply", ["null", "not json"])
+def test_extraction_sample_counts_threads_even_when_no_records_return(
+    fake_server, seeded_db, reply
+):
+    llm = FakeInferenceClient(response=reply)
+    handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
+    out = asyncio.run(handler(query="synthetic", schema={"vendor": "string"}))
+    sample = out.structured_content["retrieval"]
+    assert sample["retrieval_ran"] is True
+    assert sample["threads_retrieved"] == sample["threads_supplied"] == len(llm.complete_calls)
+    assert sample["threads_supplied"] > 0
+    assert sample["exhaustive"] is False and sample["remainder"] == "unknown"

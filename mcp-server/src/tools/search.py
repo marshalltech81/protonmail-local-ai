@@ -37,6 +37,7 @@ from .outputs import (
     HEADER_CHAR_LIMIT,
     MAX_LISTED,
     AttachmentHit,
+    AttachmentSenderMatch,
     EvidenceCarrier,
     EvidenceChunk,
     EvidenceOutput,
@@ -1380,7 +1381,26 @@ def register_search_tools(
             log.error("search_attachments error: %s", safe_error)
             raise ToolError(f"Attachment search error: {safe_error}") from e
 
+        sender_match = (
+            AttachmentSenderMatch(
+                mode="exact" if address_match_mode(sender or "") == "exact" else "substring",
+                scope="returned_occurrences",
+                distinct_addresses=found.sender_matches.distinct,
+                addresses=found.sender_matches.addresses,
+            )
+            if found.sender_matches is not None
+            else None
+        )
+        sender_line = None
+        if sender_match is not None:
+            sender_line = (
+                f"Sender match: {sender_match.mode}; {sender_match.distinct_addresses} "
+                "distinct address(es) among returned attachment occurrences"
+            )
+            if sender_match.addresses:
+                sender_line += ": " + ", ".join(sender_match.addresses)
         output = SearchAttachmentsOutput(
+            sender_match=sender_match,
             date_bounds=bounds,
             results=[
                 AttachmentHit(
@@ -1447,7 +1467,7 @@ def register_search_tools(
                 if indeterminate_line and known
                 else "No attachments found."
             ]
-            lines += [line for line in (indeterminate_line, bounds_line) if line]
+            lines += [line for line in (indeterminate_line, bounds_line, sender_line) if line]
             return tool_result("\n".join(lines), output)
 
         lines = [f"Found {len(results)} attachment(s):"]
@@ -1455,6 +1475,8 @@ def register_search_tools(
             lines.append(indeterminate_line)
         if bounds_line:
             lines.append(bounds_line)
+        if sender_line:
+            lines.append(sender_line)
         lines.append("")
         for i, a in enumerate(results, 1):
             size_kb = a.size_bytes / 1024
