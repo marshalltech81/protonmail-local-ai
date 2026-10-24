@@ -127,7 +127,7 @@ class TestDispatch:
         result = extract(content_type=content_type, filename=filename, payload=_text("x"))
         assert result.status == STATUS_SUCCESS
         assert result.extractor == f"eml@{EXTRACTOR_VERSIONS['eml']}"
-        assert EXTRACTOR_VERSIONS["eml"] == 5
+        assert EXTRACTOR_VERSIONS["eml"] == 6
 
     def test_a_version_1_row_is_stale(self):
         """#1398: the cached ``eml@1`` rows counted every
@@ -136,7 +136,8 @@ class TestDispatch:
         assert extractors.is_stale_extractor("eml@2") is True  # #1402
         assert extractors.is_stale_extractor("eml@3") is True  # #1516
         assert extractors.is_stale_extractor("eml@4") is True  # #1456
-        assert extractors.is_stale_extractor("eml@5") is False
+        assert extractors.is_stale_extractor("eml@5") is True  # #1447
+        assert extractors.is_stale_extractor("eml@6") is False
 
     @pytest.mark.parametrize(
         ("content_type", "filename", "reruns"),

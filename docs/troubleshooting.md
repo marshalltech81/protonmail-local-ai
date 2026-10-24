@@ -2764,6 +2764,18 @@ of its rendered text, even when labelled as nested mail. The eml
 extractor version refreshes cached text once; dead-lettered messages
 keep their old chunks until `make requeue-dead`.
 
+
+Decoded mail containing lone Unicode surrogates (for example a UTF-7
+plain-text part) replaces those characters with `?` before chunking or
+storing text. Rate-limited warnings report only the decoding surface and
+replacement count. Extractor children report `text_surrogates_replaced`
+when replacement happens at their UTF-8 output boundary. These cosmetic
+replacements do not imply that the entire message was dropped.
+Existing dead-lettered messages need `make requeue-dead` after upgrading.
+Reparse existing mail with `make reparse` to refresh decoded headers and
+filenames. EML extractor version 6 refreshes cached attached-email text;
+dead-lettered attached emails still need the same manual requeue.
+
 Identity-encoded OLE2 and ZIP attachments under any `message/*` subtype
 are preserved as container bytes. To revisit occurrences indexed before
 this handling, run `make reparse`; dead-lettered jobs first need

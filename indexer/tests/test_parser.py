@@ -3768,7 +3768,7 @@ _FILENAME_SHAPES = {
     "encoded-word-lone-surrogate": (
         b"Content-Type: application/pdf\r\n"
         b'Content-Disposition: attachment; filename="=?unicode_escape?q?a=5Cud83d.pdf?="',
-        "=?unicode_escape?q?a=5Cud83d.pdf?=",
+        "a?.pdf",
     ),
     "encoded-word-decodes-empty": (
         b'Content-Type: application/pdf\r\nContent-Disposition: attachment; filename="=?utf-8?q?_?="',
@@ -3912,20 +3912,9 @@ def test_undecodable_filename_warning_is_rate_limited(tmp_path, caplog):
     assert marker not in caplog.text
 
 
-@pytest.mark.parametrize(
-    ("charset", "text", "exc_name"),
-    [
-        ("unicode_escape", "{}=5Cud83d.pdf", "UnicodeEncodeError"),
-    ],
-)
-def test_undecodable_filename_encoded_word_is_kept_and_not_logged(
-    tmp_path, caplog, charset, text, exc_name
-):
-    """#924: an encoded-word filename that does not decode keeps the
-    standard library's value and logs one fixed WARNING naming the
-    exception type, never the filename."""
+def test_filename_encoded_word_surrogate_is_replaced_and_not_logged(tmp_path, caplog):
     marker = "FNAMEMARKER924"
-    raw = f"=?{charset}?q?{text.format(marker)}?="
+    raw = f"=?unicode_escape?q?{marker}=5Cud83d.pdf?="
     headers = (
         b"Content-Type: application/pdf\r\n"
         b'Content-Disposition: attachment; filename="' + raw.encode() + b'"'
@@ -3933,13 +3922,8 @@ def test_undecodable_filename_encoded_word_is_kept_and_not_logged(
     with caplog.at_level(logging.DEBUG):
         msg = parse_email(_write_filename_message(tmp_path, headers))
     assert msg is not None
-    assert [a.filename for a in msg.attachments] == [raw]
-    warnings = [r for r in caplog.records if "filename" in r.getMessage()]
-    assert [r.levelno for r in warnings] == [logging.WARNING]
-    assert warnings[0].getMessage() == (
-        f"attachment filename encoded-words could not be decoded ({exc_name}); "
-        "kept 1 filename as sent"
-    )
+    assert [a.filename for a in msg.attachments] == [f"{marker}?.pdf"]
+    assert "replaced 1 lone surrogate" in caplog.text
     assert marker not in caplog.text
 
 
