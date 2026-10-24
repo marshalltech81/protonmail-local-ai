@@ -344,6 +344,49 @@ make force-deletion     # One deletion pass past the mass-delete brake, for an i
 make clean        # Remove everything (destructive)
 ```
 
+## Local verification
+
+Run `UV_PYTHON=3.14 make verify` for the full local check sequence:
+all pre-commit hooks, the four CI Semgrep checks, `make test`, the synthetic retrieval/answer
+baseline, both service typechecks, Docker TLS and Maildir layout
+checks, host-loopback alias checks, and the Trivy dependency,
+configuration and built-image scans. Checks run sequentially and stop
+at the first failure. The baseline is checked with `UPDATE=0`, even
+when an inherited `UPDATE` would otherwise rewrite its snapshot.
+
+Install `uv`, `pre-commit`, Docker/OrbStack and Trivy first, and build
+the checkout's images with `make build`. The host also needs Tesseract
+and Poppler (`brew install tesseract poppler`) for the baseline's OCR
+fixtures. Semgrep 1.182.1 is supplied by `uvx`; it runs the rule fixtures,
+Compose filename checks, repository scan and generated-Compose scan.
+The host-alias check requires macOS. Dependencies, pinned test images and vulnerability databases may
+need downloading. Provider-backed `baseline-real-embedder` and
+`eval-answers` remain separate opt-in commands; `verify` does not start
+the mailbox stack or run operator maintenance.
+
+**Coverage audit (2026-10-24, #1429).** The unchanged 90% floor is an
+aggregate across each service, not a per-module or child-process
+coverage guarantee. A focused 481-test run on macOS/Python 3.14,
+using the normal `--cov=src` source setting, measured these combined
+statement/branch percentages:
+
+| Boundary | Focused coverage | Unobserved branch families |
+|---|---:|---|
+| Attached-email extractor (`eml.py`) | 87.3% | Already-full text buffer, label-only nested messages, body/structure/header loss flags, post-decode header cap, transport rejection and absent nested child |
+| Child launcher/protocol (`_runner.py`) | 88.4% | Platform/process polling, output-cap and exit paths, raw-output budget helpers, recovered-error/name frame variants |
+| Child framing (`extractor_child.py`) | 97.2% | Launch-count frame; the subprocess entry point is excluded from parent coverage |
+
+Several EML loss/cap paths have real-child assertions in
+`test_eml_extractor.py`, so a missing parent-coverage line is not proof
+that the behavior is untested. Conversely, an in-process fixture does
+not exercise OS resource limits or process-group cleanup. Before
+changing thresholds, inspect each missing branch against the direct
+and real-child tests (`test_extractor_child.py`,
+`test_child_degradation.py`, `test_legacy_office.py` and the format
+child tests), and collect child-process coverage separately. This
+focused audit does not measure whole-suite coverage or replace those
+process-boundary assertions.
+
 ## Disclaimer
 
 This is an unofficial community project and is not affiliated with

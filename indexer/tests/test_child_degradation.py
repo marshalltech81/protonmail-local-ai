@@ -85,6 +85,7 @@ class TestChildSends:
                     "image_scale_factor",
                     "pdf_ocr_dpi",
                     "image_normalized_frames",
+                    "eml_binary_containers_skipped",
                 }
             )
             == CHILD_DEGRADATION_KEYS
