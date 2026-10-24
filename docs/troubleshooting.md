@@ -2775,3 +2775,8 @@ Existing dead-lettered messages need `make requeue-dead` after upgrading.
 Reparse existing mail with `make reparse` to refresh decoded headers and
 filenames. EML extractor version 6 refreshes cached attached-email text;
 dead-lettered attached emails still need the same manual requeue.
+
+Identity-encoded OLE2 and ZIP attachments under any `message/*` subtype
+are preserved as container bytes. To revisit occurrences indexed before
+this handling, run `make reparse`; dead-lettered jobs first need
+`make requeue-dead`. The genuine attached-email path is unchanged.

@@ -264,6 +264,12 @@ the indexer + mcp-server at any OpenAI-compatible embedder and choose
 between an Anthropic-compatible Messages API or any OpenAI-compatible
 chat-completions endpoint for inference.
 
+Endpoint URLs must not contain embedded user credentials, a query
+string or a fragment. Put API keys in the layer's secret file. Both
+configuration modes and service startup reject these URL components
+with fixed text, so endpoint credentials cannot enter logs or saved
+job errors.
+
 **Required-vars contract (all three layers):**
 
 For every enabled layer (`*_MODE` != `none`; embed is always
