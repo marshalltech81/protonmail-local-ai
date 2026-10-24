@@ -3126,6 +3126,13 @@ Extract structured data from emails matching a query. Attachment text
 each thread's context, so fields that appear only in an attachment can be
 extracted.
 
+Every response sets `retrieval`: whether ranked search ran, how many
+threads it returned, how many actually supplied evidence to an
+extraction prompt, the effective `limit` (clamped to 1–50),
+`exhaustive: false` and `remainder: "unknown"`. An empty result says
+only what this sample returned. If `from_name` matches no contact,
+retrieval did not run and both thread counts are zero.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | required | What to search for; also sent to the model as the request, so it can pick which records in a passage are wanted |
