@@ -1517,6 +1517,14 @@ def _address_matches(
         return AddressMatches(distinct=len(addresses), addresses=addresses)
     params: list = []
     rows_sql = _substring_participant_rows(value, roles, params)
+    if "from" in roles:
+        # A recipient can decide the predicate while From is unsafe.
+        # Only role rows that could prove the predicate are witnesses.
+        rows_sql = (
+            f"({rows_sql}) AND (p.role != 'from' OR EXISTS "  # nosec B608 -- fixed row SQL; values bound
+            "(SELECT 1 FROM messages am WHERE am.claimant_id=p.claimant_id "
+            "AND am.sender_ambiguous=0))"
+        )
     return _matched_addresses(conn, rows_sql, params, where_sql, where_params, metadata)
 
 
