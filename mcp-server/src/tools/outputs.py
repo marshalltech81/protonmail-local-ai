@@ -1608,7 +1608,7 @@ class QuoteCheck(_Output):
 
 
 class AskRetrieval(_Output):
-    """What ask_mailbox's answer was drawn from (#1233): a ranked sample
+    """What a retrieval-backed answer was drawn from (#1233, #1580): a ranked sample
     of threads, never the whole mailbox."""
 
     retrieval_ran: bool = Field(
@@ -1616,7 +1616,7 @@ class AskRetrieval(_Output):
         "ranked search ran, whether or not it returned threads."
     )
     threads_retrieved: int = Field(
-        description="Threads the ranked search returned, at most max_threads."
+        description="Threads returned by ranked search, including overfetch past chunkless threads when used."
     )
     threads_supplied: int = Field(
         description="Distinct threads with at least one passage in the prompt the model "
@@ -1925,6 +1925,9 @@ _TRUNCATION_REASON_DESCRIPTION = (
 
 
 class BriefIssueOutput(_Output):
+    retrieval: AskRetrieval = Field(
+        description="Always set: ranked retrieval and prompt coverage; never exhaustive."
+    )
     experimental: Literal[True] = Field(
         description="Always true: brief_issue is experimental and this format may change."
     )
@@ -2047,6 +2050,9 @@ class ConclusionQuoteCheck(ReplyQuoteCheck):
 
 
 class CheckConclusionOutput(_Output):
+    retrieval: AskRetrieval = Field(
+        description="Always set: ranked retrieval and prompt coverage; never exhaustive."
+    )
     experimental: Literal[True] = Field(
         description="Always true: check_conclusion is experimental and this format may change."
     )

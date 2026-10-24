@@ -3479,6 +3479,15 @@ Phase 3 item 3, #291): a chronology, actors' positions, decisions, open
 questions and conflicting evidence. Nothing it produces is persisted or
 indexed, so a brief can never come back as evidence.
 
+Both `brief_issue` and `check_conclusion` answer from a ranked,
+non-exhaustive sample. Their always-set `retrieval` object reports
+whether search ran, how many threads it returned (including overfetch
+past chunkless threads), how many threads actually supplied passages
+to the prompt, the effective `max_threads`, `exhaustive: false` and
+`remainder: "unknown"`. Empty sections or no conflicting evidence apply
+only to the retrieved sample. The prose and system prompts state the
+same scope; use population query tools for mailbox-wide claims.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `topic` | string | required | The issue to brief, as the user phrased it |
