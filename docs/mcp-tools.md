@@ -2362,7 +2362,7 @@ is population-dependent, including membership selection and sorting; the output
 cap is not a constant-work or latency guarantee.
 
 ### `query_attachments`
-Enumerate **every** attachment occurrence matching exact criteria, with
+Enumerate stored attachment occurrences matching exact criteria, with
 a total count
 ([#796](https://github.com/marshalltech81/protonmail-local-ai/issues/796)).
 An occurrence is one attachment on one message: the same bytes attached
@@ -2427,6 +2427,28 @@ occurrences are in neither `total_matches` nor the pages; the response
 counts them in `indeterminate`, and the prose states it with its causes
 whenever it is not 0 (an empty first page then ends "No attachments are
 known to match.").
+
+`messages_with_incomplete_manifest` counts claimant messages whose manifest is
+incomplete or unassessed under the carrying-message filters and claimant/thread
+scope, including messages without stored occurrences. Unknown message predicates
+are included; rejected messages are excluded. Filename, MIME type, payload ID,
+extraction status and page boundaries do not narrow this coverage count: the
+metadata of missing occurrences is unknown. A nonzero count means further
+matching occurrences may be missing even when `indeterminate` is zero. Each
+listed row (also in `get_attachment`) carries `attachments_manifest_complete`
+as true, false or null, independently of extraction status and text completeness.
+
+`messages_with_noncurrent_inventory` uses that same carrying-message scope and
+counts messages with attachments or retained occurrence rows whose
+`attachment_rows_current` is false (extraction disabled) or null (pending or
+unassessed). This is independent of manifest completeness and text extraction:
+a complete manifest does not make retained rows current. A known empty manifest
+with no retained rows needs no extraction pass; retained stale rows are still
+disclosed. Each row, also in `get_attachment`, exposes its nullable
+`attachment_rows_current` marker. `total_matches` and `status_counts` count
+**stored** matching occurrences; with either coverage count nonzero, stored rows
+may be obsolete or current occurrences missing. Report both coverage counts
+alongside filter indeterminacy; none is an extraction-text completeness flag.
 
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole match, not the page), `indeterminate`,

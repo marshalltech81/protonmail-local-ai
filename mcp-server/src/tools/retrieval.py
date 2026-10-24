@@ -685,6 +685,8 @@ def _listed_attachment(a: AttachmentOccurrenceRecord) -> ListedAttachment:
         extractor=a.extractor,
         extracted_at=a.extracted_at,
         ocr_pages_skipped=a.ocr_pages_skipped,
+        attachments_manifest_complete=a.attachments_manifest_complete,
+        attachment_rows_current=a.attachment_rows_current,
     )
 
 
@@ -2461,7 +2463,7 @@ def register_retrieval_tools(server, db):
         cursor: str | None = None,
     ) -> CallToolResult:
         """
-        Enumerate EVERY attachment matching exact criteria, with a total
+        Enumerate stored attachment occurrences matching exact criteria, with a total
         count. Not ranked: one row per attachment occurrence (one file on
         one message; the same bytes attached twice are two rows sharing
         an ``attachment_id``), newest carrying message first. Use it for
@@ -2491,7 +2493,18 @@ def register_retrieval_tools(server, db):
         true; get_message lists the message's copies.
 
         ``total_matches`` counts the occurrences the filters definitely
-        match; it is the complete count only when ``indeterminate`` is 0.
+        match. ``messages_with_incomplete_manifest`` counts scoped messages whose
+        manifest is incomplete or unassessed, even with no stored rows. It uses
+        carrying-message filters and claimant/thread scope, independently of
+        filename, MIME type, payload ID, extraction status and paging: missing
+        occurrences cannot be ruled out with those filters. Report nonzero
+        coverage counts; indeterminate=0 alone never proves a complete inventory.
+        ``messages_with_noncurrent_inventory`` separately counts scoped messages
+        with attachments or retained rows whose inventory is not committed as
+        current (extraction off, pending, or unassessed). Stored rows can be
+        stale or current occurrences missing even with a complete manifest.
+        Each row's ``attachment_rows_current`` exposes that nullable marker;
+        it does not certify complete extracted text.
         ``indeterminate`` counts occurrences a filter could not decide (a
         sender or participant filter on a carrying message whose sender
         is ambiguous or not yet checked; an address filter that finds
@@ -2523,8 +2536,8 @@ def register_retrieval_tools(server, db):
         Paging: when ``has_more`` is true, call again with the SAME
         filters plus ``cursor`` set to ``next_cursor``; ``limit`` may
         change between pages. Never report a partial page as the
-        complete answer; a count needs only ``total_matches`` and
-        ``indeterminate``. Each page uses a fresh index snapshot, so an
+        complete answer; report ``total_matches``, ``indeterminate`` and
+        ``messages_with_incomplete_manifest`` and ``messages_with_noncurrent_inventory`` together. Each page uses a fresh index snapshot, so an
         attachment indexed or moved while paging can be missed; a
         changed ``total_matches`` signals churn, but matching totals do
         not prove nothing was missed.
@@ -2617,6 +2630,8 @@ def register_retrieval_tools(server, db):
         timings.count("total_matches", page.total_matches)
         timings.count("indeterminate", page.indeterminate)
         timings.count("returned", len(page.attachments))
+        timings.count("messages_with_incomplete_manifest", page.messages_with_incomplete_manifest)
+        timings.count("messages_with_noncurrent_inventory", page.messages_with_noncurrent_inventory)
         uses = _filter_uses(args)
         if page.indeterminate:
             # Why, by fixed key, as query_messages does (#1086).
@@ -2629,6 +2644,8 @@ def register_retrieval_tools(server, db):
             total_matches=page.total_matches,
             indeterminate=page.indeterminate,
             status_counts=page.status_counts,
+            messages_with_incomplete_manifest=page.messages_with_incomplete_manifest,
+            messages_with_noncurrent_inventory=page.messages_with_noncurrent_inventory,
             returned=len(page.attachments),
             offset=page.offset,
             has_more=page.has_more,
@@ -2645,6 +2662,16 @@ def register_retrieval_tools(server, db):
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}")
+        if page.messages_with_noncurrent_inventory:
+            lines.append(
+                f"messages_with_noncurrent_inventory: {page.messages_with_noncurrent_inventory}; "
+                "stored rows may be stale or current occurrences missing."
+            )
+        if page.messages_with_incomplete_manifest:
+            lines.append(
+                f"messages_with_incomplete_manifest: {page.messages_with_incomplete_manifest}; "
+                "further attachment occurrences may be missing (manifest incomplete or unassessed)."
+            )
         if page.indeterminate:
             # Fixed text naming the causes the given filters can have.
             causes = _indeterminate_causes(uses, date_basis=date_basis)
@@ -2664,7 +2691,11 @@ def register_retrieval_tools(server, db):
             lines.append("has_more: false")
             if page.offset:
                 lines.append("No further attachments.")
-            elif page.indeterminate:
+            elif (
+                page.indeterminate
+                or page.messages_with_incomplete_manifest
+                or page.messages_with_noncurrent_inventory
+            ):
                 lines.append("No attachments are known to match.")
             else:
                 lines.append("No attachments match.")

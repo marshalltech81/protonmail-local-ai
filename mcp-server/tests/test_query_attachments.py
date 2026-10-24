@@ -478,14 +478,21 @@ class TestWork:
         db, _ = corpus
         statements = self._trace(db, monkeypatch)
         db.query_attachments(limit=7)
-        # BEGIN, the grouped count, the page, ROLLBACK: whatever the
+        # BEGIN, manifest coverage, grouped count, page, ROLLBACK: whatever the
         # corpus size, and no indeterminate count without an unknown leaf.
-        assert self._shape(statements) == ["BEGIN", "SELECT", "WITH", "ROLLBACK"]
-        assert "LIMIT 8" in statements[2]
+        assert self._shape(statements) == ["BEGIN", "SELECT", "SELECT", "WITH", "ROLLBACK"]
+        assert "LIMIT 8" in statements[3]
         statements.clear()
         db.query_attachments(limit=7, extraction_status="failed")
-        assert self._shape(statements) == ["BEGIN", "SELECT", "SELECT", "WITH", "ROLLBACK"]
-        assert "IS NULL" in statements[2]
+        assert self._shape(statements) == [
+            "BEGIN",
+            "SELECT",
+            "SELECT",
+            "SELECT",
+            "WITH",
+            "ROLLBACK",
+        ]
+        assert "IS NULL" in statements[3]
 
     def test_filenames_are_read_for_the_page_rows_only(self, corpus, monkeypatch):
         """The page's row columns (the clipped filename among them) are
@@ -494,7 +501,7 @@ class TestWork:
         db, _ = corpus
         statements = self._trace(db, monkeypatch)
         db.query_attachments(limit=3)
-        page_sql = statements[2]
+        page_sql = next(sql for sql in statements if sql.startswith("WITH page"))
         keys, rows = page_sql.split("LIMIT 4", 1)
         assert "filename" not in keys
         assert "a.filename" in rows

@@ -721,7 +721,13 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
     ),
     "query_attachments": (
         {"sender": _MARKER_ADDRESS, "filename": MARKER, "folder": _MARKER_FOLDER},
-        {"total_matches": 1, "indeterminate": 0, "returned": 1},
+        {
+            "total_matches": 1,
+            "indeterminate": 0,
+            "returned": 1,
+            "messages_with_incomplete_manifest": 0,
+            "messages_with_noncurrent_inventory": 0,
+        },
     ),
     "get_attachment": ({"attachment_occurrence_id": _MARKER_OCCURRENCE_ID}, {"attachments": 1}),
     "get_message": ({"message_id": _MARKER_MESSAGE_ID}, {"messages": 1}),

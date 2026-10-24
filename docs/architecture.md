@@ -1190,6 +1190,15 @@ completeness is recorded per occurrence instead (below).
 
 **Attachment text completeness**
 ([#1242](https://github.com/marshalltech81/protonmail-local-ai/issues/1242)).
+`query_attachments` reports `messages_with_incomplete_manifest` separately
+from occurrence-filter indeterminacy. Its coverage scan includes scoped messages
+without stored occurrences and does not apply attachment-row filters to unknown
+entries. Each returned occurrence carries its message's nullable manifest flag.
+`messages_with_noncurrent_inventory` independently counts scoped messages with
+attachments or retained occurrences whose inventory is not committed as current.
+Both counts use one message-scope aggregate in the page's read snapshot; missing
+rows remain visible, and retained rows expose their nullable currentness marker.
+
 `attachments.text_complete` records whether an occurrence's committed
 attachment chunks hold all its text (`1`), whether text was lost or the
 occurrence never certifies absence (`0`), or that it is not assessed
