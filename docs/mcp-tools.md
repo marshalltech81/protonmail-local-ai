@@ -18,6 +18,18 @@ registered only when `INFERENCE_MODE` is not `none` (the default is
 
 The server retrieves and reports mail. Linking threads and tracking matters are left to the client; see PLAN.md decision 44.
 
+
+Counts in structured output declare their unit in each field's schema
+description. A stored claimant is identified by Message-ID plus a hash
+of the raw file: identical copies in several folders count once, while
+different raw files claiming the same Message-ID count separately.
+Thread counts deduplicate threads within a result or group; folder and
+other overlapping groups can count the same item in each group.
+Attachment occurrences are separate positions on a claimant, while
+payload-identity counts deduplicate attachment bytes. Queue counts are
+Maildir-file jobs, one per queued path, so they can count copies in
+different folders separately.
+
 ## Response format
 
 The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
