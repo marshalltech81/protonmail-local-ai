@@ -1352,6 +1352,48 @@ backup="${maildir}-utf7-backup"
    "Indexer refuses to start — wipe the sqlite-volume", which removes
    only the index and runs `make up`.
 
+### If the folder migration is interrupted
+
+Keep the stack stopped (`make down`). Do not rerun `--apply` or remove
+`/backup/utf7-migration-applied`: that marker records that renaming
+**started**, not that it finished. The Maildir may now contain original,
+`.utf7-migrating-<n>` and decoded directory names together. Keep the
+backup volume and the plan printed before the first rename; folder names
+in that plan are private mailbox metadata.
+
+To finish by hand, work through the printed plan in the script's order:
+deepest parent first, all sources staged before any final names within
+that parent. The temporary number is the source's zero-based position
+within that parent's printed batch; it starts again at zero for each
+parent. Inspect the directories to establish which moves completed.
+Finish staging the remaining original sources into their assigned temporary
+names, then move the staged directories to their planned decoded names.
+Skip moves already completed. Never replace or merge an existing directory:
+when one source's decoded name is another source's original name, names
+alone may not establish which move completed. Compare the directory's sync
+state and files with the backup, or use the restore route below. If a
+parent has already moved, locate its children under that parent's current
+name rather than the old path printed in the plan.
+
+To return to the pre-migration state instead, restore `encoded-folders.tar`
+only after moving the affected live directory trees out of the Maildir into
+a separate recovery volume. Keep that volume private (root mode 700) and
+preserve file permissions. The archive contains only the affected trees,
+not the whole Maildir: leave unaffected trees in place. Inspect the archive's
+root entries and the printed plan to identify **all** their current forms,
+including staged and decoded names and moved parents. Verify none of those
+trees remain at their old, staged or decoded paths before extracting the
+archive at the Maildir root. Do not extract over a partially migrated tree:
+that can leave duplicate folders and messages even when extraction succeeds.
+
+After restoring, compare the restored trees with the archive before removing
+only the `utf7-migration-applied` marker from the backup volume. Run the
+script without `--apply` and review its new plan before trying the migration
+again. Keep both backup and recovery volumes until the migrated folders,
+first sync and rebuilt index have been checked. If you cannot identify the
+interrupted state confidently, leave the stack stopped and retain both
+copies rather than guessing at renames or deleting directories.
+
 The first 1.5.1 sync then finds each folder under its decoded name with
 its sync state. A folder gone from Proton stays, reported as a far-side
 box that "cannot be opened anymore", as before. Keep the backup volume
