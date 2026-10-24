@@ -76,12 +76,13 @@ import io
 import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from typing import cast
 
 import pillow_heif
 import pytesseract
 from PIL import Image, ImageOps
 
-from . import record_image_scale_factor
+from . import record_image_normalization, record_image_scale_factor
 from .image import (
     _MAX_TEXT_CHARS,
     CAP_FRAMES,
@@ -250,8 +251,21 @@ def _fit_to_ceiling(image: Image.Image) -> int:
 
 def _png_ready(frame: Image.Image) -> Image.Image:
     """The frame as ``pytesseract`` can save it: unchanged when Pillow
-    writes its mode as PNG, else converted to RGB (#1400). The frame is
-    already decoded under the pixel cap and the child's memory limit."""
+    writes its mode as PNG. Numeric modes that PNG cannot store are
+    normalized to 8-bit luminance; an already 8-bit integer range stays
+    unchanged. Other unsupported modes convert to RGB (#1400). Each
+    operation is a constant number of passes over the pixels already
+    decoded under the pixel cap and the child's memory limit."""
+    if frame.mode in {"I", "F", "I;16L", "I;16N"}:
+        numeric = frame.convert("I") if frame.mode.startswith("I;16") else frame
+        low, high = cast(tuple[float, float], numeric.getextrema())
+        if high > low and not (frame.mode == "I" and 0 <= low <= high <= 255):
+            scale = 255 / (high - low)
+            prepared = numeric.point(lambda value: (value - low) * scale).convert("L")
+        else:
+            prepared = numeric.convert("L")
+        record_image_normalization()
+        return prepared
     return frame if frame.mode in _PNG_MODES else frame.convert("RGB")
 
 

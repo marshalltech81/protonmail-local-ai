@@ -161,6 +161,7 @@ class TestCapFrames:
         result = _extract(_tiff(1), max_ocr_pages=2)
         assert (result.status, result.text) == (STATUS_SUCCESS, f"{MARKER} text")
         assert result.text_complete is False
+        assert result.ocr_pages_cap == 2
         [line] = [r for r in caplog.records if "image OCR capped" in r.getMessage()]
         assert (line.levelno, line.getMessage()) == (logging.WARNING, message)
         counts = extractors.drain_extractor_counts()
@@ -639,7 +640,7 @@ class TestScaleDownIsVisible:
             content_type="image/jpeg", filename=f"{MARKER}.jpg", payload=_jpeg((150, 150))
         )
         assert (result.status, result.text, result.text_complete) == (STATUS_SUCCESS, MARKER, False)
-        assert result.extractor == "image-ocr@6"
+        assert result.extractor == "image-ocr@8"
         lines = [
             (r.levelno, r.getMessage()) for r in caplog.records if r.name.startswith("indexer")
         ]
@@ -688,7 +689,7 @@ class TestScaleDownIsVisible:
             IMAGE_PIXEL_CEILING_ERROR,
             None,
         )
-        assert result.extractor == "image@6"
+        assert result.extractor == "image@8"
         assert IMAGE_PIXEL_CEILING_ERROR in extractors.PERMANENT_FAILURE_ERRORS
         assert "decompression bomb" not in caplog.text
         assert MARKER not in caplog.text
@@ -755,7 +756,9 @@ class TestModesPillowCannotSaveAsPng:
 
         frame = Image.new(mode, (4, 4))
         prepared = image_child._png_ready(frame)
-        if self._saves_as_png(mode):
+        if mode in {"I", "F", "I;16L", "I;16N"}:
+            assert prepared.mode == "L"
+        elif self._saves_as_png(mode):
             assert prepared is frame
         else:
             assert prepared.mode == "RGB"
@@ -836,7 +839,7 @@ class TestRealChild:
             IMAGE_PIXEL_CEILING_ERROR,
             None,
         )
-        assert result.extractor == "image@6"
+        assert result.extractor == "image@8"
         assert pages == []
         assert MARKER not in caplog.text
         assert "decompression bomb" not in caplog.text
@@ -868,7 +871,7 @@ class TestRealChild:
         pages: list[int] = []
         result = _extract(_tiff(4), max_ocr_pages=2, on_progress=lambda: pages.append(1))
         assert result.status in (STATUS_SUCCESS, STATUS_EMPTY)
-        assert result.extractor == "image-ocr@6"
+        assert result.extractor == "image-ocr@8"
         assert result.text_complete is False
         assert len(pages) == 2
         assert extractors.drain_extractor_counts()["ocr_capped_images"] == 1
@@ -1061,3 +1064,72 @@ def test_image_degradation_report_survives_a_later_child_failure(monkeypatch, ca
     assert extractors.drain_extractor_counts()["extractor_caps"] == 1
     assert "image_pixel_ceiling" in caplog.text
     assert "SYNTHETIC_IMAGE_PRIVATE_1452" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "mode,values",
+    [
+        ("I", [0, 128, 255]),
+        ("I", [0, 32768, 65535]),
+        ("F", [0.0, 0.5, 1.0]),
+        ("F", [-100.0, 0.0, 100.0]),
+        ("I;16L", [0, 32768, 65535]),
+        ("I;16N", [0, 32768, 65535]),
+    ],
+)
+def test_numeric_modes_keep_visible_intensity_steps(mode, values):
+    import struct
+
+    if mode.startswith("I;16"):
+        frame = Image.frombytes(mode, (3, 1), struct.pack("<HHH", *values))
+    else:
+        frame = Image.new(mode, (3, 1))
+        frame.putdata(values)
+    prepared = image_child._png_ready(frame)
+    assert prepared.mode == "L"
+    samples = [prepared.getpixel((x, 0)) for x in range(3)]
+    assert samples[0] == 0 and 120 <= samples[1] <= 135 and samples[2] == 255
+    prepared.save(io.BytesIO(), format="PNG")
+
+
+@requires_tesseract
+@pytest.mark.parametrize("mode", ["I", "F"])
+def test_numeric_tiff_is_read_and_normalization_is_visible(mode, caplog):
+    scan = Image.new("L", (800, 120), 255)
+    ImageDraw.Draw(scan).text((15, 25), "SYNTHETICNUMERIC", fill=0, font_size=48)
+    numeric = scan.convert(mode)
+    numeric = numeric.point(lambda value: value * 256 if mode == "I" else value / 255)
+    buf = io.BytesIO()
+    numeric.save(buf, format="TIFF")
+    with caplog.at_level("INFO"):
+        text, module = image.extract(buf.getvalue())
+    assert "SYNTHETICNUMERIC" in text.replace(" ", "")
+    assert module == "image-ocr"
+    assert "image_normalized_frames=1" in caplog.text
+    assert "SYNTHETICNUMERIC" not in caplog.text
+
+
+def test_unreadable_frame_cap_survives_the_extraction_cache(monkeypatch, tmp_path, caplog):
+    from src.attachment_indexing import record_committed_outcomes
+
+    from tests.test_cap_refresh import _apply, _attachment, _prepare, _setup
+
+    caplog.set_level("INFO")
+    extractors.drain_extractor_counts()
+    calls = stub_child_output(monkeypatch, b"C ocr_frames_unreadable\nT 4\ntext")
+    db = _setup(tmp_path)
+    try:
+        attachment = _attachment(_tiff(3), filename="synthetic.tiff", ctype="image/tiff")
+        first = _prepare(db, attachment, max_ocr_pages=2)
+        _apply(db, first)
+        assert first.caps[0] == 2
+        caplog.clear()
+        extractors.drain_extractor_counts()
+        second = _prepare(db, attachment, max_ocr_pages=2)
+        assert second.cached and len(calls) == 1
+        record_committed_outcomes([second])
+        assert extractors.drain_extractor_counts()["ocr_capped_images"] == 1
+        assert "cached result stopped at 2 frames" in caplog.text
+        assert MARKER not in caplog.text
+    finally:
+        db.close()

@@ -216,11 +216,10 @@ def extract(
         # The frames past the cap are not counted: the child seeks one
         # frame past it rather than walk the whole frame chain (#885).
         note_ocr_capped_image()
+        # Both outcomes stopped at the configured limit. Preserve that
+        # fact on cache hits even when the next frame is unreadable.
+        record_cap_cut(CAP_OCR_PAGES, max_ocr_pages)
         if cap == CAP_FRAMES:
-            # The limit that cut, so raising it re-extracts (#1418). Not
-            # for an unreadable next frame: a higher limit would only try
-            # to read it, and fail the image.
-            record_cap_cut(CAP_OCR_PAGES, max_ocr_pages)
             warn_rate_limited(
                 log,
                 "image OCR capped at %d of at least %d frames",

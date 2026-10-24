@@ -5150,6 +5150,13 @@ counts; find_contact and thread participant discovery remain visible-only.
 The approved split leaves #1090 open; #1644 owns provenance-backed negatives,
 self and effective completeness at the metadata boundary (#1598/#1584).
 
+Before image OCR, numeric grayscale modes I, F, I;16L and I;16N are
+mapped to 8-bit PNG-compatible grayscale. Integer samples already in
+0–255 keep that range; wider and floating ranges are scaled from their
+frame extrema. Child limits and pixel ceilings still apply. The parent
+reports the count of normalized frames without image contents. Image
+extractor version 8 refreshes older cached results once.
+
 Raw 8-bit identity headers (`Message-ID`, `In-Reply-To`, `References`)
 use the existing header-byte decoder before ID trimming and splitting.
 The decoded ID retains the existing length limit; raw bytes still

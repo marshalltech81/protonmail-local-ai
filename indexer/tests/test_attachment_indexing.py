@@ -19,6 +19,7 @@ from src.extractors import (
     AMBIGUOUS_CONTAINER_ERROR,
     CONTAINER_IDENTIFIER,
     ENCRYPTED_OFFICE_ERROR,
+    EXTRACTOR_VERSIONS,
     NO_EXTRACTOR_ERROR,
     OLE2_NOT_OFFICE_ERROR,
     SCANNED_PDF_OCR_DISABLED_ERROR,
@@ -2261,7 +2262,7 @@ def _image_ceiling_case(monkeypatch) -> tuple[bytes, str, str]:
     monkeypatch.setattr(image_child, "CHILD_MAX_IMAGE_PIXELS", 100)
     buf = io.BytesIO()
     Image.new("L", (20, 20), 255).save(buf, format="PNG")
-    return buf.getvalue(), IMAGE_PIXEL_CEILING_ERROR, "image@6"
+    return buf.getvalue(), IMAGE_PIXEL_CEILING_ERROR, f"image@{EXTRACTOR_VERSIONS['image']}"
 
 
 class TestPermanentFailureCacheRows:
@@ -3227,14 +3228,14 @@ class TestOccurrenceTextComplete:
             attachment_id=attachment.content_hash,
             extractor_module=_module(attachment),
             extraction_status=STATUS_UNSUPPORTED,
-            extractor="image@6",
+            extractor=f"image@{EXTRACTOR_VERSIONS['image']}",
             extracted_text=None,
             extraction_error="OCR disabled (INDEXER_OCR_ENABLED=false)",
         )
         plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
         assert plan.cached
         self._apply(db, plan)
-        assert self._row(db, plan) == (0, "image@6")
+        assert self._row(db, plan) == (0, f"image@{EXTRACTOR_VERSIONS['image']}")
 
     def test_a_payload_a_parse_cap_emptied_is_zero(self, tmp_path, monkeypatch):
         db = _setup_db_for_attachment(tmp_path)

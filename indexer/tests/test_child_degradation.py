@@ -84,6 +84,7 @@ class TestChildSends:
                     "result_ocr_pages_skipped",
                     "image_scale_factor",
                     "pdf_ocr_dpi",
+                    "image_normalized_frames",
                     "eml_binary_containers_skipped",
                     "text_surrogates_replaced",
                 }
