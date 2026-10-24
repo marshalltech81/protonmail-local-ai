@@ -1463,6 +1463,19 @@ toml_mode_api_key_in_env_fails() {
 check "TOML mode: an MCP token in .env fails, same as legacy mode" toml_mode_mcp_token_in_env_fails
 check "TOML mode: an API key in .env fails, same as legacy mode" toml_mode_api_key_in_env_fails
 
+endpoint_queries_and_fragments_fail() {
+    local name suffix
+    for name in EMBED_BASE_URL INFERENCE_BASE_URL RERANK_BASE_URL; do
+        for suffix in '?key=SYNTHETIC_ENDPOINT_1449' '#SYNTHETIC_ENDPOINT_1449'; do
+            setup 'RERANK_MODE=cohere' 'RERANK_MODEL=synthetic' "$name=https://provider.invalid/v1$suffix"
+            printf 'placeholder\n' >"$ROOT/.secrets/rerank_api_key.txt"
+            fails_with "$name must not contain a query string or fragment" || return 1
+            if grep -F 'SYNTHETIC_ENDPOINT_1449' "$WORK/output"; then return 1; fi
+        done
+    done
+}
+check "provider endpoint query strings and fragments fail without echoing values" endpoint_queries_and_fragments_fail
+
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
     exit 1

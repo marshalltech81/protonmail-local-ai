@@ -747,6 +747,8 @@ def _check_url_userinfo(path: str, value: str) -> None:
         netloc = urllib.parse.urlsplit(value).netloc
     except ValueError:
         raise ConfigError(f"{path} is not a valid URL.") from None
+    if "?" in value or "#" in value:
+        raise ConfigError(f"{path} must not contain a query string or fragment.")
     if "@" in netloc:
         raise ConfigError(
             f"{path} must not embed credentials (user:pass@host): put the key in the layer's api_key_file."
