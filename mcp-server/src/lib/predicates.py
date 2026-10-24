@@ -841,13 +841,16 @@ def _compile_attachment_text_words(terms: tuple[str, ...], params: list) -> str:
     # for every occurrence. During phase 1, a nonempty manifest may not
     # yet have occurrence rows; that is unknown too.
     complete = (
-        "m.attachments_manifest_complete = 1 "
+        f"{ATTACHMENT_INVENTORY_KNOWN_SQL} "  # nosec B608 -- code-owned SQL constant, no input
         "AND (m.has_attachments = 0 OR EXISTS "
         "(SELECT 1 FROM attachments a WHERE a.claimant_id = m.claimant_id)) "
         "AND NOT EXISTS (SELECT 1 FROM attachments a "
         "WHERE a.claimant_id = m.claimant_id AND a.text_complete IS NOT 1)"
     )
-    return f"CASE WHEN ({match}) THEN 1 WHEN {complete} THEN 0 ELSE NULL END"
+    return (
+        "CASE WHEN m.attachment_rows_current = 1 AND m.has_attachments = 1 "
+        f"AND ({match}) THEN 1 WHEN {complete} THEN 0 ELSE NULL END"
+    )
 
 
 def _compile_header_exists(name: str, params: list) -> str:
@@ -1113,10 +1116,11 @@ _EFFECTIVE_COVERAGE = (
     "m.occurred_at IS NULL AND m.sent_at_status IS NULL",
 )
 _ATTACHMENT_COVERAGE = (
-    "m.attachments_manifest_complete = 1 AND "
+    f"{ATTACHMENT_INVENTORY_KNOWN_SQL} AND "
     "(m.has_attachments = 0 OR a.n > 0) AND "
     "COALESCE(a.incomplete, 0) = 0 AND COALESCE(a.unassessed, 0) = 0",
     "m.attachments_manifest_complete IS NULL OR a.unassessed > 0 OR "
+    "(m.has_attachments IS NOT 0 AND m.attachment_rows_current IS NULL) OR "
     "(m.has_attachments = 1 AND a.n IS NULL)",
 )
 # An eligible occurrence: active and not Spam/Recovered (``_occurrence_not_spam``,
@@ -1264,7 +1268,16 @@ LEAVES: dict[str, LeafKind] = {
             _compile_attachment_text_words,
             Evaluability.UNKNOWN_WHEN_NULL,
             coverage=_ATTACHMENT_COVERAGE,
-            schema={**_WORD_SCHEMA, "attachments": ("claimant_id", "text_complete")},
+            schema={
+                **_WORD_SCHEMA,
+                "messages": (
+                    "claimant_id",
+                    "attachment_rows_current",
+                    "has_attachments",
+                    "attachments_manifest_complete",
+                ),
+                "attachments": ("claimant_id", "text_complete"),
+            },
         ),
         LeafKind(
             "attachment_content_type_is",

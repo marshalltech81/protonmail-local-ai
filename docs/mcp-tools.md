@@ -643,7 +643,7 @@ different filters"), never read against them.
 | `header_contains` | header name, text | `query_messages` and `aggregate_messages` `where` | any occurrence contains the Unicode caseless substring in its decoded value (raw value when decoding failed); a miss is unknown unless header evidence is complete |
 | `subject_contains` | text | `query_messages` and `aggregate_messages` `where` | same as `subject`, including unknown on a miss against an incomplete subject |
 | `attachment_content_type_is` | MIME type | `query_messages` and `aggregate_messages` `where` | exact declared type on a current occurrence; a miss is unknown unless the current inventory is exhaustive |
-| `attachment_text_words` | words | `query_messages` and `aggregate_messages` `where` | every word occurs in the message's attachment chunks (FTS, stemmed; at most 16 words); a miss is unknown unless the manifest and every occurrence's committed text are complete |
+| `attachment_text_words` | words | `query_messages` and `aggregate_messages` `where` | every word occurs in the message's attachment chunks (FTS, stemmed; at most 16 words); retained text qualifies only with current attachment rows; a miss is unknown unless the inventory and every occurrence's committed text are complete |
 | `body_words` | words | `query_messages` `text` and `where` | every word occurs in its indexed body (FTS, stemmed; at most 16 words); unknown when one does not and the indexed body is not complete |
 | `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it has an active copy in one of them ([one copy](#copies-and-one-copy-matching)) |
 | `default_scope` | none | the default scope, when no folder is named | it has a current copy outside Trash, counting only its live (not `T`-flagged) copies when it has any ([Trash](#trash-is-left-out-by-default)) |
@@ -1618,8 +1618,9 @@ through the flat parameters' inferred mode:
   label; `body_words` follows `text` (at least one word, at most 16).
   `attachment_text_words` uses the same tokens and stemming over attachment
   chunks only; words may occur in different attachments of the same
-  message. A stored match decides it true. A miss is false only when
-  the attachment manifest and every occurrence's committed text are
+  message. A stored match decides it true only when attachment rows are
+  current and the message has attachments. A miss is false only when
+  the attachment inventory is known exhaustive and every occurrence's committed text is
   complete; otherwise it is indeterminate, including under negation.
   A complete empty manifest decides a miss false. `subject_contains`
   follows the flat `subject` filter (Unicode caseless substring, a miss

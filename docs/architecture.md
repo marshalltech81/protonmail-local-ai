@@ -1170,7 +1170,7 @@ semantics, `0` a known loss, `NULL` not assessed, with no default:
 | `subject_complete` | the subject was cut (`subject_length`) | phase 1, with the row |
 | `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete` | an `address_*` parser cap fired while that role's headers were read, or an entry yielded no storable address (`address_unparsed`); all three when the header scan stopped (`address_fields`); From also for a repeated `From`, whose later headers are not parsed | phase 1, with the row |
 | `attachments_manifest_complete` | a cap stopped the walk or left an attached email unwalked (`attached_depth`, `attached_fields`, `transport_decode`, `transport_lossy`, `decoded_bytes`, `container_serialize`, `mime_parts`, `delivery_status_parts`) | phase 1, with the row |
-| `body_complete` | text parts were left out of the body (`body_parts`, `html_body`, `mime_parts`) or a retained declared multipart part could not be split (`body_structure`, #1348). Not yet detected, so still `1`: a body text part whose transfer decode lost bytes (#1360) | phase 2c, in the transaction that commits the body chunks |
+| `body_complete` | text parts were left out of the body (`body_parts`, `html_body`, `mime_parts`), a retained declared multipart part could not be split (`body_structure`, #1348), or a retained base64 body part has a known lossy decode (`body_decode`, #1360); a padding-only repair remains lossless | phase 2c, in the transaction that commits the body chunks |
 
 `_write_message_record` writes the phase-1 columns from the parse and
 resets `body_complete` to `NULL` on every write, and
@@ -4255,7 +4255,13 @@ vectors. This marker certifies currentness, not manifest exhaustiveness:
 incomplete manifest, and reports definite matches whose inventory is not known
 exhaustive (`manifest = 1 AND (has_attachments = 0 OR current = 1)`). Unknown
 inventories make identity counts lower bounds. A disabled-extraction pass leaves
-old rows untouched and cannot certify them as current. The aggregation selects
+old rows untouched and cannot certify them as current. `attachment_text_words`
+likewise accepts a stored hit only from current attachment rows on a message
+with attachments. Absence requires a known exhaustive inventory and complete
+committed text for every retained occurrence; pending or disabled extraction
+therefore cannot turn stale text into a definite positive or negative. A complete
+empty manifest still needs no extraction pass to establish absence.
+The aggregation selects
 its clock through the shared predicates, materializes message memberships once,
 and counts attachment identities separately so occurrence fan-out does not
 inflate message totals or repeat predicate evaluation. Sender/domain period

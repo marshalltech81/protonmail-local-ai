@@ -528,8 +528,8 @@ class TestBodyPartDecodeLoss:
         assert result.text_complete is True
         assert result.text == "Subject: s\nFrom: a@example.test\n\nintact words"
 
-    def test_the_default_walk_ignores_body_decode_loss(self):
-        """Walk-only: the top-level body path is unchanged (#1315)."""
+    def test_the_default_walk_counts_known_base64_body_decode_loss(self):
+        """#1360 extends the existing loss accounting to top-level bodies."""
         encoded = base64.encodebytes(b"intact words")
         msg = email.message_from_bytes(
             b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n"
@@ -539,7 +539,7 @@ class TestBodyPartDecodeLoss:
         )
         caps: Counter[str] = Counter()
         parser._extract_body_and_attachments(msg, caps=caps)
-        assert caps == Counter()
+        assert caps == Counter(body_decode=1)
 
     def test_an_inline_attached_email_is_a_nested_section(self, caplog):
         """Finding 5: a ``message/rfc822`` part with no filename and no

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sqlite3
 
 import pytest
 from src.lib.predicates import InvalidFilterError, compile_where, normalize_where
@@ -273,3 +274,78 @@ def test_header_unknown_is_rescued_by_a_true_or_leaf_but_not_by_and(header_db):
     assert (union.total_matches, union.indeterminate) == (4, 0)
     intersection = _query(header_db, header, subject)
     assert (intersection.total_matches, intersection.indeterminate) == (2, 1)
+
+
+@pytest.mark.parametrize("current", [None, 0, 1])
+@pytest.mark.parametrize("manifest", [None, 0, 1])
+@pytest.mark.parametrize("text_complete", [None, 0, 1])
+def test_attachment_inventory_currentness_across_readers(
+    population_db, current, manifest, text_complete
+):
+    from contextlib import closing
+
+    with closing(sqlite3.connect(population_db.path)) as conn, conn:
+        conn.execute("DELETE FROM messages WHERE message_id != 'm0'")
+        conn.execute(
+            "UPDATE messages SET attachment_rows_current=?, attachments_manifest_complete=?",
+            (current, manifest),
+        )
+        conn.execute("UPDATE attachments SET text_complete=?", (text_complete,))
+    for word in ("alpha", "absent"):
+        truth = (
+            True
+            if word == "alpha" and current == 1
+            else (False if current == manifest == text_complete == 1 else None)
+        )
+        for negate in (False, True):
+            item = {"leaf": "attachment_text_words", "value": word, "negate": negate}
+            where = normalize_where(_where(item))
+            match = int(truth is not None and truth != negate)
+            unknown = int(truth is None)
+            page = population_db.query_messages(where=where)
+            threads = population_db.query_threads(where=where)
+            aggregate = population_db.aggregate_messages(group_by="folder", where=where)
+            assert (page.total_matches, page.indeterminate) == (match, unknown)
+            assert (threads.total_matching_messages, threads.indeterminate_messages) == (
+                match,
+                unknown,
+            )
+            assert (aggregate.total_matches, aggregate.indeterminate) == (match, unknown)
+        union = _query(
+            population_db,
+            {
+                "any": [
+                    {"leaf": "attachment_text_words", "value": word},
+                    {"leaf": "subject_contains", "value": "STRASSE"},
+                ]
+            },
+        )
+        assert (union.total_matches, union.indeterminate) == (1, 0)
+    coverage = population_db.get_mailbox_status()["query_capabilities"]["attachment_text_words"]
+    assert coverage["available_messages"] == int(current == manifest == text_complete == 1)
+    if current is None:
+        assert coverage["unassessed_messages"] == 1
+
+
+@pytest.mark.parametrize("current", [None, 0, 1])
+def test_complete_empty_manifest_does_not_need_extraction(population_db, current):
+    from contextlib import closing
+
+    with closing(sqlite3.connect(population_db.path)) as conn, conn:
+        conn.execute("DELETE FROM messages WHERE message_id != 'm6'")
+        conn.execute("UPDATE messages SET attachment_rows_current=?", (current,))
+    page = _query(
+        population_db, {"leaf": "attachment_text_words", "value": "alpha", "negate": True}
+    )
+    assert (page.total_matches, page.indeterminate) == (1, 0)
+
+
+@pytest.mark.parametrize("current", [None, 0, 1])
+def test_no_attachments_never_accepts_retained_text(population_db, current):
+    from contextlib import closing
+
+    with closing(sqlite3.connect(population_db.path)) as conn, conn:
+        conn.execute("DELETE FROM messages WHERE message_id != 'm0'")
+        conn.execute("UPDATE messages SET has_attachments=0, attachment_rows_current=?", (current,))
+    page = _query(population_db, {"leaf": "attachment_text_words", "value": "alpha"})
+    assert (page.total_matches, page.indeterminate) == (0, 0)

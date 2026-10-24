@@ -13,6 +13,7 @@ the adapter's stderr.
 
 import os
 import socket
+import subprocess
 import sys
 import threading
 from collections.abc import Iterator
@@ -381,3 +382,84 @@ class TestStdioSubprocess:
             anyio.run(run)
         assert recorder.seen == []
         assert "ERROR: MCP bearer token file" in stderr_path.read_text()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS extended ACL regression")
+@pytest.mark.parametrize("grant", ["read", "write", "read,write", "readsecurity"])
+@pytest.mark.parametrize("symlink", [False, True])
+def test_mode_600_with_macos_allow_acl_fails_closed(tmp_path, grant, symlink):
+    path = _token_file(tmp_path)
+    # A searchable fixture parent makes the grant reachable independently
+    # of ordinary parent mode bits. Only synthetic fixture paths are touched.
+    subprocess.run(["/bin/chmod", "+a", "everyone allow search", str(tmp_path)], check=True)
+    subprocess.run(["/bin/chmod", "+a", f"everyone allow {grant}", str(path)], check=True)
+    token_path = path
+    if symlink:
+        token_path = tmp_path / "token-link"
+        token_path.symlink_to(path)
+    try:
+        assert token_path.stat().st_mode & 0o777 == 0o600
+        with pytest.raises(adapter.AdapterConfigError, match="ACL") as error:
+            adapter.read_token(token_path)
+        assert _TOKEN not in str(error.value)
+    finally:
+        subprocess.run(["/bin/chmod", "-N", str(path)], check=True)
+        subprocess.run(["/bin/chmod", "-N", str(tmp_path)], check=True)
+
+
+@pytest.mark.parametrize(
+    "failure", [OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError, UnicodeError]
+)
+def test_acl_inspection_failure_is_fixed_and_precedes_token_read(tmp_path, monkeypatch, failure):
+    path = _token_file(tmp_path)
+    monkeypatch.setattr(adapter.sys, "platform", "darwin")
+
+    def fail(*args, **kwargs):
+        if failure is subprocess.TimeoutExpired:
+            raise failure(_MARKER, 5)
+        if failure is subprocess.CalledProcessError:
+            raise failure(1, _MARKER)
+        raise failure(_MARKER)
+
+    monkeypatch.setattr(adapter.subprocess, "run", fail)
+    with pytest.raises(adapter.AdapterConfigError, match="ACL cannot be checked") as error:
+        adapter.read_token(path)
+    assert _MARKER not in str(error.value)
+    assert _TOKEN not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "entry,accepted",
+    [
+        ("", True),
+        (" 0: everyone deny write", True),
+        (" 0: group:everyone inherited allow read", False),
+    ],
+)
+def test_acl_listing_contract_on_every_platform(tmp_path, monkeypatch, entry, accepted):
+    from types import SimpleNamespace
+
+    path = _token_file(tmp_path)
+    monkeypatch.setattr(adapter.sys, "platform", "darwin")
+
+    def listing(command, **kwargs):
+        assert command == ["/bin/ls", "-lde", "--", str(path.resolve(strict=True))]
+        assert kwargs["timeout"] == 5
+        assert kwargs["check"] is True
+        assert kwargs["env"] == {"LC_ALL": "C"}
+        return SimpleNamespace(stdout="-rw-------@ 1 owner group 1 file\n" + entry)
+
+    monkeypatch.setattr(adapter.subprocess, "run", listing)
+    if accepted:
+        assert adapter.read_token(path) == _TOKEN
+    else:
+        with pytest.raises(adapter.AdapterConfigError, match="ACL granting access"):
+            adapter.read_token(path)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS token symlink control")
+def test_symlink_to_private_token_remains_accepted(tmp_path):
+    target = _token_file(tmp_path)
+    link = tmp_path / "token-link"
+    link.symlink_to(target)
+    assert adapter.read_token(link) == _TOKEN

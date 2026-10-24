@@ -132,6 +132,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "decoded_bytes",
     "container_serialize",
     "body_parts",
+    "body_decode",
     "html_body",
     "body_structure",
     "mime_parts",
@@ -163,7 +164,13 @@ PARSE_REPEATS: tuple[str, ...] = ("address_repeated", "from_repeated")
 # names are attributed to the role (From, To, Cc) being read when they
 # fire; ``address_fields`` stops the scan before any role is read and
 # clears all three.
-BODY_LOSS_CAPS: tuple[str, ...] = ("body_parts", "html_body", "body_structure", "mime_parts")
+BODY_LOSS_CAPS: tuple[str, ...] = (
+    "body_parts",
+    "body_decode",
+    "html_body",
+    "body_structure",
+    "mime_parts",
+)
 ATTACHMENT_LOSS_CAPS: tuple[str, ...] = (
     "attached_depth",
     "attached_fields",
@@ -2177,10 +2184,15 @@ def _extract_body_and_attachments(
         # A part whose decode lost bytes (``_decode_lost_bytes``), or in
         # an encoding not decoded here (anything unknown can come back as
         # its transport text), counts as lossy in a body-only walk
-        # (#1311, #1288).
-        if walk is not None and (
-            _decode_lost_bytes(part, payload) or _transfer_decode_unchecked(part)
-        ):
+        # (#1311, #1288). Known base64 defects also invalidate the
+        # default body (#1360); selection below excludes unused alternatives.
+        if (
+            walk is not None
+            or (
+                legacy_text
+                and str(part.get("Content-Transfer-Encoding", "")).strip().lower() == "base64"
+            )
+        ) and (_decode_lost_bytes(part, payload) or _transfer_decode_unchecked(part)):
             decode_lossy.append((len(nodes) - 1, not is_html))
         if (
             walk is not None
@@ -2278,6 +2290,8 @@ def _extract_body_and_attachments(
             caps["body_parts"] += lost
     if walk is None and unsplit:
         caps["body_structure"] += _capped_parts_lost(nodes, unsplit)
+    if walk is None and decode_lossy:
+        caps["body_decode"] += _capped_parts_lost(nodes, decode_lossy)
     if walk is not None:
         # Only a part the body keeps, or would keep had its text decoded
         # whole, changes what is indexed: a loss in an alternative set
