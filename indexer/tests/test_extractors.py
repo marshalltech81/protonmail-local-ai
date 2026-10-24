@@ -5220,8 +5220,8 @@ def _docx_bytes(text: str) -> bytes:
 
 _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
-# Legacy binary Office labels, and the OOXML extractor each falls back to
-# for a ZIP payload (#694, #935).
+# Legacy binary Office labels and the expected extractor for each test's
+# matching OOXML payload; its directory determines the reader (#1416).
 _LEGACY_LABELS = (
     ("application/msword", "a.bin", "docx"),
     ("application/octet-stream", "a.doc", "docx"),
@@ -5254,10 +5254,9 @@ def _count_extractor_calls(monkeypatch) -> list[str]:
 
 class TestLegacyOfficeLabels:
     """#694, #935: ``application/msword`` / ``.doc`` and
-    ``application/vnd.ms-excel`` / ``.xls`` route a genuine legacy binary
-    (an OLE2 compound file) to the ``doc`` / ``xls`` extractor, and a ZIP
-    payload to the OOXML extractor, as a best effort for OOXML files
-    mislabelled as a legacy type; any other payload is recorded
+    ``application/vnd.ms-excel`` / ``.xls`` labels do not determine an
+    OLE2 or ZIP payload's reader: its directory identifies the format
+    (#1416). Other payloads under these labels are recorded
     ``unsupported`` (#1227)."""
 
     def test_zip_payload_with_a_legacy_label_still_reaches_the_ooxml_extractor(self, monkeypatch):
@@ -5279,8 +5278,9 @@ class TestLegacyOfficeLabels:
     ):
         """#1227: neither ZIP nor OLE2 (an RTF file labelled ``.doc``, for
         one) under a legacy label has no reader. It is recorded
-        ``unsupported`` with a fixed reason, not ``failed`` (which the
-        startup sweep retries every week); no extractor runs."""
+        ``unsupported`` with a fixed reason, not ``failed``; no extractor
+        runs. A failed cache row can retry after seven days when the
+        same bytes are processed again, not on a weekly startup sweep."""
         caplog.set_level("INFO")
         calls = _count_extractor_calls(monkeypatch)
         payload = b"SYNTHETIC_PAYLOAD_MARKER not a zip and not OLE2"
