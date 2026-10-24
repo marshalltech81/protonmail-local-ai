@@ -1616,7 +1616,7 @@ class AskRetrieval(_Output):
         "ranked search ran, whether or not it returned threads."
     )
     threads_retrieved: int = Field(
-        description="Threads returned by ranked search, including overfetch past chunkless threads when used."
+        description="Unit: threads returned by ranked search, including overfetch past chunkless threads when used."
     )
     threads_supplied: int = Field(
         description="Distinct threads with at least one passage in the prompt the model "

@@ -161,6 +161,14 @@ def _brief_output(
     """A ``brief_issue`` output as the tool returns it (#1240)."""
     return BriefIssueOutput.model_validate(
         {
+            "retrieval": {
+                "retrieval_ran": True,
+                "threads_retrieved": 1,
+                "threads_supplied": 1,
+                "max_threads": 5,
+                "exhaustive": False,
+                "remainder": "unknown",
+            },
             "experimental": True,
             "status": status,
             "brief": brief,
@@ -196,6 +204,14 @@ def _check_output(
     """A ``check_conclusion`` output as the tool returns it (#1240)."""
     return CheckConclusionOutput.model_validate(
         {
+            "retrieval": {
+                "retrieval_ran": True,
+                "threads_retrieved": 1,
+                "threads_supplied": 1,
+                "max_threads": 5,
+                "exhaustive": False,
+                "remainder": "unknown",
+            },
             "experimental": True,
             "status": status,
             "verdict_summary": verdict,
