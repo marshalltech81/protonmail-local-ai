@@ -36,7 +36,7 @@ from ..lib.sqlite import (
     ThreadResult,
 )
 from ..lib.timings import count, rerank_mode, stage, timed_tool
-from ..lib.validation import clamp_int
+from ..lib.validation import clamp_int, validate_fts_query
 from .outputs import (
     EXTRACTION_DEFERRED_NOTE,
     HEADER_CHAR_LIMIT,
@@ -2939,7 +2939,7 @@ def register_intelligence_tools(
     secret_values = list(secret_values or ())
     prompt_budget = prompt_budget or PromptBudget()
     # A client can repeat a rejected argument as fast as it likes (#1039).
-    rejections = ArgumentRejections(log, ("ask_mailbox", "extract_from_emails"))
+    rejections = ArgumentRejections(log, ("ask_mailbox", "extract_from_emails", "summarize_thread"))
 
     async def llm_complete(system: str, user: str, json_schema: dict | None = None) -> str:
         count("inference_calls", 1)
@@ -3193,6 +3193,7 @@ def register_intelligence_tools(
         participant = blank_to_none(participant)
         # Reject a bad date range before any provider or retrieval work.
         try:
+            validate_fts_query(question)
             bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
             rejections.reject("ask_mailbox", e.field_name)
@@ -3515,6 +3516,7 @@ def register_intelligence_tools(
             # path returns at most one thread so there's no ambiguity
             # at the summarize step.
             if not thread:
+                validate_fts_query(thread_id)
                 # A phrase with no usable tokens can never pass the
                 # subject gate below, so refuse it before any provider
                 # work: an embedder outage must not turn a missing ID
@@ -3704,6 +3706,9 @@ def register_intelligence_tools(
                 prompt_tokens=e.prompt_tokens,
             )
             raise
+        except InvalidFilterError as e:
+            rejections.reject("summarize_thread", e.field_name)
+            raise ToolError(f"Error: {e}") from e
         except ToolError:
             raise
         except Exception as e:
@@ -3841,6 +3846,7 @@ def register_intelligence_tools(
             )
         # Reject a bad date range before any provider or retrieval work.
         try:
+            validate_fts_query(query)
             bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
             rejections.reject("extract_from_emails", e.field_name)

@@ -27,3 +27,14 @@ def clamp_int(value, default: int, minimum: int, maximum: int) -> int:
     if parsed > maximum:
         return maximum
     return parsed
+
+
+MAX_FTS_QUERY_CHARS = 4096
+
+
+def validate_fts_query(query: str | None) -> None:
+    """Reject oversized retrieval queries before tokenization or provider work."""
+    if query is not None and len(query) > MAX_FTS_QUERY_CHARS:
+        from .predicates import InvalidFilterError
+
+        raise InvalidFilterError("query", "query must be at most 4096 characters")

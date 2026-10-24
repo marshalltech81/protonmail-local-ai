@@ -48,7 +48,7 @@ from ..lib.sqlite import (
     ThreadResult,
 )
 from ..lib.timings import count, rerank_mode, stage, timed_tool
-from ..lib.validation import clamp_int
+from ..lib.validation import clamp_int, validate_fts_query
 from .intelligence import (
     _EXTRACT_CUT_TEXTS,
     _LABEL_RE,
@@ -961,6 +961,7 @@ def register_experimental_tools(
         )
         max_threads = clamp_int(max_threads, default=5, minimum=1, maximum=_MAX_ASK_THREADS)
         try:
+            validate_fts_query(topic)
             bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
             rejections.reject("brief_issue", e.field_name)
@@ -1249,6 +1250,7 @@ def register_experimental_tools(
         if len(conclusion) > _MAX_CONCLUSION_CHARS:
             raise ToolError(f"Error: conclusion is longer than {_MAX_CONCLUSION_CHARS} characters")
         try:
+            validate_fts_query(conclusion)
             bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
             rejections.reject("check_conclusion", e.field_name)
