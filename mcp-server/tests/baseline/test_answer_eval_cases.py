@@ -111,7 +111,7 @@ def sent_dates(baseline_db: Database) -> dict[str, str]:
     """Each indexed message's sent date (``YYYY-MM-DD``, UTC), by Message-ID."""
     with closing(baseline_db._connect()) as conn:
         rows = conn.execute("SELECT message_id, sent_at FROM messages").fetchall()
-    return {message_id: sent_at[:10] for message_id, sent_at in rows}
+    return {message_id: sent_at[:10] if sent_at else None for message_id, sent_at in rows}
 
 
 CHRONOLOGY_CASES = [c for c in CASES if c.chronology is not None]
@@ -138,6 +138,8 @@ def test_chronology_labels_resolve(
             assert any(_mentions(folded, v) for v in group), (case.id, p.id, group)
         if p.date_source in ("sent", "relative"):
             assert sent_dates[message] == p.date, (case.id, p.id)
+        elif p.date_source == "unknown":
+            assert sent_dates[message] is None and p.date is None
         else:
             assert sent_dates[message] != p.date, (case.id, p.id)
             day = date.fromisoformat(p.date)
@@ -184,6 +186,7 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
         "(SELECT MIN(rowid) FROM messages)",
         "UPDATE messages SET occurred_at = '2031-01-01T00:00:00+00:00' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
+        "UPDATE messages SET sent_at_status = 'invalid' WHERE sent_at IS NULL",
         # #674: the stored Message-ID is each passage's origin in the judge prompt.
         "UPDATE messages SET message_id = 'privatemarker@private.example' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
@@ -280,7 +283,7 @@ class _OracleAnswerer:
         for i in items:
             i.labels = [x for x in i.labels if x.startswith("E")]
         if self.case.tool == "brief_issue":
-            dated = [i for i in items if i.date is not None]
+            dated = [i for i in items if i.date is not None or i.date_source == "unknown"]
             return json.dumps(
                 {
                     "chronology": [
@@ -388,7 +391,8 @@ class _OracleAnswerer:
             what = " and ".join(group[0] for group in p.values) or p.kind
             items.append(
                 _Item(
-                    f"{p.actor[0]}, {p.kind}: {what}",
+                    f"{p.actor[0]}, {p.kind}: {what}"
+                    + (" (undated)" if p.date_source == "unknown" else ""),
                     [label],
                     p.date,
                     "sent" if p.date_source == "relative" else p.date_source,
@@ -417,7 +421,7 @@ class _OracleAnswerer:
                         i.labels = [before]
         elif mutation == "newest_only":
             for group in chron.conflicts:
-                sides = sorted((chron.position(i) for i in group), key=lambda p: p.date)
+                sides = sorted((chron.position(i) for i in group), key=lambda p: p.date or "9999")
                 older = {label_of(p.source) for p in sides[:-1]}
                 items = [i for i in items if not older & set(i.labels)]
         elif mutation == "sender_dated":
@@ -585,6 +589,8 @@ _MUTATION_CATCHES = {
     ("ask-reading-room-deposit", "newest_only"): "chronology_cited",
     ("brief-reading-room-deposit", "newest_only"): "chronology_cited",
     ("brief-footbridge-closure", "sender_dated"): "chronology_dated",
+    ("ask-undated-alcove", "newest_only"): "chronology_cited",
+    ("brief-undated-alcove", "newest_only"): "chronology_cited",
 }
 
 

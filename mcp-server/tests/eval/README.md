@@ -707,10 +707,6 @@ make eval-answers EVAL_MAX_CALLS=27 EVAL_ARGS="--case ask-hedge-price-as-of-marc
 
 - No paid baseline run has been recorded yet (#1369), so nothing
   here says how well either tool does on them.
-- Undated mail is not a case: the indexer stores a missing `Date:` as
-  unknown (#1080), but the runner's synthetic-index check compares each
-  message's stored sent date with its file's `Date:` header, so it
-  cannot accept an undated corpus message yet (#1370).
 - A delayed delivery (a receiving time different from the sent date)
   is not a case either: the runner's synthetic-index check requires
   every `occurred_at` to be null, as for the outstanding-items cases
@@ -1154,3 +1150,7 @@ Unparsed `brief_issue` and `check_conclusion` replies (`invalid_json` or
 text is one uncited statement the judge can assess, with a fixed placeholder
 when empty; inability to parse an answer is not itself a judge infrastructure
 error. This does not excuse an actual judge error.
+
+The loom-alcove chronology cases (#1370) include an undated preference.
+Golden labels keep it in an unknown-date partition; the judge must reject
+invented dates and treating file/reply order as the newest dated position.

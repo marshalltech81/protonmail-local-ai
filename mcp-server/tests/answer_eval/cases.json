@@ -1294,6 +1294,236 @@
         ],
         "in_force": ["p1"]
       }
+    },
+    {
+      "id": "ask-undated-alcove",
+      "category": "conflicting_sources",
+      "tool": "ask_mailbox",
+      "arguments": {
+        "question": "Trace the loom alcove finish positions, keeping undated mail separate. Which position is the latest dated one?"
+      },
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [
+        [
+          "t129.1"
+        ],
+        [
+          "t129.2"
+        ]
+      ],
+      "expected_facts": [
+        {
+          "id": "f1",
+          "fact": "Iona Vale stated indigo on 2 June 2026; it is the latest dated position.",
+          "sources": [
+            "t129.1"
+          ],
+          "excerpt": "The loom alcove finish will be indigo."
+        },
+        {
+          "id": "f2",
+          "fact": "The amber preference is undated; its time relative to the indigo message is unknown.",
+          "sources": [
+            "t129.2"
+          ],
+          "excerpt": "I prefer amber for the loom alcove finish."
+        }
+      ],
+      "must_not_assert": [
+        "The amber preference was sent on 2 June 2026.",
+        "Amber is the newest or current position because its message appears later."
+      ],
+      "deterministic": {
+        "must_include": [
+          [
+            "indigo"
+          ],
+          [
+            "amber"
+          ],
+          [
+            "undated",
+            "unknown",
+            "no send date"
+          ]
+        ],
+        "must_not_include": []
+      },
+      "criteria": {
+        "factual_correctness": true,
+        "citation_support": true,
+        "completeness": true,
+        "temporal_reasoning": true,
+        "conflict_uncertainty": true,
+        "relevance": true
+      },
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {
+            "id": "p1",
+            "actor": [
+              "Iona Vale",
+              "Iona",
+              "Vale"
+            ],
+            "kind": "statement",
+            "source": "t129.1",
+            "date": "2026-06-02",
+            "date_source": "sent",
+            "values": [
+              [
+                "indigo"
+              ]
+            ],
+            "excerpt": "The loom alcove finish will be indigo."
+          },
+          {
+            "id": "p2",
+            "actor": [
+              "Iona Vale",
+              "Iona",
+              "Vale"
+            ],
+            "kind": "statement",
+            "source": "t129.2",
+            "date": null,
+            "date_source": "unknown",
+            "values": [
+              [
+                "amber"
+              ]
+            ],
+            "excerpt": "I prefer amber for the loom alcove finish."
+          }
+        ],
+        "changes": [],
+        "conflicts": [
+          [
+            "p1",
+            "p2"
+          ]
+        ],
+        "in_force": []
+      }
+    },
+    {
+      "id": "brief-undated-alcove",
+      "category": "conflicting_sources",
+      "tool": "brief_issue",
+      "arguments": {
+        "topic": "Trace the loom alcove finish positions, keeping undated mail separate. Which position is the latest dated one?"
+      },
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [
+        [
+          "t129.1"
+        ],
+        [
+          "t129.2"
+        ]
+      ],
+      "expected_facts": [
+        {
+          "id": "f1",
+          "fact": "Iona Vale stated indigo on 2 June 2026; it is the latest dated position.",
+          "sources": [
+            "t129.1"
+          ],
+          "excerpt": "The loom alcove finish will be indigo."
+        },
+        {
+          "id": "f2",
+          "fact": "The amber preference is undated; its time relative to the indigo message is unknown.",
+          "sources": [
+            "t129.2"
+          ],
+          "excerpt": "I prefer amber for the loom alcove finish."
+        }
+      ],
+      "must_not_assert": [
+        "The amber preference was sent on 2 June 2026.",
+        "Amber is the newest or current position because its message appears later."
+      ],
+      "deterministic": {
+        "must_include": [
+          [
+            "indigo"
+          ],
+          [
+            "amber"
+          ],
+          [
+            "undated",
+            "unknown",
+            "no send date"
+          ]
+        ],
+        "must_not_include": []
+      },
+      "criteria": {
+        "factual_correctness": true,
+        "citation_support": true,
+        "completeness": true,
+        "temporal_reasoning": true,
+        "conflict_uncertainty": true,
+        "relevance": true
+      },
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {
+            "id": "p1",
+            "actor": [
+              "Iona Vale",
+              "Iona",
+              "Vale"
+            ],
+            "kind": "statement",
+            "source": "t129.1",
+            "date": "2026-06-02",
+            "date_source": "sent",
+            "values": [
+              [
+                "indigo"
+              ]
+            ],
+            "excerpt": "The loom alcove finish will be indigo."
+          },
+          {
+            "id": "p2",
+            "actor": [
+              "Iona Vale",
+              "Iona",
+              "Vale"
+            ],
+            "kind": "statement",
+            "source": "t129.2",
+            "date": null,
+            "date_source": "unknown",
+            "values": [
+              [
+                "amber"
+              ]
+            ],
+            "excerpt": "I prefer amber for the loom alcove finish."
+          }
+        ],
+        "changes": [],
+        "conflicts": [
+          [
+            "p1",
+            "p2"
+          ]
+        ],
+        "in_force": []
+      }
     }
   ]
 }
