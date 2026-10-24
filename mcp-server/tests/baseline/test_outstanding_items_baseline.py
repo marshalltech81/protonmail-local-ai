@@ -382,3 +382,15 @@ def test_later_guidance_is_in_another_thread(tools: dict) -> None:
     assert _mid("t123.1") not in [m["message_id"] for m in signage["messages"]]
     (handover,) = _thread_pages(tools, _mid("t123.1"))
     assert [m["message_id"] for m in handover["messages"]] == [_mid("t123.1")]
+
+
+def test_held_out_claim_sources_keep_dispatch_and_guidance_distinct(tools: dict) -> None:
+    assert _listed(_query_all(tools, folder="Sent", text="access mandate")) == []
+    assert _listed(_query_all(tools, folder="Sent", text="skylight undertaking")) == ["t136.1"]
+    (received,) = _thread_pages(tools, _mid("t137.1"))
+    assert [m["message_id"] for m in received["messages"]] == [_mid("t137.1"), _mid("t137.2")]
+    assert _mid("t138.1") not in [m["message_id"] for m in received["messages"]]
+    (guidance,) = _message_pages(tools, _mid("t138.1"))
+    assert "My completed opinion" in guidance["body"]
+    (unrelated,) = _message_pages(tools, _mid("t139.2"))
+    assert "A calendar notice only" in unrelated["body"]

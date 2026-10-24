@@ -1065,3 +1065,22 @@ class TestLoadScenarios:
     def test_duplicate_ids_are_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="s3"):
             self._load(tmp_path, [self._row(), self._row()])
+
+
+@pytest.mark.parametrize("mutation", ["drop", "mislabel"])
+def test_held_out_claim_mutations_fail(mutation):
+    sid = "second-vendor-follow-ups"
+    assert is_held_out(sid)
+    trace = copy.deepcopy(TRACE_BY_SCENARIO[sid])
+    score = score_trace(SCENARIOS[sid], trace)
+    assert score.claim_recall == score.claim_labels_correct == 1.0
+    assert score.confirmed_claims_supported is True
+    claim = trace["answer"]["items"][-1]["claims"]
+    if mutation == "drop":
+        claim.pop()
+        assert score_trace(SCENARIOS[sid], trace).claim_recall < 1.0
+    else:
+        claim[-1]["label"] = "confirmed"
+        bad = score_trace(SCENARIOS[sid], trace)
+        assert bad.claim_labels_correct < 1.0
+        assert bad.confirmed_claims_supported is False
