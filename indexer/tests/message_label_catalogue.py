@@ -20,6 +20,16 @@ LABELS = (
     "message/external-body",
     "message/delivery-status",
 )
+# Additional single-child labels covered by #1455, pinned before that fix.
+EXTRA_LABELS = (
+    "message/partial",
+    "message/news",
+    "message/disposition-notification",
+    "message/global-headers",
+    "message/global-delivery-status",
+    "message/http",
+    "message/x-synthetic",
+)
 ENCODINGS = ("none", "7bit", "8bit", "binary", "base64", "quoted-printable")
 # The transfer encodings of the attached email around a nested part: the
 # parser reads an identity-encoded one in place and decodes the others
