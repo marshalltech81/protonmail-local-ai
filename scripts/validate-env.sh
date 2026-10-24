@@ -72,7 +72,7 @@ require_mode_600() {
     # alone does not remove them. Deny-only ACLs cannot broaden access.
     if [[ "$(uname -s)" == Darwin ]]; then
         local listing
-        listing="$(LC_ALL=C /bin/ls -lde -- "$path")" || {
+        listing="$(LC_ALL=C ls -lde -- "$path")" || {
             printf 'ERROR: unable to check the ACL on %s.\n' "$path" >&2
             exit 1
         }

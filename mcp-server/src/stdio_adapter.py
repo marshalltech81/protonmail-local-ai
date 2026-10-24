@@ -12,8 +12,8 @@ The token is read from a file, by default ``.secrets/mcp_auth_token.txt``
 at the repository root, or the path given with ``--token-file``. It is
 never taken from an argument or an environment variable, which other
 local accounts could read from the process list. The file must be a
-regular file with mode 600 or stricter and hold a non-empty RFC 6750
-token; otherwise the adapter exits with a fixed message before
+regular file with mode 600 or stricter, have no granting macOS ACL,
+and hold a non-empty RFC 6750 token; otherwise the adapter exits with a fixed message before
 connecting.
 
 Nothing the adapter writes to stderr contains the token or a tool's
@@ -68,10 +68,11 @@ def read_token(path: Path) -> str:
         )
     if sys.platform == "darwin":
         # macOS ACL grants override mode bits, even on a mode-600 file.
+        # Follow symlinks as stat() and read_text() do.
         # Match the host preflight: deny-only ACLs cannot broaden access.
         try:
             listing = subprocess.run(  # nosec B603 -- fixed system command, no shell
-                ["/bin/ls", "-lde", "--", str(path)],
+                ["/bin/ls", "-lde", "--", str(path.resolve(strict=True))],
                 capture_output=True,
                 text=True,
                 check=True,

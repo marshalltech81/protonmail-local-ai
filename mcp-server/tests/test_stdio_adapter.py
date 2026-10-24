@@ -386,16 +386,21 @@ class TestStdioSubprocess:
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS extended ACL regression")
 @pytest.mark.parametrize("grant", ["read", "write", "read,write", "readsecurity"])
-def test_mode_600_with_macos_allow_acl_fails_closed(tmp_path, grant):
+@pytest.mark.parametrize("symlink", [False, True])
+def test_mode_600_with_macos_allow_acl_fails_closed(tmp_path, grant, symlink):
     path = _token_file(tmp_path)
     # A searchable fixture parent makes the grant reachable independently
     # of ordinary parent mode bits. Only synthetic fixture paths are touched.
     subprocess.run(["/bin/chmod", "+a", "everyone allow search", str(tmp_path)], check=True)
     subprocess.run(["/bin/chmod", "+a", f"everyone allow {grant}", str(path)], check=True)
+    token_path = path
+    if symlink:
+        token_path = tmp_path / "token-link"
+        token_path.symlink_to(path)
     try:
-        assert path.stat().st_mode & 0o777 == 0o600
+        assert token_path.stat().st_mode & 0o777 == 0o600
         with pytest.raises(adapter.AdapterConfigError, match="ACL") as error:
-            adapter.read_token(path)
+            adapter.read_token(token_path)
         assert _TOKEN not in str(error.value)
     finally:
         subprocess.run(["/bin/chmod", "-N", str(path)], check=True)
@@ -438,7 +443,7 @@ def test_acl_listing_contract_on_every_platform(tmp_path, monkeypatch, entry, ac
     monkeypatch.setattr(adapter.sys, "platform", "darwin")
 
     def listing(command, **kwargs):
-        assert command == ["/bin/ls", "-lde", "--", str(path)]
+        assert command == ["/bin/ls", "-lde", "--", str(path.resolve(strict=True))]
         assert kwargs["timeout"] == 5
         assert kwargs["check"] is True
         assert kwargs["env"] == {"LC_ALL": "C"}
@@ -450,3 +455,11 @@ def test_acl_listing_contract_on_every_platform(tmp_path, monkeypatch, entry, ac
     else:
         with pytest.raises(adapter.AdapterConfigError, match="ACL granting access"):
             adapter.read_token(path)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS token symlink control")
+def test_symlink_to_private_token_remains_accepted(tmp_path):
+    target = _token_file(tmp_path)
+    link = tmp_path / "token-link"
+    link.symlink_to(target)
+    assert adapter.read_token(link) == _TOKEN
