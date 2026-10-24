@@ -361,6 +361,7 @@ CHILD_OCR_PAGES_SKIPPED = "result_ocr_pages_skipped"
 # The factor (2, 4 or 8) by which the image child scaled down a JPEG over
 # its pixel ceiling before OCR (``record_image_scale_factor``, #1401).
 CHILD_IMAGE_SCALE_FACTOR = "image_scale_factor"
+CHILD_IMAGE_NORMALIZED_FRAMES = "image_normalized_frames"
 # The cap name the parent reports a scale-down under.
 IMAGE_PIXEL_CEILING_CAP = "image_pixel_ceiling"
 # The DPI the PDF child rendered pages for OCR at when the page-pixel
@@ -384,6 +385,7 @@ CHILD_DEGRADATION_KEYS = frozenset(
         CHILD_TEXT_LOST,
         CHILD_OCR_PAGES_SKIPPED,
         CHILD_IMAGE_SCALE_FACTOR,
+        CHILD_IMAGE_NORMALIZED_FRAMES,
         CHILD_PDF_OCR_DPI,
     }
 )
@@ -398,6 +400,7 @@ def reset_attempt() -> None:
     _attempt.text_lost = False
     _attempt.ocr_pages_skipped = None
     _attempt.image_scale_factor = None
+    _attempt.image_normalized_frames = 0
     _attempt.pdf_ocr_dpi = None
     _attempt.child_caps = []
     _attempt.recovered_errors = []
@@ -453,6 +456,11 @@ def record_image_scale_factor(factor: int) -> None:
     _attempt.image_scale_factor = factor
 
 
+def record_image_normalization() -> None:
+    """Count numeric frames mapped to PNG-compatible grayscale in the child."""
+    _attempt.image_normalized_frames = getattr(_attempt, "image_normalized_frames", 0) + 1
+
+
 def child_degradation() -> dict[str, int]:
     """In the child, after the extraction: the degradation it recorded,
     by ``CHILD_DEGRADATION_KEYS`` key, zero counts left out."""
@@ -462,6 +470,9 @@ def child_degradation() -> dict[str, int]:
     skipped = getattr(_attempt, "ocr_pages_skipped", None)
     if skipped is not None:
         state[CHILD_OCR_PAGES_SKIPPED] = skipped
+    normalized = getattr(_attempt, "image_normalized_frames", 0)
+    if normalized:
+        state[CHILD_IMAGE_NORMALIZED_FRAMES] = normalized
     factor = getattr(_attempt, "image_scale_factor", None)
     if factor is not None:
         state[CHILD_IMAGE_SCALE_FACTOR] = factor
@@ -793,7 +804,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
     "eml": 4,  # Retain malformed encoded-word headers instead of failing (#1516).
-    "image": 6,
+    "image": 7,  # Numeric grayscale modes retain intensity steps before OCR.
     "pdf": 7,
     "ppt": 2,
     "pptx": 3,
