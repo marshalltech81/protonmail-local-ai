@@ -2,6 +2,7 @@
 
 from collections import Counter
 
+import pytest
 from src import parser
 from src.chunker import chunk_message
 from src.extractors import extractor_child
@@ -79,6 +80,7 @@ def test_eml_decode_replacements_cross_to_parent(caplog):
     assert MARKER not in caplog.text
 
 
+@pytest.mark.serial
 def test_surrogate_replacement_makes_one_bounded_pass(monkeypatch, caplog):
     import time
 
