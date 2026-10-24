@@ -336,7 +336,7 @@ async def _run_cli(argv: list[str], stdin: str, cwd: str, env: dict[str, str]) -
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(proc.wait(), KILL_WAIT_SECS)
+                await asyncio.wait_for(proc.communicate(), KILL_WAIT_SECS)
     return stdout
 
 

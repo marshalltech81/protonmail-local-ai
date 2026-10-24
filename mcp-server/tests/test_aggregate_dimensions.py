@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sqlite3
+from contextlib import closing
 
 import pytest
 from src.lib.predicates import InvalidFilterError, Where, normalize_where
@@ -56,7 +57,7 @@ def build(tmp_path, *, current=1, manifest=1, subject_complete=1, types=()):
 
 def test_recipient_positive_deduplicated_and_coverage(tmp_path):
     db = build(tmp_path)
-    with sqlite3.connect(db.path) as conn:
+    with closing(sqlite3.connect(db.path)) as conn, conn:
         conn.execute("UPDATE messages SET cc_addresses_complete = NULL, sender_ambiguous = 1")
     page = db.aggregate_messages(group_by="recipient_domain")
     assert [(r.value, r.messages) for r in page.groups] == [("one.test", 1), ("two.test", 1)]
@@ -106,7 +107,7 @@ def test_unknown_memberships_include_filter_indeterminate(tmp_path):
 
 def test_known_no_attachments_excludes_retained_rows(tmp_path):
     db = build(tmp_path, current=0, types=["application/pdf"])
-    with sqlite3.connect(db.path) as conn:
+    with closing(sqlite3.connect(db.path)) as conn, conn:
         conn.execute("UPDATE messages SET has_attachments = 0")
     page = db.aggregate_messages(group_by="attachment_content_type")
     assert page.groups[0].value is None
@@ -174,7 +175,7 @@ def test_mime_clipping_does_not_merge_groups_or_enter_cursor(tmp_path, monkeypat
 )
 def test_recipient_domain_uses_predicate_text_semantics(tmp_path, address, domain):
     db = build(tmp_path)
-    with sqlite3.connect(db.path) as conn:
+    with closing(sqlite3.connect(db.path)) as conn, conn:
         conn.execute("DELETE FROM message_participants WHERE role IN ('to','cc')")
         conn.execute(
             "INSERT INTO message_participants (claimant_id, role, address) "
@@ -200,7 +201,7 @@ def test_new_leaf_cap_and_schema_dependencies(tmp_path):
         db.get_mailbox_status()["query_capabilities"]["attachment_content_type_is"]["status"]
         == "supported"
     )
-    with sqlite3.connect(db.path) as conn:
+    with closing(sqlite3.connect(db.path)) as conn, conn:
         conn.execute("ALTER TABLE messages DROP COLUMN attachment_rows_current")
     entry = db.get_mailbox_status()["query_capabilities"]["attachment_content_type_is"]
     assert entry["status"] == "unavailable" and entry["available_messages"] is None
@@ -229,7 +230,7 @@ def test_new_dimensions_expand_identities_only_after_page(tmp_path, monkeypatch,
     visits = []
     for size in (40, 400):
         db = _wide_inventory(tmp_path, size)
-        with sqlite3.connect(db.path) as conn:
+        with closing(sqlite3.connect(db.path)) as conn, conn:
             conn.execute("UPDATE message_participants SET role = 'to' WHERE role = 'from'")
             if dimension == "attachment_content_type":
                 for i, (oid,) in enumerate(
@@ -307,7 +308,7 @@ def test_new_dimensions_expand_identities_only_after_page(tmp_path, monkeypatch,
 
 def test_recipient_without_derivable_domain_does_not_add_null_membership(tmp_path):
     db = build(tmp_path)
-    with sqlite3.connect(db.path) as conn:
+    with closing(sqlite3.connect(db.path)) as conn, conn:
         conn.execute(
             "INSERT INTO message_participants (claimant_id, role, address) "
             "SELECT claimant_id, 'to', ? FROM messages",
@@ -319,7 +320,7 @@ def test_recipient_without_derivable_domain_does_not_add_null_membership(tmp_pat
 
 def test_mime_decoder_substitution_is_disclosed(tmp_path):
     db = build(tmp_path, types=["application/pdf"])
-    with sqlite3.connect(db.path) as conn:
+    with closing(sqlite3.connect(db.path)) as conn, conn:
         conn.execute(
             "UPDATE attachments SET content_type = CAST(? AS TEXT)", (b"application/\xff",)
         )

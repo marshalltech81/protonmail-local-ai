@@ -1,6 +1,7 @@
 """Positive-only observed Bcc semantics; absence never proves no recipient."""
 
 import sqlite3
+from contextlib import closing
 
 import pytest
 from src.lib.predicates import Where, normalize_where
@@ -115,7 +116,7 @@ def test_population_readers_share_new_unknowns_and_coverage(bcc_db):
 
 
 def test_unassessed_capture_differs_from_assessed_no_proof(bcc_db):
-    with sqlite3.connect(bcc_db.path) as conn:
+    with closing(sqlite3.connect(bcc_db.path)) as conn, conn:
         conn.execute("UPDATE messages SET bcc_addresses_complete=NULL WHERE message_id='received'")
     entry = bcc_db.get_mailbox_status()["query_capabilities"]["address_is"]
     assert entry["unassessed_messages"] == 1
@@ -126,7 +127,7 @@ def test_unassessed_capture_differs_from_assessed_no_proof(bcc_db):
 
 
 def test_any_role_does_not_report_ambiguous_from_as_a_matching_witness(bcc_db):
-    with sqlite3.connect(bcc_db.path) as conn:
+    with closing(sqlite3.connect(bcc_db.path)) as conn, conn:
         conn.execute(
             "UPDATE messages SET sender_ambiguous=1, subject='only-this' WHERE message_id='sent'"
         )
@@ -142,7 +143,7 @@ def test_bcc_projection_is_bounded_and_disclosed(bcc_db, fake_server, caplog):
 
     from src.tools.retrieval import register_retrieval_tools
 
-    with sqlite3.connect(bcc_db.path) as conn:
+    with closing(sqlite3.connect(bcc_db.path)) as conn, conn:
         conn.executemany(
             "INSERT INTO message_participants VALUES (?,'bcc',?,NULL)",
             [(claimant_of("sent"), f"a{i:03}@example.test") for i in range(25)],

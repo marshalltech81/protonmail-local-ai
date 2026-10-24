@@ -53,13 +53,13 @@ def _open_fixture_db(tmp_path):
     """An empty schema to insert into through ``conn``; close ``conn``
     before querying through ``db``."""
     path = tmp_path / "fixture.db"
-    conn = sqlite3.connect(str(path))
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
-    _build_schema(conn)
-    db = Database(str(path))
-    yield conn, db
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        db = Database(str(path))
+        yield conn, db
 
 
 def _handlers(fake_server, db):
@@ -197,7 +197,7 @@ class TestGetThread:
         assert second.structured_content["next_offset"] is None
 
     def test_newest_order_reverses_claimant_id_ties(self, fake_server, messages_db):
-        with sqlite3.connect(messages_db.path) as conn:
+        with closing(sqlite3.connect(messages_db.path)) as conn, conn:
             conn.execute("UPDATE messages SET sent_at = '2024-01-10T09:00:00+00:00'")
         handler = _handlers(fake_server, messages_db)["get_thread"]
         oldest = asyncio.run(handler(thread_id="t1")).structured_content["messages"]

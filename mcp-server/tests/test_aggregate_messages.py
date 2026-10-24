@@ -16,6 +16,7 @@ import calendar
 import json
 import logging
 import sqlite3
+from contextlib import closing
 
 import pytest
 from fastmcp import FastMCP
@@ -293,7 +294,7 @@ class TestGroups:
         assert by == {"unclassified": 5, "counsel": 2, "vendor": 1, None: 3}
 
     def test_the_domain_follows_the_last_at_sign_as_domain_is_does(self, agg_db):
-        with sqlite3.connect(agg_db.path) as conn:
+        with closing(sqlite3.connect(agg_db.path)) as conn, conn:
             conn.execute(
                 "UPDATE message_participants SET address = 'gus@x@five.test' "
                 "WHERE address = 'gus@five.test'"
@@ -304,7 +305,7 @@ class TestGroups:
         assert agg_db.query_messages(where=where).total_matches == 1
 
     def test_a_sender_with_no_person_entity_has_no_class(self, agg_db):
-        with sqlite3.connect(agg_db.path) as conn:
+        with closing(sqlite3.connect(agg_db.path)) as conn, conn:
             conn.execute("DELETE FROM entities WHERE entity_id = 'person:gus@five.test'")
         groups, _ = _all_groups(agg_db, "authority_class")
         assert {g.value: g.messages for g in groups}[None] == 4

@@ -2,6 +2,7 @@
 
 import hashlib
 import sqlite3
+from contextlib import closing
 
 import pytest
 from src.lib.predicates import InvalidFilterError, Where, normalize_where
@@ -100,7 +101,7 @@ def test_direction_projection_and_partial_leaf_knowledge(direction_db):
 def test_unconfigured_identity_and_direction_groups(direction_db):
     page = direction_db.aggregate_messages(group_by="direction")
     assert {g.value: g.messages for g in page.groups} == {"inbound": 1, "outbound": 3, None: 7}
-    with sqlite3.connect(direction_db.path) as conn:
+    with closing(sqlite3.connect(direction_db.path)) as conn, conn:
         identity(conn, [])
     assert all(m.direction == "unknown" for m in direction_db.query_messages(limit=100).messages)
     page = direction_db.query_messages(direction="inbound")
@@ -110,7 +111,7 @@ def test_unconfigured_identity_and_direction_groups(direction_db):
 def test_every_message_cursor_binds_identity_inside_read_snapshot(direction_db):
     cursor = direction_db.query_messages(limit=1).next_cursor
     assert cursor
-    with sqlite3.connect(direction_db.path) as conn:
+    with closing(sqlite3.connect(direction_db.path)) as conn, conn:
         identity(conn, ["external@example.test"])
     with pytest.raises(InvalidFilterError, match="cursor"):
         direction_db.query_messages(limit=1, cursor=cursor)
@@ -144,7 +145,7 @@ def test_stale_identity_cursor_rejected_before_population_scan(direction_db, mon
 
     cursor = read().next_cursor
     assert cursor
-    with sqlite3.connect(direction_db.path) as conn:
+    with closing(sqlite3.connect(direction_db.path)) as conn, conn:
         identity(conn, ["external@example.test"])
     seen = []
     connect = direction_db._connect
@@ -163,7 +164,7 @@ def test_stale_identity_cursor_rejected_before_population_scan(direction_db, mon
 def test_direction_free_population_cursors_survive_identity_replacement(direction_db):
     thread_cursor = direction_db.query_threads(limit=1).next_cursor
     group_cursor = direction_db.aggregate_messages(group_by="sender_address", limit=1).next_cursor
-    with sqlite3.connect(direction_db.path) as conn:
+    with closing(sqlite3.connect(direction_db.path)) as conn, conn:
         identity(conn, ["external@example.test"])
     assert direction_db.query_threads(limit=1, cursor=thread_cursor).offset == 1
     assert (
@@ -188,7 +189,7 @@ def test_direction_status_is_count_only_and_conservative(direction_db):
         "sent_conflicts": 0,
     }
     assert "@" not in json.dumps(status["operator_identity"])
-    with sqlite3.connect(direction_db.path) as conn:
+    with closing(sqlite3.connect(direction_db.path)) as conn, conn:
         identity(conn, [])
     coverage = direction_db.get_mailbox_status()["query_capabilities"]["direction_is"]
     assert coverage["status"] == "unavailable"
@@ -295,7 +296,7 @@ def test_direction_reader_work_tracks_only_relevant_participant_fanout(tmp_path,
                 value += 1
                 return 0
 
-            with connect(path) as c:
+            with closing(connect(path)) as c, c:
                 c.set_progress_handler(tick, 1)
                 c.execute("SELECT " + sql + " FROM messages m").fetchall()
             return value
