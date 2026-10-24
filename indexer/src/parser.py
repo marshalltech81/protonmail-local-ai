@@ -887,7 +887,10 @@ def parse_email_bytes(
         caps["in_reply_to_length"] += 1
         in_reply_to = ""
     references: list[str] = []
-    for ref in (_clean_id(r) for r in msg.get("References", "").split() if r.strip()):
+    reference_header = msg.get("References", "")
+    if isinstance(reference_header, email.header.Header):
+        reference_header = _decode_header(reference_header)
+    for ref in (_clean_id(r) for r in reference_header.split() if r.strip()):
         if len(ref) <= MESSAGE_ID_MAX_CHARS:
             references.append(ref)
         else:
@@ -2490,7 +2493,9 @@ def _read_top_headers(
     return rows, complete
 
 
-def _clean_id(value: str) -> str:
+def _clean_id(value: str | email.header.Header) -> str:
+    if isinstance(value, email.header.Header):
+        value = _decode_header(value)
     return value.strip().strip("<>").strip()
 
 
