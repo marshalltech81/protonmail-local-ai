@@ -3327,6 +3327,79 @@ THREADS.update(
 )
 
 
+# Held-out per-claim variants (#1344): different wording, structure and placement.
+THREADS.update(
+    {
+        135: [
+            Msg(
+                "INBOX",
+                ny(2026, 8, 1),
+                TOBIAS,
+                JORDAN,
+                "Osprey Cove access mandate",
+                "The access mandate is ready in your drafts. You must dispatch it to Emery; I have not dispatched it.",
+            )
+        ],
+        136: [
+            Msg(
+                "Sent",
+                ny(2026, 8, 3),
+                JORDAN,
+                SASHA,
+                "Osprey Cove skylight undertaking",
+                "Please advise on the OC-136 skylight undertaking within twelve days of receiving this message.",
+            )
+        ],
+        137: [
+            Msg(
+                "Sent",
+                ny(2026, 8, 4),
+                JORDAN,
+                EMERY,
+                "Osprey Cove ramp measurements",
+                "Here are the ramp measurements for your compliance opinion.",
+            ),
+            Msg(
+                "INBOX",
+                ny(2026, 8, 6),
+                EMERY,
+                JORDAN,
+                "Re: Osprey Cove ramp measurements",
+                "Your ramp measurements reached me. I will provide the compliance opinion separately.",
+            ),
+        ],
+        138: [
+            Msg(
+                "INBOX",
+                ny(2026, 8, 19),
+                SASHA,
+                JORDAN,
+                "Osprey Cove access opinion completed",
+                "Emery handed me the ramp review. My completed opinion: the measured ramp meets the access requirement.",
+            )
+        ],
+        139: [
+            Msg(
+                "Sent",
+                ny(2026, 8, 7),
+                JORDAN,
+                EMERY,
+                "Osprey Cove annex licence review",
+                "Please review the annex licence terms and advise whether the extension is permitted.",
+            ),
+            Msg(
+                "INBOX",
+                ny(2026, 8, 8),
+                EMERY,
+                JORDAN,
+                "Re: Osprey Cove annex licence review",
+                "A calendar notice only: our reception desk moves upstairs next week.",
+            ),
+        ],
+    }
+)
+
+
 # Undated position: MIME/file order must never become a send date (#1370).
 THREADS[129] = [
     Msg(
