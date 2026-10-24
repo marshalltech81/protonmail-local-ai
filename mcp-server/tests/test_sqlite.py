@@ -6075,3 +6075,52 @@ class TestNameCompleteness:
         out = asyncio.run(fake_server.tools["query_messages"](**filters))
         assert out.structured_content["indeterminate"] == count
         assert f"could neither accept nor reject: {causes} in neither" in out.content[0].text
+
+
+@pytest.mark.parametrize("query", [[1.0, 0.0, 0.0, 0.0], [0.01, 0.0, 0.0, 0.0]])
+def test_thread_vector_lane_refills_after_zero_placeholders(seeded_db, query):
+    import math
+
+    import sqlite_vec
+
+    with closing(sqlite3.connect(seeded_db.path)) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.execute(
+            "UPDATE threads_vec SET embedding = ?", (sqlite_vec.serialize_float32([-0.0] * 4),)
+        )
+        conn.execute(
+            "UPDATE threads_vec SET embedding = ? WHERE thread_id = 't-beta'",
+            (sqlite_vec.serialize_float32([0.1, math.sqrt(0.99), 0.0, 0.0]),),
+        )
+        conn.commit()
+    rows = seeded_db._vector_search(query, limit=1)
+    assert rows is not None
+    assert [row.thread_id for row in rows] == ["t-beta"]
+
+
+def test_zero_vector_refill_keeps_the_native_candidate_bound(seeded_db, monkeypatch, caplog):
+    import sqlite_vec
+    from src.lib import sqlite as module
+
+    with closing(sqlite3.connect(seeded_db.path)) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.execute(
+            "UPDATE threads_vec SET embedding = ?", (sqlite_vec.serialize_float32([0.0] * 4),)
+        )
+        conn.commit()
+    monkeypatch.setattr(module, "_SQLITE_VEC_MAX_K", 2)
+    fetch = seeded_db._fetchall
+    sizes = []
+
+    def counted(sql, params=()):
+        sizes.append(params[1])
+        return fetch(sql, params)
+
+    monkeypatch.setattr(seeded_db, "_fetchall", counted)
+    caplog.set_level("INFO")
+    assert seeded_db._vector_search([1.0, 0.0, 0.0, 0.0], limit=1) == []
+    assert sizes == [1, 2]
+    assert "zero thread vectors" in caplog.text
+    assert "candidate cap=2" in caplog.text

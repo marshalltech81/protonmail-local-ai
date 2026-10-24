@@ -4334,25 +4334,43 @@ class Database:
         ``_chunk_vector_search``); ``[]`` means no matches."""
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
-            rows = self._fetchall(
-                """
-                SELECT
-                    t.thread_id, t.subject, t.participants, t.senders, t.folder,
-                    t.date_first, t.date_last, t.message_ids,
-                    t.snippet, t.has_attachments, t.body_text, t.display_subject,
-                    v.distance AS score
-                FROM threads_vec v
-                JOIN threads t ON v.thread_id = t.thread_id
-                WHERE v.embedding MATCH ?
-                  AND k = ?
-                ORDER BY v.distance
-            """,
-                (serialized, min(limit, _SQLITE_VEC_MAX_K)),
-            )
-            # Tag the dense thread lane so RRF fusion can record it as
-            # ``thread_vec`` provenance on the surviving thread row.
+            requested = min(limit, _SQLITE_VEC_MAX_K)
+            candidate_k = requested
+            while True:
+                rows = self._fetchall(
+                    """
+                    SELECT
+                        t.thread_id, t.subject, t.participants, t.senders, t.folder,
+                        t.date_first, t.date_last, t.message_ids,
+                        t.snippet, t.has_attachments, t.body_text, t.display_subject,
+                        v.distance AS score,
+                        vec_distance_l2(v.embedding, zeroblob(length(v.embedding))) > 0 AS nonzero
+                    FROM threads_vec v
+                    JOIN threads t ON v.thread_id = t.thread_id
+                    WHERE v.embedding MATCH ? AND k = ?
+                    ORDER BY v.distance
+                    """,
+                    (serialized, candidate_k),
+                )
+                eligible = [r for r in rows if r["nonzero"] and _has_valid_distance(r)]
+                if (
+                    len(eligible) >= requested
+                    or len(rows) < candidate_k
+                    or candidate_k == _SQLITE_VEC_MAX_K
+                ):
+                    break
+                # Refilling is bounded by the same native candidate cap. Test
+                # norms only for returned candidates, never in an index-wide scan.
+                candidate_k = min(candidate_k * 2, _SQLITE_VEC_MAX_K)
+            zeros = sum(r["nonzero"] == 0 for r in rows)
+            if zeros:
+                log.info("Skipped %d zero thread vectors from %d candidates", zeros, len(rows))
+                timings.count("excluded_zero_thread_vectors", zeros)
+            if len(eligible) < requested and len(rows) == candidate_k == _SQLITE_VEC_MAX_K:
+                log.info("Thread vector refill reached candidate cap=%d", candidate_k)
+                timings.count("degraded_thread_vec_cap", 1)
             return _tag_lane_ranks(
-                [self._row_to_result(r) for r in rows if _has_valid_distance(r)], "thread_vec"
+                [self._row_to_result(r) for r in eligible[:requested]], "thread_vec"
             )
         except (sqlite3.Error, ValueError) as e:
             # Same catch surface as ``_chunk_vector_search`` —
