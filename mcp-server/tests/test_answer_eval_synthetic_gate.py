@@ -97,7 +97,7 @@ def _build_index(tmp_path: Path, claimants: list[str]) -> _Db:
         conn.executescript(
             """
             CREATE TABLE messages (claimant_id TEXT PRIMARY KEY, message_id TEXT,
-                sent_at TEXT, occurred_at TEXT, subject TEXT);
+                sent_at TEXT, sent_at_status TEXT, occurred_at TEXT, subject TEXT);
             CREATE TABLE message_chunks (claimant_id TEXT, text TEXT);
             CREATE TABLE message_participants (claimant_id TEXT, role TEXT, address TEXT,
                 name TEXT);
@@ -112,7 +112,7 @@ def _build_index(tmp_path: Path, claimants: list[str]) -> _Db:
             claimants, _MESSAGES, strict=True
         ):
             conn.execute(
-                "INSERT INTO messages VALUES (?, ?, ?, NULL, ?)",
+                "INSERT INTO messages VALUES (?, ?, ?, 'parsed', NULL, ?)",
                 (claimant, message_id, sent_at, subject),
             )
             conn.execute("INSERT INTO message_chunks VALUES (?, ?)", (claimant, body))
@@ -197,14 +197,14 @@ def _tamper_cases() -> list[tuple[str, Callable[[list[str]], str]]]:
             lambda c: (
                 "INSERT INTO messages VALUES ('other@dup.example#"
                 + c[1].split("#")[1]
-                + "', 'other@dup.example', '2026-08-04T08:00:00+00:00', NULL, 'Kickoff plan')"
+                + "', 'other@dup.example', '2026-08-04T08:00:00+00:00', 'parsed', NULL, 'Kickoff plan')"
             ),
         ),
         (
             "extra_claimant_suffix_matching_no_sibling",
             lambda c: (
                 f"INSERT INTO messages VALUES ('{REPLY_ID}#{'0' * 16}', '{REPLY_ID}', "
-                "'2026-08-04T08:00:00+00:00', NULL, 'Re: Kickoff plan')"
+                "'2026-08-04T08:00:00+00:00', 'parsed', NULL, 'Re: Kickoff plan')"
             ),
         ),
         # The root's hash under the reply's Message-ID: a trusted suffix,
@@ -212,6 +212,16 @@ def _tamper_cases() -> list[tuple[str, Callable[[list[str]], str]]]:
         ("suffix_matching_no_sibling", lambda c: swap(c[2], f"{REPLY_ID}#{c[0].split('#')[1]}")),
         ("short_suffix", lambda c: swap(c[2], c[2][:-1])),
         ("long_suffix", lambda c: swap(c[2], c[2] + "0")),
+        (
+            "missing_sent_at_status",
+            lambda c: f"UPDATE messages SET sent_at_status = NULL WHERE claimant_id = '{c[2]}'",
+        ),
+        (
+            "wrong_sent_at_status",
+            lambda c: (
+                f"UPDATE messages SET sent_at_status = 'invalid' WHERE claimant_id = '{c[2]}'"
+            ),
+        ),
         # Metadata checked against the claimant's own entry, not its sibling's.
         (
             "sibling_sent_at",
