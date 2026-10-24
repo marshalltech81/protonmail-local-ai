@@ -11,7 +11,9 @@ encoding, container and genuine contents, at the top level and inside an
 attached email. ``tests/fixtures/message_label_pin.json`` is every
 shape's parse before #1416's change (``outcome`` over the whole catalogue with
 the parser of ``bd31e37``): the genuine shapes must still match it, and
-the container shapes show what changed."""
+the container shapes show what changed. The extra single-child labels
+of #1455 are pinned on its unmodified base; the four original labels
+retain their pre-#1416 pin."""
 
 from __future__ import annotations
 
@@ -40,7 +42,7 @@ def _sha(data: bytes) -> str:
 @pytest.mark.parametrize("nested", [False, True], ids=["top", "nested"])
 @pytest.mark.parametrize("name", sorted(catalogue.GENUINE))
 @pytest.mark.parametrize("encoding", catalogue.ENCODINGS)
-@pytest.mark.parametrize("label", catalogue.LABELS)
+@pytest.mark.parametrize("label", catalogue.LABELS + catalogue.EXTRA_LABELS)
 def test_genuine_contents_parse_as_pinned(tmp_path, label, encoding, name, nested):
     data = catalogue.message_bytes(label, encoding, catalogue.GENUINE[name], nested=nested)
     got = catalogue.outcome(tmp_path / "m.eml", data)
@@ -50,7 +52,7 @@ def test_genuine_contents_parse_as_pinned(tmp_path, label, encoding, name, neste
 @pytest.mark.parametrize("nested", [False, True], ids=["top", "nested"])
 @pytest.mark.parametrize("name", sorted(catalogue.CONTAINERS))
 @pytest.mark.parametrize("encoding", catalogue.ENCODINGS)
-@pytest.mark.parametrize("label", catalogue.LABELS)
+@pytest.mark.parametrize("label", catalogue.LABELS + catalogue.EXTRA_LABELS)
 def test_a_container_is_kept_as_sent_and_not_walked(tmp_path, label, encoding, name, nested):
     """The attachment's payload is the container's bytes exactly (so
     identification sees its signature), complete, and nothing inside it

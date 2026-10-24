@@ -301,8 +301,15 @@ class TestUrlCredentialsAreNotHashed:
     _PASSWORD_MARKER = "synthetic-url-pass"  # pragma: allowlist secret
 
     @pytest.mark.parametrize("name", ["INFERENCE_BASE_URL", "EMBED_BASE_URL", "RERANK_BASE_URL"])
-    def test_userinfo_is_replaced_by_a_marker(self, monkeypatch, caplog, name):
-        url = "https://user:{pw}@gateway.example/v1"
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://user:{pw}@gateway.example/v1",
+            "https://gateway.example/v1?key={pw}",
+            "https://gateway.example/v1#{pw}",
+        ],
+    )
+    def test_userinfo_is_replaced_by_a_marker(self, monkeypatch, caplog, name, url):
         monkeypatch.setenv(name, url.format(pw=self._PASSWORD_MARKER + "-one"))
         first = _log(caplog)["config"]
         assert main_mod._identity_settings()[name] == "<url-with-credentials>"

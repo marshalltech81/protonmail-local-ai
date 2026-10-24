@@ -2763,3 +2763,8 @@ Attached-email extraction leaves OLE2 and ZIP container attachments out
 of its rendered text, even when labelled as nested mail. The eml
 extractor version refreshes cached text once; dead-lettered messages
 keep their old chunks until `make requeue-dead`.
+
+Identity-encoded OLE2 and ZIP attachments under any `message/*` subtype
+are preserved as container bytes. To revisit occurrences indexed before
+this handling, run `make reparse`; dead-lettered jobs first need
+`make requeue-dead`. The genuine attached-email path is unchanged.

@@ -298,6 +298,8 @@ class TestUrlCredentialsAreNotHashed:
         [
             "https://user:{pw}@gateway.example/v1",
             "http://{pw}@gateway.example:8443/v1",
+            "https://gateway.example/v1?key={pw}",
+            "https://gateway.example/v1#{pw}",
         ],
     )
     def test_userinfo_is_replaced_by_a_marker(self, monkeypatch, caplog, url):
