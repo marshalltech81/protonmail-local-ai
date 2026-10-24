@@ -133,6 +133,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "container_serialize",
     "body_parts",
     "html_body",
+    "body_structure",
     "mime_parts",
     "delivery_status_parts",
     "address_header",
@@ -162,7 +163,7 @@ PARSE_REPEATS: tuple[str, ...] = ("address_repeated", "from_repeated")
 # names are attributed to the role (From, To, Cc) being read when they
 # fire; ``address_fields`` stops the scan before any role is read and
 # clears all three.
-BODY_LOSS_CAPS: tuple[str, ...] = ("body_parts", "html_body", "mime_parts")
+BODY_LOSS_CAPS: tuple[str, ...] = ("body_parts", "html_body", "body_structure", "mime_parts")
 ATTACHMENT_LOSS_CAPS: tuple[str, ...] = (
     "attached_depth",
     "attached_fields",
@@ -2076,14 +2077,10 @@ def _extract_body_and_attachments(
                 inline_roots.add(id(inner))
                 frames.append((iter((inner,)), False, decode_depth, index, False, None))
                 continue
-            if (
-                walk is not None
-                and part.get_content_maintype() == "multipart"
-                and not part.is_multipart()
-            ):
+            if part.get_content_maintype() == "multipart" and not part.is_multipart():
                 # A declared container the parse left as one undecomposed
-                # payload: nothing in it is read (#1311; the default
-                # walk's same gap is #1348). Counted below like a lossy
+                # payload: nothing in it is read (#1311, #1348).
+                # Counted below like a lossy
                 # text part, only if the body could keep it.
                 unsplit.append((len(nodes) - 1, True))
         elif is_attachment and parent >= 0 and nodes[parent].related:
@@ -2279,6 +2276,8 @@ def _extract_body_and_attachments(
         lost = _capped_parts_lost(nodes, capped)
         if lost:
             caps["body_parts"] += lost
+    if walk is None and unsplit:
+        caps["body_structure"] += _capped_parts_lost(nodes, unsplit)
     if walk is not None:
         # Only a part the body keeps, or would keep had its text decoded
         # whole, changes what is indexed: a loss in an alternative set
