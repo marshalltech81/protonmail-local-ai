@@ -794,6 +794,7 @@ def register_retrieval_tools(server, db):
     rejections = ArgumentRejections(
         log,
         (
+            "get_thread",
             "get_message",
             "list_threads",
             "query_messages",
@@ -803,6 +804,7 @@ def register_retrieval_tools(server, db):
             "get_attachment",
             "find_contact",
         ),
+        fields=(*ArgumentRejections.FIELDS, "order"),
     )
     local_only_note = (
         "mcp-server has no live Bridge access. "
@@ -819,9 +821,10 @@ def register_retrieval_tools(server, db):
         include_attachments_metadata: bool = True,
         offset: int = 0,
         limit: int = _DEFAULT_THREAD_PAGE,
+        order: str = "oldest",
     ) -> CallToolResult:
         """
-        Get one thread's messages by thread ID, oldest first — each
+        Get one thread's messages by thread ID, oldest first by default — each
         message's own headers and body; no attachment content.
 
         For a potentially exhaustive review, disclose the target thread
@@ -864,11 +867,12 @@ def register_retrieval_tools(server, db):
         Args:
             thread_id: The opaque thread ID returned by search_emails
             include_attachments_metadata: Include the local attachment availability note
-            offset: Messages to skip, oldest first (default 0)
+            offset: Messages to skip in the selected order (default 0)
+            order: oldest (default) or newest; keep the same order when paging
             limit: Messages per page (default 10, clamped to [1, 50])
 
         Returns:
-            Thread metadata, then the page's messages oldest first: its own
+            Thread metadata, then the page's messages in the selected order: its own
             Message-ID, subject, From / To / Cc / observed Bcc, send date and (when
             known) delivery date (UTC), folder, reply headers,
             attachment flag, and indexed body
@@ -883,17 +887,21 @@ def register_retrieval_tools(server, db):
                 "include_attachments_metadata": include_attachments_metadata,
                 "offset": offset,
                 "limit": limit,
+                "order": order,
             },
         )
         limit = clamp_int(limit, default=_DEFAULT_THREAD_PAGE, minimum=1, maximum=_MAX_THREAD_PAGE)
         offset = clamp_int(offset, default=0, minimum=0, maximum=1_000_000)
         try:
+            if order not in ("oldest", "newest"):
+                raise InvalidFilterError("order", "order must be oldest or newest")
             page = await asyncio.to_thread(
                 db.get_thread_page,
                 thread_id,
                 offset=offset,
                 limit=limit,
                 body_char_limit=_THREAD_BODY_CHAR_LIMIT,
+                order=order,
             )
             # Fixed-text causes: the ID is the caller's and stays out of the log.
             if isinstance(page, ReapedSource):
@@ -906,7 +914,7 @@ def register_retrieval_tools(server, db):
             timings.count("messages", len(messages))
 
             if messages:
-                count = f"{total} (showing {offset + 1}-{offset + len(messages)}, oldest first)"
+                count = f"{total} (showing {offset + 1}-{offset + len(messages)}, {order} first)"
             else:
                 count = str(total)
             lines = [
@@ -922,7 +930,7 @@ def register_retrieval_tools(server, db):
             ]
             if messages:
                 lines.append(
-                    "Messages, oldest first (bodies are the indexed text after "
+                    f"Messages, {order} first (bodies are the indexed text after "
                     "quoted-reply stripping; attachment text is not included; "
                     "long headers are shortened):"
                 )
@@ -1010,6 +1018,9 @@ def register_retrieval_tools(server, db):
 
         except ToolError:
             raise
+        except InvalidFilterError as e:
+            rejections.reject("get_thread", e.field_name)
+            raise ToolError(f"Error: {e}") from e
         except Exception as e:
             log.error("get_thread error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e

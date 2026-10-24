@@ -1181,7 +1181,10 @@ or `get_evidence` on the thread
 ## Group 2 — Retrieval
 
 ### `get_thread`
-Read a thread by ID as its messages, oldest first. Each message shows
+Read a thread by ID as its messages, oldest first by default. Set
+`order="newest"` with `limit=1` to read the latest indexed message first.
+Keep the same order when following offsets; ties use claimant ID in the
+same direction. Each message shows
 its own headers (Message-ID, claimant ID, subject, From / To / Cc / observed Bcc, send date and,
 when known, delivery date (`occurred_at`) in UTC,
 folder, In-Reply-To, attachment flag, [read state](#read-state);
@@ -1236,7 +1239,8 @@ found` ([Reaped sources](#reaped-sources)).
 |---|---|---|---|
 | `thread_id` | string | required | Thread ID from search results |
 | `include_attachments_metadata` | bool | `true` | Show the local attachment-availability note when the indexed thread has attachments |
-| `offset` | int | `0` | Messages to skip, oldest first |
+| `offset` | int | `0` | Messages to skip in the selected order |
+| `order` | string | `oldest` | `oldest` or `newest`; offsets follow this order |
 | `limit` | int | `10` | Messages per page; clamped to `[1, 50]` |
 
 ### `get_message`
