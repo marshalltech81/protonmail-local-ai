@@ -253,6 +253,14 @@ def _extract_output(records, cited=(), *, notice=None, threads=("t05",)) -> Extr
     """An ``extract_from_emails`` output as the tool returns it (#1137)."""
     return ExtractFromEmailsOutput.model_validate(
         {
+            "retrieval": {
+                "retrieval_ran": True,
+                "threads_retrieved": len(threads),
+                "threads_supplied": len(threads),
+                "limit": 20,
+                "exhaustive": False,
+                "remainder": "unknown",
+            },
             "records": list(records),
             "citations": [_citation(label, ref) for label, ref in cited],
             "fields": [],

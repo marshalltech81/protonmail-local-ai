@@ -1240,3 +1240,11 @@ class TestTelemetryOff:
             check=True,
         )
         assert result.stdout.split() == ["off", "off"]
+
+
+@pytest.mark.parametrize("name", ["EMBED_BASE_URL", "INFERENCE_BASE_URL", "RERANK_BASE_URL"])
+@pytest.mark.parametrize("suffix", ["?key=SYNTHETIC_ENDPOINT_1449", "#SYNTHETIC_ENDPOINT_1449"])
+def test_provider_endpoint_rejects_query_and_fragment(name, suffix, caplog):
+    with pytest.raises(ValueError, match="query string or fragment") as exc:
+        _reject_url_userinfo(name, "https://provider.invalid/v1" + suffix)
+    assert "SYNTHETIC_ENDPOINT_1449" not in str(exc.value) + caplog.text

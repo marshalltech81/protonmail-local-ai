@@ -560,6 +560,17 @@ REFUSALS += [
     ),
 ]
 
+# Reject endpoint credentials in every configuration mode, including disabled layers.
+REFUSALS += [
+    (
+        f"{layer} endpoint {suffix}",
+        [(f"global.{layer}.base_url", f"https://provider.invalid/v1{suffix}{MARKER}")],
+        f"global.{layer}.base_url must not contain a query string or fragment.",
+    )
+    for layer in ("embedding", "inference", "reranking")
+    for suffix in ("?key=", "#")
+]
+
 # Refused by mbsync/proton-settings.sh, whose fixed text the refusal carries.
 PROTON_REFUSALS: list[tuple[str, str, Any, str]] = [
     (

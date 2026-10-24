@@ -107,12 +107,12 @@ _IDENTITY_EXCLUDED = {
 
 
 def _hashable_url(value: str) -> str:
-    """``value`` unless it carries userinfo, so the hash cannot be used to
+    """``value`` unless it carries userinfo, a query or a fragment, so the hash cannot be used to
     test guesses at a password offline (Codex round 6 on #893). Never
     raises: a value ``urlsplit`` rejects is a fixed marker too."""
     try:
         parts = urllib.parse.urlsplit(value)
-        if parts.username is not None or parts.password is not None:
+        if parts.username is not None or parts.password is not None or "?" in value or "#" in value:
             return "<url-with-credentials>"
     except ValueError:
         return "<unparseable-url>"
@@ -414,6 +414,8 @@ def _reject_url_userinfo(name: str, value: str) -> str:
             f"{name} must not embed credentials (user:pass@host). Put the "
             "API key in the matching .secrets/<layer>_api_key.txt file instead."
         )
+    if "?" in value or "#" in value:
+        raise ValueError(f"{name} must not contain a query string or fragment")
     return value
 
 

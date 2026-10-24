@@ -301,7 +301,7 @@ class TestSearchAttachmentsSenderTool:
             _handler(fake_server, fake_embed, carrier_db)(sender="nobody@nowhere.test")
         )
         # With a sender the count is stated, 0 included (#1204).
-        assert out.content[0].text == "No attachments found.\nindeterminate: 0"
+        assert out.content[0].text.startswith("No attachments found.\nindeterminate: 0\n")
         assert out.structured_content["results"] == []
 
     def test_sender_value_never_reaches_logs(self, fake_server, fake_embed, carrier_db, caplog):
@@ -361,3 +361,55 @@ class TestSearchAttachmentsSenderTool:
         result = asyncio.run(run())
         assert not result.isError
         assert {r["attachment_id"] for r in result.structuredContent["results"]} == expected
+
+
+@pytest.mark.parametrize(
+    "sender,mode,addresses",
+    [
+        ("vendor@example.com", "exact", ["vendor@example.com"]),
+        ("Person", "substring", ["vendor@example.com"]),
+        ("no-such-sender", "substring", []),
+    ],
+)
+def test_sender_match_disclosure_is_scoped_to_returned_occurrences(
+    carrier_db, fake_server, fake_embed, sender, mode, addresses
+):
+    register_search_tools(fake_server, carrier_db, fake_embed)
+    out = asyncio.run(fake_server.tools["search_attachments"](sender=sender))
+    match = out.structured_content["sender_match"]
+    assert match == dict(
+        mode=mode,
+        scope="returned_occurrences",
+        distinct_addresses=len(addresses),
+        addresses=addresses,
+    )
+    assert "among returned attachment occurrences" in out.content[0].text
+
+
+def test_sender_disclosure_caps_addresses_and_only_counts_the_returned_page(
+    tmp_path, fake_server, fake_embed, caplog
+):
+    conn, path = _open_built_db_conn(tmp_path, "sender-disclosure.db")
+    try:
+        for i in range(20):
+            _add(
+                conn,
+                f"shared{i}",
+                f"t-shared{i}",
+                f"2024-04-{i + 1:02}T00:00:00+00:00",
+                f"Shared Person <p{i:02}@example.test>",
+            )
+    finally:
+        conn.close()
+    register_search_tools(fake_server, Database(str(path)), fake_embed)
+    handler = fake_server.tools["search_attachments"]
+    with caplog.at_level("INFO"):
+        page = asyncio.run(handler(sender="Shared", limit=1))
+        all_rows = asyncio.run(handler(sender="Shared", limit=50))
+        unfiltered = asyncio.run(handler(limit=1))
+    assert page.structured_content["sender_match"]["distinct_addresses"] == 1
+    assert page.structured_content["sender_match"]["addresses"] == ["p19@example.test"]
+    full = all_rows.structured_content["sender_match"]
+    assert full["distinct_addresses"] == 20 and len(full["addresses"]) == 10
+    assert unfiltered.structured_content["sender_match"] is None
+    assert "p19@example.test" not in caplog.text

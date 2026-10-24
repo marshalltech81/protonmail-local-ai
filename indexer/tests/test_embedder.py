@@ -1304,3 +1304,22 @@ def test_is_rate_limit_error_is_429_only():
     assert is_rate_limit_error(_api_status_error(429)) is True
     assert is_rate_limit_error(_api_status_error(408)) is False
     assert is_rate_limit_error(ValueError("x")) is False
+
+
+@pytest.mark.parametrize("suffix", ["?key=SYNTHETIC_ENDPOINT_1449", "#SYNTHETIC_ENDPOINT_1449"])
+def test_endpoint_query_and_fragment_are_rejected_before_client_construction(
+    suffix, monkeypatch, caplog
+):
+    import openai
+
+    calls = []
+
+    def forbidden(**kwargs):
+        calls.append(1)
+        raise AssertionError("client must not be built")
+
+    monkeypatch.setattr(openai, "OpenAI", forbidden)
+    with pytest.raises(ValueError, match="query string or fragment") as exc:
+        _make_embedder(base_url="https://provider.invalid/v1" + suffix)
+    assert calls == []
+    assert "SYNTHETIC_ENDPOINT_1449" not in str(exc.value) + caplog.text
