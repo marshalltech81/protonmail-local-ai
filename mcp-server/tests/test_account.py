@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import subprocess  # nosec B404 - runs bash on the repository's own script
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -200,7 +201,7 @@ class TestVerify:
 
     def test_the_check_reads_through_the_read_only_connection(self, tmp_path):
         db = _db(tmp_path, [(TEST_ACCOUNT_SCOPE, "proton-bridge")])
-        with db._connect() as conn:
+        with closing(db._connect()) as conn, conn:
             assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
         before = (tmp_path / "mail.db").read_bytes()
         verify_account(db, ACCOUNT)

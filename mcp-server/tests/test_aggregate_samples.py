@@ -1,6 +1,7 @@
 """Synthetic chronological group evidence (#1169), never a series classifier."""
 
 import sqlite3
+from contextlib import closing
 
 import pytest
 from src.lib.predicates import InvalidFilterError
@@ -132,7 +133,7 @@ def test_actual_page_cap_rejects_without_starving_groups(cap_db):
 
 
 def test_subject_projection_is_bounded_and_completeness_is_separate(sample_db):
-    with sqlite3.connect(sample_db.path) as conn:
+    with closing(sqlite3.connect(sample_db.path)) as conn, conn:
         conn.execute("UPDATE messages SET subject = ?, subject_complete = NULL", ("x" * 1_000_000,))
     row = sample_db.aggregate_messages(group_by="folder", sample_per_group=1).groups[0].samples[0]
     assert row.subject == "x" * 500 and row.subject_clipped
@@ -140,7 +141,7 @@ def test_subject_projection_is_bounded_and_completeness_is_separate(sample_db):
 
 
 def test_dates_ties_and_period_cells(sample_db):
-    with sqlite3.connect(sample_db.path) as conn:
+    with closing(sqlite3.connect(sample_db.path)) as conn, conn:
         conn.execute(
             "UPDATE messages SET sent_at = NULL, sent_at_status = 'missing', occurred_at = NULL WHERE message_id = 'series10'"
         )
@@ -184,7 +185,7 @@ def test_tool_samples_and_private_metadata_stay_out_of_logs(sample_db, caplog):
     from tests.test_structured_output import _call
 
     marker = "SYNTHETIC_PRIVATE_SAMPLE_SUBJECT"
-    with sqlite3.connect(sample_db.path) as conn:
+    with closing(sqlite3.connect(sample_db.path)) as conn, conn:
         conn.execute("UPDATE messages SET subject = ?", (marker,))
     with caplog.at_level("INFO"):
         output = _call(
@@ -202,7 +203,7 @@ def test_sample_subject_clipping_is_visible_without_content(sample_db, caplog):
     from tests.test_structured_output import _call
 
     marker = "SYNTHETIC_CLIPPED_SUBJECT"
-    with sqlite3.connect(sample_db.path) as conn:
+    with closing(sqlite3.connect(sample_db.path)) as conn, conn:
         conn.execute("UPDATE messages SET subject = ?", (marker * 1000,))
     with caplog.at_level("INFO"):
         result = _call(
@@ -300,7 +301,7 @@ def test_empty_and_unknown_only_groups_have_no_samples(sample_db):
         ).samples_returned
         == 0
     )
-    with sqlite3.connect(sample_db.path) as conn:
+    with closing(sqlite3.connect(sample_db.path)) as conn, conn:
         conn.execute("UPDATE messages SET subject_complete = NULL")
     page = sample_db.aggregate_messages(
         group_by="sender_address", subject="not present", sample_per_group=10

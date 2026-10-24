@@ -61,6 +61,12 @@ markers = [
     "baseline: retrieval regression baseline over the synthetic mailbox (skipped unless BASELINE_DIR is set; run with `make baseline`)",
 ]
 
+# Unclosed files, sockets and SQLite connections must fail the suite (#1427).
+filterwarnings = [
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
+
 [tool.mypy]
 python_version = "3.14"
 warn_unused_configs = true

@@ -1,5 +1,7 @@
 """Synthetic raw-header normalization contract approved for #825."""
 
+from contextlib import closing
+
 import pytest
 from src.lib.list_metadata import normalize_fields
 
@@ -67,43 +69,54 @@ def test_sql_budget_guards_precede_python_and_materialize_once(tmp_path):
     from tests.test_sqlite import _open_built_db_conn
 
     conn, _ = _open_built_db_conn(tmp_path, "metadata-guards.db")
-    calls = []
+    try:
+        calls = []
 
-    def normalize(name, encoded):
-        fields = json.loads(encoded)
-        calls.append(sum(len(f) for f in fields))
-        return json.dumps(normalize_fields(name, fields))
+        def normalize(name, encoded):
+            fields = json.loads(encoded)
+            calls.append(sum(len(f) for f in fields))
+            return json.dumps(normalize_fields(name, fields))
 
-    conn.create_function("mcp_list_metadata", 2, normalize)
-    cases = {"valid": "List <a.example>", "large": "\x00" + "x" * 40000, "nul": "<a.example>\x00"}
-    for mid, raw in cases.items():
-        _insert_message(
-            conn, message_id=mid, thread_id=mid, sent_at=None, completeness={"headers_complete": 1}
+        conn.create_function("mcp_list_metadata", 2, normalize)
+        cases = {
+            "valid": "List <a.example>",
+            "large": "\x00" + "x" * 40000,
+            "nul": "<a.example>\x00",
+        }
+        for mid, raw in cases.items():
+            _insert_message(
+                conn,
+                message_id=mid,
+                thread_id=mid,
+                sent_at=None,
+                completeness={"headers_complete": 1},
+            )
+            conn.execute(
+                "INSERT INTO message_headers VALUES (?, 0, 'List-Id', 'list-id', ?, NULL)",
+                (claimant_of(mid), raw),
+            )
+        result = metadata_result_sql("list_id")
+        rows = conn.execute(
+            with_metadata(f"SELECT m.message_id, {result}, {result} FROM messages m", ("list_id",))
+        ).fetchall()
+        assert len(calls) == 1
+        assert calls == [len(cases["valid"])]
+        # A known-bad nonmaterialized shape repeats the UDF for the same
+        # selected field; prove the one-call gate detects that regression.
+        calls.clear()
+        bad = with_metadata(f"SELECT {result}, {result} FROM messages m", ("list_id",)).replace(
+            " AS MATERIALIZED", " AS NOT MATERIALIZED"
         )
-        conn.execute(
-            "INSERT INTO message_headers VALUES (?, 0, 'List-Id', 'list-id', ?, NULL)",
-            (claimant_of(mid), raw),
-        )
-    result = metadata_result_sql("list_id")
-    rows = conn.execute(
-        with_metadata(f"SELECT m.message_id, {result}, {result} FROM messages m", ("list_id",))
-    ).fetchall()
-    assert len(calls) == 1
-    assert calls == [len(cases["valid"])]
-    # A known-bad nonmaterialized shape repeats the UDF for the same
-    # selected field; prove the one-call gate detects that regression.
-    calls.clear()
-    bad = with_metadata(f"SELECT {result}, {result} FROM messages m", ("list_id",)).replace(
-        " AS MATERIALIZED", " AS NOT MATERIALIZED"
-    )
-    conn.execute(bad).fetchall()
-    assert len(calls) > 1
-    values = {r[0]: json.loads(r[1]) for r in rows}
-    assert values == {
-        "valid": ["a.example", "valid"],
-        "large": [None, "budget_exceeded"],
-        "nul": [None, "malformed"],
-    }
+        conn.execute(bad).fetchall()
+        assert len(calls) > 1
+        values = {r[0]: json.loads(r[1]) for r in rows}
+        assert values == {
+            "valid": ["a.example", "valid"],
+            "large": [None, "budget_exceeded"],
+            "nul": [None, "malformed"],
+        }
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("name", ["list-id", "precedence"])
@@ -261,30 +274,33 @@ def test_joint_message_budget_covers_both_headers_before_any_normalization(tmp_p
     from tests.test_sqlite import _open_built_db_conn
 
     conn, _ = _open_built_db_conn(tmp_path, "joint-budget.db")
-    _insert_message(
-        conn, message_id="m", thread_id="t", sent_at=None, completeness={"headers_complete": 1}
-    )
-    calls = []
-    conn.create_function("mcp_list_metadata", 2, lambda *args: calls.append(args))
-    # Each header family alone fits; the one per-message combined budget does not.
-    for i in range(65):
-        name = "list-id" if i < 32 else "precedence"
-        conn.execute(
-            "INSERT INTO message_headers VALUES (?, ?, ?, ?, ?, NULL)",
-            (claimant_of("m"), i, name, name, "x" * FIELD_BYTES),
+    try:
+        _insert_message(
+            conn, message_id="m", thread_id="t", sent_at=None, completeness={"headers_complete": 1}
         )
-    rows = conn.execute(
-        with_metadata(
-            "SELECT "
-            + metadata_result_sql("list_id")
-            + ", "
-            + metadata_result_sql("precedence")
-            + " FROM messages m",
-            ("list_id", "precedence"),
-        )
-    ).fetchall()
-    assert not calls
-    assert all(json.loads(value) == [None, "budget_exceeded"] for value in rows[0])
+        calls = []
+        conn.create_function("mcp_list_metadata", 2, lambda *args: calls.append(args))
+        # Each header family alone fits; the one per-message combined budget does not.
+        for i in range(65):
+            name = "list-id" if i < 32 else "precedence"
+            conn.execute(
+                "INSERT INTO message_headers VALUES (?, ?, ?, ?, ?, NULL)",
+                (claimant_of("m"), i, name, name, "x" * FIELD_BYTES),
+            )
+        rows = conn.execute(
+            with_metadata(
+                "SELECT "
+                + metadata_result_sql("list_id")
+                + ", "
+                + metadata_result_sql("precedence")
+                + " FROM messages m",
+                ("list_id", "precedence"),
+            )
+        ).fetchall()
+        assert not calls
+        assert all(json.loads(value) == [None, "budget_exceeded"] for value in rows[0])
+    finally:
+        conn.close()
 
 
 @pytest.mark.serial
@@ -398,7 +414,7 @@ def test_degradation_is_count_only_on_the_call_timing_line(metadata_db, fake_ser
 
     from src.tools.retrieval import register_retrieval_tools
 
-    with sqlite3.connect(metadata_db.path) as conn:
+    with closing(sqlite3.connect(metadata_db.path)) as conn, conn:
         conn.execute(
             "UPDATE message_headers SET raw_value='SYNTHETIC_PRIVATE_MARKER' WHERE name_normalized='list-id'"
         )

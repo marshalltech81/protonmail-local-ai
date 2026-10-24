@@ -5,6 +5,7 @@ import collections
 import inspect
 import logging
 import sqlite3
+from contextlib import closing
 from types import SimpleNamespace
 
 import pytest
@@ -129,24 +130,24 @@ def test_unknown_units_duplicate_claimants_and_full_thread_metadata(thread_db):
 )
 @pytest.mark.parametrize("state", [None, 0])
 def test_incomplete_whole_thread_participants_are_unknown(thread_db, flag, state):
-    with sqlite3.connect(thread_db.path) as conn:
+    with closing(sqlite3.connect(thread_db.path)) as conn, conn:
         conn.execute(f"UPDATE messages SET {flag}=? WHERE message_id=?", (state, "trash"))
     assert thread_db.query_threads(subject="match").threads[0].participant_count is None
 
 
 def test_attachment_presence_uses_complete_whole_thread_evidence(thread_db):
-    with sqlite3.connect(thread_db.path) as conn:
+    with closing(sqlite3.connect(thread_db.path)) as conn, conn:
         conn.execute(
             "UPDATE messages SET attachments_manifest_complete=NULL WHERE message_id='trash'"
         )
     assert thread_db.query_threads(subject="match").threads[0].has_attachments is None
-    with sqlite3.connect(thread_db.path) as conn:
+    with closing(sqlite3.connect(thread_db.path)) as conn, conn:
         conn.execute("UPDATE messages SET has_attachments=1 WHERE message_id='trash'")
     assert thread_db.query_threads(subject="match").threads[0].has_attachments is True
 
 
 def test_undated_matches_do_not_display_indexing_time(thread_db):
-    with sqlite3.connect(thread_db.path) as conn:
+    with closing(sqlite3.connect(thread_db.path)) as conn, conn:
         conn.execute(
             "UPDATE messages SET occurred_at=NULL, sent_at_status='missing' WHERE thread_id='a'"
         )
@@ -156,7 +157,7 @@ def test_undated_matches_do_not_display_indexing_time(thread_db):
 
 
 def test_and_leaves_cannot_be_satisfied_by_different_messages(thread_db):
-    with sqlite3.connect(thread_db.path) as conn:
+    with closing(sqlite3.connect(thread_db.path)) as conn, conn:
         conn.execute("UPDATE messages SET subject_complete=1 WHERE message_id='unknown'")
     assert thread_db.query_messages(subject="match").total_matches == 2
     assert thread_db.query_messages(text="absentword").total_matches == 1
@@ -278,7 +279,7 @@ def test_one_statement_and_one_evaluation_per_claimant_at_two_sizes(tmp_path, mo
 def test_newest_match_changes_do_not_repeat_returned_threads(agg_db):
     first = agg_db.query_threads(limit=1)
     tid = first.threads[0].thread_id
-    with sqlite3.connect(agg_db.path) as conn:
+    with closing(sqlite3.connect(agg_db.path)) as conn, conn:
         conn.execute(
             "UPDATE messages SET occurred_at=? WHERE thread_id=?",
             ("1900-01-01T00:00:00+00:00", tid),
@@ -358,7 +359,7 @@ def test_all_leaves_and_negations_match_message_populations(
 
 
 def test_counts_rows_and_metadata_share_one_snapshot(thread_db, monkeypatch):
-    with sqlite3.connect(thread_db.path) as conn:
+    with closing(sqlite3.connect(thread_db.path)) as conn, conn:
         conn.execute("PRAGMA journal_mode=WAL")
     original = predicates.LEAVES["subject_contains"]
     connect = thread_db._connect
@@ -368,7 +369,7 @@ def test_counts_rows_and_metadata_share_one_snapshot(thread_db, monkeypatch):
         nonlocal changed
         if not changed:
             changed = True
-            with sqlite3.connect(thread_db.path) as writer:
+            with closing(sqlite3.connect(thread_db.path)) as writer, writer:
                 writer.execute(
                     "UPDATE messages SET subject='other', from_addresses_complete=NULL WHERE message_id='same'"
                 )

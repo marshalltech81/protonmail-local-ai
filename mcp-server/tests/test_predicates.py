@@ -333,7 +333,7 @@ class TestPinnedFilterSemantics:
 
 
 def test_fixture_thread_row_records_each_messages_primary_author(mixed_db):
-    with sqlite3.connect(mixed_db.path) as conn:
+    with closing(sqlite3.connect(mixed_db.path)) as conn, conn:
         senders = json.loads(
             conn.execute("SELECT senders FROM threads WHERE thread_id = 't-mix'").fetchone()[0]
         )
