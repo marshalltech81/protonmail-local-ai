@@ -113,6 +113,10 @@ OperationalError`), because an SQLite message can quote the query or
 stored mail; the server log then shows the same type for that call. An
 empty match is not a failure: it is a normal result with an empty list.
 
+Argument strings (including nested values and object keys) must be valid
+Unicode. A lone UTF-16 surrogate is refused before tool dispatch with
+`Tool arguments must contain valid Unicode`, without echoing its value.
+
 In the tools that call the embed or inference provider (`search_emails`,
 `get_evidence` and the intelligence tools), a provider or database
 failure is reported, and logged, as follows, because a provider's
