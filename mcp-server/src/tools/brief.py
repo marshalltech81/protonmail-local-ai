@@ -897,6 +897,10 @@ def register_experimental_tools(
         their actor), actors' positions, decisions, open questions, and
         conflicting evidence (passages that disagree).
 
+        Lead with names, identifiers and key terms and keep the query
+        focused: keyword passage ranking uses only the first 16 distinct
+        query words to order passages; later words can still match.
+
         Every entry cites evidence labels (E1, ...) that name passages of
         specific messages, each with its sender and sent date. Labels, and
         words an entry quotes, are checked against the passages the model
@@ -1175,6 +1179,10 @@ def register_experimental_tools(
         EXPERIMENTAL: the output format may change. Check a conclusion
         (for example a sentence drafted for a report) against the mailbox:
         find passages that support, contradict, qualify or supersede it.
+
+        Lead with names, identifiers and key terms and keep the query
+        focused: keyword passage ranking uses only the first 16 distinct
+        query words to order passages; later words can still match.
 
         Each finding names its relation, explains it, and cites evidence
         labels (E1, ...). The server attaches to each finding the cited
