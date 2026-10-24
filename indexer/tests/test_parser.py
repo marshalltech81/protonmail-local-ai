@@ -6645,3 +6645,28 @@ def test_malformed_base64_encoded_word_keeps_the_message(tmp_path, caplog, field
         assert msg.subject == headers[field]
     assert "header encoded-words could not be decoded (HeaderParseError)" in caplog.text
     assert marker not in caplog.text
+
+
+@pytest.mark.parametrize("field", ["Message-ID", "In-Reply-To", "References"])
+def test_raw_utf8_identity_headers_have_a_defined_outcome(tmp_path, caplog, field):
+    marker = "synthetic-identity-🪶@example.test"
+    headers = {
+        "Message-ID": "<current@example.test>",
+        "In-Reply-To": "<previous@example.test>",
+        "References": "<root@example.test>",
+    }
+    headers[field] = f"<{marker}>"
+    raw = (
+        "".join(f"{name}: {value}\r\n" for name, value in headers.items())
+        + "Date: Mon, 1 Jan 2024 00:00:00 +0000\r\n\r\nSynthetic body."
+    ).encode()
+    path = tmp_path / "identity.eml"
+    path.write_bytes(raw)
+    msg = parse_email(path)
+    assert msg is not None
+    assert {
+        "Message-ID": msg.message_id,
+        "In-Reply-To": msg.in_reply_to,
+        "References": msg.references,
+    }[field] == ([marker] if field == "References" else marker)
+    assert marker not in caplog.text
