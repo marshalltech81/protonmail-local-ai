@@ -3027,6 +3027,10 @@ def register_intelligence_tools(
         Synthesize an answer from email threads — including the
         text content of their PDF and image attachments.
 
+        Lead with names, identifiers and key terms and keep the query
+        focused: keyword passage ranking uses only the first 16 distinct
+        query words to order passages; later words can still match.
+
         This and ``extract_from_emails`` are the tools that synthesize
         over attachment content (``search_attachments``,
         ``get_evidence`` and ``get_attachment`` return the raw
@@ -3723,6 +3727,10 @@ def register_intelligence_tools(
     ) -> CallToolResult:
         """
         Extract structured data from indexed emails matching a query.
+
+        Lead with names, identifiers and key terms and keep the query
+        focused: keyword passage ranking uses only the first 16 distinct
+        query words to order passages; later words can still match.
 
         Use this when the user wants a *structured list* across many
         threads — invoice numbers and amounts, tracking numbers,
