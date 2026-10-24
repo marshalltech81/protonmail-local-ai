@@ -331,7 +331,7 @@ in threads 120-124 the claim cases: a document prepared but never sent,
 a transmission shown only by a message in Sent, a receipt explicitly
 acknowledged with later guidance in a different thread from a different
 sender, and a later same-thread reply about something else. The
-held-out variant `second-vendor-follow-ups` (threads 66-74) asks the
+held-out variant `second-vendor-follow-ups` (threads 66-74 and 135-139) asks the
 same about Sasha Ortiz and Emery Vance with different names, wording,
 thread structure and evidence placement.
 
@@ -1146,6 +1146,13 @@ Unparsed `brief_issue` and `check_conclusion` replies (`invalid_json` or
 text is one uncited statement the judge can assess, with a fixed placeholder
 when empty; inability to parse an answer is not itself a judge infrastructure
 error. This does not excuse an actual judge error.
+
+Held-out claim variants (#1344) keep the access mandate in drafts, a
+skylight request only in Sent, ramp receipt followed by an opinion in a
+separate thread, and an annex request followed by an unrelated calendar
+notice. Ground truth and the held-out reference trace label each relevant
+claim; none of these cases is used to tune the dev scenario.
+
 
 The loom-alcove chronology cases (#1370) include an undated preference.
 Golden labels keep it in an unknown-date partition; the judge must reject
