@@ -842,7 +842,12 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         expected = set(scenario.expected_messages)
         enumeration_recall, exhausted = 0.0, False
         for chain in _enumeration_chains(calls, scenario.expected_arguments):
-            listed = {m["message_id"] for page in chain for m in page.get("messages", [])}
+            listed = {
+                m["message_id"]
+                for page in chain
+                for m in page.get("messages", [])
+                if isinstance(m.get("message_id"), str)
+            }
             chain_score = (
                 len(expected & listed) / len(expected),
                 chain[-1].get("has_more") is False,
