@@ -1903,7 +1903,7 @@ class Database:
 
         - ``message_ids``: union existing and incoming claimant IDs, preserving order
         - ``participants``: union existing and incoming, preserving order
-        - ``has_attachments``: true if previously true or newly true
+        - ``has_attachments``: recomputed from the stored messages after each write
         - ``date_first``: min(existing, incoming)
         - ``body_text``: existing body plus any previously-unseen messages
         """
@@ -2099,10 +2099,14 @@ class Database:
             # (``effective_at``) range. The merge above can only widen
             # it, so a reprocess that re-dates a message (a parser fix)
             # would leave the old date as an endpoint; recompute both
-            # from the rows just written.
+            # from the rows just written. Recompute the attachment flag too:
+            # a reparse may drop the only attachment without deleting any
+            # occurrence rows (extraction can be disabled).
             cur.execute(
                 """
                 UPDATE threads SET
+                    has_attachments = EXISTS (
+                        SELECT 1 FROM messages WHERE thread_id = :t AND has_attachments = 1),
                     date_first = COALESCE(
                         (SELECT MIN(effective_at) FROM messages WHERE thread_id = :t),
                         date_first),

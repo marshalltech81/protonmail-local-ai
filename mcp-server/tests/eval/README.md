@@ -943,7 +943,8 @@ cap below, count launches, not model requests.
   pytest --no-cov tests/test_answer_eval_cli_judge.py -k live_codex`
   makes one real call (to `ANSWER_EVAL_LIVE_CODEX_MODEL`, default
   `gpt-5.5`, not `JUDGE_MODEL`) to check that planted `AGENTS.md`
-  files, the global `AGENTS.md` and an `OPENAI_API_KEY` never reach it
+  files, a controlled global `CODEX_HOME/AGENTS.md` canary and an
+  `OPENAI_API_KEY` never reach it
   and that it cannot read a file.
   **Known limitation (#827):** Codex also registers tools that a model's
   catalog entry advertises, and no setting turns those off. In Codex
@@ -1147,3 +1148,9 @@ real-model synthetic index, and token usage.
   every required group is in the top 10 and fail otherwise; the
   aggregate summary always passes. CI does not enforce a floor on any
   of the three scores because the right floor is mailbox-dependent.
+
+Unparsed `brief_issue` and `check_conclusion` replies (`invalid_json` or
+`truncated`) remain incomplete answers and fail `answer_complete`. Their raw
+text is one uncited statement the judge can assess, with a fixed placeholder
+when empty; inability to parse an answer is not itself a judge infrastructure
+error. This does not excuse an actual judge error.

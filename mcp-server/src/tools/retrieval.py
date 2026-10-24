@@ -2445,6 +2445,7 @@ def register_retrieval_tools(server, db):
         extraction_status: ExtractionStatusFilter | None = None,
         claimant_id: str | None = None,
         thread_id: str | None = None,
+        attachment_id: str | None = None,
         limit: int = 20,
         cursor: str | None = None,
     ) -> CallToolResult:
@@ -2456,6 +2457,9 @@ def register_retrieval_tools(server, db):
         "list every attachment" or "how many PDFs" questions;
         ``search_attachments`` ranks by filename and extracted text and
         caps at 50 results, so it cannot answer "all" or "how many".
+
+        Use ``attachment_id`` for exact payload identity across occurrences;
+        it is conjoined with message and attachment filters, and blank is ignored.
 
         ``date_basis`` chooses the clock for bounds, ordering and cursors:
         effective (default: delivery, else send date), sent (Date
@@ -2515,6 +2519,7 @@ def register_retrieval_tools(server, db):
         not prove nothing was missed.
 
         Args:
+            attachment_id: Exact payload ID from an attachment result; blank is ignored.
             sender: From address of the carrying message, matched as in
                     query_messages: a full address exactly, anything else
                     as a case-insensitive substring of the address or
@@ -2568,6 +2573,7 @@ def register_retrieval_tools(server, db):
             "extraction_status": extraction_status,
             "claimant_id": claimant_id,
             "thread_id": thread_id,
+            "attachment_id": attachment_id,
         }
         log_tool_call(
             log,

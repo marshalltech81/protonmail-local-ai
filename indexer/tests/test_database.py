@@ -2362,6 +2362,28 @@ class TestUpsertThreadUpdate:
         ).fetchone()
         assert row["has_attachments"] == 1
 
+    @pytest.mark.parametrize("other_has_attachments", [False, True])
+    def test_reparse_recomputes_attachment_flag_without_deleting_occurrences(
+        self, db, threader, other_has_attachments
+    ):
+        original = make_message(
+            message_id="reparse-flag@example.test", filepath="/flags/1", has_attachments=True
+        )
+        db.upsert_thread(threader.assign_thread(original), FAKE_EMBEDDING)
+        other = make_message(
+            message_id="other-flag@example.test",
+            filepath="/flags/2",
+            in_reply_to=original.message_id,
+            has_attachments=other_has_attachments,
+        )
+        db.upsert_thread(threader.assign_thread(other), FAKE_EMBEDDING)
+        assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0
+        original.has_attachments = False
+        db.upsert_thread(threader.assign_thread(original), FAKE_EMBEDDING)
+        assert db._conn.execute(
+            "SELECT has_attachments FROM threads WHERE thread_id = ?", (original.message_id,)
+        ).fetchone()[0] == int(other_has_attachments)
+
     def test_update_lowers_date_first_for_out_of_order_older_message(self, db, threader):
         """Regression: a late-arriving older message must lower date_first
         rather than leaving it at the originally-indexed newer date."""

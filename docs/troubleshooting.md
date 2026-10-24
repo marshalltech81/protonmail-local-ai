@@ -2398,6 +2398,13 @@ still logs `header encoded-word charset could not be decoded
 (<ExceptionType>)` instead ([Attachment filename shows `=?utf-8?...?=`
 text](#attachment-filename-shows-utf-8-text)).
 
+A malformed encoded-word that the email library refuses is kept as sent,
+with a rate-limited `header encoded-words could not be decoded` warning
+naming only the exception type. The rest of the message remains indexable.
+Attached-email extraction uses the same fallback; its version bump refreshes
+older cached results through the ordinary startup sweep (dead-lettered jobs
+still need `make requeue-dead`).
+
 ### `authority_class` filters return nothing after an upgrade
 
 Schema v2 (#1144) records whether each message's sender attribution is
