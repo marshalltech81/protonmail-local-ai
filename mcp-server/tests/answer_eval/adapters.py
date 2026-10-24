@@ -252,7 +252,13 @@ def _unparsed_view(output: Any, citation_problems: Sequence[Any]) -> AnswerView:
         output.threads,
         [],
         citation_problems,
-        [],
+        [
+            AnswerStatement(
+                text=output.raw_text or "The tool returned no parseable answer.",
+                labels=[],
+                status="not_checked",
+            )
+        ],
         None,
         output.repair_attempted,
         complete=False,
