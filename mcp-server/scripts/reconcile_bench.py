@@ -2390,11 +2390,11 @@ _KEPT, _CACHED, _EXTRACTED, _DEFERRED = "kept", "cached", "extracted", "deferred
 
 def _writer_plan(
     conn: sqlite3.Connection, rec: _Record, continuation: bool, extract_seconds: float
-) -> list[tuple[str, bool, bool, int | None]]:
+) -> list[tuple[str, bool, bool, int | None, tuple | None]]:
     """One pass's outcome for each of ``rec``'s occurrences, as phase 2a
     decides it (indexer/src/main.py ``_phase2a_collect_chunks`` and
     indexer/src/attachment_indexing.py ``_resolve_extracted_text``):
-    ``(action, stored, was_deferred, text_complete)``. A continuation
+    ``(action, stored, was_deferred, text_complete, cached_row)``. A continuation
     keeps the occurrences already resolved; a cached payload costs
     nothing; any other is extracted while the pass's budget lasts (the
     first always, then until ``EXTRACTION_TURN_LAUNCHES`` launches or
@@ -2413,10 +2413,10 @@ def _writer_plan(
     for occurrence, attachment_id, _size, _text in rec.attachments:
         complete, was_deferred = states.get(occurrence, (None, False))
         if continuation and complete is not None and not was_deferred:
-            plan.append((_KEPT, True, False, complete))
+            plan.append((_KEPT, True, False, complete, None))
             continue
         cached = conn.execute(
-            "SELECT 1 FROM attachment_extractions WHERE attachment_id = ? AND extractor_module = ?",
+            "SELECT * FROM attachment_extractions WHERE attachment_id = ? AND extractor_module = ?",
             (attachment_id, PDF_MODULE),
         ).fetchone()
         if cached:
@@ -2430,14 +2430,14 @@ def _writer_plan(
             launches += PDF_LAUNCHES
             seconds += extract_seconds
             action = _EXTRACTED
-        plan.append((action, occurrence in states, was_deferred, complete))
+        plan.append((action, occurrence in states, was_deferred, complete, cached))
     return plan
 
 
 def _writer_phase2c(
     conn: sqlite3.Connection,
     rec: _Record,
-    plan: list[tuple[str, bool, bool, int | None]],
+    plan: list[tuple[str, bool, bool, int | None, tuple | None]],
     continuation: bool,
     embed: Callable[[str], bytes],
     now: str,
@@ -2501,6 +2501,7 @@ def _writer_phase2c(
         stored,
         was_deferred,
         complete,
+        cached_row,
     ) in zip(rec.attachments, plan, strict=True):
         # indexer/src/attachment_indexing.py ``apply_attachment_writes``.
         if action == _KEPT:
@@ -2543,6 +2544,13 @@ def _writer_phase2c(
         if action == _EXTRACTED:
             conn.execute(_INSERT_EXTRACTION, (attachment_id, extracted, now))
         else:
+            # Restore the phase 2a cache snapshot before certifying it, as
+            # apply_attachment_writes does even when the row still exists.
+            conn.execute(
+                "INSERT INTO attachment_extractions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(attachment_id, extractor_module) DO NOTHING",
+                cached_row,
+            )
             # A cache hit on a payload with no container signature.
             conn.execute(
                 "UPDATE attachment_extractions SET identifier = ? "
@@ -3000,7 +3008,7 @@ def phase_writer(
                     plan = _writer_plan(conn, rec, continuation, extract_seconds)
                     now = datetime.now(UTC).isoformat()
                     # The occurrences not yet stored are inserted.
-                    new = sum(1 for _, stored, _, _ in plan if not stored)
+                    new = sum(1 for _, stored, _, _, _ in plan if not stored)
                     with transaction(occurrences=new):
                         deferred = _writer_phase2c(conn, rec, plan, continuation, embed, now)
                         if deferred:

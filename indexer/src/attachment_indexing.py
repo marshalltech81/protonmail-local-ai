@@ -730,6 +730,8 @@ class AttachmentWritePlan:
     # commits (``record_committed_outcomes``).
     extraction_error: str | None = None
     cached: bool = False
+    # Keep the exact cache hit across a concurrent whole-message removal (#1412).
+    cached_row: sqlite3.Row | None = None
     # The scanned PDF pages the OCR cap left unread in that result, or
     # ``None`` when unknown (#891).
     ocr_pages_skipped: int | None = None
@@ -824,9 +826,10 @@ def _resolve_extracted_text(
     str | None,
     bool | None,
     CapRecord,
+    sqlite3.Row | None,
 ]:
     """Return ``(text, status, extraction_to_persist, error, cached,
-    ocr_pages_skipped, extractor, text_complete, caps)``: ``error`` is the
+    ocr_pages_skipped, extractor, text_complete, caps, cached_row)``: ``error`` is the
     extraction error behind ``status``, ``cached`` whether the result was
     served without extracting and ``ocr_pages_skipped`` the result's
     OCR-cap count (``None`` when unknown), for the outcome counts;
@@ -876,6 +879,7 @@ def _resolve_extracted_text(
             pending.extractor,
             pending.text_complete,
             _result_caps(pending),
+            None,
         )
 
     cached = db.get_attachment_extraction(attachment.content_hash, module)
@@ -891,6 +895,7 @@ def _resolve_extracted_text(
             cached["extractor"],
             None if cached["text_complete"] is None else bool(cached["text_complete"]),
             _row_caps(cached),
+            cached,
         )
     # A row written by an older version of a since-fixed extractor would
     # otherwise be served forever: it is re-extracted, and only by an
@@ -936,11 +941,12 @@ def _resolve_extracted_text(
             cached["extractor"],
             None if cached["text_complete"] is None else bool(cached["text_complete"]),
             _row_caps(cached),
+            cached,
         )
 
     if budget is not None and budget.exhausted():
         budget.deferred += 1
-        return (None, STATUS_DEFERRED, None, None, False, None, None, None, _NO_CAPS)
+        return (None, STATUS_DEFERRED, None, None, False, None, None, None, _NO_CAPS, None)
 
     launches_before = process_launches()
     started = budget.clock() if budget is not None else 0.0
@@ -971,6 +977,7 @@ def _resolve_extracted_text(
         result.extractor,
         result.text_complete,
         _result_caps(result),
+        None,
     )
 
 
@@ -1038,6 +1045,7 @@ def prepare_attachment_writes(
         extractor,
         extraction_complete,
         caps,
+        cached_row,
     ) = _resolve_extracted_text(
         attachment=attachment,
         db=db,
@@ -1083,6 +1091,7 @@ def prepare_attachment_writes(
             extraction_to_persist=extraction_to_persist,
             extraction_error=extraction_error,
             cached=cached,
+            cached_row=cached_row,
             ocr_pages_skipped=ocr_pages_skipped,
             caps=caps,
             text_complete=text_complete,
@@ -1111,6 +1120,7 @@ def prepare_attachment_writes(
         chunks=chunks,
         extraction_error=extraction_error,
         cached=cached,
+        cached_row=cached_row,
         ocr_pages_skipped=ocr_pages_skipped,
         caps=caps,
         text_complete=text_complete,
@@ -1208,7 +1218,11 @@ def _write_occurrence(
             identifier=result.identifier,
         )
     else:
-        if purged_extractions:
+        if plan.cached_row is not None:
+            # A whole-message removal can purge this hit after preparation.
+            # Restore only an absent row, preserving its original timestamp.
+            db.restore_attachment_extraction(plan.cached_row)
+        elif purged_extractions:
             # A cache hit whose row an earlier message of the batch purged
             # (it dropped the last occurrence using it, #1375): put it back
             # as it was, so this occurrence has its cached result.
