@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -250,7 +251,7 @@ class TestMessageScope:
         }
 
     def test_a_moved_message_is_labelled_by_its_current_folder(self, scope_db, tmp_path):
-        with sqlite3.connect(str(tmp_path / "scope.db")) as conn:
+        with closing(sqlite3.connect(str(tmp_path / "scope.db"))) as conn, conn:
             conn.execute(
                 "UPDATE message_occurrences SET folder = 'Archive' WHERE claimant_id = ?",
                 (_claimant("sep"),),

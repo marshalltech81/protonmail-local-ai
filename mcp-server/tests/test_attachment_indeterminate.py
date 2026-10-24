@@ -538,13 +538,16 @@ class TestAttachmentIndeterminateCount:
         fallback WARNING once per window, not on every call; the rest
         are counted."""
         conn, path = _open_built_db_conn(tmp_path, "rate.db")
-        _add(conn, "v1", "t", "2024-01-10T00:00:00+00:00", VENDOR)
-        db = Database(str(path))
-        with caplog.at_level(logging.WARNING):
-            for _ in range(5):
-                assert db._attachment_filename_lane("nosuchcolumn:x", [], [], 10) == []
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings.count("Attachment filename search unavailable: OperationalError") == 1
+        try:
+            _add(conn, "v1", "t", "2024-01-10T00:00:00+00:00", VENDOR)
+            db = Database(str(path))
+            with caplog.at_level(logging.WARNING):
+                for _ in range(5):
+                    assert db._attachment_filename_lane("nosuchcolumn:x", [], [], 10) == []
+            warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+            assert warnings.count("Attachment filename search unavailable: OperationalError") == 1
+        finally:
+            conn.close()
 
     def test_a_failed_statement_keeps_the_read_transaction(self, tmp_path, caplog):
         """A lane's OperationalError is caught per statement; the shared

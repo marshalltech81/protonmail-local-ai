@@ -2,6 +2,7 @@
 
 import sqlite3
 import time
+from contextlib import closing
 
 import pytest
 from src.lib.predicates import Leaf, compile_leaves, normalize_where
@@ -86,7 +87,7 @@ def _measure(db, leaf, monkeypatch):
             )
         work["elapsed"] = time.perf_counter() - started
         sql, params = compile_leaves([Leaf(leaf, _TERMS)])
-        with db._connect() as conn:
+        with closing(db._connect()) as conn, conn:
             plan = conn.execute(
                 "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM messages m WHERE " + sql, params
             ).fetchall()
@@ -191,7 +192,7 @@ def test_original_join_is_a_semantic_oracle_and_exposes_repeated_fts_work(tmp_pa
     )
     params = [f'"{word}"' for word in _TERMS]
     reads = []
-    with db._connect() as conn:
+    with closing(db._connect()) as conn, conn:
         conn.set_trace_callback(
             lambda sql: (
                 reads.append(sql)
@@ -234,7 +235,7 @@ def test_original_join_is_a_semantic_oracle_and_exposes_repeated_fts_work(tmp_pa
 @pytest.mark.parametrize("leaf", ["text", "body_words", "attachment_text_words"])
 def test_rare_and_missing_words_keep_population_counts(tmp_path, leaf):
     db = _dense_db(tmp_path, 40)
-    with sqlite3.connect(db.path) as conn:
+    with closing(sqlite3.connect(db.path)) as conn, conn:
         # Add a rare word to one body and one attachment chunk of one message.
         for rowid in (1, 11):
             text = _TEXT + " rareword"
