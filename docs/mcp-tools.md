@@ -3255,10 +3255,9 @@ mail a population run will read; the steps are not sent to clients:
    sent once per window). With reranking on (`RERANK_MODE` not
    `none`), each call also sends the text of up to
    `max(50, RERANK_CANDIDATES)` candidate threads to the rerank
-   provider. No tool reports either setting
-   ([#1578](https://github.com/marshalltech81/protonmail-local-ai/issues/1578)),
-   and `RERANK_CANDIDATES` has no upper limit: ask the user, who runs
-   the server, for both, and do not extract until they are known.
+   provider. Read `get_mailbox_status.rerank_mode` and
+   `rerank_candidates` before the call: disabled reranking reports
+   `none` and `null`. The configured candidate count has no upper limit.
 2. Enumerate the population, paging each query to the end with
    `next_cursor`:
    - For occurrences backed by an attachment (every invoice line for
@@ -3785,6 +3784,7 @@ and what it holds. Call this when asked which version or build is running.
 | Field | Meaning |
 |---|---|
 | `server_version` | MCP server image's source commit, including `-dirty` for local changes; `unknown` when build identity is unavailable. This identifies the server code, not the MCP protocol or SQLite schema version |
+| `rerank_mode`, `rerank_candidates` | Active reranking configuration: `none` / `null` when disabled, `cohere` / configured candidate count when enabled. A reranking search can send up to `max(limit, rerank_candidates)` candidate threads to the provider (fewer when unavailable); this is per search, not a whole multi-call tool run. No URL, model or key is exposed |
 | `current` | `true` only when all four hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, no message is pending, retrying, deferred or extraction deferred, and no mail collection waits for its success to be delivered to the indexer (`collection.failure_unrecovered` after an observed failure, or `collection.success_undelivered` for a success whose delivery is not yet confirmed, including one whose failed predecessor was never observed). A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
 | `ingestion_caught_up` | The same sync/heartbeat freshness and collection checks as `current`, but waiting reparse jobs do not block it. Non-reparse pending, retrying, deferred and extraction-deferred jobs still block it. Both flags exclude terminal failures; neither certifies completeness |
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |

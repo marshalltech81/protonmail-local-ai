@@ -7,12 +7,14 @@ Claude should call get_mailbox_status before making claims about email content.
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib import timings
 from ..lib.build_identity import git_commit
+from ..lib.reranker import RerankerBackend
 from .outputs import (
     CollectionAttempt,
     CollectionStatus,
@@ -208,7 +210,9 @@ def collection_reasons(collection: CollectionStatus) -> list[str]:
     return []
 
 
-def _mailbox_status(db) -> MailboxStatusOutput:
+def _mailbox_status(
+    db, *, rerank_mode: Literal["none", "cohere"] = "none", rerank_candidates: int | None = None
+) -> MailboxStatusOutput:
     stats = db.get_mailbox_status()
     state = stats["ingestion"] or {}
     last_sync_at = (
@@ -242,6 +246,8 @@ def _mailbox_status(db) -> MailboxStatusOutput:
         not (freshness_failures or collection_failures) and waiting == queue.reparse
     )
     return MailboxStatusOutput(
+        rerank_mode=rerank_mode,
+        rerank_candidates=rerank_candidates,
         server_version=git_commit(),
         current=not reasons,
         ingestion_caught_up=ingestion_caught_up,
@@ -274,6 +280,12 @@ def _when(value: datetime | None, now: datetime) -> str:
 def _render(out: MailboxStatusOutput) -> str:
     lines = [
         "=== Mailbox Status ===",
+        (
+            f"Reranking: cohere; rerank_candidates={out.rerank_candidates}; "
+            "up to max(limit, rerank_candidates) candidate threads per reranking search"
+            if out.rerank_mode == "cohere"
+            else "Reranking: none"
+        ),
         f"Server version: {out.server_version}",
         f"Index schema version: {out.index_schema_version}",
         f"Current:        {'yes' if out.current else 'no'}",
@@ -427,7 +439,7 @@ def _conflict_lines(out: MailboxStatusOutput) -> list[str]:
     ]
 
 
-def register_system_tools(server, db):
+def register_system_tools(server, db, *, reranker: RerankerBackend | None = None):
     @server.tool(
         output_schema=MailboxStatusOutput.model_json_schema(),
         annotations=read_only("Get Mailbox Status"),
@@ -471,12 +483,21 @@ def register_system_tools(server, db):
         indexed and being reparsed), total threads
         and messages, the date range, and how many Message-IDs more
         than one file claims (counts only).
+        rerank_mode and rerank_candidates describe the active reranker:
+        none/null when disabled, cohere and its configured candidate count
+        when enabled. A reranking search can send up to
+        max(limit, rerank_candidates) candidate threads to that provider.
         """
         log.info("tool=get_mailbox_status")
         try:
             # The status queries scan aggregates; run them in a worker
             # thread so they do not block the shared event loop.
-            output = await asyncio.to_thread(_mailbox_status, db)
+            output = await asyncio.to_thread(
+                _mailbox_status,
+                db,
+                rerank_mode="cohere" if reranker is not None else "none",
+                rerank_candidates=reranker.candidates if reranker is not None else None,
+            )
         except Exception as e:
             log.error("get_mailbox_status error: %s", type(e).__name__)
             raise ToolError(f"Mailbox status error: {type(e).__name__}") from e
@@ -496,7 +517,16 @@ def get_mailbox_status() -> dict:
     from ..lib.sqlite import Database
 
     try:
-        output = _mailbox_status(Database(os.environ.get("SQLITE_PATH", "/data/mail.db")))
+        mode = os.environ.get("RERANK_MODE", "none").strip().lower()
+        if mode not in ("none", "cohere"):
+            raise ValueError("invalid rerank mode")
+        output = _mailbox_status(
+            Database(os.environ.get("SQLITE_PATH", "/data/mail.db")),
+            rerank_mode="cohere" if mode == "cohere" else "none",
+            rerank_candidates=int(os.environ.get("RERANK_CANDIDATES", "20"))
+            if mode == "cohere"
+            else None,
+        )
     except Exception as e:
         return {"status": "error", "error": f"Mailbox status error: {type(e).__name__}"}
     return {"status": "ok", **output.model_dump(mode="json")}

@@ -865,7 +865,7 @@ def _build_server(
         )
     elif experimental_tools:
         log.info("Experimental tools not registered: they need inference (INFERENCE_MODE=none).")
-    register_system_tools(server, db)
+    register_system_tools(server, db, reranker=reranker)
     return server
 
 
