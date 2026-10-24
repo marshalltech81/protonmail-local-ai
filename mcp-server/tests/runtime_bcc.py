@@ -29,15 +29,22 @@ class RuntimeBcc(unittest.TestCase):
             conn.execute("CREATE TABLE threads(thread_id TEXT PRIMARY KEY, subject TEXT)")
             stamp = "2024-01-01T00:00:00+00:00"
             conn.executemany(
-                "INSERT INTO messages(claimant_id,message_id,thread_id,filepath,folder,subject,"
+                "INSERT INTO messages(claimant_id,message_id,thread_id,subject,"
                 "sent_at,sent_at_status,references_json,has_attachments,indexed_at,first_indexed_at,"
                 "sender_ambiguous,from_addresses_complete,to_addresses_complete,cc_addresses_complete,"
                 "bcc_addresses_complete,subject_complete,body_complete) "
-                "VALUES(?,?,?,?,'INBOX','synthetic',?,'parsed','[]',0,?,?,0,1,1,1,1,1,1)",
-                (
-                    (f"c{i}", f"m{i}", f"t{i}", f"/synthetic/{i}", stamp, stamp, stamp)
-                    for i in range(size)
-                ),
+                "VALUES(?,?,?,'synthetic',?,'parsed','[]',0,?,?,0,1,1,1,1,1,1)",
+                ((f"c{i}", f"m{i}", f"t{i}", stamp, stamp, stamp) for i in range(size)),
+            )
+            # Folder and path live on message_occurrences since the
+            # occurrence cutover (#1567, #1568); the default scope the
+            # readers compile needs one active occurrence per message.
+            conn.executemany(
+                "INSERT INTO message_occurrences (account_id, folder, uniq, claimant_id, "
+                "relative_path, seen, flagged, replied, trashed, first_observed_at, "
+                "last_observed_at, state, provenance) "
+                "VALUES (1, 'INBOX', ?, ?, ?, 0, 0, 0, 0, ?, ?, 'active', 'parse')",
+                ((f"m{i}", f"c{i}", f"INBOX/cur/m{i}:2,S", stamp, stamp) for i in range(size)),
             )
             conn.executemany(
                 "INSERT INTO threads VALUES(?,'synthetic')", ((f"t{i}",) for i in range(size))
