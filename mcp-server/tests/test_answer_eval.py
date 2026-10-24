@@ -1153,9 +1153,9 @@ class TestDeterministicGraders:
         assert det.checks["abstention"] == FAIL
         assert det.checks["required_evidence_cited"] == FAIL
 
-    def test_out_of_scope_decoy_value_fails_a_sender_filtered_case(self):
-        """#755: the sender filter selects Nadia's thread; Callum's reply in
-        it gives another rate, which the answer must not report."""
+    def test_sender_context_values_are_left_to_the_judge(self):
+        """Context may name the other rate; only the judge distinguishes
+        that from asserting it as the in-scope answer (#894)."""
         case = CASES["ask-walker-rate-sender"]
         passages = [_passage("E1", "t75.1"), _passage("E2", "t75.2")]
         ok = grade_run(case, _run("He asks $22 per half-hour walk [E1].", passages, ["E1"]))
@@ -1164,7 +1164,7 @@ class TestDeterministicGraders:
             case, _run("$22 per walk [E1], though Callum paid $30 [E2].", passages, ["E1", "E2"])
         )
         assert decoy.checks["expected_values"] == PASS
-        assert decoy.checks["forbidden_values"] == FAIL
+        assert decoy.checks["forbidden_values"] == NA
 
     @pytest.mark.parametrize("case_id", ["ask-swim-practice-date", "ask-swim-scope-stated"])
     def test_later_schedule_as_context_passes_without_a_judge(self, case_id):
@@ -1260,15 +1260,14 @@ class TestDeterministicGraders:
             ),
         ],
     )
-    def test_out_of_scope_decoy_values_fail_without_a_judge(self, case_id, ref, answer):
-        """A judge-less run must still catch the decoy
-        message's values in a Trash-scoped answer."""
+    def test_trash_context_values_are_left_to_the_judge(self, case_id, ref, answer):
+        """A stale value named as context is not itself a false claim."""
         case = CASES[case_id]
         decoy = ref.replace(".1", ".2")
         passages = [_passage("E1", ref), _passage("E2", decoy)]
         det = grade_run(case, _run(answer, passages, ["E1", "E2"]))
         assert det.checks["expected_values"] == PASS
-        assert det.checks["forbidden_values"] == FAIL
+        assert det.checks["forbidden_values"] == NA
 
     def test_incomplete_swim_schedule_fails_without_a_judge(self):
         """The wrong time and a missing weekday fail the

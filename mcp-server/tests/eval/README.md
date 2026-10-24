@@ -1158,6 +1158,11 @@ The loom-alcove chronology cases (#1370) include an undated preference.
 Golden labels keep it in an unknown-date partition; the judge must reject
 invented dates and treating file/reply order as the newest dated position.
 
+For sender and Trash decoy cases (#894), `must_not_assert` remains the
+judge's check for claiming an out-of-scope value as the answer. Those
+values are absent from `must_not_include`: mentioning a stale or context
+value with its scope stated must not fail plain containment grading.
+
 The delayed-clasp cases (#1372) separate a June 1 send date, June 20
 delivery, and July 9 fitting. A June 10 replacement remains later by
 send date. The synthetic gate verifies the normalized Received date;

@@ -773,11 +773,15 @@ _DECOYS = {
 }
 
 
-# The decoy value the swim cases check for, which their case data leaves
-# empty (#1409): the November schedule's distinguishing words. The other
-# decoys take their values from ``must_not_include``, so the test file
-# stays the only place this rule is written.
-_SWIM_DECOY_VALUES = ("Wednesdays", "5:30pm")
+# Prompt-coverage probes retain each planted decoy's values separately
+# from grading: #894 grades a false assertion through the judge, while
+# simply mentioning one of these values as context is valid.
+_DECOY_VALUES = {
+    "ask-swim-practice-date": ("Wednesdays", "5:30pm"),
+    "ask-swim-scope-stated": ("Wednesdays", "5:30pm"),
+    "ask-walker-rate-sender": ("$30",),
+    "ask-garden-plot-trash": ("C-3", "$70"),
+}
 
 
 def _decoy_shown(case_id: str, passages: list[dict]) -> bool:
@@ -789,11 +793,7 @@ def _decoy_shown(case_id: str, passages: list[dict]) -> bool:
     shown = [p["text"] for p in passages if p["message_id"] == decoy and not p["truncated"]]
     if not shown:
         return False
-    values = (
-        _SWIM_DECOY_VALUES
-        if case_id.startswith("ask-swim")
-        else next(c for c in CASES if c.id == case_id).must_not_include
-    )
+    values = _DECOY_VALUES[case_id]
     assert values, case_id
     return any(all(v in text for v in values) for text in shown)
 
