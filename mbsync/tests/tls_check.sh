@@ -46,7 +46,7 @@ readonly MBSYNC_DIR
 # The image the indexer and mcp-server Dockerfiles build from. Dependabot
 # bumps only the Dockerfiles; scripts/tests/image_pin_test.sh fails when
 # this pin differs from them (#1023), so bump it with them.
-readonly PYTHON_IMAGE="python:3.14-slim-trixie@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170"
+readonly PYTHON_IMAGE="python:3.14-slim-trixie@sha256:0514bc76712d64f8bb48adcb95b1ab0d88c69fee95d62fe4c18ee948bee9b1e1"
 readonly RUN_ID="mbsync-tls-check-$$"
 readonly NETWORK="$RUN_ID"
 readonly STUB="${RUN_ID}-bridge"
