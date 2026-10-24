@@ -15,8 +15,19 @@ import pytest
 _TESTS = Path(__file__).resolve().parent
 
 
+# The aggregate and list-metadata scripts assert wall-clock bounds, so they
+# run in the workflow's serial pass; the Bcc script compares SQLite VM step
+# counts and can share the parallel one.
+_SERIAL = pytest.mark.serial
+
+
 @pytest.mark.parametrize(
-    "script", ["runtime_bcc", "runtime_aggregate_samples", "runtime_list_metadata"]
+    "script",
+    [
+        "runtime_bcc",
+        pytest.param("runtime_aggregate_samples", marks=_SERIAL),
+        pytest.param("runtime_list_metadata", marks=_SERIAL),
+    ],
 )
 def test_runtime_script_runs_against_the_current_schema(script):
     done = subprocess.run(  # noqa: S603 - fixed interpreter and repository script
