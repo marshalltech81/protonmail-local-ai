@@ -23,7 +23,7 @@ from ..lib.sqlite import (
     normalize_authority_class,
 )
 from ..lib.timings import count, rerank_mode, stage, timed_tool
-from ..lib.validation import clamp_int
+from ..lib.validation import clamp_int, validate_fts_query
 from .intelligence import (
     _MAX_ASK_THREADS,
     FromNameResolution,
@@ -398,6 +398,7 @@ def register_search_tools(
         limit = clamp_int(limit, default=10, minimum=1, maximum=_MAX_SEARCH_LIMIT)
         # Reject a bad date range before any provider or retrieval work.
         try:
+            validate_fts_query(query)
             bounds = date_bounds(*validate_date_range(date_from, date_to))
             authority_class = normalize_authority_class(authority_class)
         except InvalidFilterError as e:
@@ -729,6 +730,7 @@ def register_search_tools(
         if not query or not query.strip():
             raise ToolError("Provide a query to gather evidence for.")
         try:
+            validate_fts_query(query)
             _check_precision_controls(source, scope, max_chunks_per_thread, max_chars_per_chunk)
         except InvalidFilterError as e:
             precision_rejections.record(e.field_name)
@@ -1334,6 +1336,7 @@ def register_search_tools(
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_SEARCH_LIMIT)
         # Reject a bad date range before any provider or retrieval work.
         try:
+            validate_fts_query(query)
             bounds = date_bounds(*validate_date_range(date_from, date_to))
         except InvalidFilterError as e:
             rejections.reject("search_attachments", e.field_name)

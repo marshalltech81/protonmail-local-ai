@@ -3056,6 +3056,14 @@ model's own context window filled first (Anthropic's
 `model_context_window_exceeded` stop). A reply cut before any text is
 an error with the same distinction.
 
+Search and intelligence retrieval queries accept at most 4,096
+characters. Longer queries are rejected with fixed text before provider
+calls or FTS tokenization; shorten the query rather than splitting it
+into a long OR expression. This applies to `search_emails`,
+`get_evidence`, `search_attachments`, `ask_mailbox`,
+`extract_from_emails`, `brief_issue`, `check_conclusion` and the
+subject-phrase fallback of `summarize_thread`.
+
 ### `summarize_thread`
 Summarize a thread in different styles.
 

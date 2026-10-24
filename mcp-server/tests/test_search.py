@@ -1568,3 +1568,24 @@ def test_query_messages_description_points_to_the_multi_lane_recipe(empty_db):
     # #1100: the union keeps message identities.
     assert "union by thread_id" not in doc
     assert doc.count("multi-lane recipe") == 1
+
+
+@pytest.mark.parametrize("mode", ["keyword", "hybrid", "semantic"])
+def test_oversized_query_is_rejected_before_provider_or_database(
+    fake_server, fake_embed, seeded_db, monkeypatch, caplog, mode
+):
+    marker = "SYNTHETIC_PRIVATE_QUERY_1271"
+    query = marker + " word" * 1000
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError("database must not be queried")
+
+    for name in ("keyword_search", "hybrid_search", "semantic_search"):
+        monkeypatch.setattr(seeded_db, name, forbidden)
+    handler = _handler(fake_server, fake_embed, seeded_db)
+    error = _error(handler(query=query, mode=mode))
+    assert "4096 characters" in error
+    assert marker not in error and marker not in caplog.text
+    assert calls == [] and fake_embed.embed_calls == []
