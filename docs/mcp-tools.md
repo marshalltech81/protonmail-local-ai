@@ -2331,6 +2331,7 @@ by filename and extracted text and stops at 50 results.
 | `filename` | string | none | Unicode caseless substring of the filename, taken literally (`%` and `_` are ordinary characters) |
 | `content_type` | string | none | Exact MIME type, e.g. `application/pdf` |
 | `extraction_status` | string | none | `success`, `empty`, `unsupported`, `too_large`, `failed`, `deferred` (extraction waits for a later indexer pass, #1236), or `none` (no extraction recorded); blank is ignored, any other value is an error |
+| `attachment_id` | string | — | Exact payload ID from an attachment result; lists each occurrence separately and combines with other filters. Blank is ignored |
 | `claimant_id` | string | none | Exact claimant ID of the carrying message |
 | `thread_id` | string | none | Exact thread ID |
 | `limit` | int | `20` | Attachments per page; clamped to `[1, 50]` |
