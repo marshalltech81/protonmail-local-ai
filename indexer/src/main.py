@@ -4148,7 +4148,7 @@ def _warn_extraction_timeout_config() -> None:
             ocr_enabled=INDEXER_OCR_ENABLED,
             max_ocr_pages=INDEXER_OCR_MAX_PAGES,
             ocr_timeout_seconds=INDEXER_OCR_TIMEOUT_SECONDS or None,
-            max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES,
+            max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES or None,
         ),
     ]
     if INDEXER_OCR_ENABLED:

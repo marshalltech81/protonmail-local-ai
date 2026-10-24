@@ -17,6 +17,7 @@ from src.extractors import eml, html, image, pdf
         (False, 20, 0, 500, 3600, False),
         (False, 20, 0, 500, 100, True),
         (False, 20, 0, 0, 60, True),
+        (False, 20, 0, 0, 500, True),
         (True, 20, 0, 500, 0, False),
         (True, 20, 0, 500, 10000, False),
     ],
