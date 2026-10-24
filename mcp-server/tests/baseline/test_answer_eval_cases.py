@@ -187,6 +187,7 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
         "UPDATE messages SET occurred_at = '2031-01-01T00:00:00+00:00' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
         "UPDATE messages SET sent_at_status = 'invalid' WHERE sent_at IS NULL",
+        "UPDATE messages SET occurred_at = NULL WHERE message_id = 't130.2@baseline.example'",
         # #674: the stored Message-ID is each passage's origin in the judge prompt.
         "UPDATE messages SET message_id = 'privatemarker@private.example' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
@@ -231,7 +232,7 @@ _HEADER = re.compile(r"\[(E\d+) \| message ([^ |]+) \| from (.*?) \| sent ([0-9-
 # and passes the tool's checks), keep only the newest side of a
 # conflict, or date each event by its message's sent date and give it
 # to the message's sender.
-MUTATIONS = ("omit_correction", "cite_superseded", "newest_only", "sender_dated")
+MUTATIONS = ("omit_correction", "cite_superseded", "newest_only", "sender_dated", "delivery_dated")
 
 
 @dataclass
@@ -424,6 +425,9 @@ class _OracleAnswerer:
                 sides = sorted((chron.position(i) for i in group), key=lambda p: p.date or "9999")
                 older = {label_of(p.source) for p in sides[:-1]}
                 items = [i for i in items if not older & set(i.labels)]
+        elif mutation == "delivery_dated":
+            items[0].date = "2026-06-20"
+            items[0].date_source = "sent"
         elif mutation == "sender_dated":
             for i in items:
                 if i.date is not None:
@@ -589,6 +593,8 @@ _MUTATION_CATCHES = {
     ("ask-reading-room-deposit", "newest_only"): "chronology_cited",
     ("brief-reading-room-deposit", "newest_only"): "chronology_cited",
     ("brief-footbridge-closure", "sender_dated"): "chronology_dated",
+    ("ask-delayed-clasp", "omit_correction"): "chronology_cited",
+    ("brief-delayed-clasp", "delivery_dated"): "chronology_dated",
     ("ask-undated-alcove", "newest_only"): "chronology_cited",
     ("brief-undated-alcove", "newest_only"): "chronology_cited",
 }
