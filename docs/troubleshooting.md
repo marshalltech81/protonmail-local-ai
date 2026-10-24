@@ -2056,9 +2056,12 @@ only, never filenames or text (`make logs`):
   result stopped at <N> frames` (WARNING, rate limited) and is counted
   in `ocr_capped_images` once its message commits, and raising
   `INDEXER_OCR_MAX_PAGES` re-extracts it (the `cap refresh sweep` line
-  above). An image whose next frame could not be read records no cap:
-  a higher limit would only try that frame, so it is neither re-extracted
-  nor counted again from the cache.
+  above). This includes an unreadable first frame beyond the cap:
+  the cached warning reports only where reading stopped, not that the
+  remaining frames are readable. Raising the cap tries that frame and
+  can fail extraction if it is corrupt. Image extractor version 8
+  refreshes older cached results so this cap becomes visible;
+  dead-lettered messages still need `make requeue-dead`.
 - `extractor eml degraded in the child: <key>=<n> ...` (WARNING, rate
   limited): decoding fallbacks in an attached email's text (#922):
   `eml_headers_degraded` in its headers (an unknown charset, raw 8-bit
