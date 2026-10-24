@@ -28,7 +28,7 @@ from openai import APIStatusError
 from src import main, parser
 from src.database import EMBEDDING_DIM, Database
 from src.embed_identity import CALIBRATION_TEXT
-from src.extractors import NOT_CONTAINER_IDENTIFIER
+from src.extractors import EXTRACTOR_VERSIONS, NOT_CONTAINER_IDENTIFIER
 from src.maildir import SyncStamp
 from src.occurrence_scan import file_identity
 from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
@@ -4521,17 +4521,19 @@ class TestRequeueOcrDisabledExtractions:
             paths["scan"]: REASON_REEXTRACT,
         }
 
-        extractor = MagicMock(
-            return_value=ExtractionResult(
+        def extracted(*, content_type, **_kwargs):
+            module = "pdf" if content_type == "application/pdf" else "image"
+            return ExtractionResult(
                 status=STATUS_SUCCESS,
-                extractor="image-ocr@6",
+                extractor=f"{module}-ocr@{EXTRACTOR_VERSIONS[module]}",
                 text="scanned words",
                 error=None,
                 text_complete=True,
                 # Neither payload is OLE2 or ZIP (#1416).
                 identifier=NOT_CONTAINER_IDENTIFIER,
             )
-        )
+
+        extractor = MagicMock(side_effect=extracted)
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
         self._drain(db, queue)
         assert extractor.call_count == 2
@@ -4700,7 +4702,7 @@ class TestRequeueNewlyDispatchedExtensions:
         extractor = MagicMock(
             return_value=ExtractionResult(
                 status=STATUS_SUCCESS,
-                extractor="image-ocr@6",
+                extractor=f"image-ocr@{EXTRACTOR_VERSIONS['image']}",
                 text="photo words",
                 error=None,
                 text_complete=True,
