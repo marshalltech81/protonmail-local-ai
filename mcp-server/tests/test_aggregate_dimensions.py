@@ -167,9 +167,9 @@ def test_mime_clipping_does_not_merge_groups_or_enter_cursor(tmp_path, monkeypat
     "address,domain",
     [
         ("a@example.test", "example.test"),
-        ("a@example.test\0x", "example.test"),
+        ("a@example.test\0x", None),
         ("a\0x@example.test", None),
-        ("a@exa\0mple.test", "exa"),
+        ("a@exa\0mple.test", None),
         ('"a@b"@example.test', "example.test"),
     ],
 )
@@ -191,6 +191,24 @@ def test_recipient_domain_uses_predicate_text_semantics(tmp_path, address, domai
             )
         )
         assert db.query_messages(where=w).total_matches == 1
+    else:
+        for negate in (False, True):
+            w = normalize_where(
+                Where.model_validate(
+                    {
+                        "all": [
+                            {
+                                "leaf": "domain_is",
+                                "role": "visible_recipient",
+                                "value": "example.test",
+                                "negate": negate,
+                            }
+                        ]
+                    }
+                )
+            )
+            page = db.query_messages(where=w)
+            assert page.total_matches == 0 and page.indeterminate == 1
 
 
 def test_new_leaf_cap_and_schema_dependencies(tmp_path):

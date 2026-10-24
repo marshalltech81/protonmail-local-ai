@@ -46,8 +46,8 @@ def test_bcc_spends_shared_budget_last(monkeypatch):
     calls = []
     original = parser._parse_addrs
 
-    def count(value, caps, budget):
-        result = original(value, caps, budget)
+    def count(value, caps, budget, *, is_bcc=False):
+        result = original(value, caps, budget, is_bcc=is_bcc)
         calls.append(budget.parse_calls)
         return result
 
@@ -121,8 +121,8 @@ def test_bcc_worst_case_shares_existing_work_ceilings(monkeypatch, caplog):
     calls = []
     original = parser._parse_addrs
 
-    def measured(value, caps, budget):
-        result = original(value, caps, budget)
+    def measured(value, caps, budget, *, is_bcc=False):
+        result = original(value, caps, budget, is_bcc=is_bcc)
         calls.append((budget.parse_calls, budget.addresses, budget.chars, budget.occurrences))
         return result
 
