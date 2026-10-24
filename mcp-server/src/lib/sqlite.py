@@ -2026,7 +2026,7 @@ def _attachment_message_scope(
     params = list(message_params)
     for name, value in filters:
         if name in ("claimant_id", "thread_id"):
-            scope.append(f"m.{name} = ?")
+            scope.append("m.claimant_id = ?" if name == "claimant_id" else "m.thread_id = ?")
             params.append(value)
     return " AND ".join(scope), params
 

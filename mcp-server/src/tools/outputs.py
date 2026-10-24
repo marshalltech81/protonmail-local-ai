@@ -1674,7 +1674,7 @@ class MailboxStatusOutput(_Output):
     )
     rerank_candidates: int | None = Field(
         ge=1,
-        description="Configured candidate count, null when disabled. Each reranking search "
+        description="Unit: candidate threads. Configured count, null when disabled. Each reranking search "
         "can send up to max(limit, rerank_candidates) candidate threads, fewer when unavailable.",
     )
     operator_identity: OperatorIdentityStatus

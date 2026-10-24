@@ -605,7 +605,7 @@ def test_a_key_only_in_env_example_is_caught(reverse_copy):
 
 
 def test_a_removed_read_with_its_pass_through_and_identity_entry_left_is_caught(reverse_copy):
-    # The sole operational read goes; the Compose pass-through and the
+    # All operational reads go; the Compose pass-through and the
     # ``_IDENTITY_SETTINGS`` entry stay, as they would after a careless
     # removal. The identity entry must not count as a read.
     main = reverse_copy / "mcp-server" / "src" / "main.py"
@@ -613,6 +613,15 @@ def test_a_removed_read_with_its_pass_through_and_identity_entry_left_is_caught(
     read = 'RERANK_CANDIDATES = _int_env("RERANK_CANDIDATES", 20, minimum=1)'
     assert text.count(read) == 1 and '    "RERANK_CANDIDATES",\n' in text
     main.write_text(text.replace(read, "RERANK_CANDIDATES = 20"), encoding="utf-8")
+    # Status is another reader: removing only the startup read does not
+    # make the setting dead. Remove that read too for the negative control.
+    assert not _unread_pass_throughs(reverse_copy)
+    assert not _dead_keys(reverse_copy)
+    _replace_once(
+        reverse_copy / "mcp-server" / "src" / "tools" / "system.py",
+        'os.environ.get("RERANK_CANDIDATES", "20")',
+        '"20"',
+    )
     assert _unread_pass_throughs(reverse_copy) == {"mcp-server:RERANK_CANDIDATES"}
     assert _dead_keys(reverse_copy) == {"RERANK_CANDIDATES"}
 
