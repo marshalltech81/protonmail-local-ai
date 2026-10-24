@@ -288,7 +288,7 @@ and the connection.
   (PLAN.md decision 46); the message names the setting, never the value.
   `BRIDGE_HOST` takes only names that forward to this Mac's
   `127.0.0.1`: `host.docker.internal` (the default), or OrbStack's
-  `host.orb.internal` or `host.internal`, in any case and without
+  `host.orb.internal` or `host.internal`, in any ASCII case and without
   surrounding spaces. `gateway.docker.internal`, an IP address, a LAN
   or `.local` name, or a name with a trailing dot is refused: a Bridge on
   another machine waits on
@@ -297,7 +297,7 @@ and the connection.
   `127.x.y.z` written without leading zeros, or `::1`, exactly as
   written. The four isync names take 1 to 64 of `A-Z a-z 0-9 _ -`,
   starting with a letter or digit, and the two store names must differ.
-  `SOURCE_MODE` accepts only `proton-bridge`, in any case and without
+  `SOURCE_MODE` accepts only `proton-bridge`, in any ASCII case and without
   surrounding spaces. `BRIDGE_IMAP_PORT` is a port from 1 to 65535
   without leading zeros or spaces. `PROTON_FOLDER_EXCLUSIONS` is folder
   patterns separated by `|`, none empty or with a space at either end,

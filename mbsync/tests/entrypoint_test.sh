@@ -3863,6 +3863,22 @@ setting_row_agrees() {
     fi
 }
 
+# LANG is exported, but LC_ALL is deliberately unset as on a UTF-8 host.
+# A non-ASCII capital must never become an allowlisted ASCII spelling.
+non_ascii_settings_are_refused_under_utf8() {
+    local assignment
+    for assignment in $'SOURCE_MODE=proton-br\xc4\xb0dge' $'BRIDGE_HOST=host.docker.\xc4\xb0nternal'; do # pragma: allowlist secret
+        order_setup utf8-settings
+        order_run LANG=C.UTF-8 "$assignment"
+        order_is "identity error" 1 || return 1
+        grep -qxF ">>> ERROR: $(fixed_refusal "${assignment%%=*}")" "$ORDER_LOG" || return 1
+        [[ ! -e "$ORDER_DIR/runtime/mbsyncrc" ]] || return 1
+    done
+}
+
+check "non-ASCII capitals in Proton settings are refused under a UTF-8 locale" \
+    non_ascii_settings_are_refused_under_utf8
+
 every_setting_row_agrees_at_both_sites() {
     local i
     for ((i = 0; i < ${#SETTING_CASES[@]}; i++)); do

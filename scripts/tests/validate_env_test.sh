@@ -448,6 +448,17 @@ proton_settings_from_env_file() {
     passes
 }
 
+non_ascii_proton_settings_are_refused_under_utf8() {
+    local assignment
+    for assignment in $'SOURCE_MODE=proton-br\xc4\xb0dge' $'BRIDGE_HOST=host.docker.\xc4\xb0nternal'; do # pragma: allowlist secret
+        setup "$assignment"
+        fails_with "${assignment%%=*}" LANG=C.UTF-8 || return 1
+    done
+}
+
+check "non-ASCII capitals in Proton settings are refused under a UTF-8 locale" \
+    non_ascii_proton_settings_are_refused_under_utf8
+
 # ACCOUNT_SCOPE (#1596): required, a canonical lower-case UUID compared
 # exactly, refused with fixed text that never repeats the value; the same
 # rule the indexer and mcp-server apply (indexer/tests/test_account.py).
