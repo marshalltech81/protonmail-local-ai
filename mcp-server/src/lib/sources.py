@@ -109,6 +109,11 @@ def live_sql(alias: str = "o") -> str:
     return f"{active_sql(alias)} AND {alias}.trashed = 0"
 
 
+def active_outside_trash_sql(alias: str = "o") -> str:
+    """An active occurrence outside its provider's Trash, regardless of T flags."""
+    return f"{active_sql(alias)} AND NOT {role_sql('trash', alias)}"
+
+
 def default_scope_sql(alias: str = "o") -> str:
     """SQL that holds for an occurrence that puts its message in
     mailbox-wide retrieval's default scope (#441; owner decision on
@@ -125,7 +130,7 @@ def default_scope_sql(alias: str = "o") -> str:
     ``default_scope`` leaf, the search folder membership and its
     ``DefaultFolderScope`` lookup, and the attachment search default."""
     return (
-        f"{active_sql(alias)} AND NOT {role_sql('trash', alias)} "
+        f"{active_outside_trash_sql(alias)} "
         f"AND ({alias}.trashed = 0 OR NOT EXISTS (SELECT 1 FROM message_occurrences o2 "  # nosec B608 - module constants only
         f"WHERE o2.claimant_id = {alias}.claimant_id AND {live_sql('o2')}))"
     )

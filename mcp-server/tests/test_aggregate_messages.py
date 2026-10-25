@@ -697,13 +697,13 @@ class TestTool:
         qm = _tools(_server(agg_db))["query_messages"].input_schema["properties"]
         agg = _tools(_server(agg_db))["aggregate_messages"].input_schema["properties"]
         # Every message filter, including the selected clock, not the projection.
-        assert set(qm) - {"fields"} == set(agg) - {
+        assert set(qm) - {"fields", "collapse"} == set(agg) - {
             "group_by",
             "period",
             "period_breakdown",
             "sample_per_group",
         }
-        for name in set(qm) - {"fields", "limit"}:
+        for name in set(qm) - {"fields", "collapse", "limit"}:
             assert {k: v for k, v in agg[name].items() if k != "description"} == {
                 k: v for k, v in qm[name].items() if k != "description"
             }, name

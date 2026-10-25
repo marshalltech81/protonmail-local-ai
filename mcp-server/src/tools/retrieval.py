@@ -484,6 +484,8 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
         ids.insert(0, f"Message-ID: {m.message_id}")
     lines.append("   " + " | ".join(ids))
     lines.append(f"   Thread ID: {m.thread_id}")
+    if m.claimant_count is not None:
+        lines.append(f"   claimant_count: {m.claimant_count}")
     return lines
 
 
@@ -1463,6 +1465,7 @@ def register_retrieval_tools(server, db):
         where: Where | None = None,
         limit: int = 25,
         cursor: str | None = None,
+        collapse: Literal["message_id"] | None = None,
         fields: list[str] | None = None,
     ) -> CallToolResult:
         """
@@ -1473,8 +1476,15 @@ def register_retrieval_tools(server, db):
         ``total_matches`` counts the messages the filters definitely
         match; it is the complete count only when ``indeterminate`` is
         0. ``distinct_message_ids`` counts their distinct sender-controlled
-        Message-IDs in the same snapshot, not identical content. Rows and
-        ``indeterminate`` remain per claimant; no rows are grouped.
+        Message-IDs in the same snapshot, not identical content.
+        With ``collapse="message_id"``, group definite matches by that
+        sender-controlled ID; ``total_matches`` counts groups, each row's
+        ``claimant_count`` counts matching claimants, and indeterminate
+        counts groups with no definite match and at least one unknown.
+        The representative is a definitely matching claimant with a copy
+        outside Trash first, then earliest effective time, then claimant ID.
+        Default rows stay per claimant. Address and leaf diagnostics stay
+        claimant-level before grouping. Cursors are bound to this mode.
         ``indeterminate`` counts messages a filter could not decide
         (a size bound on a message without a stored size; a sender or
         participant filter, or an authority_class filter on a message
@@ -1759,6 +1769,8 @@ def register_retrieval_tools(server, db):
                 | {"claimant_id", "thread_id"}
                 | {name + "_status" for name in ("list_id", "precedence") if name in fields}
             )
+        if collapse:
+            projection = projection | {"claimant_count"}
         # Reject a bad date range before any retrieval work.
         try:
             if date_basis is None:
@@ -1787,6 +1799,7 @@ def register_retrieval_tools(server, db):
                 where=where_leaves,
                 limit=limit,
                 cursor=cursor,
+                **({"collapse": collapse} if collapse else {}),
             )
         except InvalidFilterError as e:
             # Validation messages quote the offending input (an invalid
@@ -1800,6 +1813,8 @@ def register_retrieval_tools(server, db):
             log.error("query_messages error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
+        if collapse:
+            timings.count("grouped_message_ids", 1)
         timings.count("total_matches", page.total_matches)
         # On the timing line too, so a call that could not decide every
         # message is not read as complete from the log (Codex round 3).
@@ -1812,6 +1827,7 @@ def register_retrieval_tools(server, db):
             for key, _ in _indeterminate_cause_entries(uses, where_leaves, date_basis):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = QueryMessagesOutput(
+            collapse=collapse,
             metadata_diagnostics=page.metadata_diagnostics,
             date_basis=date_basis,
             filters=uses,
@@ -1859,12 +1875,17 @@ def register_retrieval_tools(server, db):
         )
         lines = [f"Query: {', '.join(p for p in parts if p) or none}"]
         lines.append(f"date_basis: {date_basis}")
+        if collapse:
+            lines.append(
+                "collapse: message_id (sender-controlled IDs; not proof of identical content)"
+            )
         lines.extend(_metadata_lines(page.metadata_diagnostics))
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}")
         lines.append(
-            f"distinct_message_ids: {page.distinct_message_ids} (sender-controlled IDs; rows remain per claimant)"
+            f"distinct_message_ids: {page.distinct_message_ids} (sender-controlled IDs; "
+            + ("rows grouped by Message-ID)" if collapse else "rows remain per claimant)")
         )
         if page.indeterminate:
             # Stated whenever non-zero, so a count is never read as
@@ -1872,7 +1893,13 @@ def register_retrieval_tools(server, db):
             # text naming the causes the given filters can have.
             causes = _indeterminate_causes(uses, where_leaves, date_basis)
             lines.append(
-                f"indeterminate: {page.indeterminate} (messages the filters could neither "
+                f"indeterminate: {page.indeterminate} ("
+                + (
+                    "Message-ID groups with no definite match and at least one unknown; "
+                    if collapse
+                    else ""
+                )
+                + "messages the filters could neither "
                 f"accept nor reject: {'; '.join(causes)}; in neither total_matches nor "
                 "the pages)"
             )
@@ -1884,6 +1911,8 @@ def register_retrieval_tools(server, db):
             if match.distinct > 1:
                 line += " (possibly different people; filter by one exact address to separate them)"
             lines.append(line)
+        if collapse and page.leaf_results:
+            lines.append("Leaf diagnostics count claimants before Message-ID grouping.")
         for r in page.leaf_results:
             label = r.path if r.id is None else f"{r.path} (id {r.id!r})"
             if r.negate:
