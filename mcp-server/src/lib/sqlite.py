@@ -1122,6 +1122,28 @@ class ScopeLabels:
 
 
 @dataclass
+class ThreadAttachmentRecord:
+    """One stored occurrence, with bounded display metadata and no text."""
+
+    attachment_occurrence_id: str
+    claimant_id: str
+    attachment_id: str
+    filename: str
+    filename_clipped: bool
+    content_type: str
+    content_type_clipped: bool
+    extraction_status: str | None
+
+
+@dataclass
+class ThreadAttachmentMetadata:
+    attachments: list[ThreadAttachmentRecord]
+    total: int
+    rows_current: bool | None
+    manifest_complete: bool | None
+
+
+@dataclass
 class ThreadPage:
     """One page of a thread's messages, read from one snapshot."""
 
@@ -1133,6 +1155,8 @@ class ThreadPage:
     bodies: dict[str, MessageBody]
     # Whether any message of the whole thread has an indexed body.
     has_bodies: bool
+    # None when metadata was not requested; otherwise keyed by page claimant.
+    attachments: dict[str, ThreadAttachmentMetadata] | None = None
     # Messages of this thread the indexer reaped (mirror retention) and
     # still holds a record of, oldest reap first: at most
     # ``MAX_LISTED_CLAIMANTS``, with ``reaped_truncated`` set when more.
@@ -1947,6 +1971,65 @@ def _clipped_text(head: bytes) -> tuple[str, bool]:
         return head.decode("utf-8", "ignore")[:ATTACHMENT_META_CHARS], True
     text = head.decode("utf-8", "replace")
     return text[:ATTACHMENT_META_CHARS], len(text) > ATTACHMENT_META_CHARS
+
+
+def _thread_attachments(
+    conn: sqlite3.Connection, claimant_ids: list[str]
+) -> dict[str, ThreadAttachmentMetadata]:
+    """Read counts and at most ten occurrences per page message in this
+    snapshot. Counts walk the claimant index, not attachment text. Rowid
+    ordering uses that index's implicit tie-break, so LIMIT precedes any
+    filename/MIME read; those values cross SQLite as bounded byte heads.
+    Two statements cover the whole page, not one pair per message.
+    """
+    if not claimant_ids:
+        return {}
+    page = json.dumps(claimant_ids)
+    metadata = {
+        row["claimant_id"]: ThreadAttachmentMetadata(
+            attachments=[],
+            total=row["total"],
+            rows_current=None
+            if row["attachment_rows_current"] is None
+            else bool(row["attachment_rows_current"]),
+            manifest_complete=None
+            if row["attachments_manifest_complete"] is None
+            else bool(row["attachments_manifest_complete"]),
+        )
+        for row in conn.execute(
+            "SELECT m.claimant_id, m.attachment_rows_current, m.attachments_manifest_complete, "
+            "(SELECT COUNT(*) FROM attachments WHERE claimant_id = m.claimant_id) AS total "
+            "FROM messages m WHERE m.claimant_id IN (SELECT value FROM json_each(?))",
+            (page,),
+        ).fetchall()
+    }
+    rows = conn.execute(
+        "SELECT a.attachment_occurrence_id, a.claimant_id, a.attachment_id, "  # nosec B608 — fixed module constants only; values are bound
+        f"substr(CAST(a.filename AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) AS filename_head, "
+        f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) AS content_type_head, "
+        f"{OCCURRENCE_STATUS_SQL} AS extraction_status "
+        "FROM json_each(?) p JOIN attachments a ON a.rowid IN "
+        "(SELECT rowid FROM attachments WHERE claimant_id = p.value ORDER BY rowid LIMIT ?) "
+        "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+        "AND e.extractor_module = a.extractor_module ORDER BY p.key, a.rowid",
+        (page, MAX_LISTED_MESSAGE_HEADERS),
+    ).fetchall()
+    for row in rows:
+        filename, filename_clipped = _clipped_text(row["filename_head"])
+        content_type, content_type_clipped = _clipped_text(row["content_type_head"])
+        metadata[row["claimant_id"]].attachments.append(
+            ThreadAttachmentRecord(
+                attachment_occurrence_id=row["attachment_occurrence_id"],
+                claimant_id=row["claimant_id"],
+                attachment_id=row["attachment_id"],
+                filename=filename,
+                filename_clipped=filename_clipped,
+                content_type=content_type,
+                content_type_clipped=content_type_clipped,
+                extraction_status=row["extraction_status"],
+            )
+        )
+    return metadata
 
 
 def _attachment_clauses(
@@ -4724,6 +4807,7 @@ class Database:
         limit: int,
         body_char_limit: int,
         order: str = "oldest",
+        include_attachments_metadata: bool = True,
     ) -> ThreadPage | ReapedSource | None:
         """One page of a thread's messages in the selected order, each with its
         own headers and its body cut at ``body_char_limit``.
@@ -4747,6 +4831,11 @@ class Database:
                 conn, "m.thread_id = ?", (thread_id,), limit=limit, offset=offset, order=order
             )
             bodies = _message_bodies(conn, [m.claimant_id for m in messages], body_char_limit)
+            attachments = (
+                _thread_attachments(conn, [m.claimant_id for m in messages])
+                if include_attachments_metadata
+                else None
+            )
             has_bodies = bool(bodies) or bool(
                 conn.execute(
                     "SELECT EXISTS (SELECT 1 FROM message_chunks "
@@ -4775,6 +4864,7 @@ class Database:
             messages=messages,
             bodies=bodies,
             has_bodies=has_bodies,
+            attachments=attachments,
             reaped=reaped[:MAX_LISTED_CLAIMANTS],
             reaped_truncated=len(reaped) > MAX_LISTED_CLAIMANTS,
         )

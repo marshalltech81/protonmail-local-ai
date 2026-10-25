@@ -731,7 +731,15 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
     ),
     "get_attachment": ({"attachment_occurrence_id": _MARKER_OCCURRENCE_ID}, {"attachments": 1}),
     "get_message": ({"message_id": _MARKER_MESSAGE_ID}, {"messages": 1}),
-    "get_thread": ({"thread_id": _MARKER_THREAD_ID}, {"messages": 1}),
+    "get_thread": (
+        {"thread_id": _MARKER_THREAD_ID},
+        {
+            "messages": 1,
+            "attachment_metadata_omitted": 0,
+            "attachment_metadata_clipped": 0,
+            "attachment_inventory_uncertain": 0,
+        },
+    ),
     "list_threads": ({"folder": _MARKER_FOLDER}, {"threads": 1}),
     "find_contact": ({"query": MARKER}, {"contacts": 1}),
     "list_folders": ({}, {"folders": 1}),
