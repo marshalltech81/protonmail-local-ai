@@ -2707,7 +2707,13 @@ def _decode_text_header(
             type(exc).__name__,
             attachment=False,
         )
-        return str(value).strip()
+        # Header.__str__ replaces unknown-8bit bytes. Keep the raw UTF-8
+        # recovery used before word decoding, with malformed words intact.
+        return (
+            _decode_header(value, degraded)
+            if isinstance(value, email.header.Header)
+            else value.strip()
+        )
     if isinstance(value, email.header.Header) and _ENCODED_WORD_RE.search(text):
         if degraded is not None:
             degraded[HEADER_DEGRADED] += 1
