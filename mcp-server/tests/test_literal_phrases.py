@@ -382,3 +382,87 @@ def test_foreign_cursor_is_refused_before_phrase_source_reads(phrase_db, monkeyp
         phrase_db.query_messages(
             where=expression("body_phrase", "different"), cursor=first.next_cursor
         )
+
+
+@pytest.mark.parametrize("scope", ["body_phrase", "attachment_text_phrase"])
+@pytest.mark.parametrize("stop", ["space", "membership"])
+def test_resource_caps_keep_positives_and_unknown_negatives(
+    empty_db, monkeypatch, caplog, scope, stop
+):
+    from tests.conftest import _insert_attachment, _insert_extraction
+
+    with closing(sqlite3.connect(empty_db.path)) as conn:
+        _insert_message(
+            conn,
+            message_id="capped",
+            thread_id="synthetic-thread",
+            sent_at="2024-01-01T00:00:00+00:00",
+        )
+        text = (
+            "retained_literal_marker " + "synthetic ordinary words " * 1000 + " tail_literal_marker"
+        )
+        if scope == "attachment_text_phrase":
+            add_source(conn, "capped", [("synthetic body", "body")])
+            _insert_attachment(
+                conn,
+                attachment_id="payload",
+                message_id="capped",
+                thread_id="synthetic-thread",
+                filename="synthetic.pdf",
+            )
+            _insert_extraction(
+                conn, attachment_id="payload", extracted_text=text, extractor="pdf-digital@8"
+            )
+            conn.execute("UPDATE attachments SET text_complete=1,text_extractor='pdf-digital@8'")
+            conn.execute("UPDATE messages SET has_attachments=1,attachment_rows_current=1")
+        constructed = []
+        original = writer._tokens
+
+        def tokens(*args):
+            constructed.append(1)
+            return original(*args)
+
+        monkeypatch.setattr(writer, "_tokens", tokens)
+        if stop == "space":
+            monkeypatch.setattr(writer, "_storage_available", lambda cur: not constructed)
+        else:
+            monkeypatch.setattr(writer, "MAX_MEMBERSHIP", 700000)
+        if scope == "body_phrase":
+            add_source(conn, "capped", [(text, "body")])
+        else:
+            writer.rebuild_attachments(conn.cursor(), claimant_of("capped"), True)
+        conn.commit()
+    assert len(constructed) == 1
+    assert "retained_literal_marker" not in caplog.text
+    for reader in ("query_messages", "query_threads", "aggregate_messages"):
+        for needle, negate, expected in [
+            ("retained_literal_marker", False, (1, 0)),
+            ("tail_literal_marker", False, (0, 1)),
+            ("tail_literal_marker", True, (0, 1)),
+        ]:
+            args = {"where": expression(scope, needle, negate)}
+            if reader == "aggregate_messages":
+                args["group_by"] = "folder"
+            result = getattr(empty_db, reader)(**args)
+            observed = (
+                (result.total_matching_messages, result.indeterminate_messages)
+                if reader == "query_threads"
+                else (result.total_matches, result.indeterminate)
+            )
+            assert observed == expected, (scope, stop, reader, needle, negate)
+
+    # A later normal reparse can assess the whole source when capacity permits.
+    monkeypatch.setattr(writer, "MAX_MEMBERSHIP", 16 * 1024 * 1024)
+    monkeypatch.setattr(writer, "_storage_available", lambda cur: True)
+    with closing(sqlite3.connect(empty_db.path)) as conn:
+        if scope == "body_phrase":
+            writer.rebuild_body(conn.cursor(), claimant_of("capped"))
+        else:
+            writer.rebuild_attachments(conn.cursor(), claimant_of("capped"), True)
+        conn.commit()
+    assert (
+        empty_db.query_messages(where=expression(scope, "tail_literal_marker")).total_matches == 1
+    )
+    assert (
+        empty_db.query_messages(where=expression(scope, "absent_literal_marker")).indeterminate == 0
+    )

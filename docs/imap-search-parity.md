@@ -108,8 +108,13 @@ There is no fallback to scanning every document.
 The stored Unicode casefold version must match the reader; a mismatch leaves
 phrase evidence unassessed until compatible reindexing, never a definite miss.
 Each message shares admission limits across body and attachment windows: 10,000
-windows, 128 MiB source-window bytes, 64 MiB logical metadata and 512 MiB charged
-membership construction. Body windows reuse the existing source fragments;
+windows, 128 MiB source-window bytes, 64 MiB logical metadata and 16 MiB charged
+membership construction. Before constructing each window, the writer checks
+available space on the main database's filesystem. Less than 1 GiB free, or an
+unavailable filesystem probe, stops new literal windows across messages and
+continuation passes; a fresh claimant does not reset this check. This admission
+guard is not a disk reservation against other writers. Body windows reuse the
+existing source fragments;
 attachment text is read incrementally into bounded fragments. No attachment
 payload bytes enter SQLite. A cap leaves the affected negative evidence unknown,
 retains admitted current positives and emits rate-limited count-only warnings.

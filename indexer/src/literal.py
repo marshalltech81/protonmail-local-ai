@@ -3,6 +3,7 @@
 import codecs
 import json
 import logging
+import os
 import sqlite3
 import time
 import unicodedata
@@ -18,7 +19,8 @@ OVERLAP = 999
 MAX_WINDOWS = 10_000
 MAX_BYTES = 128 * 1024 * 1024
 MAX_METADATA = 64 * 1024 * 1024
-MAX_MEMBERSHIP = 512 * 1024 * 1024
+MAX_MEMBERSHIP = 16 * 1024 * 1024
+MIN_FREE_BYTES = 1024 * 1024 * 1024
 SCOPES = {"body": "a", "quote": "q", "signature": "s", "forwarded": "f"}
 FTS_TABLES = ("literal_long_fts", "literal_short_fts")
 
@@ -74,6 +76,7 @@ class Budget:
     metadata: int = 0
     membership: int = 0
     capped: bool = False
+    storage_limited: bool = False
 
     def admit(self, size: int, metadata: int, membership: int, deadline: float | None) -> bool:
         if (
@@ -115,6 +118,20 @@ def _tokens(text: str, ranges: list[tuple[int, int, str]], attachment: bool) -> 
     return " ".join(sorted(long)), " ".join(sorted(short))
 
 
+def _storage_available(cur: sqlite3.Cursor) -> bool:
+    """Check the main database's filesystem afresh, across messages and passes."""
+    path = next(
+        row[2] for row in cur.connection.execute("PRAGMA database_list") if row[1] == "main"
+    )
+    if not path:  # An in-memory SQLite database has no filesystem to fill.
+        return True
+    try:
+        space = os.statvfs(path)
+    except OSError:
+        return False
+    return space.f_bavail * space.f_frsize >= MIN_FREE_BYTES
+
+
 def _write_window(
     cur, claimant, part, occurrence, generation, ordinal, text, ranges, budget, deadline, read_bytes
 ):
@@ -124,6 +141,9 @@ def _write_window(
     folded_size = len(text.casefold())
     membership = max(folded_size - 2, 0) * 20 + len(text) * 48
     metadata = len(encoded_ranges.encode()) + 2 * len(claimant.encode()) + 256
+    if not _storage_available(cur):
+        budget.capped = budget.storage_limited = True
+        return False
     if not budget.admit(data_bytes, metadata, membership, deadline):
         return False
     long, short = _tokens(text, ranges, occurrence is not None)
@@ -142,11 +162,12 @@ def _warn(budget):
         _warnings.log(
             log,
             "index",
-            "Literal index incomplete: windows=%d source_bytes=%d metadata_bytes=%d membership_bytes=%d",
+            "Literal index incomplete: windows=%d source_bytes=%d metadata_bytes=%d membership_bytes=%d storage_limited=%d",
             budget.windows,
             budget.source_bytes,
             budget.metadata,
             budget.membership,
+            budget.storage_limited,
         )
 
 

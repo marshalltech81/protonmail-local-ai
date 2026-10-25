@@ -5309,7 +5309,11 @@ read through SQLite's incremental BLOB API; payload bytes remain in Maildir.
 Phase 1 writes the body index with source generation evidence and invalidates
 old attachment windows. Phase 2 replaces the attachment index after committing
 its current occurrence results, in the same message transaction. Metadata and
-membership admission share the per-message window/byte/work limits. Partial
+membership admission share the per-message window/byte/work limits, including
+16 MiB of charged membership construction. Every window also checks that the
+database filesystem has at least 1 GiB available; a failed space probe refuses
+new literal writes. The filesystem check is cumulative across claimants and
+continuation passes, not a per-message allowance or a disk reservation. Partial
 indexes keep current positives and cannot certify missing text. Generation,
 extractor stamp, current-inventory and deferral checks prevent stale attachment
 windows from qualifying or certifying a negative.

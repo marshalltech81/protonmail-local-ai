@@ -254,7 +254,7 @@ jobs:
         run: |
           docker run --rm -i --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --memory 1g --pids-limit 32 \
-            --tmpfs /tmp:rw,nosuid,nodev,size=768m \
+            --tmpfs /tmp:rw,nosuid,nodev,size=2g \
             --mount type=bind,src="$PWD/indexer/src",dst=/task/indexer/src,readonly \
             --mount type=bind,src="$PWD/mcp-server/src/lib",dst=/task/mcp-server/src/lib,readonly \
             --env LITERAL_ROOT=/task --entrypoint python full-body-runtime - \

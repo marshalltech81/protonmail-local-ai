@@ -165,8 +165,22 @@ def measure_cap():
             conn.execute("INSERT INTO messages(claimant_id) VALUES('synthetic')")
             capture = body.prepare([body.Part(0, -1, "plain", True, text)], "synthetic")
             body.store(conn.cursor(), "synthetic", capture)
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            before = path.stat().st_size
+            constructed = []
+            original = writer._tokens
+
+            def counted(*args):
+                constructed.append(1)
+                return original(*args)
+
+            writer._tokens = counted
             started = time.perf_counter()
-            writer.rebuild_body(conn.cursor(), "synthetic")
+            try:
+                writer.rebuild_body(conn.cursor(), "synthetic")
+            finally:
+                writer._tokens = original
             conn.commit()
             elapsed = time.perf_counter() - started
             complete, windows, source, metadata, membership = conn.execute(
@@ -183,7 +197,16 @@ def measure_cap():
                 and metadata <= writer.MAX_METADATA
                 and membership <= writer.MAX_MEMBERSHIP
             )
-            assert elapsed < 120
+            assert writer.MAX_MEMBERSHIP == 16 * 1024 * 1024
+            assert len(constructed) == windows <= 32
+            added = (
+                conn.execute("PRAGMA page_count").fetchone()[0]
+                * conn.execute("PRAGMA page_size").fetchone()[0]
+                - before
+            )
+            wal = Path(str(path) + "-wal").stat().st_size
+            assert added + wal <= 32 * 1024 * 1024
+            assert elapsed < 10
             print(
                 json.dumps(
                     {
@@ -194,6 +217,8 @@ def measure_cap():
                         "body_complete": complete,
                         "windows": windows,
                         "membership_bytes": membership,
+                        "constructed_windows": len(constructed),
+                        "added_database_bytes": added,
                         "db_bytes": path.stat().st_size,
                         "wal_bytes": Path(str(path) + "-wal").stat().st_size,
                         "sqlite": sqlite3.sqlite_version,
@@ -205,9 +230,55 @@ def measure_cap():
             conn.close()
 
 
+def measure_storage_guard():
+    with tempfile.TemporaryDirectory(prefix="literal-storage-runtime-") as scratch:
+        path = Path(scratch) / "synthetic.db"
+        conn = sqlite3.connect(path)
+        original = writer.MIN_FREE_BYTES
+        try:
+            create_schema(conn)
+            conn.execute("INSERT INTO messages(claimant_id) VALUES('synthetic')")
+            capture = body.prepare(
+                [body.Part(0, -1, "plain", True, "synthetic private marker")], "synthetic"
+            )
+            body.store(conn.cursor(), "synthetic", capture)
+            conn.commit()
+            # Exercise the real statvfs path without filling a filesystem.
+            space = os.statvfs(path)
+            assert original == 1024**3
+            writer.MIN_FREE_BYTES = space.f_bavail * space.f_frsize + 1
+            writer.rebuild_body(conn.cursor(), "synthetic")
+            conn.commit()
+            assert conn.execute("SELECT COUNT(*) FROM literal_windows").fetchone()[0] == 0
+            assert conn.execute("SELECT body_complete FROM literal_state").fetchone()[0] == 0
+            where = [
+                type(
+                    "W", (), {"leaf": type("L", (), {"name": "body_phrase", "value": "marker"})()}
+                )()
+            ]
+            with reader.QueryBudget(conn) as budget:
+                budget.prepare(where)
+                params = []
+                predicate = reader.compile_phrase("b", "marker", params)
+                assert (
+                    conn.execute(
+                        "SELECT COUNT(*) FROM messages m WHERE (" + predicate + ") IS NULL", params
+                    ).fetchone()[0]
+                    == 1
+                )
+            print(
+                json.dumps({"shape": "storage_limited", "windows": 0, "body_complete": 0}),
+                flush=True,
+            )
+        finally:
+            writer.MIN_FREE_BYTES = original
+            conn.close()
+
+
 if __name__ == "__main__":
     for shape in ("prose", "repeated", "unicode", "misaligned"):
         for count in (40, 400):
             measure(shape, count)
 
     measure_cap()
+    measure_storage_guard()

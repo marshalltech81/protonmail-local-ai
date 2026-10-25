@@ -144,3 +144,70 @@ def test_window_admission_stops_source_reads_at_constant_work(db, monkeypatch):
         measures.append(sum(copied))
     assert measures[0] == measures[1]
     assert 0 < measures[1] <= 3 * 32768
+
+
+def test_approved_membership_limit_is_sixteen_mib():
+    assert literal.MAX_MEMBERSHIP == 16 * 1024 * 1024
+
+
+@pytest.mark.parametrize("failure", ["low_space", "probe_failed"])
+def test_storage_guard_precedes_token_and_posting_work(db, monkeypatch, caplog, failure):
+    import os
+    from types import SimpleNamespace
+
+    def space(path):
+        if failure == "probe_failed":
+            raise OSError("SYNTHETIC_PRIVATE_WORDS")
+        return SimpleNamespace(f_bavail=(1024**3 - 1) // 4096, f_frsize=4096)
+
+    monkeypatch.setattr(os, "statvfs", space)
+    monkeypatch.setattr(literal, "_tokens", lambda *a: pytest.fail("token construction ran"))
+    store(db, "SYNTHETIC_PRIVATE_WORDS")
+    assert db._conn.execute("SELECT COUNT(*) FROM literal_windows").fetchone()[0] == 0
+    assert db._conn.execute("SELECT body_complete FROM literal_state").fetchone()[0] == 0
+    assert "storage_limited=1" in caplog.text
+    assert "SYNTHETIC_PRIVATE_WORDS" not in caplog.text
+
+
+def test_storage_guard_rechecks_each_window_and_does_not_reset_for_next_message(db, monkeypatch):
+    import os
+    from types import SimpleNamespace
+
+    probes, tokens = [], []
+    available = 1024**3
+    original = literal._tokens
+
+    def space(path):
+        probes.append(path)
+        return SimpleNamespace(f_bavail=available, f_frsize=1)
+
+    def construct(*args):
+        nonlocal available
+        tokens.append(1)
+        available = 1024**3 - 1
+        return original(*args)
+
+    monkeypatch.setattr(os, "statvfs", space)
+    monkeypatch.setattr(literal, "_tokens", construct)
+    first = store(db, "SYNTHETIC_FIRST_MARKER " + "ordinary synthetic prose " * 1000)
+    assert len(tokens) == 1
+    assert len(probes) == 2
+    assert db._conn.execute("SELECT COUNT(*) FROM literal_windows").fetchone()[0] == 1
+    assert db._conn.execute("SELECT body_complete FROM literal_state").fetchone()[0] == 0
+    # A current positive survives the stop; a new claimant gets no space bypass.
+    token = literal.gram_token("syn")
+    assert (
+        db._conn.execute(
+            "SELECT COUNT(*) FROM literal_long_fts WHERE literal_long_fts MATCH ?", (token,)
+        ).fetchone()[0]
+        == 1
+    )
+    second = store(db, "different synthetic message")
+    assert second.claimant_id != first.claimant_id
+    assert len(tokens) == 1
+    assert (
+        db._conn.execute(
+            "SELECT body_complete FROM literal_state WHERE claimant_id=?", (second.claimant_id,)
+        ).fetchone()[0]
+        == 0
+    )

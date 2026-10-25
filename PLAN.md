@@ -837,6 +837,10 @@ superseded entries keep their number and one line.
     grams use fixed ASCII encoding (owner approval, 2026-10-25) so NUL-containing
     operands are representable in FTS MATCH. Existing query meanings and omitted
     server-state criteria stay; limits fail explicitly without partial counts.
+    The owner subsequently approved a 16 MiB per-message membership budget and
+    a 1 GiB filesystem free-space admission guard for the literal writer after
+    the P1 amplification review of #1801. A storage-limited index keeps admitted
+    current positives; missing text remains unknown. The other work limits stand.
 
 36. **Predicate leaves, reparse and sender evidence (2026-10-08):**
     parser-only backfills run as an in-place reparse through the job
