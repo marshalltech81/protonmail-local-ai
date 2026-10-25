@@ -1803,17 +1803,18 @@ _GROUP_ROWS: dict[str, str] = {
     # The text after the last "@" (``rtrim`` strips every trailing
     # character but "@"), the suffix ``domain_is`` compares.
     "sender_domain": (
-        "SELECT DISTINCT e.*, substr(p.address, "  # nosec B608
-        "length(rtrim(p.address, replace(p.address, '@', ''))) + 1) AS value, "
+        "SELECT DISTINCT e.*, CASE WHEN instr(CAST(p.address AS BLOB), x'00') > 0 "  # nosec B608
+        "THEN NULL ELSE substr(p.address, "
+        "length(rtrim(p.address, replace(p.address, '@', ''))) + 1) END AS value, "
         f"NULL AS name FROM e {_SAFE_FROM_ROWS}"
     ),
-    # SQLite's suffix predicate sees the prefix before an embedded NUL.
+    # NUL-bearing addresses have no known domain, never a truncated one.
     "recipient_domain": (
         "SELECT DISTINCT e.*, p.value, NULL AS name FROM e LEFT JOIN ("
-        "SELECT claimant_id, CASE WHEN instr(address, '@') = 0 THEN NULL ELSE "
+        "SELECT claimant_id, CASE WHEN instr(CAST(address AS BLOB), x'00') > 0 "
+        "OR instr(address, '@') = 0 THEN NULL ELSE "
         "NULLIF(substr(address, length(rtrim(address, replace(address, '@', ''))) + 1), '') "
-        "END AS value FROM (SELECT claimant_id, substr(address, 1, length(address)) AS address "
-        "FROM message_participants WHERE role IN ('to', 'cc'))) p "
+        "END AS value FROM message_participants WHERE role IN ('to', 'cc')) p "
         "ON p.claimant_id = e.cid AND p.value IS NOT NULL"
     ),
     "attachment_content_type": (
@@ -2026,7 +2027,7 @@ def _attachment_message_scope(
     params = list(message_params)
     for name, value in filters:
         if name in ("claimant_id", "thread_id"):
-            scope.append(f"m.{name} = ?")
+            scope.append("m.claimant_id = ?" if name == "claimant_id" else "m.thread_id = ?")
             params.append(value)
     return " AND ".join(scope), params
 

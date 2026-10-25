@@ -2756,7 +2756,7 @@ class TestDecodeHeader:
         assert extractors.drain_suppressed_lines() == 0
         assert self.RAW_8BIT_MARKER not in caplog.text
 
-    def test_raw_8bit_encoded_word_search_finishes_quickly(self, tmp_path, caplog):
+    def test_raw_8bit_encoded_word_search_finishes_quickly(self, tmp_path, caplog, header_work):
         """The search for a kept encoded-word runs over
         the whole decoded Subject before the cap. Near-miss prefixes
         (``=?a=?a...``) each fail after a constant number of steps."""
@@ -2766,6 +2766,7 @@ class TestDecodeHeader:
         with caplog.at_level(logging.DEBUG):
             msg = parse_email(self._write_raw_header_message(tmp_path, headers))
         elapsed = time.perf_counter() - start
+        header_work.check(len(headers) + 1000)
         assert msg is not None
         assert msg.subject == ("café " + "=?a" * prefixes)[:SUBJECT_MAX_CHARS]
         assert "not decoded" not in caplog.text
@@ -2837,7 +2838,7 @@ class TestDecodeHeader:
         assert _decode_header(value) == "ok =?utf-8?x?bad?="
         assert _decode_display_name(value) == "ok =?utf-8?x?bad?="
 
-    def test_malformed_encoded_word_prefixes_decode_quickly(self):
+    def test_malformed_encoded_word_prefixes_decode_quickly(self, header_work):
         """Regression (#218): ``email.header.decode_header`` rescans the
         rest of the header at every malformed ``=?`` prefix, so a 48 KB
         Subject of them took ~0.4 s and a multi-MB one stalled the
@@ -2848,6 +2849,7 @@ class TestDecodeHeader:
         started = time.monotonic()
         result = _decode_header(value)
         assert time.monotonic() - started < 1.0
+        header_work.check(len(value))
         assert result == value.strip()
 
     def test_malformed_subject_does_not_stall_parse(self, tmp_path):

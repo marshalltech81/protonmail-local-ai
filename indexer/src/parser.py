@@ -107,8 +107,9 @@ type DateStatus = Literal["parsed", "missing", "invalid"]
 #   (#1086);
 # * ``participant_names``: a display name past the first for its (role,
 #   address), past the ``MAX_EXTRA_PARTICIPANT_*`` budget, is not stored
-#   (#1140); the address and its first name are kept;
-# * ``bcc_participant_names``: the same shared name budget dropped a Bcc
+#   (#1140), or a name the formatter cannot keep without changing the
+#   parsed address (#1250); the address is kept;
+# * ``bcc_participant_names``: the shared budget or identity guard dropped a Bcc
 #   name; tracked separately so visible-role name completeness is unchanged;
 # * ``subject_length``: a decoded subject over ``SUBJECT_MAX_CHARS`` is
 #   cut to the cap (#902);
@@ -2984,7 +2985,7 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
                 continue
             if index:
                 caps["address_repeated"] += 1
-            addrs.extend(_parse_addrs(value, caps, budget))
+            addrs.extend(_parse_addrs(value, caps, budget, is_bcc=role == "bcc"))
         recipients[role] = addrs
         recipients_complete[role] = complete and _address_losses(caps) == lost
 
@@ -3123,6 +3124,8 @@ def _parse_addrs(
     value: str | email.header.Header,
     caps: Counter[str] | None = None,
     budget: _AddressBudget | None = None,
+    *,
+    is_bcc: bool = False,
 ) -> list[str]:
     """Parse an address header into one parseable string per address.
 
@@ -3195,6 +3198,11 @@ def _parse_addrs(
                 continue
             name = _decode_display_name(restore(name)) if name else ""
             formatted = _format_address(name, addr)
+            if name and formatted == addr:
+                if is_bcc:
+                    caps["bcc_participant_names"] += 1
+                else:
+                    caps["participant_names"] += 1
         except Exception:
             # e.g. RecursionError from parseaddr on deeply nested comments,
             # whether in the element or re-created by restoring a token.

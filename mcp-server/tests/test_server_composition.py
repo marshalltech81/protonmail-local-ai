@@ -239,7 +239,7 @@ def test_each_group_gets_the_clients_and_settings_main_built(monkeypatch):
     assert search_kwargs["secret_values"] == [_KEY, _KEY, _KEY]
     assert search_kwargs["expected_embed_dim"] == 4
     assert calls["register_retrieval_tools"] == ((server, db), {})
-    assert calls["register_system_tools"] == ((server, db), {})
+    assert calls["register_system_tools"] == ((server, db), {"reranker": search_kwargs["reranker"]})
     inference = calls["register_intelligence_tools"][0][3]
     assert isinstance(inference, main_mod.InferenceClient)
     for group in ("register_intelligence_tools", "register_experimental_tools"):

@@ -13,13 +13,14 @@ for tool ...`` at WARNING once per call, with no rate limit.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import time
 from collections.abc import Callable
 
 import mcp.types as mt
 from fastmcp import FastMCP
-from fastmcp.exceptions import ValidationError
+from fastmcp.exceptions import ToolError, ValidationError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 from pydantic import ValidationError as PydanticValidationError
@@ -27,6 +28,23 @@ from pydantic import ValidationError as PydanticValidationError
 from .rate_limited_log import ArgumentRejections
 
 log = logging.getLogger("mcp.tools.arguments")
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _invalid_unicode(value: object) -> bool:
+    """Scan JSON strings, including keys, without recursive Python calls."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            if _SURROGATE.search(item):
+                return True
+        elif isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return False
 
 
 class ArgumentValidationLog(Middleware):
@@ -44,8 +62,9 @@ class ArgumentValidationLog(Middleware):
 
     Handler-checked arguments are counted by the handlers' own limiters:
     a call that fails the argument model never reaches the handler, so
-    no rejection is counted twice. Read-only: the middleware changes no
-    request, result or error.
+    no rejection is counted twice. Before dispatch, JSON strings with
+    lone UTF-16 surrogates are refused with fixed text, so neither an
+    echoed argument nor a validation error breaks response serialization.
     """
 
     def __init__(
@@ -66,6 +85,11 @@ class ArgumentValidationLog(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
+        if _invalid_unicode([context.message.name, context.message.arguments]):
+            params, limiter = await self._state()
+            name = context.message.name
+            limiter.reject(name if name in params else "other", "other")
+            raise ToolError("Tool arguments must contain valid Unicode")
         try:
             return await call_next(context)
         except ValidationError as e:

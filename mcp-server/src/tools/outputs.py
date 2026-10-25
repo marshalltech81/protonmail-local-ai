@@ -1669,6 +1669,14 @@ class OperatorIdentityStatus(_Output):
 
 
 class MailboxStatusOutput(_Output):
+    rerank_mode: Literal["none", "cohere"] = Field(
+        description="Whether this server reranks search candidates; no provider URL or credential."
+    )
+    rerank_candidates: int | None = Field(
+        ge=1,
+        description="Unit: candidate threads. Configured count, null when disabled. Each reranking search "
+        "can send up to max(limit, rerank_candidates) candidate threads, fewer when unavailable.",
+    )
     operator_identity: OperatorIdentityStatus
     server_version: str = Field(
         description="MCP server's deployed source commit, with -dirty for local changes; "

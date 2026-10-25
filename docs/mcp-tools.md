@@ -113,6 +113,10 @@ OperationalError`), because an SQLite message can quote the query or
 stored mail; the server log then shows the same type for that call. An
 empty match is not a failure: it is a normal result with an empty list.
 
+Argument strings (including nested values and object keys) must be valid
+Unicode. A lone UTF-16 surrogate is refused before tool dispatch with
+`Tool arguments must contain valid Unicode`, without echoing its value.
+
 In the tools that call the embed or inference provider (`search_emails`,
 `get_evidence` and the intelligence tools), a provider or database
 failure is reported, and logged, as follows, because a provider's
@@ -633,7 +637,7 @@ different filters"), never read against them.
 | `address_contains` | role, text | `query_messages` `where` | an address in the role contains the text, lowercased; display names are not read |
 | `display_name_contains` | role, text | `query_messages` `where` | a display name written for an address in the role contains the text, casefolded, each name on its own; also unknown when its `participant_names_complete` is not `1` and none does |
 | `address_or_name_contains` | role, text | `sender`, `recipient` and `participant` given anything else (a domain such as `@example.com`, a name or a fragment); `query_messages` `where` | an address in the role, or a display name written for it, contains the text; also unknown when its `participant_names_complete` is not `1` and none does |
-| `domain_is` | role, domain | `query_messages` `where` | an address in the role has exactly that domain, lowercased; a subdomain does not match |
+| `domain_is` | role, domain | `query_messages` `where` | an address in the role has exactly that domain, lowercased; a subdomain does not match. An embedded NUL makes that address's domain unknown: another valid address may still decide a positive, otherwise the leaf is indeterminate |
 | `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded; unknown when it does not and the stored subject was cut or not checked |
 | `text` | words | `query_messages` `text` | as `body_words`, which it compiles to |
 | `header_exists` | header name | `query_messages` and `aggregate_messages` `where` | any occurrence of the named top-level header exists, even with an empty value; absence is unknown unless header evidence is complete |
@@ -708,7 +712,8 @@ A `sender`, `recipient` or `participant` value matched as a substring
 (a name or fragment, not a full address) that matches none of a
 message's stored addresses and display names is unknown, not false,
 when its `participant_names_complete` is not `1`: `0` when the
-indexer's per-message name budget dropped a From/To/Cc name, `null` for mail not
+indexer's per-message name budget or address-formatting identity guard dropped
+a From/To/Cc name, `null` for mail not
 reparsed since the upgrade that added it
 ([#1140](https://github.com/marshalltech81/protonmail-local-ai/issues/1140)).
 A match on a stored address or name still decides it, and a full
@@ -2186,7 +2191,7 @@ filters and `date_basis`, and, for a key accepted by its selector, a group's `me
 | `group_by` | Group value | The group's own filter |
 |---|---|---|
 | `sender_address` | a From address | a `where` `address_is` leaf, role `from` |
-| `sender_domain` | the domain of a From address | a `where` `domain_is` leaf, role `from` |
+| `sender_domain` | the domain of a From address; a NUL-bearing address has no known domain and groups under `null` | a `where` `domain_is` leaf, role `from` |
 | `recipient_domain` | an observed To/Cc domain | a `where` `domain_is` leaf, role `visible_recipient`, when the key meets its operand validation |
 | `attachment_content_type` | declared MIME type on a current occurrence | a `where` `attachment_content_type_is` leaf, when `value_clipped=false` |
 | `folder` | the folder | `folder` |
@@ -3255,10 +3260,9 @@ mail a population run will read; the steps are not sent to clients:
    sent once per window). With reranking on (`RERANK_MODE` not
    `none`), each call also sends the text of up to
    `max(50, RERANK_CANDIDATES)` candidate threads to the rerank
-   provider. No tool reports either setting
-   ([#1578](https://github.com/marshalltech81/protonmail-local-ai/issues/1578)),
-   and `RERANK_CANDIDATES` has no upper limit: ask the user, who runs
-   the server, for both, and do not extract until they are known.
+   provider. Read `get_mailbox_status.rerank_mode` and
+   `rerank_candidates` before the call: disabled reranking reports
+   `none` and `null`. The configured candidate count has no upper limit.
 2. Enumerate the population, paging each query to the end with
    `next_cursor`:
    - For occurrences backed by an attachment (every invoice line for
@@ -3785,6 +3789,7 @@ and what it holds. Call this when asked which version or build is running.
 | Field | Meaning |
 |---|---|
 | `server_version` | MCP server image's source commit, including `-dirty` for local changes; `unknown` when build identity is unavailable. This identifies the server code, not the MCP protocol or SQLite schema version |
+| `rerank_mode`, `rerank_candidates` | Active reranking configuration: `none` / `null` when disabled, `cohere` / configured candidate count when enabled. A reranking search can send up to `max(limit, rerank_candidates)` candidate threads to the provider (fewer when unavailable); this is per search, not a whole multi-call tool run. No URL, model or key is exposed |
 | `current` | `true` only when all four hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, no message is pending, retrying, deferred or extraction deferred, and no mail collection waits for its success to be delivered to the indexer (`collection.failure_unrecovered` after an observed failure, or `collection.success_undelivered` for a success whose delivery is not yet confirmed, including one whose failed predecessor was never observed). A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
 | `ingestion_caught_up` | The same sync/heartbeat freshness and collection checks as `current`, but waiting reparse jobs do not block it. Non-reparse pending, retrying, deferred and extraction-deferred jobs still block it. Both flags exclude terminal failures; neither certifies completeness |
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |

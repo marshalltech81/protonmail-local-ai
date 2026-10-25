@@ -423,12 +423,15 @@ class TestReplyHeaderWorkBound:
         ],
         ids=["en", "en-wrote-mid-line", "de", "fr", "es", "it", "nl"],
     )
-    def test_long_lead_word_line_finishes_quickly(self, line):
+    def test_long_lead_word_line_finishes_quickly(self, line, reply_work):
         # Unbounded, each of these takes minutes; bounded, milliseconds.
         started = time.perf_counter()
         result = _embedded_body(line + "\nNew reply text.")
         assert time.perf_counter() - started < 1.0
         assert "New reply text." in result
+        assert reply_work  # the short reply still exercises the matcher
+        assert max(reply_work) <= 300
+        assert sum(reply_work) < 1000
 
     def test_long_attribution_line_is_still_cut(self):
         body = (
