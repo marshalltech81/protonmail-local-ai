@@ -91,6 +91,7 @@ STOP_TOKENS = frozenset(
         "operator_declined",
         "probe_failed",
         "world_error",
+        "fixture_unbuildable",
     }
 )
 _PREDICTION_ID = re.compile(r"P(?:[1-9]|1[0-2])")

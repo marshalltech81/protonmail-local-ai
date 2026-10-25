@@ -29,7 +29,7 @@ import secrets
 import sys
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 from . import correlation, export, fixtures, frozen, p11, runner
@@ -57,6 +57,7 @@ STOP_TOKENS = frozenset(
         "operator_declined",
         "probe_failed",
         "world_error",
+        "fixture_unbuildable",
     }
 )
 _FOLDERS = ("INBOX", "Folder", "Archive", "Trash", "Drafts", "Sent", "Spam")
@@ -180,11 +181,101 @@ class Driver:
         self.snapshots: list[str] = []  # the labels of snapshots taken, in order
         self._continuity: dict[str, list[tuple[str, int, int]]] = {}
         self._isolation_checked, self._tls_checked = isolation_checked, tls_checked
+        self._preflight_fixtures()  # refused before any account activity
 
     # ---- plumbing --------------------------------------------------
 
     def _gid(self, group: str) -> str:
         return f"{self.run_id}{group}"
+
+    def _fixture_calls(self) -> Iterator[tuple[Callable[..., bytes], str, int, dict]]:
+        """Every generator call the groups can make, one number per decimal
+        width of each numbering (a call's length depends on its number only
+        through that width). A route that may not carry the fields is still
+        included: whether it does is not known before the run.
+        """
+
+        def widths(
+            group: str, low: int, high: int, build: Callable[..., bytes], **kw: object
+        ) -> Iterator[tuple[Callable[..., bytes], str, int, dict]]:
+            for n in fixtures.width_representatives(low, high):
+                yield build, self._gid(group), n, kw
+
+        def split(
+            group: str, count: int, multipart: int, size: int
+        ) -> Iterator[tuple[Callable[..., bytes], str, int, dict]]:
+            """Numbers 1..count, multipart up to ``multipart``, plain after."""
+            cut = min(multipart, count)
+            yield from widths(group, 1, cut, fixtures.control_message, size=size, multipart=True)
+            yield from widths(
+                group, cut + 1, count, fixtures.control_message, size=size, multipart=False
+            )
+
+        g = self.inputs.fixtures["groups"]
+        ctrl = fixtures.control_message
+        yield from widths(
+            "g1", 1, g["g1"]["control"] + g["g1"]["incremental"], ctrl, size=g["g1"]["size"]
+        )
+        g2 = g["g2"]
+        kinds, period = g2["kinds"], g2["per_route"]
+        for index in range(len(g2["routes"])):
+            yield (
+                fixtures.forged_message,
+                self._gid("g2"),
+                900 + index,
+                {
+                    "kind": kinds[0],
+                    "size": g2["size"],
+                },
+            )
+        total = len(g2["routes"]) * period
+        for j, kind in enumerate(kinds):
+            if j >= period:
+                break  # this kind is never reached
+            # The lowest number of each width that takes this kind: n runs
+            # route by route, kind ``(n - 1) % period % len(kinds)``.
+            for low in fixtures.width_representatives(1, total):
+                high = min(10 ** len(str(low)) - 1, total)
+                r = (low - 1) % period
+                i = j if r <= j else j + len(kinds) * -(-(r - j) // len(kinds))
+                n = low - r + (i if i < period else period + j)
+                if n <= high:
+                    yield (
+                        fixtures.forged_message,
+                        self._gid("g2"),
+                        n,
+                        {
+                            "kind": kind,
+                            "size": g2["size"],
+                        },
+                    )
+        yield from split("g3", g["g3"]["messages"], g["g3"]["multipart"], g["g3"]["size"])
+        yield from widths("g4", 1, g["g4"]["drafts"], ctrl, size=g["g4"]["size"])
+        g5 = g["g5"]
+        yield ctrl, self._gid("g5"), 1, {"size": g5["size"]}
+        yield from widths(
+            "g5", 100, 99 + len(g5["h11"]), fixtures.forged_message, kind="forged", size=g5["size"]
+        )
+        g6 = g["g6"]
+        for n in fixtures.width_representatives(1, g6["messages"]):
+            yield fixtures.g6_message, self._gid("g6"), n, {"size": g6["message_bytes"]}
+        g7 = g["g7"]
+        yield from split(
+            "g7", g7["tracked_multipart"] + g7["tracked_plain"], g7["tracked_multipart"], g7["size"]
+        )
+        if g["g8"].get("spam_probe"):
+            yield from widths("g8", 1, 2, ctrl, size=2048)
+
+    def _preflight_fixtures(self) -> None:
+        """Refuse a plan or run id the generator cannot build, before any
+        account activity. The generator keeps enforcing its own limits."""
+        try:
+            for group in GROUPS:
+                fixtures.token(self._gid(group), 1)
+            for build, run, n, kw in self._fixture_calls():
+                build(run, n, **kw)
+        except fixtures.FixtureError:
+            raise Refused("frozen_inputs_invalid") from None
 
     def _token_of(self, raw: bytes) -> str | None:
         return correlation.summary(raw).token
@@ -807,6 +898,8 @@ class Driver:
             )
         except ProbeError:
             stop = ("probe_failed", self._group)
+        except fixtures.FixtureError:
+            stop = ("fixture_unbuildable", self._group)
         for name, state in self._marks.items():
             self.state.states[name] = state
         return self._finish(stop)
