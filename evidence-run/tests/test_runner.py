@@ -157,3 +157,18 @@ def test_the_service_rules_are_frozen_before_the_first_account_action():
         rules.add("b", lambda m: True)
     with pytest.raises(runner.ConfigError):
         runner.Run().classify(runner.MessageSummary(token=None, sender_domain="x"))  # not frozen
+
+
+def test_operations_that_are_not_submissions_are_paced_without_spending_attempts():
+    clock = Clock()
+    budget = Budget(clock=clock, sleep=clock.sleep)
+    for _ in range(25):
+        budget.pace()
+    assert budget.attempts == 0
+    assert budget.max_in_any_second <= 10
+
+
+def test_a_refusal_carries_a_fixed_token_and_is_a_config_error():
+    refused = runner.Refused("not_authorized")
+    assert refused.token == "not_authorized"
+    assert isinstance(refused, runner.ConfigError)

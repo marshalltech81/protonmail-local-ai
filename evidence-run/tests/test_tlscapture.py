@@ -150,3 +150,32 @@ def test_a_folder_name_that_cannot_be_sent_is_refused_before_connecting(tmp_path
             _capture(server, cert, secret, folder=folder)
     assert str(caught.value) == "bad_folder_name"
     assert server.commands == []
+
+
+def test_the_capture_state_carries_uidvalidity_and_flags_with_the_literals(tmp_path, secret):
+    cert = make_cert(tmp_path, "a")
+    with ImapResponder([cert], MESSAGES) as server:
+        server.flags = True
+        state = tlscapture.capture_state(
+            "127.0.0.1",
+            server.port,
+            expected_fingerprint=cert.fingerprint,
+            user="synthetic-user",
+            password_file=secret,
+        )
+    assert state.uidvalidity == 1
+    assert [state.messages[uid] for uid in sorted(state.messages)] == MESSAGES
+    assert state.flags == {1: frozenset({"\\Seen"}), 2: frozenset({"\\Seen"})}
+
+
+def test_capture_state_without_flags_in_the_reply_gives_empty_flag_sets(tmp_path, secret):
+    cert = make_cert(tmp_path, "a")
+    with ImapResponder([cert], MESSAGES) as server:
+        state = tlscapture.capture_state(
+            "127.0.0.1",
+            server.port,
+            expected_fingerprint=cert.fingerprint,
+            user="synthetic-user",
+            password_file=secret,
+        )
+    assert state.flags == {1: frozenset(), 2: frozenset()}

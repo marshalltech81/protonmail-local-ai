@@ -20,11 +20,13 @@ import os
 import re
 import ssl
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 _UID = re.compile(rb"UID (\d+)")
 _SIZE = re.compile(rb"RFC822\.SIZE (\d+)")
+_FLAGS = re.compile(rb"FLAGS \(([^)]*)\)")
 
 
 class CaptureError(Exception):
@@ -64,6 +66,24 @@ def pinned_context(pem: str) -> ssl.SSLContext:
     return context
 
 
+@dataclass(frozen=True)
+class CaptureState:
+    """What one capture saw: the mailbox's UIDVALIDITY (``None`` if the
+    server did not say), each message's bytes as served, and its flags."""
+
+    uidvalidity: int | None
+    messages: dict[int, bytes]
+    flags: dict[int, frozenset[str]]
+
+
+def _uidvalidity(conn: imaplib.IMAP4) -> int | None:
+    _, data = conn.response("UIDVALIDITY")
+    try:
+        return int(data[0]) if data and data[0] is not None else None
+    except ValueError:
+        return None
+
+
 def capture(
     host: str,
     port: int,
@@ -77,6 +97,32 @@ def capture(
     max_messages: int = 1000,
 ) -> dict[int, bytes]:
     """The messages of ``folder`` as served, by UID."""
+    return capture_state(
+        host,
+        port,
+        expected_fingerprint=expected_fingerprint,
+        user=user,
+        password_file=password_file,
+        folder=folder,
+        timeout=timeout,
+        max_total_bytes=max_total_bytes,
+        max_messages=max_messages,
+    ).messages
+
+
+def capture_state(
+    host: str,
+    port: int,
+    *,
+    expected_fingerprint: str,
+    user: str,
+    password_file: Path | str,
+    folder: str = "INBOX",
+    timeout: float = 30.0,
+    max_total_bytes: int = 64 * 1024 * 1024,
+    max_messages: int = 1000,
+) -> CaptureState:
+    """``capture`` with the mailbox's UIDVALIDITY and each message's flags."""
     expected = normalize_fingerprint(expected_fingerprint)
     if not folder or any(c in folder for c in "\r\n\x00"):
         raise CaptureError("bad_folder_name")  # refused before any connection
@@ -101,12 +147,14 @@ def capture(
         # imaplib quotes the name itself (Python 3.14's select uses _astring).
         # An empty folder is read from EXISTS, not from a FETCH reply that a
         # server may answer with NO or with nothing.
+        validity = _uidvalidity(conn)
         if selected and selected[0] is not None and int(selected[0]) == 0:
-            return {}
+            return CaptureState(validity, {}, {})
         status, data = conn.uid("FETCH", "1:*", "(UID RFC822.SIZE)")
         if status != "OK":
             raise CaptureError("size_fetch_failed")  # never "an empty folder"
         sizes: dict[int, int] = {}
+        flags: dict[int, frozenset[str]] = {}
         for item in data or []:
             line = item[0] if isinstance(item, tuple) else item
             if (
@@ -114,7 +162,10 @@ def capture(
                 and (uid_match := _UID.search(line))
                 and (size_match := _SIZE.search(line))
             ):
-                sizes[int(uid_match.group(1))] = int(size_match.group(1))
+                uid = int(uid_match.group(1))
+                sizes[uid] = int(size_match.group(1))
+                found = _FLAGS.search(line)
+                flags[uid] = frozenset(found.group(1).decode().split()) if found else frozenset()
         if len(sizes) > max_messages or sum(sizes.values()) > max_total_bytes:
             raise CaptureError("capture_cap")
         captured: dict[int, bytes] = {}
@@ -124,7 +175,7 @@ def capture(
             if status != "OK" or literal is None:
                 raise CaptureError("fetch_failed")
             captured[uid] = bytes(literal)
-        return captured
+        return CaptureState(validity, captured, flags)
     except CaptureError:
         raise
     except OSError, ssl.SSLError, imaplib.IMAP4.error:

@@ -140,6 +140,7 @@ class ImapResponder(_Server):
     ) -> None:
         self.messages = messages
         self.fail_size_fetch = fail_size_fetch
+        self.flags = False  # also report FLAGS in the size FETCH
         self.commands: list[str] = []
         self.logins: list[tuple[str, str]] = []
         self.mailboxes: list[str] = []  # the raw EXAMINE/SELECT argument
@@ -184,7 +185,8 @@ class ImapResponder(_Server):
                     if wanted not in ("1:*", str(index)):
                         continue
                     if "RFC822.SIZE" in rest:
-                        send(f"* {index} FETCH (UID {index} RFC822.SIZE {len(raw)})")
+                        flags = " FLAGS (\\Seen)" if self.flags else ""
+                        send(f"* {index} FETCH (UID {index}{flags} RFC822.SIZE {len(raw)})")
                     else:
                         head = f"* {index} FETCH (UID {index} BODY[] {{{len(raw)}}}\r\n"
                         stream.write(head.encode() + raw + b")\r\n")

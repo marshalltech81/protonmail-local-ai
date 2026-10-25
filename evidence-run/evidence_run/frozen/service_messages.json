@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "frozen": false,
+  "frozen_hash": null,
+  "note": "PLACEHOLDER. Freeze before the first sign-in (procedure 1B.1): replace the rules with the expected Proton service messages and how each is recognised, set frozen to true and frozen_hash to the value printed by `python -m evidence_run.driver --service-hash`. The driver refuses every account-stage group until this holds.",
+  "rules": [
+    {
+      "name": "placeholder_welcome",
+      "sender_domain": "service.example"
+    }
+  ]
+}
