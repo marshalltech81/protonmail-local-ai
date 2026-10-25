@@ -1282,10 +1282,14 @@ def _materialize(
                 "ORDER BY a.attachment_occurrence_id",
                 chunk,
             ).fetchall()
-            out += [
-                _listed_attachment(db._row_to_occurrence(r)).model_dump(mode="json", by_alias=True)
-                for r in rows
-            ]
+            records = [db._row_to_occurrence(r) for r in rows]
+            db._attach_attachment_messages(conn, records)
+            messages = {r.claimant_id: r.message_metadata for r in records}
+            read["participant_rows"] += sum(
+                len(m.from_) + len(m.to) + len(m.cc) for m in messages.values()
+            )
+            read["references"] += sum(len(m.references) for m in messages.values())
+            out += [_listed_attachment(r).model_dump(mode="json", by_alias=True) for r in records]
     return out, read
 
 

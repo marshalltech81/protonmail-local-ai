@@ -651,6 +651,7 @@ class AttachmentResult:
     score: float = 0.0
     # Raw file of the message carrying the attachment.
     source_file: SourceFile | None = None
+    message_metadata: MessageRecord | None = None
 
 
 @dataclass
@@ -1937,6 +1938,7 @@ class AttachmentOccurrenceRecord:
     ocr_pages_skipped: int | None
     attachments_manifest_complete: bool | None
     attachment_rows_current: bool | None
+    message_metadata: MessageRecord | None = None
 
 
 @dataclass
@@ -2281,6 +2283,25 @@ def _read_text_window(blob, offset: int, chars: int) -> tuple[str, int]:
     while block := blob.read(TEXT_READ_BLOCK_BYTES):
         total += len(block.translate(None, _UTF8_CONTINUATION_BYTES))
     return "".join(parts), total
+
+
+def _attach_attachment_messages(
+    conn: sqlite3.Connection, records: Sequence[AttachmentResult | AttachmentOccurrenceRecord]
+) -> None:
+    """Page claimants only, using the same bounded header reader as message listings."""
+    ids = list({r.claimant_id for r in records})
+    if not ids:
+        return
+    rows = conn.execute(
+        f"SELECT {_MESSAGE_COLUMNS} FROM messages m "  # nosec B608 — fixed columns; bound IDs
+        "WHERE m.claimant_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(ids),),
+    ).fetchall()
+    messages = [_row_to_message_record(row) for row in rows]
+    _attach_participants(conn, messages)
+    by_id = {m.claimant_id: m for m in messages}
+    for record in records:
+        record.message_metadata = by_id.get(record.claimant_id)
 
 
 def _row_to_occurrence(r) -> AttachmentOccurrenceRecord:
@@ -3292,6 +3313,7 @@ class Database:
                     [json.dumps(list({r.claimant_id for r in results}))],
                     len(results),
                 )
+            _attach_attachment_messages(conn, results)
             conn.rollback()
         return AttachmentSearch(results, indeterminate, matches)
 
@@ -6177,10 +6199,11 @@ class Database:
                 "ORDER BY page.clock DESC, page.cid DESC, page.occ DESC",
                 [*page_params, limit + 1],
             ).fetchall()
+            records = [_row_to_occurrence(r) for r in rows[:limit]]
+            _attach_attachment_messages(conn, records)
             conn.rollback()
 
         has_more = len(rows) > limit
-        records = [_row_to_occurrence(r) for r in rows[:limit]]
         next_offset = offset + len(records)
         return AttachmentPage(
             total_matches=sum(status_counts.values()),
@@ -6233,9 +6256,11 @@ class Database:
                     readonly=True,
                 ) as blob:
                     window, total = _read_text_window(blob, offset, window_chars)
+            record = _row_to_occurrence(row)
+            _attach_attachment_messages(conn, [record])
             conn.rollback()
         return AttachmentText(
-            record=_row_to_occurrence(row),
+            record=record,
             ocr_disabled=bool(row["ocr_disabled"]) and row["extraction_status"] == "unsupported",
             window=window,
             total_chars=total,

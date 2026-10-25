@@ -286,14 +286,20 @@ class TestSearchAttachmentsSenderTool:
         )
         assert [r["attachment_id"] for r in out.structured_content["results"]] == ["v1-att"]
 
-    def test_structured_output_keeps_thread_senders(self, fake_server, fake_embed, carrier_db):
+    def test_structured_output_reports_carrying_message_sender(
+        self, fake_server, fake_embed, carrier_db
+    ):
         out = asyncio.run(
             _handler(fake_server, fake_embed, carrier_db)(sender="colleague@other.test")
         )
         rows = {r["attachment_id"]: r for r in out.structured_content["results"]}
         assert set(rows) == {"c1-att", "o1-att"}
-        # ``senders`` is still the thread's: c1's thread lists the vendor too.
-        assert rows["c1-att"]["senders"] == [VENDOR, COLLEAGUE]
+        # The vendor also wrote in the thread, but did not carry this attachment.
+        assert rows["c1-att"]["from"] == [
+            {"name": "Colleague Name", "address": "colleague@other.test"}
+        ]
+        assert rows["c1-att"]["from_count"] == 1
+        assert "senders" not in rows["c1-att"]
         assert rows["c1-att"]["claimant_id"] == claimant_of("c1")
 
     def test_no_match_prose(self, fake_server, fake_embed, carrier_db):

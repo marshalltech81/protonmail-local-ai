@@ -1114,7 +1114,7 @@ from Acme", "which emails had W-2 attachments?"). With no `query` it
 lists attachments by the structured filters alone, newest message
 first. Each result carries `sent_at` and `occurred_at`, the send and
 delivery dates of the message carrying the attachment, beside its
-thread's `date_last`; the date filters and the no-query order use the
+thread's explicitly named `thread_date_last`; the date filters and the no-query order use the
 message's effective time (`occurred_at`, else `sent_at`, else the time
 it was first indexed).
 
@@ -1162,8 +1162,12 @@ exception type each minute, then a count) and the call's timing line
 carries `degraded_attachment_indeterminate`. The lanes and the
 count read one snapshot. It is applied in
 each lane's SQL before the lane's limit, so unlike `from_addr` it does
-not depend on a candidate window. Each result's `senders` is still its
-thread's senders, not the carrying message's From. With `sender`,
+not depend on a candidate window. `subject`, `from`, `from_count` and
+`sender_ambiguous` describe the carrying message, with the same display
+limits and nullable ambiguity as `query_messages`. `thread_subject` and
+`thread_date_last` describe the thread; thread senders are available through
+`get_thread`. This replaces the former thread-level `subject`, `senders`,
+`sender_count` and `date_last` output fields. With `sender`,
 `sender_match` reports `mode` (`exact` or `substring`),
 `scope: "returned_occurrences"`, the full distinct matched From-address
 count among the returned attachment occurrences, and at most ten
@@ -2390,6 +2394,13 @@ is population-dependent, including membership selection and sorting; the output
 cap is not a constant-work or latency guarantee.
 
 ### `query_attachments`
+
+Every occurrence includes its carrying message's `subject`, `from`,
+`from_count` and nullable `sender_ambiguous`, using `query_messages`'s
+500-character header limits and at most ten From entries with the full
+count. `get_attachment` returns these same fields on its occurrence.
+The headers and attachment metadata come from the call's read snapshot.
+
 Enumerate stored attachment occurrences matching exact criteria, with
 a total count
 ([#796](https://github.com/marshalltech81/protonmail-local-ai/issues/796)).

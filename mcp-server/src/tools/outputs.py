@@ -680,7 +680,27 @@ class EvidenceOutput(_Output):
     )
 
 
-class AttachmentHit(_Output):
+class AttachmentMessageHeaders(_Output):
+    subject: str = Field(
+        description="Carrying message's subject, display-limited as in query_messages."
+    )
+    from_: list[Participant] = Field(validation_alias="from", serialization_alias="from")
+    from_count: int = Field(description="Unit: distinct retained claimed From addresses. ")
+    sender_ambiguous: bool | None = Field(
+        description=_SENDER_AMBIGUOUS_DESCRIPTION.format(subject="The carrying message's")
+    )
+
+
+def attachment_message_headers(message: MessageRecord | None) -> dict[str, Any]:
+    # Attachment readers enrich their returned page inside the read snapshot.
+    assert message is not None
+    headers = message_headers(message)
+    return {
+        key: getattr(headers, key) for key in ("subject", "from_", "from_count", "sender_ambiguous")
+    }
+
+
+class AttachmentHit(AttachmentMessageHeaders):
     attachment_id: str = Field(description="Content hash of the attachment payload.")
     filename: str
     content_type: str
@@ -690,9 +710,9 @@ class AttachmentHit(_Output):
     claimant_id: str = Field(
         description="The message carrying the attachment; pass it to get_message."
     )
-    subject: str = Field(description="Parent thread subject.")
+    thread_subject: str = Field(description="Parent thread subject.")
     folder: str
-    date_last: datetime = Field(description="Parent thread's latest activity.")
+    thread_date_last: datetime = Field(description="Parent thread's latest activity.")
     sent_at: str | None = Field(
         description="Send date of the message carrying the attachment (its Date: header) "
         "in UTC, ISO 8601. Null when unknown."
@@ -703,10 +723,6 @@ class AttachmentHit(_Output):
         "topmost Received: header) in UTC, ISO 8601; null when absent or unparseable. "
         "Date filters and the no-query order use occurred_at, else sent_at, else the time "
         "the message was first indexed (#1373)."
-    )
-    senders: list[str] = Field(description=f"Thread senders, at most {MAX_LISTED}.")
-    sender_count: int = Field(
-        description="Unit: distinct primary From addresses stored on the whole thread, before display limits; includes senders of other messages in that thread. "
     )
     extraction_status: str | None = Field(
         description="Null when no extraction has run; deferred when the indexer will "
@@ -1315,7 +1331,7 @@ class AggregateMessagesOutput(_Output):
     )
 
 
-class ListedAttachment(_Output):
+class ListedAttachment(AttachmentMessageHeaders):
     attachment_occurrence_id: str = Field(
         description="This occurrence: one attachment on one message. Unique per row."
     )
