@@ -37,17 +37,79 @@ COUNT_KEYS = frozenset(
         "transfer_bytes",
         "service_messages",
         "messages_observed",
+        # the driver (#1767)
+        "duplicate_internal_fields_seen",
+        "h11_matched",
+        "h11_mismatched",
+        "h11_unresolved",
+        "race_neither",
+        "race_one",
+        "race_both",
+        "header_pass_connector_fetches",
+        "steps_observed",
+        "steps_unobservable",
+        "g3_gluon_equal",
+        "g3_gluon_changed",
+        "g3_gluon_unavailable",
+        "g4_gluon_equal",
+        "g4_gluon_changed",
+        "g4_gluon_unavailable",
     }
 )
 BOOLEAN_KEYS = frozenset(
-    {"isolation_passed", "tls_pin_checked", "stopped_early", "all_predictions_held"}
+    {
+        "isolation_passed",
+        "tls_pin_checked",
+        "stopped_early",
+        "all_predictions_held",
+        # the driver (#1767): the G2 route checks and a few measurements
+        "route_b_preserved",
+        "route_c_preserved",
+        "route_a2_preserved",
+        "p2_internal_survived",
+        "p2_gluon_survived",
+        "cold_pass_proved",
+        "flag_scope_ok",
+    }
+)
+# Why a run stopped (procedure v5 section 7): one fixed token, never a value.
+STOP_TOKENS = frozenset(
+    {
+        "prediction_failed",
+        "unexplained_message",
+        "foreign_party",
+        "provider_warning",
+        "isolation_failed",
+        "clock_exhausted",
+        "attempt_budget_exhausted",
+        "unique_bytes_exhausted",
+        "retry_limit",
+        "convergence_timeout",
+        "identifier_in_output",
+        "probe_state_lost",
+        "state_not_spannable",
+        "operator_declined",
+        "probe_failed",
+        "world_error",
+        "fixture_unbuildable",
+    }
 )
 _PREDICTION_ID = re.compile(r"P(?:[1-9]|1[0-2])")
 _TIMING_KEY = re.compile(r"g[1-8]_seconds")
+_STOP_GROUP = re.compile(r"g[1-8]|start")
 _MAX_COUNT = 10**12
 _MAX_SECONDS = 10**7
 
-SECTIONS = ("reasons", "outcomes", "parser", "counts", "booleans", "predictions", "timings")
+SECTIONS = (
+    "reasons",
+    "outcomes",
+    "parser",
+    "counts",
+    "booleans",
+    "predictions",
+    "timings",
+    "stop",
+)
 
 
 class ExportError(ValueError):
@@ -83,6 +145,16 @@ def validate_export(data: Mapping[str, object]) -> None:
         ),
         "timings": (lambda k: bool(_TIMING_KEY.fullmatch(k)), _seconds),
     }
+    stop = data.get("stop", {})
+    if not isinstance(stop, Mapping):
+        raise ExportError("an export section is not a mapping")
+    if stop and (
+        set(stop) != {"reason", "group"}
+        or stop["reason"] not in STOP_TOKENS
+        or not isinstance(stop["group"], str)
+        or not _STOP_GROUP.fullmatch(stop["group"])
+    ):
+        raise ExportError("an export stop is not on the allowlist")
     for section, (key_ok, value_ok) in checks.items():
         body = data.get(section, {})
         if not isinstance(body, Mapping):
@@ -103,6 +175,7 @@ def build_export(
     booleans: Mapping[str, bool] | None = None,
     predictions: Mapping[str, str] | None = None,
     timings: Mapping[str, float] | None = None,
+    stop: Mapping[str, str] | None = None,
 ) -> dict[str, dict]:
     data: dict[str, dict] = {
         "reasons": dict(reasons or {}),
@@ -112,6 +185,7 @@ def build_export(
         "booleans": dict(booleans or {}),
         "predictions": dict(predictions or {}),
         "timings": dict(timings or {}),
+        "stop": dict(stop or {}),
     }
     validate_export(data)
     return data

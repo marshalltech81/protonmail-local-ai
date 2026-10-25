@@ -20,6 +20,26 @@ FORGED_KINDS = ("forged", "duplicated", "conflicting")
 _LINE = 76  # filler line length, before CRLF
 
 
+class FixtureError(ValueError):
+    """The generator cannot build the requested message; the text is fixed."""
+
+
+def width_representatives(low: int, high: int) -> list[int]:
+    """The lowest number of each decimal width in ``low..high``.
+
+    A message's own header and part lengths depend on its number only through
+    the number's decimal width, so one number per width proves every number
+    in that width builds or fails alike, whatever the count.
+    """
+    if low < 1 or high < low:
+        return []
+    found, width = [], len(str(low))
+    while 10 ** (width - 1) <= high:
+        found.append(max(low, 10 ** (width - 1)))
+        width += 1
+    return found
+
+
 def token(run: str, n: int) -> str:
     _check_run(run)
     return f"SYNTH-{run}-{n}"
@@ -27,7 +47,7 @@ def token(run: str, n: int) -> str:
 
 def _check_run(run: str) -> None:
     if not _RUN.fullmatch(run):
-        raise ValueError("a run id is 1 to 16 letters or digits")
+        raise FixtureError("a run id is 1 to 16 letters or digits")
 
 
 def _filler(run: str, n: int, length: int) -> str:
@@ -35,7 +55,7 @@ def _filler(run: str, n: int, length: int) -> str:
     if length == 0:
         return ""
     if length == 1:
-        raise ValueError("a filler of one byte cannot hold a line ending")
+        raise FixtureError("a filler of one byte cannot hold a line ending")
     lines: list[str] = []
     state = hashlib.sha256(f"{run}-{n}".encode()).hexdigest()
     remaining = length
@@ -61,14 +81,14 @@ def _identity_fields(run: str, n: int, kind: str) -> list[str]:
         internal = [f"SYNTHFORGED-{run}-{n}-a", f"SYNTHFORGED-{run}-{n}-b"]
         gluon = [f"SYNTHFORGEDGLUON-{run}-{n}-a", f"SYNTHFORGEDGLUON-{run}-{n}-b"]
     else:
-        raise ValueError(f"forged kind is one of {FORGED_KINDS}")
+        raise FixtureError(f"forged kind is one of {FORGED_KINDS}")
     return [f"X-Pm-Internal-Id: {v}" for v in internal] + [f"X-Pm-Gluon-Id: {v}" for v in gluon]
 
 
 def _build(run: str, n: int, *, size: int, multipart: bool, extra: list[str], cap: int) -> bytes:
     _check_run(run)
     if not 0 < size <= cap:
-        raise ValueError("size is positive and within the cap for this fixture")
+        raise FixtureError("size is positive and within the cap for this fixture")
     tok = token(run, n)
     boundary = f"SYNTHBOUNDARY{run}x{n}"
     head = [
@@ -93,7 +113,7 @@ def _build(run: str, n: int, *, size: int, multipart: bool, extra: list[str], ca
     fixed = "\r\n".join(head) + "\r\n\r\n" + prefix + suffix
     fill = size - len(fixed)
     if fill < 0:
-        raise ValueError("size is smaller than the message's own headers and parts")
+        raise FixtureError("size is smaller than the message's own headers and parts")
     raw = ("\r\n".join(head) + "\r\n\r\n" + prefix + _filler(run, n, fill) + suffix).encode("ascii")
     assert len(raw) == size
     return raw
@@ -118,8 +138,12 @@ def forged_message(
     )
 
 
+def g6_message(run: str, n: int, *, size: int = G6_MESSAGE_BYTES) -> bytes:
+    return _build(run, n, size=size, multipart=False, extra=[], cap=G6_MESSAGE_BYTES)
+
+
 def g6_messages(run: str, count: int = G6_COUNT, size: int = G6_MESSAGE_BYTES) -> Iterator[bytes]:
     """The G6 workload, one message at a time: nothing is kept between
     yields, so the set is never in memory or on disk as a whole."""
     for n in range(1, count + 1):
-        yield _build(run, n, size=size, multipart=False, extra=[], cap=G6_MESSAGE_BYTES)
+        yield g6_message(run, n, size=size)

@@ -72,3 +72,45 @@ def test_canary_content_in_a_probed_message_never_reaches_the_export():
     assert CANARY not in text
     assert CANARY.lower() not in text.lower()
     export.validate_export(json.loads(text))
+
+
+# The driver's stop reason and the extra counts and booleans of #1767 are
+# allowlisted vocabulary too: fixed tokens and numbers, nothing else.
+def test_a_stop_reason_is_a_fixed_token_with_a_group():
+    data = export.build_export(stop={"reason": "prediction_failed", "group": "g3"})
+    assert json.loads(export.to_json(data))["stop"] == {
+        "reason": "prediction_failed",
+        "group": "g3",
+    }
+
+
+@pytest.mark.parametrize(
+    "stop",
+    [
+        {"reason": CANARY, "group": "g1"},
+        {"reason": "prediction_failed", "group": CANARY},
+        {"reason": "prediction_failed", "group": "g9"},
+        {"reason": "prediction_failed"},
+        {"reason": "prediction_failed", "group": "g1", "detail": "x"},
+    ],
+)
+def test_a_stop_outside_the_vocabulary_is_refused(stop):
+    with pytest.raises(export.ExportError):
+        export.build_export(stop=stop)
+
+
+def test_every_stop_token_the_driver_can_raise_is_in_the_vocabulary():
+    from evidence_run import driver
+
+    assert driver.STOP_TOKENS <= export.STOP_TOKENS
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"counts": {"h11_matched": 5, "race_neither": 0, "steps_unobservable": 2}},
+        {"booleans": {"route_c_preserved": True, "p2_internal_survived": False}},
+    ],
+)
+def test_the_new_counts_and_booleans_are_allowlisted(kwargs):
+    export.validate_export(export.build_export(**kwargs))

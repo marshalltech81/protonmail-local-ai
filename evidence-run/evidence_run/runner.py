@@ -28,6 +28,15 @@ class ConfigError(Exception):
     """The run is configured in a way the procedure does not allow."""
 
 
+class Refused(ConfigError):
+    """The run does not start (an unfrozen list, no approval): nothing ran,
+    so nothing is exported. ``token`` is a fixed reason."""
+
+    def __init__(self, token: str) -> None:
+        super().__init__(token)
+        self.token = token
+
+
 @dataclass(frozen=True)
 class Limits:
     max_attempts: int = 600  # submissions, retries and ambiguous outcomes included
@@ -82,6 +91,11 @@ class Budget:
                 self._sleep(wait)
         self._stamps.append(self._clock())
 
+    def pace(self) -> None:
+        """Hold an operation that is not a submission (a move, a read) to the
+        same rate as submissions, without spending an attempt."""
+        self._pace()
+
     def attempt(self, *, retry: bool = False, ambiguous: bool = False) -> None:
         """Count one submission attempt: a first try, a retry, or one whose
         outcome is unknown all spend the same ceiling."""
@@ -91,6 +105,11 @@ class Budget:
         self.attempts += 1
         self.retries += int(retry)
         self.ambiguous += int(ambiguous)
+
+    def note_ambiguous(self) -> None:
+        """Tally an attempt whose outcome turned out unknown (it was already
+        counted when it started)."""
+        self.ambiguous += 1
 
     def operation(self, name: str) -> Operation:
         return Operation(self, name)

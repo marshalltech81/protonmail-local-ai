@@ -1,0 +1,250 @@
+{
+  "version": 1,
+  "predictions": [
+    {
+      "id": "P1",
+      "groups": [
+        "g1"
+      ],
+      "text": "For control mail a delivered file has exactly one X-Pm-Internal-Id and one X-Pm-Gluon-Id, the Gluon field topmost. S1 and S4 permit duplicates elsewhere.",
+      "basis": "S1, S4, H2",
+      "expected": "predicted"
+    },
+    {
+      "id": "P2",
+      "groups": [
+        "g2"
+      ],
+      "text": "Internal-ID: forged X-Pm-Internal-Id fields do not survive into A's delivered file, per route (B's Bridge SMTP, C's smtplib, A to its second address), preserving S1's keep branch; duplicates counted without attributing cause. Gluon-ID: a hypothesis (unknown), judged separately. A route that does not preserve the submitted fields is unobservable for P2.",
+      "basis": "S1, H1, H2, U1",
+      "expected": "predicted"
+    },
+    {
+      "id": "P3",
+      "groups": [
+        "g3",
+        "g8"
+      ],
+      "text": "A message's Proton ID is equal before and after a move, label add or remove, archive, trash and restore, and a flag change; compared separately from the Gluon ID.",
+      "basis": "U2 (unknown)",
+      "expected": "predicted"
+    },
+    {
+      "id": "P4",
+      "groups": [
+        "g4"
+      ],
+      "text": "A draft edit and replacement changes the ID at replacement and keeps it after send; Proton and Gluon IDs compared separately.",
+      "basis": "U2 (unknown)",
+      "expected": "predicted"
+    },
+    {
+      "id": "P5",
+      "groups": [
+        "g5"
+      ],
+      "text": "Re-importing identical content creates a distinct Proton message each time, for literals carrying no existing Gluon ID; one naming an existing message's Gluon ID reuses it (S9, H11d).",
+      "basis": "H11, U2",
+      "expected": "predicted"
+    },
+    {
+      "id": "P6",
+      "groups": [
+        "g7",
+        "g8"
+      ],
+      "text": "Frozen separately per G7 step, comparing Proton ID, Gluon ID, UID, UIDVALIDITY and bytes independently; each step's baseline is the state the previous step left.",
+      "basis": "S3, S5, H7, U1",
+      "expected": "predicted"
+    },
+    {
+      "id": "P7",
+      "groups": [
+        "g7",
+        "g8"
+      ],
+      "text": "Hypothesis (no source): after account re-add the Proton IDs are unchanged and UIDVALIDITY is not.",
+      "basis": "U2 (unknown)",
+      "expected": "predicted"
+    },
+    {
+      "id": "P8",
+      "groups": [
+        "g7"
+      ],
+      "text": "Hypothesis (no source): split and combined address mode serve the same Proton ID for the same message.",
+      "basis": "U2 (unknown)",
+      "expected": "predicted"
+    },
+    {
+      "id": "P9",
+      "groups": [
+        "g6"
+      ],
+      "text": "A message in several labels appears once per label folder under one ID; header-only observation reads set no flag. Cost is a measurement, comparable to H10 only if a cold pass is proved by counted connector fetches.",
+      "basis": "S10, H9, H10",
+      "expected": "predicted"
+    },
+    {
+      "id": "P10",
+      "groups": [
+        "g6"
+      ],
+      "text": "Hypothesis (no source): a move racing a header-only scan gives, per message, the old membership, the new, or both, never neither, and never a changed Proton ID; the achieved overlap is counted.",
+      "basis": "U2 (unknown)",
+      "expected": "predicted"
+    },
+    {
+      "id": "P11",
+      "groups": [
+        "g3",
+        "g7"
+      ],
+      "text": "On multipart fixtures, retained incremental files equal Bridge's served bytes apart from the documented LF endings and one X-TUID field (the P11 method), against the contemporaneous served bytes and fresh downloads.",
+      "basis": "H3",
+      "expected": "predicted"
+    },
+    {
+      "id": "P12",
+      "groups": [
+        "g1",
+        "g5"
+      ],
+      "text": "Every policy branch is tested locally; live, ordinary folders give only no_acceptance_rule and Recovered Messages gives recovered_folder.",
+      "basis": "provider_identity.py:100-117",
+      "expected": "predicted"
+    }
+  ],
+  "g7_steps": [
+    {
+      "id": "a",
+      "label": "cache_refill_same_bytes",
+      "prediction": "P6",
+      "expect": {
+        "proton_id": "same",
+        "gluon_id": "any",
+        "uid": "same",
+        "uidvalidity": "same",
+        "bytes": "same"
+      }
+    },
+    {
+      "id": "b",
+      "label": "cache_refill_rebuild",
+      "prediction": "P6",
+      "expect": {
+        "proton_id": "same",
+        "gluon_id": "same",
+        "uid": "same",
+        "uidvalidity": "same",
+        "bytes": "changed"
+      }
+    },
+    {
+      "id": "c1",
+      "label": "equivalent_update_cached",
+      "prediction": "P6",
+      "expect": {
+        "proton_id": "same",
+        "gluon_id": "same",
+        "uid": "same",
+        "uidvalidity": "same",
+        "bytes": "any"
+      }
+    },
+    {
+      "id": "c2",
+      "label": "equivalent_update_uncached",
+      "prediction": "P6",
+      "expect": {
+        "proton_id": "same",
+        "gluon_id": "changed",
+        "uid": "changed",
+        "uidvalidity": "same",
+        "bytes": "any"
+      }
+    },
+    {
+      "id": "d",
+      "label": "changed_content",
+      "prediction": "P6",
+      "expect": {
+        "proton_id": "any",
+        "gluon_id": "changed",
+        "uid": "changed",
+        "uidvalidity": "same",
+        "bytes": "changed"
+      }
+    },
+    {
+      "id": "e",
+      "label": "event_rebuild",
+      "prediction": "P6",
+      "expect": {
+        "proton_id": "same",
+        "gluon_id": "any",
+        "uid": "any",
+        "uidvalidity": "same",
+        "bytes": "any"
+      }
+    },
+    {
+      "id": "f",
+      "label": "resync",
+      "prediction": "P6",
+      "expect": {
+        "proton_id": "same",
+        "gluon_id": "any",
+        "uid": "any",
+        "uidvalidity": "same",
+        "bytes": "any"
+      }
+    },
+    {
+      "id": "g",
+      "label": "account_readd",
+      "prediction": "P7",
+      "expect": {
+        "proton_id": "same",
+        "gluon_id": "any",
+        "uid": "any",
+        "uidvalidity": "changed",
+        "bytes": "any"
+      }
+    },
+    {
+      "id": "h",
+      "label": "split_combined_mode",
+      "prediction": "P8",
+      "expect": {
+        "proton_id": "same",
+        "gluon_id": "any",
+        "uid": "any",
+        "uidvalidity": "any",
+        "bytes": "any"
+      }
+    },
+    {
+      "id": "i",
+      "label": "primary_address_change",
+      "prediction": "P3",
+      "expect": {
+        "proton_id": "same",
+        "gluon_id": "any",
+        "uid": "any",
+        "uidvalidity": "any",
+        "bytes": "any"
+      }
+    }
+  ],
+  "h11_expect": {
+    "a": "rebuilt",
+    "a2": "refused",
+    "b": "no_trigger",
+    "c1": "recovered_unchanged",
+    "c2": "rebuilt",
+    "d": "reused_existing",
+    "recovery_copy": "imported",
+    "recovery_move": "imported"
+  }
+}

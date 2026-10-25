@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "allowed_domains": [
+    "sender.example",
+    "mail.example"
+  ],
+  "groups": {
+    "g1": {
+      "control": 20,
+      "incremental": 5,
+      "size": 2048,
+      "batches": 2,
+      "operations": 60
+    },
+    "g2": {
+      "routes": [
+        "B",
+        "C",
+        "A2"
+      ],
+      "per_route": 10,
+      "kinds": [
+        "forged",
+        "duplicated",
+        "conflicting"
+      ],
+      "size": 2048,
+      "batches": 4,
+      "operations": 80
+    },
+    "g3": {
+      "messages": 10,
+      "multipart": 3,
+      "size": 4096,
+      "ops": [
+        "move",
+        "label_add",
+        "label_remove",
+        "archive",
+        "trash",
+        "restore",
+        "flag"
+      ],
+      "batches": 9,
+      "operations": 220
+    },
+    "g4": {
+      "drafts": 5,
+      "size": 2048,
+      "batches": 5,
+      "operations": 80
+    },
+    "g5": {
+      "identical_appends": 5,
+      "size": 2048,
+      "h11": [
+        "a",
+        "a2",
+        "b",
+        "c1",
+        "c2",
+        "d",
+        "recovery_copy",
+        "recovery_move"
+      ],
+      "batches": 8,
+      "operations": 60
+    },
+    "g6": {
+      "messages": 200,
+      "message_bytes": 262144,
+      "labels": 3,
+      "race_repeats": 20,
+      "batches": 12,
+      "operations": 900
+    },
+    "g7": {
+      "tracked_multipart": 4,
+      "tracked_plain": 2,
+      "size": 4096,
+      "batches": 22,
+      "operations": 120
+    },
+    "g8": {
+      "spam_probe": true,
+      "batches": 4,
+      "operations": 40
+    }
+  }
+}
