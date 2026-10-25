@@ -55,3 +55,17 @@ def test_nullable_sample_subject_stays_unknown():
         subject_complete=None,
     )
     assert row.normalized_subject is None
+
+
+@pytest.mark.parametrize(
+    "prefix", ["Re: ", "Re:", "Fw: Re: ", "Sv: 回复: ", "Ant: ", "Fwd: " * 100]
+)
+def test_matching_and_display_keep_the_same_gateway_tag(prefix):
+    assert _normalize_subject(prefix + "[TAG] Topic") == "[tag] topic"
+    assert _normalize_subject(prefix + "[TAG] Topic", preserve_case=True) == "[TAG] Topic"
+
+
+def test_tagged_reply_is_not_sent_as_changed_rerank_subject():
+    from src.lib.sqlite import _changed_reply_subjects
+
+    assert _changed_reply_subjects("[TAG] Topic", ["Re: [TAG] Topic", "Fwd: Re: [TAG] Topic"]) == []

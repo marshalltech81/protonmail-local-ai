@@ -225,9 +225,8 @@ def _normalize_subject(subject: str, *, preserve_case: bool = False) -> str:
     s = (subject if preserve_case else subject.lower()).strip()
     pos = 0
     while match := _SUBJECT_PREFIX_RE.match(s, pos):
-        if preserve_case and "[" in match.group():
-            # Display normalization preserves gateway tags even when the
-            # matching-key prefix rule would consume their opening bracket.
+        if "[" in match.group():
+            # Gateway tags belong to the subject in both display and matching keys.
             pos = s.index("[", match.start(), match.end())
             break
         pos = match.end()

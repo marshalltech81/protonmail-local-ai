@@ -5208,3 +5208,13 @@ Raw 8-bit identity headers (`Message-ID`, `In-Reply-To`, `References`)
 use the existing header-byte decoder before ID trimming and splitting.
 The decoded ID retains the existing length limit; raw bytes still
 determine the claimant hash.
+
+### Tagged reply subjects
+
+Subject matching preserves a bracketed gateway tag after reply prefixes:
+`[TAG] Topic` and `Re: [TAG] Topic` share the same normalized key. The
+existing correspondent, folder and time-window checks still govern
+subject-fallback threading. The MCP reranker uses the same key to omit
+unchanged reply subjects. This affects future thread assignments; existing
+thread memberships and stored matching subjects are retained. No automatic
+rethreading or mailbox-wide reparse is performed.
