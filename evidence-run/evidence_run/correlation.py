@@ -68,5 +68,11 @@ def summary(raw: bytes) -> MessageSummary:
         text = str(subject)
         token = text if _TOKEN.fullmatch(text) else None
         return MessageSummary(token, address.domain.lower())
-    except email.errors.MessageError, email.errors.MessageDefect, ValueError, LookupError:
+    except (
+        email.errors.MessageError,
+        email.errors.MessageDefect,
+        ValueError,
+        LookupError,
+        RecursionError,
+    ):
         return unknown

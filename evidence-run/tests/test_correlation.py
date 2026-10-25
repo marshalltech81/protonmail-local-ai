@@ -107,3 +107,12 @@ def test_identity_fields_are_unfolded_before_comparisons():
     shape = driver.header_shape(raw)
     assert (shape.forged_internal, shape.forged_gluon) == (1, 1)
     assert driver._field_value(raw, b"x-pm-gluon-id") == b"SYNTHFORGEDGLUON-1"
+
+
+def test_deeply_nested_from_comments_are_unknown_evidence():
+    from evidence_run import correlation
+
+    nested = "(" * 490 + "x" + ")" * 490
+    assert len(f"{nested} <a@b>") < correlation.MAX_CORRELATION_FIELD_CHARS
+    raw = f"Subject: SYNTH-r1g1-1\r\nFrom: {nested} <a@b>\r\n\r\n".encode()
+    assert correlation.summary(raw) == correlation.MessageSummary(None, None)
