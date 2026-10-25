@@ -926,3 +926,58 @@ def test_a_c_route_refusal_stops_before_later_routes_or_submissions(inputs):
     _stopped(result, "provider_warning", "g2")
     assert world.routes == ["B", "C"]
     assert not world.msgs
+
+
+@pytest.mark.parametrize(
+    "name", ["To", "Cc", "Bcc", "Reply-To", "Sender", "Resent-To", "Resent-From"]
+)
+def test_header_shape_does_not_decode_unrelated_recursive_addresses(inputs, name):
+    from dataclasses import replace
+
+    nested = b"(" * 500 + b"synthetic" + b")" * 500
+    field = name.encode() + b": " + nested + b" test@example.test\r\n"
+
+    class RecursiveAddress(SimulatedWorld):
+        def served(self, folder=None):
+            return [
+                replace(item, raw=item.raw.replace(b"\r\n\r\n", b"\r\n" + field + b"\r\n", 1))
+                for item in super().served(folder)
+            ]
+
+    _, result = _run(inputs, world=RecursiveAddress(), groups=("g1",))
+    assert result.stop is None
+    assert result.states["P1"] == "observed"
+    export.validate_export(result.export)
+
+
+@pytest.mark.parametrize("group,prediction", [("g3", "P3"), ("g4", "P4")])
+@pytest.mark.parametrize("shape", ["present", "missing", "duplicate", "blank"])
+def test_identity_experiments_report_separate_gluon_evidence(inputs, group, prediction, shape):
+    class GluonEvidence(SimulatedWorld):
+        def mutate(self, op, token):
+            result = super().mutate(op, token)
+            self._find(token).gluon_id = self._new_ids()[1]
+            return result
+
+        def _served_raw(self, message):
+            raw = super()._served_raw(message)
+            if shape == "missing":
+                return raw.replace(b"X-Pm-Gluon-Id:", b"X-Unavailable:")
+            if shape == "duplicate":
+                return b"X-Pm-Gluon-Id: SYNTHGLUON-duplicate\r\n" + raw
+            if shape == "blank":
+                return b"X-Pm-Gluon-Id: \r\n" + raw.replace(b"X-Pm-Gluon-Id:", b"X-Unavailable:")
+            return raw
+
+    _, result = _run(inputs, world=GluonEvidence(), groups=(group,))
+    assert result.stop is None
+    assert result.states[prediction] == ("unobservable" if shape != "present" else "observed")
+    counts = result.export["counts"]
+    assert (
+        counts.get(
+            f"{group}_gluon_unavailable" if shape != "present" else f"{group}_gluon_changed", 0
+        )
+        > 0
+    )
+    assert "SYNTHGLUON" not in json.dumps(result.export)
+    export.validate_export(result.export)

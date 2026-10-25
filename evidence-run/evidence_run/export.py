@@ -48,6 +48,12 @@ COUNT_KEYS = frozenset(
         "header_pass_connector_fetches",
         "steps_observed",
         "steps_unobservable",
+        "g3_gluon_equal",
+        "g3_gluon_changed",
+        "g3_gluon_unavailable",
+        "g4_gluon_equal",
+        "g4_gluon_changed",
+        "g4_gluon_unavailable",
     }
 )
 BOOLEAN_KEYS = frozenset(

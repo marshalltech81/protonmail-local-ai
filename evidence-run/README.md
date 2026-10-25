@@ -65,6 +65,12 @@ Correlation reads one unambiguous top-level Subject and From using the
 standard-library header parser; quoted body fields never qualify a message.
 Header bytes, field count, and correlation-field lengths are bounded
 before parsing. Missing or malformed evidence cannot certify a test sender.
+Header-shape checks decode only the identity fields, leaving unrelated
+structured address headers unparsed. G3 and G4 separately export counts of
+equal, changed and unavailable Gluon-ID comparisons; identifiers and their
+digests stay in memory. A missing, blank or duplicate Gluon field makes that
+experiment unobservable. Gluon changes are reported independently of the
+Proton-ID prediction, without assuming both identifiers share a lifecycle.
 
 P11 fresh files must come from the operator-world interface with a new
 empty destination and independent sync state for every comparison. The

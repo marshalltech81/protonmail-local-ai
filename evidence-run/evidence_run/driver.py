@@ -78,12 +78,9 @@ def header_shape(raw: bytes) -> Shape:
     headers = correlation.read_headers(raw)
     if headers is None:
         return Shape(0, 0, False, 0, 0)
-    names, values = [], []
-    for name, value in headers.items():
-        names.append(name.lower())
-        values.append(str(value).strip())
-    internal = [v for n, v in zip(names, values, strict=True) if n == "x-pm-internal-id"]
-    gluon = [v for n, v in zip(names, values, strict=True) if n == "x-pm-gluon-id"]
+    names = [name.lower() for name, _ in headers.raw_items()]
+    internal = [str(value).strip() for value in headers.get_all("x-pm-internal-id", [])]
+    gluon = [str(value).strip() for value in headers.get_all("x-pm-gluon-id", [])]
     return Shape(
         len(internal),
         len(gluon),
@@ -100,7 +97,8 @@ def _field_value(raw: bytes, name: bytes) -> bytes | None:
     values = headers.get_all(name.decode("ascii"), [])
     if len(values) != 1:
         return None
-    return str(values[0]).strip().encode("utf-8", errors="surrogateescape")
+    value = str(values[0]).strip()
+    return value.encode("utf-8", errors="surrogateescape") if value else None
 
 
 @dataclass(frozen=True)
@@ -482,6 +480,18 @@ class Driver:
         self._booleans["p2_gluon_survived"] = survived_gluon
         self._mark("P2", "failed" if survived_internal or survived_gluon else "observed")
 
+    def _compare_gluon(self, group: str, before: bytes | None, after: bytes | None) -> bool:
+        """Count Gluon observations separately from Proton predictions."""
+        state = (
+            "unavailable"
+            if before is None or after is None
+            else "equal"
+            if hmac.compare_digest(before, after)
+            else "changed"
+        )
+        self._counts[f"{group}_gluon_{state}"] += 1
+        return state == "unavailable"
+
     def _g3(self) -> None:
         plan, run = self._plan("g3"), self._gid("g3")
         raws = [
@@ -499,6 +509,11 @@ class Driver:
                 self._mutate(op, token)
             now = self._snapshot(f"g3.{op}", tokens, _FOLDERS)
             for token in tokens:
+                unknown |= self._compare_gluon(
+                    "g3",
+                    prev[token].gluon if token in prev else None,
+                    now[token].gluon if token in now else None,
+                )
                 if token in prev and token in now:
                     equal = self.probe.equal(prev[token].probe_key, now[token].probe_key)
                     if equal is False:
@@ -520,6 +535,7 @@ class Driver:
             token = self._token_of(raw)
             assert token
             keys: list[str | None] = []
+            gluons: list[bytes | None] = []
             for op in (None, "draft_edit", "draft_replace", "draft_send"):
                 if op:
                     self._mutate(op, token)
@@ -529,10 +545,14 @@ class Driver:
                 ]
                 if len(items) == 1:
                     keys.append(self._observe(items[0], f"g4.{n}.{op}"))
+                    gluons.append(self._digest(_field_value(items[0].raw, b"x-pm-gluon-id")))
                 else:
                     for index, item in enumerate(items):
                         self._observe(item, f"g4.{n}.{op}.duplicate.{index}")
                     keys.append(None)
+                    gluons.append(None)
+                if len(gluons) >= 2:
+                    unknown |= self._compare_gluon("g4", gluons[-2], gluons[-1])
                 if len(keys) >= 3 and keys[-2] is not None and keys[-1] is not None:
                     equal = self.probe.equal(keys[-2], keys[-1])
                     if (op == "draft_replace" and equal is True) or (
