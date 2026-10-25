@@ -222,7 +222,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # observations with their scan generations. Candidates are read from the
 # stored header rows, so no reparse is queued, and nothing is accepted
 # (``migrations/0021_provider_identity_assessments.sql``).
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -1521,7 +1521,7 @@ class Database:
             CREATE INDEX idx_messages_message_effective
                 ON messages(message_id, effective_at, claimant_id);
             CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
-            CREATE INDEX idx_messages_effective ON messages(effective_at);
+            CREATE INDEX idx_messages_effective ON messages(effective_at, claimant_id);
             -- The reconciliation scan finds the message holding a found
             -- copy's bytes by content hash (#1567).
             CREATE INDEX idx_messages_content_hash ON messages(content_hash);

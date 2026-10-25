@@ -822,7 +822,7 @@ class TestMigrationV19:
         db = Database(path, account=account)
         fresh = Database(tmp_path / "fresh.db", account=account)
         try:
-            assert SCHEMA_VERSION == 21
+            assert SCHEMA_VERSION == 22
             assert _schema_shape(db._conn) == _schema_shape(fresh._conn)
             claimants = ids[:3]
             tombs = {
@@ -860,7 +860,7 @@ class TestMigrationV19:
         finally:
             db.close()
             fresh.close()
-        assert "applied migrations: [15, 16, 17, 18, 19, 20, 21]" in caplog.text
+        assert f"applied migrations: {list(range(15, SCHEMA_VERSION + 1))}" in caplog.text
         assert "Migration v19 carried 2 tombstone(s)" in caplog.text
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert any("found 1 message(s) with no verified file" in m for m in warnings)

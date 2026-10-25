@@ -143,7 +143,7 @@ CREATE TABLE messages (
 CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
 CREATE INDEX idx_messages_message_effective ON messages(message_id, effective_at, claimant_id);
 CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
-CREATE INDEX idx_messages_effective ON messages(effective_at);
+CREATE INDEX idx_messages_effective ON messages(effective_at, claimant_id);
 CREATE INDEX idx_messages_content_hash ON messages(content_hash);
 CREATE INDEX idx_messages_sent ON messages(sent_at, claimant_id)
     WHERE sent_at_status = 'parsed';

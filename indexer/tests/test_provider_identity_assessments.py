@@ -225,9 +225,11 @@ def _new_objects(conn: sqlite3.Connection) -> dict[str, str]:
 
 
 class TestSchema:
-    def test_fresh_install_is_v21_with_the_selector_set(self, db):
-        assert SCHEMA_VERSION == 21
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 21
+    def test_fresh_install_has_the_current_version_and_selector(self, db):
+        assert SCHEMA_VERSION == 22
+        assert (
+            db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+        )
         assert _tuples(db._conn.execute("SELECT policy_version FROM identity_policy_state")) == [
             (provider_identity.POLICY_VERSION,)
         ]
@@ -272,7 +274,7 @@ class TestSchema:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [21]" in caplog.text
+        assert f"applied migrations: {list(range(21, SCHEMA_VERSION + 1))}" in caplog.text
 
     def test_an_interrupted_migration_leaves_the_version(self, tmp_path):
         from pathlib import Path

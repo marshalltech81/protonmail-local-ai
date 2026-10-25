@@ -1824,7 +1824,8 @@ logged.
 
 **Effective time** is `COALESCE(occurred_at, sent_at, first_indexed_at)`,
 stored as the virtual generated column `messages.effective_at`
-(indexed on its own and with `thread_id`, `folder` and `message_id`).
+(indexed with `claimant_id` for listing cursors, and separately with
+`thread_id` and `message_id`).
 
 *Undated mail.* `first_indexed_at` is when the indexer first stored
 the message. It is kept when the message is reprocessed or its thread
@@ -3619,6 +3620,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 22 | `0022_effective_clock_index.sql` | Replaces the effective-clock index with `(effective_at, claimant_id)` for listing cursors through timestamp ties (#1635). No evidence rows, reparses or embeddings change. |
 | 21 | `0021_provider_identity_assessments.sql` | Provider-identity assessments, the policy selector and dated label observations (#1598; see *Stored identity candidates*): `provider_identity_assessments` (one row per occurrence and policy version, with the account, a candidate, an outcome, a fixed-token reason and a state), `identity_policy_state` (the one selected policy version), the `effective_accepted_occurrences` view, and `label_scan_generations` with `label_membership_observations`. A candidate is read from the stored `message_headers` rows, so no reparse is queued and nothing is re-embedded; the tables start empty and the indexer fills assessments in bounded batches. Nothing is accepted: a trigger refuses the `accepted` outcome. Claimant, chunk and thread IDs and vectors are unchanged. |
 | 20 | `0020_account_collection_state.sql` | `account_collection_state` (#1592; see *Collection status*): mbsync's latest collection outcome per account, empty until the indexer first reads mbsync's collection status file. Nothing the parser produces is added, so no reparse is queued. |
 | 19 | `0019_occurrence_readers.sql` | The readers move to the occurrences (#1567, #1568, #1569). `message_occurrences` is rebuilt, rows and ids unchanged, to accept the `scan` provenance; a message the v14 seed could not bind gets a retired occurrence at its stored path (a WARNING counts them), so every message keeps one; `pending_deletions` is keyed by occurrence, each message's old tombstones carried over as one row with their latest mark, which the next sweep clears for a message that is still live; `messages.content_hash` is indexed; `messages.filepath`, `folder`, `seen`, `flagged` and `replied` and `message_thread_map.filepath` are dropped (each drop rewrites its table once). Nothing the parser produces is added, so no reparse is queued; claimant, chunk and thread IDs and vectors are unchanged. On a synthetic 36,500-message index (14,600 threads, 160 MB) the startup open including the migration took 0.4–0.5 s (three runs, Apple M5 Max). |

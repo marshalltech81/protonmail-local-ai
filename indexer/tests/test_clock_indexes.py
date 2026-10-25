@@ -87,3 +87,59 @@ def test_second_index_failure_rolls_back_first_and_version(tmp_path):
             conn.execute("SELECT name FROM sqlite_master WHERE name='idx_messages_sent'").fetchone()
             is None
         )
+
+
+def test_effective_clock_index_migrates_without_changing_evidence(tmp_path):
+    path = tmp_path / "effective.db"
+    db = Database(path, account=TEST_ACCOUNT)
+    message = make_message(message_id="synthetic-effective@test.example")
+    db.upsert_thread(make_thread(messages=[message]), [0.1] * 4096)
+    db._conn.execute("DROP INDEX idx_messages_effective")
+    db._conn.execute("CREATE INDEX idx_messages_effective ON messages(effective_at)")
+    db._conn.execute("UPDATE schema_version SET version = 21")
+    db._conn.commit()
+    tables = ("messages", "message_thread_map", "threads", "threads_vec", "indexing_jobs")
+    before = {
+        table: [tuple(r) for r in db._conn.execute(f"SELECT * FROM {table}")] for table in tables
+    }
+    db.close()
+    migrated = Database(path, account=TEST_ACCOUNT)
+    fresh = Database(tmp_path / "fresh-effective.db", account=TEST_ACCOUNT)
+    try:
+        assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 22
+        for table, rows in before.items():
+            assert [tuple(r) for r in migrated._conn.execute(f"SELECT * FROM {table}")] == rows
+        for conn in (migrated._conn, fresh._conn):
+            assert [r[2] for r in conn.execute("PRAGMA index_info(idx_messages_effective)")] == [
+                "effective_at",
+                "claimant_id",
+            ]
+        assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
+    finally:
+        migrated.close()
+        fresh.close()
+
+
+def test_effective_clock_index_migration_failure_is_atomic(tmp_path):
+    db = Database(tmp_path / "effective-failure.db", account=TEST_ACCOUNT)
+    db._conn.execute("DROP INDEX idx_messages_effective")
+    db._conn.execute("CREATE INDEX idx_messages_effective ON messages(effective_at)")
+    db._conn.execute("UPDATE schema_version SET version = 21")
+    db._conn.commit()
+    db._conn.set_authorizer(
+        lambda action, *args: (
+            sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_CREATE_INDEX else sqlite3.SQLITE_OK
+        )
+    )
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            db._migrate()
+    finally:
+        db._conn.set_authorizer(None)
+    try:
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 21
+        assert [r[2] for r in db._conn.execute("PRAGMA index_info(idx_messages_effective)")] == [
+            "effective_at"
+        ]
+    finally:
+        db.close()
