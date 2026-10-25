@@ -1095,8 +1095,26 @@ configured base URL so two endpoints are told apart (never a URL or
 key). Every rate's denominator is the selected cases (for evidence
 coverage, those that need evidence; for dimension and missing-fact
 rates, every applicable dimension and expected fact), so errors, skips
-and unjudged answers count as failures and never improve a score. Token usage is not exposed by the inference client and no cost is
-computed. `--detail` writes a separate mode-600 artifact with the
+and unjudged answers count as failures and never improve a score.
+The comparison command also accepts schema v1 reports; their missing usage
+does not affect quality comparisons. Report schema v2 records per-call and
+per-case token usage separately for
+answerer and judge, plus totals for every split, category and tool.
+Repairs, truncated replies and failed verdicts retain any usage returned
+by the SDK. Calls without SDK usage (including CLI judges and requests
+without a response) report `unavailable`, never zero. A field's total is
+`unavailable` if any contributing call omitted it; known per-call counts
+remain visible. Counts are captured within each call's async context,
+without shared last-call state or content-bearing usage logs.
+
+`input_tokens` and `output_tokens` retain the provider's reported counts.
+Anthropic input counts exclude cache reads and creation; add the separate
+`cache_read_input_tokens` and `cache_creation_input_tokens` to obtain
+its total input when all three are available. OpenAI input counts already
+include cached tokens; its prompt-details cache counts are breakdowns,
+not extra input. Missing cache fields remain `unavailable`. No cost is
+computed: token counts alone are not a bill, and no dated operator price
+table is supplied by this workflow. `--detail` writes a separate mode-600 artifact with the
 content (answers, an extraction's records, passages, prompts, judge
 claims and explanations);
 both refuse a path inside the repository other than `.answer-eval/`.

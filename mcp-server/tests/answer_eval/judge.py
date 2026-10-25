@@ -44,7 +44,13 @@ from tests.answer_eval.adapters import EntryStatement
 from tests.answer_eval.cases import DIMENSIONS, Case
 from tests.answer_eval.cli_judge import CliJudgeError
 from tests.answer_eval.config import LayerConfig
-from tests.answer_eval.runner import Passage, ProviderBillingError, is_billing_error
+from tests.answer_eval.runner import (
+    InferenceCall,
+    Passage,
+    ProviderBillingError,
+    RecordingInference,
+    is_billing_error,
+)
 
 # Bump on any change to the rubric, the prompt or the verdict schema:
 # runs graded under different versions are not comparable.
@@ -430,6 +436,7 @@ class JudgeOutcome:
     verdict: Verdict | None = field(default=None, repr=False)
     ms: float = 0.0
     prompt_chars: int = 0
+    calls: list[InferenceCall] = field(default_factory=list)
 
 
 async def judge_answer(
@@ -468,8 +475,9 @@ async def judge_answer(
         return outcome
     timeout = config.timeout_secs if timeout_secs is None else timeout_secs
     start = time.perf_counter()
+    recorder = RecordingInference(client)
     try:
-        raw = await asyncio.wait_for(client.complete(JUDGE_SYSTEM, prompt), timeout)
+        raw = await asyncio.wait_for(recorder.complete(JUDGE_SYSTEM, prompt), timeout)
         supplied = set(passages)
         statement_labels = [set(s.labels) & supplied for s in statements]
         verdict = parse_verdict(raw, case, statement_labels, answer_abstained)
@@ -493,4 +501,5 @@ async def judge_answer(
         outcome.status, outcome.verdict, outcome.grade = "ok", verdict, grade_verdict(verdict)
     finally:
         outcome.ms = round((time.perf_counter() - start) * 1000, 1)
+        outcome.calls = recorder.calls
     return outcome

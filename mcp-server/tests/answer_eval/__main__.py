@@ -366,7 +366,7 @@ def _load_report(path: Path) -> dict[str, Any]:
     if (
         not isinstance(data, dict)
         or data.get("kind") != "answer_eval_run"
-        or data.get("schema_version") != REPORT_SCHEMA_VERSION
+        or data.get("schema_version") not in (1, REPORT_SCHEMA_VERSION)
     ):
         raise ConfigError(f"not an answer evaluation report (schema v{REPORT_SCHEMA_VERSION})")
     if not _report_shape_ok(data):

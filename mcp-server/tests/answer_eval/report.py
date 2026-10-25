@@ -21,6 +21,8 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
+from src.lib.inference import USAGE_FIELDS
+
 from tests.answer_eval.cases import DIMENSIONS, Case
 from tests.answer_eval.graders import (
     CHRONOLOGY_CHECKS,
@@ -29,9 +31,9 @@ from tests.answer_eval.graders import (
     chronology_checks_for,
 )
 from tests.answer_eval.judge import CLAIM_VERDICTS, JudgeOutcome
-from tests.answer_eval.runner import CaseRun
+from tests.answer_eval.runner import CaseRun, InferenceCall
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 # Identity fields that must match for two runs' grades to be comparable.
 _COMPARABLE = ("cases_sha256", "index_sha256", "rubric_version")
 # Run settings (``identity.settings``) that bound how long cases may
@@ -39,6 +41,35 @@ _COMPARABLE = ("cases_sha256", "index_sha256", "rubric_version")
 # changed timeout can alter every rate: each one is both reported as
 # changed and makes the runs incompatible (#997).
 TIMEOUT_SETTINGS = ("case_timeout_secs", "max_runtime_secs")
+
+
+def _usage_calls(calls: list[InferenceCall]) -> list[dict[str, Any]]:
+    return [
+        {
+            "outcome": call.outcome,
+            **{
+                name: call.usage[name]
+                if call.usage and call.usage[name] is not None
+                else "unavailable"
+                for name in USAGE_FIELDS
+            },
+        }
+        for call in calls
+    ]
+
+
+def _usage_summary(calls: list[dict[str, Any]]) -> dict[str, Any]:
+    # A partial sum would understate usage. Preserve known per-call counts,
+    # but only total a field when every attempted call reported that field.
+    return {
+        "calls": len(calls),
+        **{
+            name: sum(call[name] for call in calls)
+            if calls and all(type(call[name]) is int for call in calls)
+            else "unavailable"
+            for name in USAGE_FIELDS
+        },
+    }
 
 
 def case_record(
@@ -90,9 +121,13 @@ def case_record(
         "repair_attempted": run.view.repair_attempted if run.output else None,
         "passages_supplied": len(run.passages),
         "timings_ms": {**run.timings_ms, "judge": judge.ms},
-        # The inference client returns text only, so token usage is not
-        # exposed; cost needs a dated price table and is not computed.
-        "usage": {"answer": "unavailable", "judge": "unavailable"},
+        "usage": {
+            layer: {**_usage_summary(calls), "per_call": calls}
+            for layer, calls in (
+                ("answer", _usage_calls(run.calls)),
+                ("judge", _usage_calls(judge.calls)),
+            )
+        },
     }
 
 
@@ -179,6 +214,12 @@ def aggregate(records: list[dict[str, Any]], judge_configured: bool) -> dict[str
     done = [r for r in records if r["status"] == "ok"]
     det = [r["deterministic"] for r in done]
     out: dict[str, Any] = {
+        "usage": {
+            layer: _usage_summary(
+                [call for record in records for call in record["usage"][layer]["per_call"]]
+            )
+            for layer in ("answer", "judge")
+        },
         "cases": n,
         "completed": len(done),
         "deterministic_pass_rate": _rate(sum(d["passed"] for d in det), n),
@@ -331,6 +372,12 @@ def render_summary(report: dict[str, Any]) -> str:
         f"Cases: {c['selected']} selected, {c['completed']} completed, {c['errors']} errors "
         f"{c['errors_by_status']}, {c['skipped']} skipped",
     ]
+    usage = report["aggregates"]["all"].get("usage", {})
+    for layer, totals in usage.items():
+        lines.append(
+            f"{layer} usage ({totals['calls']} calls): "
+            + ", ".join(f"{name}={totals[name]}" for name in USAGE_FIELDS)
+        )
     if "judge_errors_by_category" in c:
         lines.append(f"Judge errors: {c['judge_errors_by_category'] or 'none'}")
     for split in ("dev", "held_out"):

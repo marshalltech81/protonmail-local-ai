@@ -29,6 +29,9 @@ import-time issue in an SDK the operator isn't using.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -39,6 +42,61 @@ from .security import (
 )
 
 log = logging.getLogger("mcp.inference")
+
+# A capture belongs to one caller's async context, not to the shared
+# client. No response or prompt text is retained here. The backend records
+# counts before validating content, including replies cut off by a limit.
+TokenUsage = dict[str, int | None]
+_USAGE: ContextVar[list[TokenUsage] | None] = ContextVar("inference_usage", default=None)
+USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+@contextmanager
+def capture_usage() -> Iterator[list[TokenUsage]]:
+    """Capture SDK usage for calls in this context; absent counts are None.
+
+    Input counts retain provider semantics: Anthropic's input_tokens
+    excludes cache reads/writes; OpenAI's prompt_tokens includes them.
+    complete() continues to return text and needs no per-client last-call
+    state, so concurrent callers and nested captures remain independent.
+    """
+    calls: list[TokenUsage] = []
+    token = _USAGE.set(calls)
+    try:
+        yield calls
+    finally:
+        _USAGE.reset(token)
+
+
+def _record_usage(response: object, mode: str) -> None:
+    calls = _USAGE.get()
+    if calls is None:
+        return
+    usage = getattr(response, "usage", None)
+    if mode == "openai":
+        details = getattr(usage, "prompt_tokens_details", None)
+        values: tuple[object, ...] = (
+            getattr(usage, "prompt_tokens", None),
+            getattr(usage, "completion_tokens", None),
+            getattr(details, "cached_tokens", None),
+            getattr(details, "cache_write_tokens", None),
+        )
+    else:
+        values = tuple(getattr(usage, name, None) for name in USAGE_FIELDS)
+    # Compat endpoints can omit usage or return arbitrary response values.
+    # Keep only non-negative integer counts, never the values they reject.
+    calls.append(
+        {
+            name: value if type(value) is int and value >= 0 else None
+            for name, value in zip(USAGE_FIELDS, values, strict=True)
+        }
+    )
+
 
 # Per-operation HTTP timeout for one completion: each connect, read or
 # write must make progress within it. It is not a total-call deadline —
@@ -306,6 +364,7 @@ class _OpenAIBackend:
             max_tokens=self.max_tokens,
             stream=False,
         )
+        _record_usage(resp, "openai")
         # OpenAI-compatible servers occasionally return empty
         # ``choices`` (provider error states, content-filter trips) or a
         # ``message.content`` of ``None``/``""`` (tool-call-only deltas,
@@ -436,6 +495,7 @@ class _AnthropicBackend:
                     safe_provider_exception_text(e),
                 )
                 raise ProviderResponseError(STRUCTURED_OUTPUT_REJECTED) from None
+        _record_usage(resp, "anthropic")
         # The Messages API returns a list of content blocks. Concatenate
         # every text block so a future model that emits multiple text
         # blocks (or thinking + text) lands the full answer rather than

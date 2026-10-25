@@ -2217,6 +2217,17 @@ class TestCli:
         write_private_json(path, build_report(_identity(judge=None, **identity), records, False))
         return path
 
+    def test_compare_accepts_v1_reports_without_usage(self, chunked_db, tmp_path):
+        current = self._report(chunked_db, tmp_path, "current.json")
+        data = json.loads(current.read_text())
+        data["schema_version"] = 1
+        data["cases"][0]["usage"] = {"answer": "unavailable", "judge": "unavailable"}
+        for group in ("all", "dev", "held_out"):
+            data["aggregates"][group].pop("usage")
+        legacy = tmp_path / "legacy.json"
+        legacy.write_text(json.dumps(data))
+        assert cli.main(["compare", str(legacy), str(current)]) == cli.EXIT_OK
+
     def test_compare_exit_codes(self, chunked_db, tmp_path, capsys):
         a = self._report(chunked_db, tmp_path, "a.json")
         b = self._report(chunked_db, tmp_path, "b.json", index_sha256="other")
@@ -2783,3 +2794,109 @@ class TestCostGuard:
         env = {**self._JUDGED, "EVAL_MAX_CALLS": value}
         assert self._preflight(tmp_path, monkeypatch, env, "ask-roof-total") == cli.EXIT_CONFIG
         assert "EVAL_MAX_CALLS must be a whole number of at least 1" in capsys.readouterr().err
+
+
+class TestTokenUsageReports:
+    def test_real_handler_repair_keeps_both_sdk_usage_counts(self, chunked_db, monkeypatch):
+        from src.lib.inference import InferenceClient
+
+        client = InferenceClient.create(
+            mode="openai",
+            base_url="https://provider.example",
+            model="synthetic",
+            api_key="synthetic",  # pragma: allowlist secret
+        )  # pragma: allowlist secret
+        replies = iter([("14,200 [E999].", 20), ("14,200 [E1].", 35)])
+
+        async def respond(**kwargs):
+            answer, count = next(replies)
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=count, completion_tokens=4),
+                choices=[
+                    SimpleNamespace(message=SimpleNamespace(content=answer), finish_reason="stop")
+                ],
+            )
+
+        monkeypatch.setattr(client._backend.client.chat.completions, "create", respond)
+        case = dataclasses.replace(CASES["ask-roof-total"], arguments={"question": "invoice"})
+        run = asyncio.run(run_case(case, _ctx(chunked_db, client)))
+        assert run.status == "ok" and run.output.repair_attempted
+        assert [call.usage["input_tokens"] for call in run.calls] == [20, 35]
+
+    def test_calls_repairs_errors_and_missing_counts_are_reported(self):
+        from tests.answer_eval.judge import JudgeOutcome
+        from tests.answer_eval.report import case_record
+        from tests.answer_eval.runner import InferenceCall
+
+        case = CASES["ask-roof-total"]
+        usage = dict(
+            input_tokens=12,
+            output_tokens=3,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=None,
+        )
+        run = CaseRun(
+            case.id,
+            "tool_error",
+            calls=[
+                InferenceCall("s", "u", usage=usage),
+                InferenceCall("s", "repair", outcome="truncated", usage=usage),
+            ],
+        )
+        judge = JudgeOutcome("error", calls=[InferenceCall("s", "j", usage=usage)])
+        rec = case_record(case, run, grade_run(case, run), judge, [])
+        report = build_report(_identity(), [rec], True)
+        answer = rec["usage"]["answer"]
+        assert answer["input_tokens"] == 24
+        assert answer["output_tokens"] == 6
+        assert answer["cache_read_input_tokens"] == 0
+        assert answer["cache_creation_input_tokens"] == "unavailable"
+        assert answer["calls"] == 2
+        assert answer["per_call"][1]["outcome"] == "truncated"
+        assert rec["usage"]["judge"]["input_tokens"] == 12
+        assert report["aggregates"]["all"]["usage"]["answer"]["input_tokens"] == 24
+        assert "input_tokens=24" in render_summary(report)
+        assert "cost" not in rec  # no operator price table was supplied
+        # A missing response is not a zero-token call, nor silently omitted
+        # from the total. Known per-call counts remain available for audit.
+        run.calls.append(InferenceCall("s", "failed", outcome="error"))
+        rec = case_record(case, run, grade_run(case, run), judge, [])
+        assert rec["usage"]["answer"]["input_tokens"] == "unavailable"
+        assert rec["usage"]["answer"]["per_call"][0]["input_tokens"] == 12
+        assert rec["usage"]["answer"]["per_call"][2]["input_tokens"] == "unavailable"
+        run.calls.clear()
+        rec = case_record(case, run, grade_run(case, run), JudgeOutcome("not_run"), [])
+        assert rec["usage"]["judge"]["calls"] == 0
+        assert rec["usage"]["judge"]["output_tokens"] == "unavailable"
+
+    @pytest.mark.parametrize("truncated", [False, True])
+    def test_judge_usage_is_captured_even_when_its_verdict_fails(self, monkeypatch, truncated):
+        from src.lib.inference import InferenceClient
+
+        client = InferenceClient.create(
+            mode="openai",
+            base_url="https://provider.example",
+            model="synthetic",
+            api_key="synthetic",  # pragma: allowlist secret
+        )
+
+        async def respond(**kwargs):
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=25, completion_tokens=9),
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=MARKER),
+                        finish_reason="length" if truncated else "stop",
+                    )
+                ],
+            )
+
+        monkeypatch.setattr(client._backend.client.chat.completions, "create", respond)
+        outcome = asyncio.run(
+            judge_answer(
+                client, _judge_config(), CASES["ask-roof-total"], "answer", {}, False, statements=[]
+            )
+        )
+        assert outcome.status == "error"
+        assert outcome.calls[0].usage["input_tokens"] == 25
+        assert outcome.calls[0].usage["output_tokens"] == 9
