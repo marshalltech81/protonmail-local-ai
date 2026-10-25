@@ -439,7 +439,11 @@ def _unsupported_still_holds(
     extractor not importable in this image) holds only while the
     occurrence selects no extractor.
     """
-    if unstamped_ocr_disabled(error, extractor) or error == BINARY_AS_TEXT_ERROR:
+    if (
+        unstamped_ocr_disabled(error, extractor)
+        or error == BINARY_AS_TEXT_ERROR
+        or (error == NOT_OLE2_OR_OOXML_ERROR and extractor is None)
+    ):
         return False
     error = error or ""
     if "OCR disabled" in error:

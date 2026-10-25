@@ -5285,15 +5285,18 @@ class TestLegacyOfficeLabels:
         ``unsupported`` with a fixed reason, not ``failed``; no extractor
         runs. A failed cache row can retry after seven days when the
         same bytes are processed again, not on a weekly startup sweep."""
+        from src.extractors import EXTRACTOR_VERSIONS
+
         caplog.set_level("INFO")
         calls = _count_extractor_calls(monkeypatch)
         payload = b"SYNTHETIC_PAYLOAD_MARKER not a zip and not OLE2"
         for content_type, filename, _module in _LEGACY_LABELS:
+            legacy = {"docx": "doc", "xlsx": "xls"}[_module]
             result = extract(content_type=content_type, filename=filename, payload=payload)
             assert (result.status, result.error, result.extractor) == (
                 STATUS_UNSUPPORTED,
                 NOT_OLE2_OR_OOXML_ERROR,
-                None,
+                f"{legacy}@{EXTRACTOR_VERSIONS[legacy]}",
             ), (content_type, filename)
         assert calls == []
         assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text

@@ -5294,3 +5294,15 @@ both, and the in-memory rules are published only after that transaction
 succeeds. It stores no rule patterns or addresses. Existing indexes start
 with no state row (unknown); normal indexer startup fills it. No mail
 reparse or embedding is needed for this metadata migration.
+
+### Prefixed Office ZIPs under legacy labels
+
+Legacy `.doc` and `.xls` labels with no lead container signature also go
+through the existing bounded container child. The standard ZIP reader's
+end-directory check recognizes leading bytes before an OOXML package;
+the existing metadata checks select its reader. Cache namespaces still
+follow the label's fixed-prefix mapping, so this adds no parent-side ZIP
+parse or cross-label cache collision. Unstamped legacy declines are queued
+once by the unsupported-result sweep and reassessed; a fresh non-container
+decline is stamped and retained. Other cached text and container results
+are unchanged. Child CPU, memory, directory and metadata budgets still apply.

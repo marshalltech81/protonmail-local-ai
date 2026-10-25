@@ -84,10 +84,12 @@ from xml.parsers.expat import errors as expat_errors
 import olefile
 from defusedxml.ElementTree import DefusedXMLParser
 
+from . import has_container_prefix
 from .container import (
     AMBIGUOUS,
     DOC,
     DOCX,
+    NOT_CONTAINER,
     OLE2_ENCRYPTED,
     OLE2_OTHER,
     OLE2_SIGNATURE,
@@ -246,6 +248,8 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
     the child process (``extractor_child``)."""
     if payload.startswith(OLE2_SIGNATURE):
         return _identify_ole2(payload), []
+    if not has_container_prefix(payload) and not zipfile.is_zipfile(io.BytesIO(payload)):
+        return NOT_CONTAINER, []
     return _identify_zip(payload), []
 
 
