@@ -939,6 +939,16 @@ walk over a message's parts stops after 10,000 parts
 (`MAX_WALKED_PARTS`, the parts inside attachments included); later
 parts add no body text and no attachments.
 
+For transfer-encoded attached emails, the existing bounded secondary parse
+keeps the original transport body opaque before decoding (#1458). Rebuilding
+it from parsed pseudo-headers can insert whitespace at quoted-printable soft
+breaks. The raw reader is lazy, runs once per parsed tree, and shares the
+existing part and decoded-byte budgets; non-ASCII transport remains rejected.
+Corrected serialization can change attachment IDs on future parses. It does
+not automatically reparse existing messages or refresh their attachment IDs.
+The separate extractor-child decoder and standalone delivery-report newline
+case are tracked in #1778 and #1779.
+
 A query like "what did my landlord say about the heating?" returns the
 full landlord thread (via the coarse lanes) and surfaces the specific
 chunk where the heating discussion appears (via the chunk lane). The

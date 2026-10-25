@@ -1375,7 +1375,12 @@ def _attachment_payload(
             caps[_nesting_cap(budget)] += 1
             return b"", None, False
         try:
-            transport = _transport_text(part)
+            # Keep the encoded bytes, including colon whitespace and soft
+            # breaks, before the stdlib's pseudo-header parse normalizes them.
+            transport = delivery_status.get(part) if delivery_status else _transport_text(part)
+            if transport is None or not transport.isascii():
+                caps["transport_decode"] += 1
+                return b"", None, False
         except email.errors.MessageError, UnicodeError:
             caps["transport_decode"] += 1
             return b"", None, False
@@ -1391,7 +1396,8 @@ def _attachment_payload(
         # The lenient decode's bytes are kept either way; a loss makes
         # them incomplete (base64 #1311, quoted-printable #1288).
         if transport_lost is not None and (
-            _transport_decode_lost(transport, encoding) or _transport_lines_dropped(part)
+            _transport_decode_lost(transport, encoding)
+            or (delivery_status is None and _transport_lines_dropped(part))
         ):
             transport_lost.append(True)
             # Counted so the loss is logged, not only flagged (#1311).
@@ -1613,29 +1619,37 @@ def _identity_container_bytes(
     return None
 
 
+def _opaque_container_payload(part: email.message.Message) -> bool:
+    """Parts whose original body must survive the secondary parse unchanged."""
+    content_type = email.message.Message.get_content_type(part)
+    return content_type == _DELIVERY_STATUS or (
+        content_type.startswith("message/")
+        and str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+        in {"base64", "quoted-printable"}
+    )
+
+
 class _DeliveryStatusLeafMessage(email.message.Message):
-    """A message whose ``message/delivery-status`` parts the parser reads
-    as one opaque body, not as header blocks: the second parse of
-    ``_DeliveryStatusBytes``. Nothing else differs."""
+    """Read delivery reports and encoded attached emails as opaque bodies
+    in the secondary parse, preserving their original transport bytes."""
 
     def get_content_type(self) -> str:
-        content_type = super().get_content_type()
-        return "text/plain" if content_type == _DELIVERY_STATUS else content_type
+        return "text/plain" if _opaque_container_payload(self) else super().get_content_type()
 
 
 _DELIVERY_STATUS_AS_LEAF = email.policy.compat32.clone(message_factory=_DeliveryStatusLeafMessage)
 
 
 class _DeliveryStatusBytes:
-    """The bytes as sent of each identity-encoded ``message/delivery-status``
-    part of one parsed tree (the message, or an attached email the walk
-    decoded from its transfer encoding), read from a second stdlib parse
-    of the bytes that tree was parsed from in which that label is a leaf
+    """The bytes as sent of delivery reports and transfer-encoded
+    ``message/*`` parts in one tree (the message, or an attached email
+    decoded by the walk), read from a second stdlib parse in which those
+    parts are leaves
     (``_DELIVERY_STATUS_AS_LEAF``), done at most once and only when a
     part needs it (#1416). The two parses match part for part in
-    document order once the first's delivery reports are not descended
-    into; any other difference (a type that does not match) gives no
-    bytes for any part.
+    document order once the first's opaque parts are not descended into;
+    any other difference (a type that does not match) gives no bytes for
+    any part.
 
     Each tree's parts are enumerated only up to ``MAX_WALKED_PARTS``
     (#1444), the walk's own cap: a tree over it gives
@@ -1671,15 +1685,19 @@ class _DeliveryStatusBytes:
             content_type = email.message.Message.get_content_type(theirs)
             if ours.get_content_type() != content_type:
                 return {}
-            if content_type == _DELIVERY_STATUS and not theirs.is_multipart():
+            if _opaque_container_payload(ours) and not theirs.is_multipart():
+                # This is the secondary tree only. Disable transfer decoding
+                # here so get_payload(decode=True) recovers the original bytes,
+                # including raw 8-bit bytes, rather than replacing them in str.
+                del theirs["Content-Transfer-Encoding"]
                 found[id(ours)] = _decoded_payload(theirs)
         return found
 
 
 def _parts_in_order(msg: email.message.Message, limit: int) -> list[email.message.Message] | None:
     """Every part of ``msg`` in document order, not descending into a
-    ``message/delivery-status`` part, or ``None`` once there are more
-    than ``limit``. Iterative, and a container's children are taken one
+    delivery report or transfer-encoded ``message/*`` part, or ``None``
+    once there are more than ``limit``. Iterative, and a container's children are taken one
     at a time, as the walk takes them, so the work stops at the limit."""
     found: list[email.message.Message] = []
     frames: list[Iterator[email.message.Message]] = [iter((msg,))]
@@ -1691,7 +1709,7 @@ def _parts_in_order(msg: email.message.Message, limit: int) -> list[email.messag
         if len(found) >= limit:
             return None
         found.append(part)
-        if email.message.Message.get_content_type(part) == _DELIVERY_STATUS:
+        if _opaque_container_payload(part):
             continue
         children = part.get_payload() if part.is_multipart() else None
         if isinstance(children, list):
@@ -1878,8 +1896,9 @@ def _extract_body_and_attachments(
     counts the content a work cap dropped, by ``PARSE_CAPS`` name. With
     ``walk``, a body-only walk under its shared budget (``BodyWalk``):
     no attachments are returned. ``raw`` is the message's bytes, read a
-    second time only for an identity-encoded delivery report that holds
-    an OLE2 or ZIP container (``_DeliveryStatusBytes``, #1416)."""
+    second time only for a delivery report holding an OLE2 or ZIP container
+    (#1416), or a transfer-encoded attached email whose original transport
+    bytes must be preserved (#1458), through ``_DeliveryStatusBytes``."""
     if caps is None:
         caps = Counter()
     max_parts = MAX_WALKED_PARTS if walk is None else walk.parts_left
