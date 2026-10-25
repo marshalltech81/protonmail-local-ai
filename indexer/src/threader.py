@@ -13,6 +13,7 @@ from itertools import islice
 
 from .extractors import warn_rate_limited
 from .parser import NO_SUBJECT, Message, canonical_addr
+from .quoting import segment_for_embedding
 
 # Reply / forward prefixes the subject normalizer strips before grouping.
 # Hoisted to module level so the compiled regex is reused across every
@@ -145,9 +146,11 @@ class Thread:
         return truncate_to_tokens("\n".join(parts), THREAD_BODY_TEXT_MAX_TOKENS)
 
     def snippet(self) -> str:
-        """Short preview for search results."""
+        """Preview the latest body's new content, or its raw start when absent."""
         if self.messages:
-            return self.messages[-1].body_text[:200].replace("\n", " ")
+            raw = self.messages[-1].body_text
+            body = next((s.text for s in segment_for_embedding(raw) if s.kind == "body"), raw)
+            return body[:200].replace("\n", " ")
         return ""
 
 

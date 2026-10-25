@@ -774,7 +774,14 @@ existed, kept so results and the retrieval baseline do not move.
 ### `search_emails`
 Search the mailbox and return matching **threads** (conversations), not
 individual messages. Each result bundles its messages with subject,
-participants, date range, folder, and a short snippet. To read the
+participants, date range, folder, and a short snippet. The snippet is
+at most 200 characters from the latest message's first body segment,
+using the same quote, attribution, signature and forward segmentation
+as embedding. If no body segment remains, it uses the raw body start.
+New indexing and in-place reparses refresh the stored preview; existing
+rows keep theirs until processed. `make reparse` refreshes all indexed
+messages in place, reading and parsing each source message; unchanged
+chunks keep their vectors, while any previously pending work still runs. To read the
 contents of a returned thread, follow up with `get_thread` or
 `summarize_thread` using the result's `Thread ID`.
 
