@@ -2989,6 +2989,7 @@ class Database:
                         (_RERANK_SUBJECT_CHARS, thread_id, _RERANK_SUBJECT_SCAN_ROWS),
                     ).fetchall()
                     out[thread_id] = [r["subject"] for r in rows]
+            self._lane_failures["rerank_subjects"].recover()
         except sqlite3.Error as e:
             self._lane_failed("rerank_subjects", e)
             timings.count("degraded_rerank_subjects", 1)
@@ -3309,6 +3310,8 @@ class Database:
                     name = type(e).__name__
                     self._count_failures.record(name if name in _COUNT_FAILURE_KEYS else "other")
                     timings.count("degraded_attachment_indeterminate", 1)
+                else:
+                    self._count_failures.recover()
             if from_addr:
                 fa = from_addr.lower()
                 results = [r for r in results if _addr_matches(r.senders, fa)]
@@ -3530,6 +3533,7 @@ class Database:
         )
         try:
             rows = self._lane_rows(sql, params, conn)
+            self._lane_failures["attachment_filename"].recover()
         except sqlite3.OperationalError as e:
             self._lane_failed("attachment_filename", e)
             timings.count("degraded_attachment_filename", 1)
@@ -3607,6 +3611,7 @@ class Database:
         )
         try:
             rows = self._lane_rows(sql, params, conn)
+            self._lane_failures["attachment_text"].recover()
         except sqlite3.OperationalError as e:
             self._lane_failed("attachment_text", e)
             timings.count("degraded_attachment_text", 1)
@@ -3654,6 +3659,7 @@ class Database:
         )
         try:
             rows = self._lane_rows(sql, params, conn)
+            self._lane_failures["attachment_scan"].recover()
         except sqlite3.OperationalError as e:
             self._lane_failed("attachment_scan", e)
             timings.count("degraded_attachment_scan", 1)
@@ -3813,7 +3819,9 @@ class Database:
 
         try:
             rows = self._fetchall(sql, params)
-            return [self._row_to_result(r) for r in rows]
+            result = [self._row_to_result(r) for r in rows]
+            self._lane_failures["thread_keyword"].recover()
+            return result
         except sqlite3.OperationalError as e:
             # Defense-in-depth: if the sanitized query still trips FTS5, fall
             # back to a LIKE scan against subject/body/participants so valid
@@ -3867,6 +3875,7 @@ class Database:
         params.append(limit * _CHUNK_LANE_OVERSAMPLE)
         try:
             rows = self._fetchall(sql, params)
+            self._lane_failures["chunk_keyword"].recover()
         except sqlite3.OperationalError as e:
             # Indexer fails fast on schema-version mismatch, so an older
             # DB is impossible at runtime. Reaching this branch implies
@@ -3919,6 +3928,7 @@ class Database:
         params.append(limit * _CHUNK_LANE_OVERSAMPLE)
         try:
             rows = self._fetchall(sql, params)
+            self._lane_failures["attachment_keyword"].recover()
         except sqlite3.OperationalError as e:
             # Indexer fails fast on schema-version mismatch, so an older
             # DB is impossible at runtime. Reaching this branch implies
@@ -3963,6 +3973,7 @@ class Database:
         )
         try:
             rows = self._fetchall(sql, [fts_query, *thread_ids])
+            self._lane_failures["matched_attachments"].recover()
         except sqlite3.Error as e:
             self._lane_failed("matched_attachments", e)
             timings.count("degraded_attachment_match", 1)
@@ -4078,7 +4089,9 @@ class Database:
 
         try:
             rows = self._fetchall(sql, params)
-            return [self._row_to_result(r) for r in rows]
+            result = [self._row_to_result(r) for r in rows]
+            self._lane_failures["like_fallback"].recover()
+            return result
         except sqlite3.OperationalError as e:
             self._lane_failed("like_fallback", e)
             timings.count("degraded_like_fallback", 1)
@@ -4140,7 +4153,9 @@ class Database:
                 "ORDER BY v.distance",
                 (serialized, min(limit, _SQLITE_VEC_MAX_K)),
             )
-            return [_row_to_chunk_result(r) for r in rows if _has_valid_distance(r)]
+            result = [_row_to_chunk_result(r) for r in rows if _has_valid_distance(r)]
+            self._lane_failures["chunk_vector"].recover()
+            return result
         except (sqlite3.Error, ValueError) as e:
             # ``sqlite3.Error`` covers OperationalError (missing vec
             # table) and DatabaseError (corruption); ``ValueError`` is
@@ -4171,6 +4186,7 @@ class Database:
             )
             timings.count("degraded_keyword_chunks", 1)
             return {}
+        self._keyword_chunk_failures.recover()
         if unranked:
             self._keyword_unranked.record(_KEYWORD_UNRANKED_KEYS[0])
             timings.count("keyword_units_unranked", unranked)
@@ -4310,6 +4326,7 @@ class Database:
                 "ORDER BY score ASC"
             )
             rows = self._fetchall(sql, [serialized, *thread_ids])
+            self._lane_failures["evidence_chunks"].recover()
         except (sqlite3.Error, ValueError) as e:
             # Same catch surface as ``_chunk_vector_search`` — missing
             # vec extension, corrupt vec row, malformed serialised
@@ -4435,6 +4452,7 @@ class Database:
                 "LIMIT ?",
                 (thread_id, limit),
             )
+            self._lane_failures["recent_chunks"].recover()
         except sqlite3.Error as e:
             self._lane_failed("recent_chunks", e)
             timings.count("degraded_recent_chunks", 1)
@@ -4554,9 +4572,11 @@ class Database:
             if len(eligible) < requested and len(rows) == candidate_k == _SQLITE_VEC_MAX_K:
                 log.info("Thread vector refill reached candidate cap=%d", candidate_k)
                 timings.count("degraded_thread_vec_cap", 1)
-            return _tag_lane_ranks(
+            result = _tag_lane_ranks(
                 [self._row_to_result(r) for r in eligible[:requested]], "thread_vec"
             )
+            self._lane_failures["vector"].recover()
+            return result
         except (sqlite3.Error, ValueError) as e:
             # Same catch surface as ``_chunk_vector_search`` —
             # ``sqlite3.Error`` for table/connection issues, ``ValueError``

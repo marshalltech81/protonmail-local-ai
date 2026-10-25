@@ -164,7 +164,7 @@ def test_every_typed_parameter_of_every_tool_is_rejected_through_the_limiter(
         _call_all(server, calls[:1])
     [summary] = [w for w in _warnings(caplog) if w.startswith("rejected invalid arguments")]
     assert summary.startswith("rejected invalid arguments in the last 61s: ")
-    counts = dict(item.split("=") for item in summary.split(": ", 1)[1].split())
+    counts = dict(item.split("=") for item in summary.split(": occurrences ", 1)[1].split())
     # Handler-checked parameters (size bounds and date_basis) are
     # counted by the handler's own limiter, not this one.
     handler_checked = {
@@ -220,7 +220,9 @@ def test_handler_and_schema_rejections_each_count_once(seeded_db, caplog, fastmc
     warnings = _warnings(caplog)
     assert warnings.count("rejected invalid argument: query_messages.size_min") == 1
     assert warnings.count("rejected invalid argument: query_messages.limit") == 2
-    assert "rejected invalid arguments in the last 61s: query_messages.limit=2" in warnings
+    assert (
+        "rejected invalid arguments in the last 61s: occurrences query_messages.limit=2" in warnings
+    )
 
 
 def test_each_rejected_field_of_one_call_is_counted(seeded_db, caplog, fastmcp_filter):

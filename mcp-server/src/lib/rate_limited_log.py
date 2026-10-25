@@ -10,26 +10,37 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import weakref
 from collections.abc import Callable
 
 
+def _schedule(delay: float, callback: Callable[[], None]) -> Callable[[], None]:
+    timer = threading.Timer(delay, callback)
+    timer.daemon = True
+    timer.start()
+    return timer.cancel
+
+
+_LIMITERS: weakref.WeakSet[RateLimitedLog] = weakref.WeakSet()
+_REGISTRY_LOCK = threading.Lock()
+
+
+def flush_all() -> None:
+    """Drain registered limiters, including tool-closure instances, on shutdown."""
+    with _REGISTRY_LOCK:
+        limiters = tuple(_LIMITERS)
+    for limiter in limiters:
+        limiter.flush()
+
+
 class RateLimitedLog:
-    """Rate-limited WARNINGs keyed by a fixed set of reasons.
+    """First WARNING per fixed key/window; count every occurrence.
 
-    In each window of ``interval`` seconds the first occurrence of each
-    key is logged as ``first_msg % key``; every occurrence is counted.
-    When an occurrence arrives after the window ended, a window that had
-    more than one occurrence of some key is reported as one
-    ``summary_msg % (seconds, "<key>=<count> ...")`` line, the seconds
-    being those the window actually covered, and a new window starts. A
-    window with no later occurrence is never summarised; its first lines
-    are already logged.
-
-    Keys are fixed literals (reason enums), never request values, so
-    state is one counter per key, bounded whatever the traffic; an
-    unknown key raises with fixed text. The lock makes ``record`` safe
-    from any thread; it never awaits, so it is safe on the event loop
-    too. Logging happens outside the lock.
+    A repeated key lazily arms one cancellable daemon timer. Its summary
+    includes the first occurrence and fires even if requests stop.
+    ``flush`` atomically drains and cancels; recovery retains the warning budget.
+    Logging stays outside the lock. Stale callbacks cannot drain a later
+    window. Keys and state are bounded by the caller's fixed reason set.
     """
 
     def __init__(
@@ -41,6 +52,7 @@ class RateLimitedLog:
         first_msg: str,
         summary_msg: str,
         clock: Callable[[], float] = time.monotonic,
+        scheduler: Callable[[float, Callable[[], None]], Callable[[], None]] = _schedule,
     ) -> None:
         self._logger = logger
         self._keys = keys
@@ -48,32 +60,114 @@ class RateLimitedLog:
         self._first_msg = first_msg
         self._summary_msg = summary_msg
         self._clock = clock
+        self._scheduler = scheduler
         self._lock = threading.Lock()
         self._window_start: float | None = None
         self._counts = dict.fromkeys(keys, 0)
+        self._cancel: Callable[[], None] | None = None
+        self._generation = 0
+        self._episode_active = False
+        self._recoveries = 0
+        with _REGISTRY_LOCK:
+            _LIMITERS.add(self)
+
+    def _drain_locked(self, now: float) -> tuple[int, dict[str, int], int] | None:
+        summary = None
+        if self._window_start is not None and (
+            any(n > 1 for n in self._counts.values()) or self._recoveries > 1
+        ):
+            summary = (int(now - self._window_start), dict(self._counts), self._recoveries)
+        if self._cancel is not None:
+            self._cancel()
+            self._cancel = None
+        self._generation += 1
+        self._window_start = None
+        self._counts = dict.fromkeys(self._keys, 0)
+        self._recoveries = 0
+        return summary
+
+    def _emit(self, summary: tuple[int, dict[str, int], int] | None) -> None:
+        if summary is not None:
+            elapsed, counts, recoveries = summary
+            self._logger.warning(
+                self._summary_msg,
+                elapsed,
+                "occurrences "
+                + " ".join(f"{name}={n}" for name, n in counts.items() if n)
+                + (f" recoveries={recoveries}" if recoveries else ""),
+            )
+
+    def _arm_locked(self, now: float) -> None:
+        assert self._window_start is not None
+        generation = self._generation
+        reference = weakref.ref(self)
+
+        def expire() -> None:
+            limiter = reference()
+            if limiter is not None:
+                limiter._expire(generation)
+
+        self._cancel = self._scheduler(max(0.0, self._window_start + self._interval - now), expire)
+
+    def _expire(self, generation: int) -> None:
+        with self._lock:
+            if generation != self._generation or self._window_start is None:
+                return
+            now = self._clock()
+            if now < self._window_start + self._interval:
+                self._arm_locked(now)
+                return
+            summary = self._drain_locked(now)
+        self._emit(summary)
 
     def record(self, key: str) -> None:
         if key not in self._counts:
             raise ValueError("unknown rate-limit key")
-        summary: tuple[int, dict[str, int]] | None = None
+        summary = None
         with self._lock:
             now = self._clock()
-            if self._window_start is None or now - self._window_start >= self._interval:
-                if self._window_start is not None and any(n > 1 for n in self._counts.values()):
-                    summary = (int(now - self._window_start), dict(self._counts))
+            if self._window_start is not None and now - self._window_start >= self._interval:
+                summary = self._drain_locked(now)
+            if self._window_start is None:
                 self._window_start = now
-                self._counts = dict.fromkeys(self._keys, 0)
+            self._episode_active = True
             self._counts[key] += 1
             first = self._counts[key] == 1
-        if summary is not None:
-            elapsed, counts = summary
-            self._logger.warning(
-                self._summary_msg,
-                elapsed,
-                " ".join(f"{name}={n}" for name, n in counts.items() if n),
-            )
+            if not first and self._cancel is None:
+                self._arm_locked(now)
+        self._emit(summary)
         if first:
             self._logger.warning(self._first_msg, key)
+
+    def flush(self) -> None:
+        """Drain pending occurrence counts and cancel the timer atomically."""
+        with self._lock:
+            summary = self._drain_locked(self._clock())
+        self._emit(summary)
+
+    def recover(self) -> None:
+        """Report an actual episode end without resetting its warning-rate budget.
+
+        One recovery line per window; repeated transitions are aggregated.
+        Timer expiry drains counts, but only a success ends an episode.
+        """
+        with self._lock:
+            if not self._episode_active:
+                return
+            self._episode_active = False
+            now = self._clock()
+            summary = None
+            if self._window_start is not None and now - self._window_start >= self._interval:
+                summary = self._drain_locked(now)
+            if self._window_start is None:
+                self._window_start = now
+            self._recoveries += 1
+            first = self._recoveries == 1
+            if not first and self._cancel is None:
+                self._arm_locked(now)
+        self._emit(summary)
+        if first:
+            self._logger.info("Warning episode recovered: %s", self._first_msg)
 
 
 class ArgumentRejections(RateLimitedLog):

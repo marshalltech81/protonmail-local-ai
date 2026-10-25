@@ -17,14 +17,17 @@ import re
 import secrets
 import time
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import fastmcp
 import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
+from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -41,7 +44,7 @@ from .lib.inference import (
     PromptBudget,
     default_token_budget,
 )
-from .lib.rate_limited_log import RateLimitedLog
+from .lib.rate_limited_log import RateLimitedLog, flush_all
 from .lib.reranker import DEFAULT_RERANK_TIMEOUT_SECS, CohereReranker, RerankConfig
 from .lib.sqlite import Database, read_stored_schema_version
 from .tools.brief import register_experimental_tools
@@ -762,12 +765,24 @@ def _build_app(server: FastMCP, *, session_idle_timeout: float, auth_token: str)
     only resolves the token, and the 401 comes from the route.
     """
     server.auth = _StaticBearerTokenVerifier(auth_token)
-    return server.http_app(
+    app = server.http_app(
         path=_STREAMABLE_HTTP_PATH,
         transport="streamable-http",
         middleware=[Middleware(_HostOriginGuard)],
         session_idle_timeout=session_idle_timeout,
     )
+    original_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def limiter_lifespan(application: Starlette) -> AsyncIterator[Any]:
+        try:
+            async with original_lifespan(application) as state:
+                yield state
+        finally:
+            flush_all()
+
+    app.router.lifespan_context = limiter_lifespan
+    return app
 
 
 async def _health_response(db: Database) -> JSONResponse:
