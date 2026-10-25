@@ -229,6 +229,7 @@ class Driver:
         op = self.budget.operation(token)
         op.attempt()
         while True:
+            self._checkpoint()
             result = self.world.send(route, raw)
             self._checkpoint()
             if result == "sent":
@@ -246,10 +247,19 @@ class Driver:
     def _append(self, raw: bytes, folder: str) -> None:
         self._register(raw)
         self.budget.attempt()
+        self._checkpoint()
         self.world.append(raw, folder)
         self._checkpoint()
 
+    def _mutate(self, operation: str, token: str) -> None:
+        self.budget.pace()
+        self._checkpoint()
+        self.world.mutate(operation, token)
+        self._checkpoint()
+
     def _sync(self) -> None:
+        self.budget.pace()
+        self._checkpoint()
         self.budget.command()
         if self.world.sync() != "ok":
             raise StopRun("world_error")
@@ -258,8 +268,9 @@ class Driver:
     def _read(self, folder: str | None) -> list[Served]:
         """Served messages, each classified: a test message, an expected
         service message, or a stop."""
-        out = self.world.served(folder)
         self.budget.pace()
+        self._checkpoint()
+        out = self.world.served(folder)
         for item in out:
             observed = correlation.summary(item.raw)
             domain = observed.sender_domain
@@ -306,8 +317,7 @@ class Driver:
         key = f"{token}|{label}"
         seen = self.probe.observe(item.raw, item.folder, token=key)
         bucket = self._recovered if item.folder == "Recovered Messages" else self._ordinary
-        if seen.reason:
-            bucket[seen.reason] += 1
+        bucket[seen.reason or "unavailable"] += 1
         self._continuity.setdefault(token, []).append((item.folder, item.uid, item.uidvalidity))
         return key
 
@@ -355,6 +365,8 @@ class Driver:
             verdicts.append(self._all_equal(retained))
             if len(retained) != len(served):
                 verdicts.append("unobservable")
+            self.budget.pace()
+            self._checkpoint()
             self.budget.command()
             fresh = self.world.fresh_files(folder)
             self._checkpoint()
@@ -375,7 +387,9 @@ class Driver:
 
     @staticmethod
     def _all_equal(verdicts: Sequence[str]) -> str:
-        return "observed" if all(v == "equal" for v in verdicts) else "failed"
+        if "different" in verdicts:
+            return "failed"
+        return "observed" if verdicts and all(v == "equal" for v in verdicts) else "unobservable"
 
     # ---- groups ----------------------------------------------------
 
@@ -413,8 +427,9 @@ class Driver:
         self._check_p12_ordinary()
 
     def _check_p12_ordinary(self) -> None:
-        bad = set(self._ordinary) - {"no_acceptance_rule"}
-        self._mark("P12", "failed" if bad else "observed")
+        bad = set(self._ordinary) - {"no_acceptance_rule", "unavailable"}
+        unknown = not self._ordinary or self._ordinary["unavailable"] > 0
+        self._mark("P12", "failed" if bad else "unobservable" if unknown else "observed")
 
     def _g2(self) -> None:
         plan, run = self._plan("g2"), self._gid("g2")
@@ -423,6 +438,7 @@ class Driver:
         for index, route in enumerate(plan["routes"]):
             check = fixtures.forged_message(run, 900 + index, plan["kinds"][0], size=plan["size"])
             self.budget.attempt()
+            self._checkpoint()
             result = self.world.route_preserves(route, check)
             self._checkpoint()
             if result is not None:
@@ -470,9 +486,7 @@ class Driver:
         unknown = False
         for step, op in enumerate(plan["ops"], start=1):
             for token in tokens:
-                self.world.mutate(op, token)
-                self.budget.pace()
-                self._checkpoint()
+                self._mutate(op, token)
             now = self._snapshot(f"g3.{op}", tokens, _FOLDERS)
             for token in tokens:
                 if token in prev and token in now:
@@ -498,9 +512,7 @@ class Driver:
             keys: list[str | None] = []
             for op in (None, "draft_edit", "draft_replace", "draft_send"):
                 if op:
-                    self.world.mutate(op, token)
-                    self.budget.pace()
-                    self._checkpoint()
+                    self._mutate(op, token)
                 self._sync()
                 items = [
                     i for f in _FOLDERS for i in self._read(f) if self._token_of(i.raw) == token
@@ -542,6 +554,7 @@ class Driver:
             raw = fixtures.forged_message(run, number, "forged", size=plan["size"])
             self._register(raw)
             self.budget.attempt()
+            self._checkpoint()
             outcome = self.world.h11(case, raw)
             self._checkpoint()
             expected = self.inputs.h11_expect[case]
@@ -560,8 +573,9 @@ class Driver:
         if not [r for r in recovered if r]:
             self._mark("P12", "unobservable")
         else:
-            bad = set(self._recovered) - {"recovered_folder"}
-            self._mark("P12", "failed" if bad else "observed")
+            bad = set(self._recovered) - {"recovered_folder", "unavailable"}
+            unknown = self._recovered["unavailable"] > 0
+            self._mark("P12", "failed" if bad else "unobservable" if unknown else "observed")
 
     def _g6(self) -> None:
         plan, run = self._plan("g6"), self._gid("g6")
@@ -576,16 +590,19 @@ class Driver:
             tokens.add(token)
             self.budget.add_transfer(len(raw))
             for _ in range(plan["labels"]):
-                self.world.mutate("label_add", token)
-                self.budget.pace()
+                self._mutate("label_add", token)
             self._checkpoint()
         self._converge(tokens, "G6", ("P9", "P10"))
+        self.budget.pace()
+        self._checkpoint()
         warm = self.world.header_pass(cold=False)
         self._checkpoint()
         ok = warm.flags_set == 0 and warm.membership_ok
         self.budget.add_transfer(warm.bytes_transferred)
         proved = False
         if self.world.can_prove_cold():
+            self.budget.pace()
+            self._checkpoint()
             cold = self.world.header_pass(cold=True)
             self._checkpoint()
             proved = cold.cold_proved
@@ -595,6 +612,8 @@ class Driver:
                 self._counts["header_pass_connector_fetches"] = cold.connector_fetches
         self._booleans["cold_pass_proved"] = proved
         self._mark("P9", "observed" if ok else "failed")
+        self.budget.pace()
+        self._checkpoint()
         race = self.world.race(plan["race_repeats"])
         self._checkpoint()
         outcomes = Counter(race.outcomes)
@@ -632,6 +651,8 @@ class Driver:
             # The baseline is the state the previous step left, captured
             # immediately before this step, in memory only.
             base = self._snapshot(f"g7.{step['id']}.base", tokens, ("INBOX",))
+            self.budget.pace()
+            self._checkpoint()
             result = self.world.operator(step["id"])
             self._checkpoint()
             if result == "declined":
@@ -680,7 +701,10 @@ class Driver:
 
     def _g8(self) -> None:
         plan = self._plan("g8")
+        self.budget.pace()
+        self._checkpoint()
         scope = self.world.flag_scope()
+        self._checkpoint()
         self._booleans["flag_scope_ok"] = scope.mailbox_local_deleted_ok and scope.shared_flags_ok
         ok = bool(self._booleans["flag_scope_ok"])
         self._mark("P3", "observed" if ok else "failed")
@@ -693,8 +717,7 @@ class Driver:
             self._converge(set(tokens), "INBOX", ("P3",))
             before = self._snapshot("g8.before", tokens, ("INBOX",))
             for token in tokens:
-                self.world.mutate("spam", token)
-                self._checkpoint()
+                self._mutate("spam", token)
             after = self._snapshot("g8.after", tokens, ("Spam",))
             self._mark("P3", self._compare({"proton_id": "same"}, before, after, tokens))
             spam = self._read("Spam")

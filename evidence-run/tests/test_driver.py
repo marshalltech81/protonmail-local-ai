@@ -686,3 +686,124 @@ def test_g6_missing_or_unrecognized_race_observations_are_unobservable(inputs, o
     _, result = _run(inputs, world=IncompleteRace(), groups=("g6",))
     assert result.stop is None
     assert result.states["P10"] == "unobservable"
+
+
+@pytest.mark.parametrize(
+    "verdicts,expected",
+    [
+        ([], "unobservable"),
+        (["precondition_failed"], "unobservable"),
+        (["equal", "precondition_failed"], "unobservable"),
+        (["different", "precondition_failed"], "failed"),
+    ],
+)
+def test_p11_unavailable_comparisons_do_not_claim_a_difference(verdicts, expected):
+    assert driver.Driver._all_equal(verdicts) == expected
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_p12_requires_every_policy_assessment_to_be_available(inputs, recovered):
+    from dataclasses import replace
+
+    class Unparseable(SimulatedWorld):
+        def served(self, folder=None):
+            rows = super().served(folder)
+            return [
+                replace(row, raw=re.sub(rb"(?m)^Message-ID:[^\r\n]*\r?\n", b"", row.raw))
+                if (row.folder == "Recovered Messages") == recovered
+                else row
+                for row in rows
+            ]
+
+    _, result = _run(inputs, world=Unparseable(), groups=("g5",) if recovered else ("g1",))
+    assert result.states["P12"] == "unobservable"
+
+
+@pytest.mark.parametrize("group", ["g6", "g8"])
+def test_stop_signals_prevent_later_label_or_spam_activity(inputs, group):
+    class WarningDuringOperation(SimulatedWorld):
+        def __init__(self):
+            super().__init__()
+            self.warned = False
+            self.operations = []
+            self.submissions = 0
+
+        def mutate(self, op, token):
+            self.operations.append(op)
+            super().mutate(op, token)
+            self.warned = True
+
+        def flag_scope(self):
+            result = super().flag_scope()
+            self.warned = True
+            return result
+
+        def send(self, route, raw):
+            self.submissions += 1
+            return super().send(route, raw)
+
+        def warnings(self):
+            return ["synthetic_warning"] if self.warned else []
+
+    world = WarningDuringOperation()
+    _, result = _run(inputs, world=world, groups=(group,))
+    _stopped(result, "provider_warning", group)
+    assert world.operations == (["label_add"] if group == "g6" else [])
+    if group == "g8":
+        assert world.submissions == 0
+
+
+def test_pacing_bounds_actual_world_operation_start_times(inputs, monkeypatch):
+    clock = driver.VirtualClock()
+    world = SimulatedWorld()
+    calls = []
+    depth = 0
+    # Count the account-operation interface, including nested simulated
+    # helpers only once; bookkeeping callbacks do not perform account work.
+    for name in (
+        "send",
+        "append",
+        "mutate",
+        "served",
+        "sync",
+        "fresh_files",
+        "route_preserves",
+        "h11",
+        "header_pass",
+        "race",
+        "operator",
+        "flag_scope",
+    ):
+        original = getattr(world, name)
+
+        def invoke(*args, _original=original, **kwargs):
+            nonlocal depth
+            if depth == 0:
+                calls.append(clock())
+            depth += 1
+            try:
+                return _original(*args, **kwargs)
+            finally:
+                depth -= 1
+
+        monkeypatch.setattr(world, name, invoke)
+    drv = driver.Driver(world, inputs, clock=clock, sleep=clock.sleep)
+    assert drv.run().stop is None
+    assert len(calls) > 1000
+    assert max(sum(start <= t < start + 1 - 1e-7 for t in calls) for start in calls) <= 10
+
+
+@pytest.mark.parametrize("append", [False, True])
+def test_a_pacing_wait_cannot_start_a_submission_after_the_group_clock_expires(inputs, append):
+    from evidence_run import fixtures
+
+    clock = driver.VirtualClock()
+    world = SimulatedWorld()
+    drv = driver.Driver(world, inputs, clock=clock, sleep=clock.sleep)
+    drv._group_clock = runner.GroupClock("g1", 0.05, clock)
+    drv.budget.pace()
+    raw = fixtures.control_message("r1g1", 1)
+    with pytest.raises(runner.StopRun) as stopped:
+        drv._append(raw, "INBOX") if append else drv._send("B", raw)
+    assert stopped.value.token == "clock_exhausted"
+    assert world.sends == 0 and not world.msgs
