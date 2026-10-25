@@ -829,7 +829,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "docx": 7,
     "eml": 6,  # Normalize lone surrogates in decoded attached-email text (#1447).
     "image": 9,  # Re-assess image-labelled HTML, including OCR-disabled rows (#1417).
-    "pdf": 7,
+    "pdf": 8,  # Keep ordinary pages at full OCR DPI in mixed-size PDFs (#1414).
     "ppt": 2,
     "pptx": 3,
     "text": 3,

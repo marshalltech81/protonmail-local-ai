@@ -290,8 +290,8 @@ class TestFrames:
     @pytest.mark.parametrize(
         ("name", "status", "extractor"),
         [
-            ("pdf-digital", STATUS_SUCCESS, "pdf-digital@7"),
-            ("pdf-ocr", STATUS_SUCCESS, "pdf-ocr@7"),
+            ("pdf-digital", STATUS_SUCCESS, "pdf-digital@8"),
+            ("pdf-ocr", STATUS_SUCCESS, "pdf-ocr@8"),
             ("pdf-ocr-disabled", STATUS_UNSUPPORTED, None),
         ],
     )
@@ -405,7 +405,7 @@ class TestFrames:
         result = _extract(b"%PDF-1.7")
         assert (result.status, result.extractor, result.text_complete) == (
             STATUS_SUCCESS,
-            "pdf-digital@7",
+            "pdf-digital@8",
             False,
         )
         [line] = [r for r in caplog.records if "OCR fallback failed" in r.getMessage()]
@@ -648,7 +648,7 @@ class TestTextCeiling:
         caplog.set_level("DEBUG")
         monkeypatch.setattr(pdf_child, "extract", lambda *_a, **_k: (text, "pdf-digital"))
         result = _extract(b"%PDF-1.7", max_extracted_chars=setting)
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@7")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@8")
         assert result.text == stored
         assert result.text_complete is False
         assert result.extracted_chars_cap == cap
@@ -756,8 +756,8 @@ class TestOcrPhaseLimit:
         ("layout", "status", "extractor", "error"),
         [
             # A mixed PDF keeps its digital text, as on any OCR failure.
-            ("ds", STATUS_SUCCESS, "pdf-digital@7", None),
-            ("ss", STATUS_FAILED, "pdf@7", "PdfOcrMemoryBudgetError"),
+            ("ds", STATUS_SUCCESS, "pdf-digital@8", None),
+            ("ss", STATUS_FAILED, "pdf@8", "PdfOcrMemoryBudgetError"),
         ],
     )
     def test_over_the_budget_the_ocr_fallback_fails_without_a_tool(
@@ -1049,7 +1049,7 @@ class TestLimitsInTheImage:
         finally:
             done.set()
             watcher.join()
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-ocr@7")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-ocr@8")
         assert "synthetic" in (result.text or "").lower()
         assert progress == 3 + 2
         seen = [(r.name.split(".")[0], r.read_text()) for r in records.iterdir()]
@@ -1343,3 +1343,57 @@ class TestTheParentNeverImportsPypdf:
         )
 
         assert out.stdout.strip() == f"{status}|{error}|[]"
+
+
+@pytest.mark.parametrize("layout", ["sLssLs", "Lsss", "sssL", "ssss"])
+def test_ocr_uses_each_pages_safe_dpi_without_lowering_ordinary_pages(layout, monkeypatch):
+    from src.extractors import pdf_child
+
+    from tests.test_pdf_catalogue import _fake_poppler_and_tesseract, _pdf
+
+    work = _fake_poppler_and_tesseract(monkeypatch, {})
+    progress = []
+    texts = pdf_child._extract_ocr(
+        _pdf(layout), pages=list(range(len(layout))), on_progress=lambda: progress.append(1)
+    )
+    assert list(texts) == list(range(len(layout)))
+    rendered = []
+    for first, last, dpi, _timeout in work["renders"]:
+        assert last - first + 1 <= pdf_child._PAGES_PER_RENDER
+        rendered.extend((index, dpi) for index in range(first - 1, last))
+    assert rendered == [(index, 15 if kind == "L" else 200) for index, kind in enumerate(layout)]
+    assert work["ocr_calls"] == len(layout)
+    assert len(progress) == len(layout)
+
+
+@pytest.mark.serial
+def test_per_page_dpi_work_is_bounded_for_many_oversized_pages(monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    from src.extractors import pdf_child
+
+    page = SimpleNamespace(mediabox=SimpleNamespace(width=14400, height=14400), user_unit=1)
+    visited = []
+
+    class Pages:
+        def __getitem__(self, index):
+            visited.append(index)
+            return page
+
+    reads = []
+    monkeypatch.setattr(
+        pdf_child.pypdf,
+        "PdfReader",
+        lambda stream: reads.append(1) or SimpleNamespace(pages=Pages()),
+    )
+    rounded = []
+    original = pdf_child.math.ceil
+    monkeypatch.setattr(pdf_child.math, "ceil", lambda value: rounded.append(1) or original(value))
+    started = time.perf_counter()
+    result = pdf_child._ocr_dpi(b"synthetic", list(range(2000)))
+    assert time.perf_counter() - started < 2
+    assert result == dict.fromkeys(range(2000), 15)
+    assert reads == [1]
+    assert visited == list(range(2000))
+    assert len(rounded) <= 2 * 200 * 2000
