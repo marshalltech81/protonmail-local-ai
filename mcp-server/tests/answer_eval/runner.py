@@ -55,7 +55,13 @@ import anthropic
 import openai
 from fastmcp.exceptions import ToolError
 from pydantic import ValidationError
-from src.lib.inference import TEMPLATE_RESERVE_TOKENS, InferenceTruncatedError, PromptBudget
+from src.lib.inference import (
+    TEMPLATE_RESERVE_TOKENS,
+    InferenceTruncatedError,
+    PromptBudget,
+    TokenUsage,
+    capture_usage,
+)
 from src.lib.security import ProviderResponseError
 from src.tools import brief, intelligence
 from src.tools.outputs import (
@@ -146,6 +152,7 @@ class InferenceCall:
     user: str = field(repr=False)
     ms: float = 0.0
     outcome: str = "ok"  # "ok", "truncated" or "error"
+    usage: TokenUsage | None = None
     response: str | None = field(default=None, repr=False)
     # The structured-output schema the tool passed, if any (#1095): the
     # caller's schema shape, not mail content.
@@ -183,7 +190,7 @@ class RecordingInference:
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
-        self.mode = inner.mode
+        self.mode = getattr(inner, "mode", "")
         self.base_url = getattr(inner, "base_url", "")
         # ``extract_from_emails`` reads this before sending a schema (#808).
         self.structured_output = getattr(inner, "structured_output", False)
@@ -194,23 +201,27 @@ class RecordingInference:
         call = InferenceCall(system=system, user=user, json_schema=json_schema)
         self.calls.append(call)
         start = time.perf_counter()
-        try:
-            # As ``intelligence.llm_complete`` does: the keyword is passed
-            # only when set, so a client taking ``(system, user)`` works.
-            if json_schema is None:
-                call.response = await self._inner.complete(system, user)
-            else:
-                call.response = await self._inner.complete(system, user, json_schema=json_schema)
-            return call.response
-        except InferenceTruncatedError as e:
-            call.outcome, call.response = "truncated", e.partial
-            raise
-        except BaseException as e:
-            call.outcome = "error"
-            self.billing_error = self.billing_error or is_billing_error(e)
-            raise
-        finally:
-            call.ms = (time.perf_counter() - start) * 1000
+        with capture_usage() as usage:
+            try:
+                # As ``intelligence.llm_complete`` does: the keyword is passed
+                # only when set, so a client taking ``(system, user)`` works.
+                if json_schema is None:
+                    call.response = await self._inner.complete(system, user)
+                else:
+                    call.response = await self._inner.complete(
+                        system, user, json_schema=json_schema
+                    )
+                return call.response
+            except InferenceTruncatedError as e:
+                call.outcome, call.response = "truncated", e.partial
+                raise
+            except BaseException as e:
+                call.outcome = "error"
+                self.billing_error = self.billing_error or is_billing_error(e)
+                raise
+            finally:
+                call.ms = (time.perf_counter() - start) * 1000
+                call.usage = usage[0] if usage else None
 
 
 class TimedEmbedder:
