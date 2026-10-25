@@ -61,7 +61,7 @@ def test_first_per_key_then_summary_after_the_window(caplog):
         "synthetic first: key=beta",
     ]
     assert _messages(caplog, "synthetic summary") == [
-        "synthetic summary in the last 60s: alpha=5 beta=1"
+        "synthetic summary in the last 60s: occurrences alpha=5 beta=1"
     ]
     assert {r.levelno for r in caplog.records if r.name == log.name} == {logging.WARNING}
 
@@ -108,5 +108,115 @@ def test_counts_are_exact_across_threads(caplog):
         clock.now += 61
         limiter.record("alpha")
     assert _messages(caplog, "synthetic summary") == [
-        "synthetic summary in the last 61s: alpha=1000 beta=1000"
+        "synthetic summary in the last 61s: occurrences alpha=1000 beta=1000"
     ]
+
+
+class _Scheduler:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, delay, callback):
+        call = {"delay": delay, "callback": callback, "cancelled": False}
+        self.calls.append(call)
+        return lambda: call.update(cancelled=True)
+
+
+def _scheduled(clock, scheduler):
+    return RateLimitedLog(
+        log,
+        ("alpha", "beta"),
+        60,
+        first_msg="synthetic first: key=%s",
+        summary_msg="synthetic summary in the last %ds: %s",
+        clock=clock,
+        scheduler=scheduler,
+    )
+
+
+def test_idle_burst_is_summarised_without_another_request(caplog):
+    clock, scheduler = _Clock(), _Scheduler()
+    limiter = _scheduled(clock, scheduler)
+    with caplog.at_level(logging.INFO):
+        for _ in range(5):
+            limiter.record("alpha")
+        assert len(scheduler.calls) == 1
+        clock.now += 60
+        scheduler.calls[0]["callback"]()
+    assert _messages(caplog, "synthetic summary") == [
+        "synthetic summary in the last 60s: occurrences alpha=5"
+    ]
+
+
+def test_shutdown_flush_cancels_and_stale_callback_cannot_drain_new_window(caplog):
+    clock, scheduler = _Clock(), _Scheduler()
+    limiter = _scheduled(clock, scheduler)
+    with caplog.at_level(logging.INFO):
+        limiter.record("alpha")
+        limiter.record("alpha")
+        old = scheduler.calls[0]
+        limiter.flush()
+        assert old["cancelled"]
+        limiter.record("beta")
+        limiter.record("beta")
+        old["callback"]()
+        limiter.flush()
+    summaries = _messages(caplog, "synthetic summary")
+    assert len(summaries) == 2
+    assert "alpha=2" in summaries[0] and "beta=2" in summaries[1]
+
+
+def test_recovery_ends_the_episode_inside_the_window(caplog):
+    limiter = _scheduled(_Clock(), _Scheduler())
+    with caplog.at_level(logging.INFO):
+        limiter.record("alpha")
+        limiter.record("alpha")
+        limiter.recover()
+        limiter.record("alpha")
+    assert len(_messages(caplog, "synthetic first")) == 2
+    assert len(_messages(caplog, "synthetic summary")) == 1
+
+
+def test_timer_and_rollover_emit_one_summary(caplog):
+    clock, scheduler = _Clock(), _Scheduler()
+    limiter = _scheduled(clock, scheduler)
+    with caplog.at_level(logging.INFO):
+        limiter.record("alpha")
+        limiter.record("alpha")
+        clock.now += 60
+        barrier = threading.Barrier(3)
+
+        def rollover():
+            barrier.wait()
+            limiter.record("beta")
+
+        def expire():
+            barrier.wait()
+            scheduler.calls[0]["callback"]()
+
+        workers = [threading.Thread(target=f) for f in (rollover, expire)]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join()
+        limiter.flush()
+    assert len(_messages(caplog, "synthetic summary")) == 1
+    assert "alpha=2" in _messages(caplog, "synthetic summary")[0]
+
+
+def test_http_shutdown_drains_closure_limiters(caplog):
+    from fastmcp import FastMCP
+    from src.main import _build_app
+    from starlette.testclient import TestClient
+
+    scheduler = _Scheduler()
+    limiter = _scheduled(_Clock(), scheduler)
+    app = _build_app(FastMCP("limiter-test"), session_idle_timeout=60, auth_token="synthetic-" * 8)
+    with caplog.at_level(logging.INFO):
+        with TestClient(app):
+            limiter.record("alpha")
+            limiter.record("alpha")
+        assert scheduler.calls[0]["cancelled"]
+        scheduler.calls[0]["callback"]()
+    assert len(_messages(caplog, "synthetic summary")) == 1

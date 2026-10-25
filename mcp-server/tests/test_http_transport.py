@@ -676,12 +676,19 @@ class TestRejectionRateLimit:
     def test_repeats_in_a_window_log_once(self, caplog, rejection_clock):
         app = _app()
         wrong = dict(_POST_HEADERS, authorization=f"Bearer {_MARKER}")
-        with caplog.at_level(logging.INFO):
+
+        async def requests():
             for _ in range(5):
-                assert _mcp_status(app, headers=wrong) == 401
+                assert await _status(app, "POST", "/mcp", headers=wrong) == 401
                 rejection_clock.now += 1
+            assert _rejection_summaries(caplog) == []
+
+        with caplog.at_level(logging.INFO):
+            _with_lifespan(app, requests)
         assert _rejections(caplog) == ["invalid_token"]
-        assert _rejection_summaries(caplog) == []
+        assert _rejection_summaries(caplog) == [
+            "rejected requests in the last 5s: occurrences invalid_token=5"
+        ]
         assert _MARKER not in caplog.text
 
     def test_each_reason_gets_its_first_line(self, caplog):
@@ -696,16 +703,19 @@ class TestRejectionRateLimit:
     def test_window_counts_are_reported_after_the_window(self, caplog, rejection_clock):
         app = _app()
         wrong = dict(_POST_HEADERS, authorization=f"Bearer {_MARKER}")
-        with caplog.at_level(logging.INFO):
+
+        async def requests():
             for _ in range(5):
-                _mcp_status(app, headers=wrong)
-            _mcp_status(app, host=_HOST_MARKER)
+                await _status(app, "POST", "/mcp", headers=wrong)
+            await _status(app, "POST", "/mcp", host=_HOST_MARKER)
             rejection_clock.now += 75
-            _mcp_status(app, headers=wrong)
+            await _status(app, "POST", "/mcp", headers=wrong)
+
+        with caplog.at_level(logging.INFO):
+            _with_lifespan(app, requests)
         assert _rejection_summaries(caplog) == [
-            "rejected requests in the last 75s: invalid_token=5 bad_host=1"
+            "rejected requests in the last 75s: occurrences invalid_token=5 bad_host=1"
         ]
-        # The new window logs its own first rejection.
         assert _rejections(caplog) == ["invalid_token", "bad_host", "invalid_token"]
         assert _MARKER not in caplog.text
         assert _HOST_MARKER not in caplog.text
@@ -737,7 +747,7 @@ class TestRejectionRateLimit:
             rejection_clock.now += 61
             log_.record("invalid_token")
         assert _rejection_summaries(caplog) == [
-            "rejected requests in the last 61s: invalid_token=1600"
+            "rejected requests in the last 61s: occurrences invalid_token=1600"
         ]
         assert _rejections(caplog) == ["invalid_token", "invalid_token"]
 
@@ -747,9 +757,13 @@ class TestRejectionRateLimit:
         protects, so it is filtered; the responses are unchanged."""
         app = _app()
         wrong = dict(_POST_HEADERS, authorization="Bearer wrong-token")
-        with caplog.at_level(logging.DEBUG):
+
+        async def requests():
             for _ in range(3):
-                assert _mcp_status(app, headers=wrong) == 401
+                assert await _status(app, "POST", "/mcp", headers=wrong) == 401
+
+        with caplog.at_level(logging.DEBUG):
+            _with_lifespan(app, requests)
         assert "Auth error returned" not in caplog.text
         assert _rejections(caplog) == ["invalid_token"]
 

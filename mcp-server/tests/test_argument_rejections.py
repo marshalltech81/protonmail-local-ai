@@ -90,7 +90,7 @@ def test_first_per_tool_and_field_then_a_summary_with_counts(caplog):
         "rejected invalid argument: search_emails.date_from",
         "rejected invalid argument: query_messages.cursor",
         "rejected invalid argument: query_messages.other",
-        "rejected invalid arguments in the last 60s: "
+        "rejected invalid arguments in the last 60s: occurrences "
         "search_emails.date_from=3 query_messages.cursor=1 query_messages.other=1",
         "rejected invalid argument: search_emails.date_from",
     ]

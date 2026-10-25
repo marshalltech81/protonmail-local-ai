@@ -5245,3 +5245,14 @@ existing replacement and warning behavior. This correction applies when a
 message is parsed, without a mailbox-wide reparse or thread reassignment.
 The attached-email extractor shares the decoder; its version 7 refreshes
 older cached text through the existing extraction-version sweep.
+
+### Idle warning summaries
+
+The MCP server's keyed warning limiters lazily arm one cancellable daemon
+timer when a warning repeats. At the window deadline they report total
+occurrences, including the first logged warning, even without another
+request. Successful retrieval-lane recovery drains the episode and logs
+its end; the next failure starts a new episode. HTTP shutdown drains and
+cancels every registered limiter, including tool-closure instances. Timer
+and request rollover share one lock and generation, preventing a stale
+callback from draining a later window. Reasons remain fixed tokens.

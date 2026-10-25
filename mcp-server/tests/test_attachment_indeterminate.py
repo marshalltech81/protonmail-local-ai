@@ -419,7 +419,7 @@ class TestAttachmentIndeterminateCount:
         lines = [r.getMessage() for r in caplog.records if r.name == "mcp.sqlite"]
         assert lines == [
             "Attachment search indeterminate count unavailable: OperationalError",
-            "Attachment search indeterminate count unavailable in the last 61s: OperationalError=3",
+            "Attachment search indeterminate count unavailable in the last 61s: occurrences OperationalError=3",
             "Attachment search indeterminate count unavailable: OperationalError",
         ]
         assert MARKER not in caplog.text

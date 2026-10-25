@@ -432,7 +432,7 @@ class TestPrivacyAndErrors:
         messages = [r.getMessage() for r in caplog.records]
         assert messages == [
             "get_attachment failed: not_found",
-            "get_attachment failed in the last 61s: not_found=4",
+            "get_attachment failed in the last 61s: occurrences not_found=4",
             "get_attachment failed: not_found",
         ]
 
