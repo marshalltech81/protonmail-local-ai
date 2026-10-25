@@ -1227,6 +1227,13 @@ def _dispatch(
         if isinstance(identified, ExtractionResult):
             return identified
         module_name = identified
+    elif module_name in _LEGACY_TO_OOXML:
+        # ZIP permits a prefix before its records. The existing bounded
+        # child checks its end directory; the parent never opens it here.
+        identified = _identify_container(module_name, payload, dispatch_via)
+        if isinstance(identified, ExtractionResult):
+            return identified
+        module_name = identified
     # PDF/image bytes under a text label and PDF/HTML under an image label
     # run their existing extractor (#969, #1415,
     # #1417), decided
@@ -1533,6 +1540,7 @@ _CONTAINER_ERRORS = {
     "ole2-encrypted": ENCRYPTED_OFFICE_ERROR,
     "zip-other": ZIP_NOT_OFFICE_ERROR,
     "ambiguous": AMBIGUOUS_CONTAINER_ERROR,
+    "not-container": NOT_OLE2_OR_OOXML_ERROR,
 }
 
 
@@ -1585,7 +1593,14 @@ def _identify_container(
         dispatch_via,
         error,
     )
-    return ExtractionResult(status=STATUS_UNSUPPORTED, extractor=None, text=None, error=error)
+    return ExtractionResult(
+        status=STATUS_UNSUPPORTED,
+        extractor=_stamp_extractor(module_name, module_name)
+        if token == "not-container" and module_name is not None
+        else None,
+        text=None,
+        error=error,
+    )
 
 
 def _route_container(module_name: str, payload: bytes) -> str | None:

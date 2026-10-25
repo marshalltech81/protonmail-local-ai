@@ -32,6 +32,7 @@ OLE2_OTHER = "ole2-other"
 OLE2_ENCRYPTED = "ole2-encrypted"
 AMBIGUOUS = "ambiguous"
 ZIP_OTHER = "zip-other"
+NOT_CONTAINER = "not-container"
 TOKENS = frozenset(
     {
         DOC,
@@ -45,6 +46,7 @@ TOKENS = frozenset(
         OLE2_ENCRYPTED,
         AMBIGUOUS,
         ZIP_OTHER,
+        NOT_CONTAINER,
     }
 )
 

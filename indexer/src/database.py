@@ -40,6 +40,7 @@ from .extractors import (
     LEGACY_OLE2_ERROR,
     NO_EXTRACTOR_ERROR,
     NOT_CONTAINER_IDENTIFIER,
+    NOT_OLE2_OR_OOXML_ERROR,
     OCR_DISABLED_ERROR,
     SCANNED_PDF_OCR_DISABLED_ERROR,
     warn_rate_limited,
@@ -2883,9 +2884,9 @@ class Database:
                 AND a.extractor_module = e.extractor_module
             JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.extraction_status = 'unsupported'
-              AND e.extraction_error IN (?, ?, ?)
+              AND e.extraction_error IN (?, ?, ?, ?)
             """,
-            (NO_EXTRACTOR_ERROR, LEGACY_OLE2_ERROR, BINARY_AS_TEXT_ERROR),
+            (NO_EXTRACTOR_ERROR, LEGACY_OLE2_ERROR, BINARY_AS_TEXT_ERROR, NOT_OLE2_OR_OOXML_ERROR),
             qualifies,
             assessed,
         )

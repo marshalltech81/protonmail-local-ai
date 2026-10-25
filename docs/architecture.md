@@ -3251,6 +3251,18 @@ Trivy see only the `pillow-heif` version, not the bundled libraries, so
 watch libheif and libde265 advisories and bump `pillow-heif` when a
 release picks up a fix.
 
+#### Prefixed Office ZIPs under legacy labels
+
+Legacy `.doc` and `.xls` labels with no lead container signature also go
+through the existing bounded container child. The standard ZIP reader's
+end-directory check recognizes leading bytes before an OOXML package;
+the existing metadata checks select its reader. Cache namespaces still
+follow the label's fixed-prefix mapping, so this adds no parent-side ZIP
+parse or cross-label cache collision. Unstamped legacy declines are queued
+once by the unsupported-result sweep and reassessed; a fresh non-container
+decline is stamped and retained. Other cached text and container results
+are unchanged. Child CPU, memory, directory and metadata budgets still apply.
+
 ### OCR
 
 PDFs and images route through Tesseract when `INDEXER_OCR_ENABLED=true`
