@@ -874,3 +874,28 @@ class TestCheckConclusionLabels:
         CheckConclusionOutput.model_validate(out.structured_content)
         assert out.structured_content["findings"]
         assert _MARKER not in caplog.text
+
+
+@pytest.mark.parametrize(("message", "expected"), [("sep", "in_scope"), ("nov", "context")])
+def test_check_conclusion_finding_sources_publish_scope(scope_db, message, expected, caplog):
+    """#954: a caller sees each source's scope, not just the prompt label."""
+    probe = FakeInferenceClient(response="x")
+    _check(scope_db, probe, **_SEPTEMBER)
+    label = _label_of(probe.complete_calls[0][1], message)
+    reply = json.dumps(
+        {
+            "verdict_summary": "Synthetic assessment",
+            "findings": [
+                {"relation": "supports", "explanation": "Synthetic finding", "labels": [label]}
+            ],
+            "insufficient_evidence": False,
+        }
+    )
+    with caplog.at_level(logging.DEBUG):
+        out = _check(scope_db, FakeInferenceClient(response=reply), **_SEPTEMBER)
+    checked = CheckConclusionOutput.model_validate(out.structured_content)
+    assert len(checked.findings) == 1
+    assert len(checked.findings[0].sources) == 1
+    assert checked.findings[0].sources[0].scope == expected
+    assert out.structured_content["findings"][0]["sources"][0]["scope"] == expected
+    assert _MARKER not in caplog.text
