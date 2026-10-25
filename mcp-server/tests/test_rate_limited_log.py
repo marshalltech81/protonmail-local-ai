@@ -173,8 +173,9 @@ def test_recovery_ends_the_episode_inside_the_window(caplog):
         limiter.record("alpha")
         limiter.recover()
         limiter.record("alpha")
-    assert len(_messages(caplog, "synthetic first")) == 2
-    assert len(_messages(caplog, "synthetic summary")) == 1
+    assert len(_messages(caplog, "synthetic first")) == 1
+    assert len(_messages(caplog, "Warning episode recovered")) == 1
+    assert not _messages(caplog, "synthetic summary")
 
 
 def test_timer_and_rollover_emit_one_summary(caplog):
@@ -220,3 +221,32 @@ def test_http_shutdown_drains_closure_limiters(caplog):
         assert scheduler.calls[0]["cancelled"]
         scheduler.calls[0]["callback"]()
     assert len(_messages(caplog, "synthetic summary")) == 1
+
+
+def test_alternating_failures_and_recoveries_keep_one_warning_budget(caplog):
+    clock, scheduler = _Clock(), _Scheduler()
+    limiter = _scheduled(clock, scheduler)
+    with caplog.at_level(logging.INFO):
+        for _ in range(100):
+            limiter.record("alpha")
+            limiter.recover()
+        assert len(_messages(caplog, "synthetic first")) == 1
+        assert len(_messages(caplog, "Warning episode recovered")) == 1
+        clock.now += 60
+        scheduler.calls[-1]["callback"]()
+    assert _messages(caplog, "synthetic summary") == [
+        "synthetic summary in the last 60s: occurrences alpha=100 recoveries=100"
+    ]
+
+
+def test_recovery_after_idle_summary_still_reports_the_episode_end(caplog):
+    clock, scheduler = _Clock(), _Scheduler()
+    limiter = _scheduled(clock, scheduler)
+    with caplog.at_level(logging.INFO):
+        limiter.record("alpha")
+        limiter.record("alpha")
+        clock.now += 60
+        scheduler.calls[0]["callback"]()
+        limiter.recover()
+        limiter.recover()
+    assert len(_messages(caplog, "Warning episode recovered")) == 1

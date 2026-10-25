@@ -5251,8 +5251,10 @@ older cached text through the existing extraction-version sweep.
 The MCP server's keyed warning limiters lazily arm one cancellable daemon
 timer when a warning repeats. At the window deadline they report total
 occurrences, including the first logged warning, even without another
-request. Successful retrieval-lane recovery drains the episode and logs
-its end; the next failure starts a new episode. HTTP shutdown drains and
+request. Successful retrieval-lane recovery logs the episode's end without
+resetting the warning budget. Recovery transitions have one INFO line per
+window and repeated transitions are counted in its summary. Timer expiry
+leaves the episode active until an actual success. HTTP shutdown drains and
 cancels every registered limiter, including tool-closure instances. Timer
 and request rollover share one lock and generation, preventing a stale
 callback from draining a later window. Reasons remain fixed tokens.

@@ -38,7 +38,7 @@ class RateLimitedLog:
 
     A repeated key lazily arms one cancellable daemon timer. Its summary
     includes the first occurrence and fires even if requests stop.
-    ``flush`` atomically drains and cancels; ``recover`` ends an episode.
+    ``flush`` atomically drains and cancels; recovery retains the warning budget.
     Logging stays outside the lock. Stale callbacks cannot drain a later
     window. Keys and state are bounded by the caller's fixed reason set.
     """
@@ -66,28 +66,35 @@ class RateLimitedLog:
         self._counts = dict.fromkeys(keys, 0)
         self._cancel: Callable[[], None] | None = None
         self._generation = 0
+        self._episode_active = False
+        self._recoveries = 0
         with _REGISTRY_LOCK:
             _LIMITERS.add(self)
 
-    def _drain_locked(self, now: float) -> tuple[int, dict[str, int]] | None:
+    def _drain_locked(self, now: float) -> tuple[int, dict[str, int], int] | None:
         summary = None
-        if self._window_start is not None and any(n > 1 for n in self._counts.values()):
-            summary = (int(now - self._window_start), dict(self._counts))
+        if self._window_start is not None and (
+            any(n > 1 for n in self._counts.values()) or self._recoveries > 1
+        ):
+            summary = (int(now - self._window_start), dict(self._counts), self._recoveries)
         if self._cancel is not None:
             self._cancel()
             self._cancel = None
         self._generation += 1
         self._window_start = None
         self._counts = dict.fromkeys(self._keys, 0)
+        self._recoveries = 0
         return summary
 
-    def _emit(self, summary: tuple[int, dict[str, int]] | None) -> None:
+    def _emit(self, summary: tuple[int, dict[str, int], int] | None) -> None:
         if summary is not None:
-            elapsed, counts = summary
+            elapsed, counts, recoveries = summary
             self._logger.warning(
                 self._summary_msg,
                 elapsed,
-                "occurrences " + " ".join(f"{name}={n}" for name, n in counts.items() if n),
+                "occurrences "
+                + " ".join(f"{name}={n}" for name, n in counts.items() if n)
+                + (f" recoveries={recoveries}" if recoveries else ""),
             )
 
     def _arm_locked(self, now: float) -> None:
@@ -123,6 +130,7 @@ class RateLimitedLog:
                 summary = self._drain_locked(now)
             if self._window_start is None:
                 self._window_start = now
+            self._episode_active = True
             self._counts[key] += 1
             first = self._counts[key] == 1
             if not first and self._cancel is None:
@@ -138,12 +146,27 @@ class RateLimitedLog:
         self._emit(summary)
 
     def recover(self) -> None:
-        """End a failed episode so the next failure has its own first line."""
+        """Report an actual episode end without resetting its warning-rate budget.
+
+        One recovery line per window; repeated transitions are aggregated.
+        Timer expiry drains counts, but only a success ends an episode.
+        """
         with self._lock:
-            had_episode = self._window_start is not None
-            summary = self._drain_locked(self._clock())
+            if not self._episode_active:
+                return
+            self._episode_active = False
+            now = self._clock()
+            summary = None
+            if self._window_start is not None and now - self._window_start >= self._interval:
+                summary = self._drain_locked(now)
+            if self._window_start is None:
+                self._window_start = now
+            self._recoveries += 1
+            first = self._recoveries == 1
+            if not first and self._cancel is None:
+                self._arm_locked(now)
         self._emit(summary)
-        if had_episode:
+        if first:
             self._logger.info("Warning episode recovered: %s", self._first_msg)
 
 
