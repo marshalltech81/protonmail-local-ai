@@ -5236,3 +5236,12 @@ subject-fallback threading. The MCP reranker uses the same key to omit
 unchanged reply subjects. This affects future thread assignments; existing
 thread memberships and stored matching subjects are retained. No automatic
 rethreading or mailbox-wide reparse is performed.
+
+### Mixed raw-byte header text
+
+Subject and fallback From text decode RFC 2047 encoded-words even beside
+raw 8-bit bytes. UTF-8 is used for the raw bytes; invalid bytes keep the
+existing replacement and warning behavior. This correction applies when a
+message is parsed, without a mailbox-wide reparse or thread reassignment.
+The attached-email extractor shares the decoder; its version 7 refreshes
+older cached text through the existing extraction-version sweep.

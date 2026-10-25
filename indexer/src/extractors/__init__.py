@@ -827,7 +827,7 @@ class ExtractionResult:
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 8,  # Read displayed text inside WordprocessingML wrappers (#1224).
-    "eml": 6,  # Normalize lone surrogates in decoded attached-email text (#1447).
+    "eml": 7,  # Decode encoded-words beside raw 8-bit header text (#1186).
     "image": 9,  # Re-assess image-labelled HTML, including OCR-disabled rows (#1417).
     "pdf": 8,  # Keep ordinary pages at full OCR DPI in mixed-size PDFs (#1414).
     "ppt": 2,

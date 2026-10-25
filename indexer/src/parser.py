@@ -2631,11 +2631,18 @@ def _clean_id(value: str | email.header.Header) -> str:
     return value.strip().strip("<>").strip()
 
 
-def _decode_header(value: str | email.header.Header, degraded: Counter[str] | None = None) -> str:
+def _decode_header(
+    value: str | email.header.Header,
+    degraded: Counter[str] | None = None,
+    *,
+    decode_raw_words: bool = False,
+) -> str:
     """Decode a header value's RFC 2047 encoded-words.
 
-    A ``Header`` (raw 8-bit header) already holds decoded chunks. A
-    string is scanned for encoded-words in one linear pass and each one
+    Text-header callers opt into decoding encoded-words within raw
+    8-bit chunks, once. Address callers keep them intact until after
+    splitting, so decoded names cannot become address syntax. A string is
+    scanned for encoded-words in one linear pass and each one
     is decoded on its own: ``decode_header`` on the whole string rescans
     the rest of the header at every malformed ``=?`` prefix, which is
     quadratic in a hostile Subject.
@@ -2645,7 +2652,22 @@ def _decode_header(value: str | email.header.Header, degraded: Counter[str] | No
     the log (the attached-email extractor's child, #922).
     """
     if isinstance(value, email.header.Header):
-        return _decode_header_parts(email.header.decode_header(value), degraded).strip()
+        parts = email.header.decode_header(value)
+        if not decode_raw_words:
+            return _decode_header_parts(parts, degraded).strip()
+        for i, (part, charset) in enumerate(parts):
+            if isinstance(part, bytes) and charset and charset.lower() == _RAW_8BIT_CHARSET:
+                text = _decode_raw_8bit(part, degraded)
+                parts[i] = (
+                    _decode_encoded_word_runs(
+                        text,
+                        lambda m: _decode_header_parts(
+                            email.header.decode_header(m.group(0)), degraded
+                        ),
+                    ),
+                    None,
+                )
+        return _decode_header_parts(parts, degraded).strip()
     if "=?" not in value:
         return value.strip()
     return _decode_encoded_word_runs(
@@ -2667,15 +2689,15 @@ def _decode_text_header(
 ) -> str:
     """Decode a header stored as text (Subject, the From fallback).
 
-    compat32 returns a raw 8-bit header as one chunk, so an encoded-word
-    beside the raw bytes stays as sent (#1186); that partial decode logs
-    one rate-limited WARNING with fixed text (#1147).
+    compat32 returns a raw 8-bit header as one chunk; its encoded-words
+    are decoded after the bytes (#1186). Any valid encoded-word still
+    left after decoding logs a rate-limited fixed-text warning (#1147).
     Address display names are not decoded here: ``_parse_addrs`` decodes
     their encoded-words after the address is fixed. The search is one
     linear pass of ``_ENCODED_WORD_RE``, whose groups stop at ``?``.
     """
     try:
-        text = _decode_header(value, degraded)
+        text = _decode_header(value, degraded, decode_raw_words=True)
     except email.errors.MessageError as exc:
         if degraded is not None:
             degraded[HEADER_DEGRADED] += 1
@@ -2685,7 +2707,13 @@ def _decode_text_header(
             type(exc).__name__,
             attachment=False,
         )
-        return str(value).strip()
+        # Header.__str__ replaces unknown-8bit bytes. Keep the raw UTF-8
+        # recovery used before word decoding, with malformed words intact.
+        return (
+            _decode_header(value, degraded)
+            if isinstance(value, email.header.Header)
+            else value.strip()
+        )
     if isinstance(value, email.header.Header) and _ENCODED_WORD_RE.search(text):
         if degraded is not None:
             degraded[HEADER_DEGRADED] += 1
