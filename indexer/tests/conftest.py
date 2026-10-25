@@ -301,6 +301,9 @@ def _reset_extractor_warning_budget(monkeypatch):
             buckets=(extractors._ATTACHMENT_LINES, extractors._OTHER_LINES),
         ),
     )
+    # Direct extractor_child.run tests simulate a fresh process; counters
+    # left by an earlier parser/extractor test must not become its N frames.
+    extractors.drain_counters()
     # The attachments-line debounce is process-wide too.
     main = sys.modules.get("src.main")
     if main is not None:

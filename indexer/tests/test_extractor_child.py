@@ -387,17 +387,7 @@ class TestRealProcess:
 
 class TestChildSide:
     @pytest.mark.parametrize("module", _MODULES)
-    @pytest.mark.parametrize(
-        "error",
-        [
-            # #1673: seen intermittently only in full xdist runs (xls and xlsx).
-            # The cause is unknown; use the issue's serial fallback for this
-            # synthetic MemoryError, retaining every extractor's protocol check.
-            pytest.param(MemoryError, marks=pytest.mark.serial),
-            RecursionError,
-            ValueError,
-        ],
-    )
+    @pytest.mark.parametrize("error", [MemoryError, RecursionError, ValueError])
     def test_any_exception_is_reported_by_type_only(self, module, error, monkeypatch):
         """Host-pressure types too: in the child they are its own limit."""
         mod = _module(extractor_child.MODULES[module])
