@@ -2327,9 +2327,9 @@ def _build_evidence(
         if attachment_coverage is not None:
             for chunk, text in pieces:
                 if chunk is not None and chunk.attachment_id is not None:
-                    key = (thread.thread_id, chunk.claimant_id, chunk.attachment_id)
+                    attachment_key = (thread.thread_id, chunk.claimant_id, chunk.attachment_id)
                     row = attachment_coverage.setdefault(
-                        key,
+                        attachment_key,
                         {
                             "passages_available": 0,
                             "passages_shown": 0,
@@ -3954,7 +3954,12 @@ def register_intelligence_tools(
                         thread_id=thread_id,
                         claimant_id=claimant_id,
                         attachment_id=attachment_id,
-                        **counts,
+                        passages_available=counts["passages_available"],
+                        passages_shown=counts["passages_shown"],
+                        passages_truncated=counts["passages_truncated"],
+                        passages_omitted=counts["passages_omitted"],
+                        chars_available=counts["chars_available"],
+                        chars_shown=counts["chars_shown"],
                     )
                     for (
                         thread_id,
