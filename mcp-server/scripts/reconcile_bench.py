@@ -50,6 +50,7 @@ import email.policy
 import fcntl
 import functools
 import hashlib
+import importlib
 import itertools
 import json
 import math
@@ -1814,6 +1815,12 @@ CREATE INDEX IF NOT EXISTS idx_indexing_jobs_status_next
     ON indexing_jobs(status, next_attempt_at);
 """
 WRITER_TABLES = (
+    "literal_windows",
+    "literal_state",
+    "literal_attachment_spans",
+    "literal_attachment_state",
+    "literal_long_fts",
+    "literal_short_fts",
     "message_headers",
     "threads",
     "threads_fts",
@@ -2225,6 +2232,7 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
     conn.execute(_UPSERT_MESSAGE, _message_values(rec, now, None))
     _bind_occurrence(conn, rec, now)
     _write_full_body(conn, rec)
+    _literal_writer().rebuild_body(conn.cursor(), rec.cid)
     conn.execute("DELETE FROM message_headers WHERE claimant_id = ?", (rec.cid,))
     conn.executemany(
         "INSERT INTO message_headers (claimant_id, ordinal, name, name_normalized, raw_value, decoded_value) "
@@ -2281,6 +2289,13 @@ def _writer_phase1(conn: sqlite3.Connection, rec: _Record, now: str) -> None:
     ).lastrowid
     conn.execute("UPDATE threads SET fts_rowid = ? WHERE thread_id = ?", (fts_rowid, rec.tid))
     _write_thread_vector(conn, rec.tid, vector)
+
+
+@functools.lru_cache(maxsize=1)
+def _literal_writer():
+    """Use the production bounded writer for WAL fidelity; mount indexer/src in the image."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    return importlib.import_module("indexer.src.literal")
 
 
 def _write_full_body(conn: sqlite3.Connection, rec: _Record) -> None:
@@ -2580,6 +2595,7 @@ def _writer_phase2c(
     conn.execute(
         "UPDATE messages SET attachment_rows_current = 1 WHERE claimant_id = ?", (rec.cid,)
     )
+    _literal_writer().rebuild_attachments(conn.cursor(), rec.cid, True)
     if count:
         # ``thread_chunk_mean`` from the sums just written.
         _write_thread_vector(conn, rec.tid, _thread_vector(total, count))
@@ -2835,6 +2851,11 @@ def phase_writer(
         if not baseline:
             conn.execute("PRAGMA wal_autocheckpoint=0")
         conn.executescript(_WRITER_SCHEMA)
+        if (
+            conn.execute("SELECT 1 FROM sqlite_master WHERE name='literal_state'").fetchone()
+            is None
+        ):
+            _literal_writer().create_schema(conn.cursor())
         # New mail goes on from the corpus's next message (rows 1..N
         # hold messages 0..N-1), joining its last thread when it ends
         # mid-thread.
@@ -3796,9 +3817,14 @@ MAX_MESSAGES = 2**30
 WAL_EST_MESSAGE_S = 0.001
 WAL_EST_ATTACHMENT_S = 0.0018
 WAL_EST_CHUNK_S = 0.002
-WAL_EST_BYTE_S = 0.16e-6
+# v25 literal writes: plain 500-message runs on 2026-10-25 took 3.53 s
+# (one 40-word chunk, one PDF) and 9.61 s (three 250-word chunks,
+# three PDFs). The old model predicted 2.60/6.94 s. Raising the byte
+# coefficient to 1.2 us predicts 3.73/11.61 s; continuation passes charge
+# all extraction text again because kept attachments are reindexed too.
+WAL_EST_BYTE_S = 1.2e-6
 WAL_EST_PARTICIPANT_S = 11.7e-6
-WAL_EST_PASS_BYTE_S = 0.05e-6
+WAL_EST_PASS_BYTE_S = 1.2e-6
 WAL_EST_COMMON_MESSAGE_S = 0.0674
 WAL_EST_COMMON_GROWTH_S = 6.8e-6
 WAL_BASELINE_BUDGET_S = 1800
@@ -4156,7 +4182,9 @@ def wal_baseline_estimate(args: argparse.Namespace) -> float:
         + WAL_EST_CHUNK_S * args.chunks
         + WAL_EST_BYTE_S * (file_bytes + 4 * args.extracted_chars * args.per_message)
         + WAL_EST_PARTICIPANT_S * people
-        + WAL_EST_PASS_BYTE_S * (passes - 1) * file_bytes
+        + WAL_EST_PASS_BYTE_S
+        * (passes - 1)
+        * (file_bytes + 4 * args.extracted_chars * args.per_message)
     )
     total = args.messages * per_message
     if args.identity == "ascii998common":

@@ -9818,7 +9818,15 @@ class TestPruneReapedRecords:
         monkeypatch.setattr(main, "initial_index", lambda *a, **kw: pytest.fail("indexed"))
         with pytest.raises(_Unreachable):
             main.main()
-        assert scrubbed == [["threads_fts", "message_chunks_fts", "attachments_fts"]]
+        assert scrubbed == [
+            [
+                "threads_fts",
+                "message_chunks_fts",
+                "attachments_fts",
+                "literal_long_fts",
+                "literal_short_fts",
+            ]
+        ]
 
 
 class TestChunkKinds:

@@ -61,6 +61,12 @@ _TABLES = (
 # commits touch what the indexer's do. The cadence test checks this list
 # against the tables the indexer's own commits write.
 _WRITER_TABLES = (
+    "literal_windows",
+    "literal_state",
+    "literal_attachment_spans",
+    "literal_attachment_state",
+    "literal_long_fts",
+    "literal_short_fts",
     "message_headers",
     "threads",
     "threads_fts",
@@ -295,6 +301,7 @@ def test_benchmark_schema_is_the_indexers(bench, tmp_path, table):
         # The WAL writer's tables (``_WRITER_SCHEMA``) as well: its
         # commits write them as the indexer does.
         ours.executescript(bench._SCHEMA + bench._WRITER_SCHEMA)
+        bench._literal_writer().create_schema(ours.cursor())
         assert _schema(ours, table) == _schema(prod, table)
 
 
@@ -320,6 +327,7 @@ def test_benchmark_carries_the_indexers_identity_invalidation_triggers(bench, tm
         closing(_with_vec(sqlite3.connect(":memory:"))) as ours,
     ):
         ours.executescript(bench._SCHEMA + bench._WRITER_SCHEMA)
+        bench._literal_writer().create_schema(ours.cursor())
         assert len(objects(prod)) == 6
         assert objects(ours) == objects(prod)
 

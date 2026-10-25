@@ -126,7 +126,7 @@ class TestSchema:
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
         the current version (v24), skipping the migration files."""
-        assert SCHEMA_VERSION == 24
+        assert SCHEMA_VERSION == 25
         assert (
             db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         )
@@ -570,6 +570,9 @@ def _revert_v21(db: Database) -> None:
     policy selector and the label observations, with their guards. Safe
     to repeat: older revert helpers call it from several paths."""
     conn = db._conn
+    from tests.conftest import drop_literal_schema
+
+    drop_literal_schema(conn)
     conn.execute("DROP TABLE IF EXISTS authority_rule_state")
     for kind, name in (
         ("VIEW", "effective_accepted_occurrences"),
@@ -4623,7 +4626,13 @@ class TestFtsScrub:
     _THREAD = "zqthreadmark"
     _CHUNK = "zqchunkmark"
     _FILE = "zqfilemark"
-    _ALL = ["threads_fts", "message_chunks_fts", "attachments_fts"]
+    _ALL = [
+        "threads_fts",
+        "message_chunks_fts",
+        "attachments_fts",
+        "literal_long_fts",
+        "literal_short_fts",
+    ]
 
     def _index_and_reap(self, db, threader) -> None:
         """Index a message carrying a marker in each FTS5 table, land
@@ -4632,6 +4641,11 @@ class TestFtsScrub:
         assert db.scrub_reaped_fts() == self._ALL
         marked = make_message(
             message_id="fts@x", filepath="/m/fts@x", body_text=f"hello {self._THREAD} there"
+        )
+        from src import full_body
+
+        marked.full_body = full_body.prepare(
+            [full_body.Part(0, -1, "plain", True, marked.body_text)], marked.claimant_id
         )
         keep = make_message(message_id="fts-keep@x", filepath="/m/fts-keep@x", body_text="survivor")
         thread = threader.assign_thread(marked)
@@ -4821,7 +4835,8 @@ class TestFtsScrub:
         finally:
             db._conn = real
         assert len(seen) > 3
-        assert len(commits) == len(seen)
+        # One durable acknowledgement of trigger-recorded literal deletions.
+        assert len(commits) == len(seen) + 1
         assert all(commits)
         assert db.wal_checkpoint_truncate()[0] == 0
         raw = db.path.read_bytes()

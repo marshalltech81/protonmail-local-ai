@@ -412,3 +412,18 @@ def reply_work(monkeypatch):
         tuple(CountedReplyPattern(pattern, lengths) for pattern in quoting._REPLY_HEADER_PATTERNS),
     )
     return lengths
+
+
+def drop_literal_schema(conn):
+    """Undo v25 for historical migration fixtures, before rebuilding parents."""
+    conn.execute("DROP TRIGGER IF EXISTS literal_window_delete")
+    for table in (
+        "literal_long_fts",
+        "literal_short_fts",
+        "literal_windows",
+        "literal_attachment_spans",
+        "literal_attachment_state",
+        "literal_state",
+        "literal_scrub",
+    ):
+        conn.execute(f"DROP TABLE IF EXISTS {table}")

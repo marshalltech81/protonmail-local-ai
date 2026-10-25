@@ -102,6 +102,8 @@ def tool_result(text: str, output: _Output) -> CallToolResult:
     """The prose as ``content`` plus ``output`` as ``structuredContent``."""
     if isinstance(output, _AuthorityFilteredOutput) and output.authority_notice:
         text += "\n" + output.authority_notice
+    if isinstance(output, (QueryMessagesOutput, QueryThreadsOutput, AggregateMessagesOutput)):
+        text += "\nCounts cover the local indexed snapshot. Check get_mailbox_status for collection currency and mail still waiting for ingestion."
     return CallToolResult(
         content=[TextContent(type="text", text=text)],
         structured_content=output.model_dump(mode="json", by_alias=True),
@@ -1018,6 +1020,10 @@ class WhereLeafResult(_Output):
 
 
 class QueryMessagesOutput(_AuthorityFilteredOutput):
+    population_scope: Literal["local_indexed_snapshot"] = Field(
+        default="local_indexed_snapshot",
+        description="Counts cover indexed local mail only, not a live IMAP mailbox or mail still waiting for ingestion. Read get_mailbox_status for current, collection and queue evidence.",
+    )
     collapse: Literal["message_id"] | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -1131,6 +1137,10 @@ class QueriedThreadRow(_SubjectOutput):
 
 
 class QueryThreadsOutput(_AuthorityFilteredOutput):
+    population_scope: Literal["local_indexed_snapshot"] = Field(
+        default="local_indexed_snapshot",
+        description="Counts cover indexed local mail only, not a live IMAP mailbox or mail still waiting for ingestion. Read get_mailbox_status for current, collection and queue evidence.",
+    )
     metadata_diagnostics: dict[str, dict[str, int]] = Field(
         default_factory=dict,
         exclude_if=lambda v: not v,
@@ -1273,6 +1283,10 @@ class MessageGroupRow(_Output):
 
 
 class AggregateMessagesOutput(_AuthorityFilteredOutput):
+    population_scope: Literal["local_indexed_snapshot"] = Field(
+        default="local_indexed_snapshot",
+        description="Counts cover indexed local mail only, not a live IMAP mailbox or mail still waiting for ingestion. Read get_mailbox_status for current, collection and queue evidence.",
+    )
     unknown_group_messages: int | None = Field(
         default=None,
         exclude_if=lambda v: v is None,

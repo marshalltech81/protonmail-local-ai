@@ -1,7 +1,8 @@
 # MCP Tool Reference
 
 Complete decoded body storage (#1362) is an internal prerequisite for future
-evidence jobs and literal phrases (#1388). It adds no public tool or field to
+evidence jobs and the literal phrase layer (#1388). Literal phrases are described in
+[Deterministic search and IMAP SEARCH](imap-search-parity.md). The source store adds no public source-reader tool or field to
 the tools below. Existing body retrieval continues to return its documented
 chunk/reading representation; it does not automatically expose every quote,
 signature or MIME alternative. Internal `lib.full_body` primitives page original
@@ -655,6 +656,12 @@ different filters"), never read against them.
 | `subject_contains` | text | `query_messages` and `aggregate_messages` `where` | same as `subject`, including unknown on a miss against an incomplete subject |
 | `attachment_content_type_is` | MIME type | `query_messages` and `aggregate_messages` `where` | exact declared type on a current occurrence; a miss is unknown unless the current inventory is exhaustive |
 | `attachment_text_words` | words | `query_messages` and `aggregate_messages` `where` | every word occurs in the message's attachment chunks (FTS, stemmed; at most 16 words); retained text qualifies only with current attachment rows; a miss is unknown unless the inventory and every occurrence's committed text are complete |
+| `body_phrase` | literal phrase | deterministic queries `where` | all preserved inline body renderings, including quotes and signatures; verified contiguous source, casefolded with original character boundaries; a miss is unknown without complete current evidence for this scope |
+| `authored_body_phrase` | literal phrase | deterministic queries `where` | preserved authored body runs; verified contiguous source, casefolded with original character boundaries; a miss is unknown without complete current evidence for this scope |
+| `quote_phrase` | literal phrase | deterministic queries `where` | preserved quote runs; verified contiguous source, casefolded with original character boundaries; a miss is unknown without complete current evidence for this scope |
+| `signature_phrase` | literal phrase | deterministic queries `where` | preserved signature runs; verified contiguous source, casefolded with original character boundaries; a miss is unknown without complete current evidence for this scope |
+| `forwarded_phrase` | literal phrase | deterministic queries `where` | preserved forwarded runs; verified contiguous source, casefolded with original character boundaries; a miss is unknown without complete current evidence for this scope |
+| `attachment_text_phrase` | literal phrase | deterministic queries `where` | current extracted attachment text, including PDF/OCR when available; verified contiguous source, casefolded with original character boundaries; a miss is unknown without complete current evidence for this scope |
 | `body_words` | words | `query_messages` `text` and `where` | every word occurs in its indexed body (FTS, stemmed; at most 16 words); unknown when one does not and the indexed body is not complete |
 | `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it has an active copy in one of them ([one copy](#copies-and-one-copy-matching)) |
 | `default_scope` | none | the default scope, when no folder is named | it has a current copy outside Trash, counting only its live (not `T`-flagged) copies when it has any ([Trash](#trash-is-left-out-by-default)) |
@@ -1952,7 +1959,7 @@ included.
 
 **The benchmark.** `mcp-server/scripts/reconcile_bench.py` builds a
 synthetic index (generated values only, never mail) whose tables mirror
-indexer schema v13 and hold the rows the indexer writes for the
+the indexer's retrieval tables and hold the rows it writes for the
 messages the benchmark renders
 (`indexer/tests/test_reconcile_bench_fidelity.py` indexes those files
 with the indexer and compares every row). `--identity utf8x4` is the
@@ -2064,19 +2071,24 @@ the index fits in memory. Peak RSS is the child's `VmHWM`. It measures:
   body chunks, bytes written, participant rows and continuation
   passes; the common-ID thread's growth), with coefficients fitted to
   those plain timings on that laptop, and refuses a run estimated over
-  30 minutes. The documented command below is estimated at about 8
-  minutes; 5,000 messages accept at most 162 attachments each, and the
-  common-ID shape with one attachment at most 11,766 messages (an
+  30 minutes. With v25 literal writes, two new plain 500-message probes
+  took 3.53/9.61 seconds against the old model's 2.60/6.94; the byte
+  coefficient now predicts 3.73/11.61, and continuation passes charge
+  all extracted text again. The documented command is estimated at about 12
+  minutes; 5,000 messages accept at most 73 attachments each, and the
+  common-ID shape with one attachment at most 11,530 messages (an
   extrapolation past the 5,000 measured). Another host's build differs:
   the estimate bounds the work, it is not a deadline.
 
 Run it inside the mcp-server image so SQLite and Python match the
-server's; `--help` lists every option:
+server's. The read-only indexer source mount supplies the production literal
+index writer for WAL fidelity. `--help` lists every option:
 
 ```bash
 docker build -t mcp-bench mcp-server
 docker run --rm --entrypoint python \
   -v "$PWD/mcp-server/scripts:/app/scripts:ro" \
+  -v "$PWD/indexer/src:/indexer/src:ro" \
   -v "$PWD/indexer/src/data/qwen3-embedding:/app/tokenizer:ro" mcp-bench \
   scripts/reconcile_bench.py --messages 50000 --identity typical --wal --filtered
 ```
@@ -2266,10 +2278,14 @@ dimension. For the sender dimensions: a message whose
 ([Sender attribution](#sender-attribution)). For `authority_class`,
 also a message only in Spam or Recovered Messages, or one whose From
 addresses have no class. A
-message with several From addresses counts in the group of each, so
-those groups can sum to more than `total_matches`; `folder`, `year`
-and `month` have one value per message, so their groups sum to
-`total_matches` and their `indeterminate` values to the call's. A
+message with several From addresses counts in each observed group; a message
+with several qualifying copies can appear in several folder groups. Their sums
+can exceed `total_matches`. Year/month have one value per message. A Boolean
+folder/flag expression is evaluated on each copy: a folder group counts only
+its own definite/unknown copy evidence. Copies within a claimant/folder collapse
+to one member: any definite witness wins, otherwise the member is unknown. An
+authority null group also includes
+messages without a provably qualifying copy outside the excluded folders. A
 group's `indeterminate` covers the supplied filters only, not the
 group's own value: a message whose membership in a sender group cannot
 be decided is not in it.
@@ -4015,3 +4031,15 @@ While reparses are pending, the status line explains that sender,
 participant and authority filters count unassessed metadata as
 indeterminate. The metadata's completeness flags decide this; a queued
 reparse alone does not make otherwise complete metadata unknown.
+
+
+### Literal phrases and typed Boolean predicates
+
+See [Deterministic search and IMAP SEARCH](imap-search-parity.md) for the
+criterion-by-criterion matrix, exact source scopes, Unicode semantics, unknown
+evidence and work limits. The six `*_phrase` leaves work in `where` on
+`query_messages`, `query_threads` and `aggregate_messages`; state, folder,
+authority, size and independent effective/sent/occurred date leaves also compose
+there. The existing word predicates retain stemming and their prior scopes.
+These results report `population_scope=local_indexed_snapshot` and a fixed prose
+notice; unindexed or dead-lettered mail can be absent from both result counts.

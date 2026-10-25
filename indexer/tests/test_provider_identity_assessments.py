@@ -226,7 +226,7 @@ def _new_objects(conn: sqlite3.Connection) -> dict[str, str]:
 
 class TestSchema:
     def test_fresh_install_has_the_current_version_and_selector(self, db):
-        assert SCHEMA_VERSION == 24
+        assert SCHEMA_VERSION == 25
         assert (
             db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         )
@@ -260,8 +260,11 @@ class TestSchema:
             )
             assert after == before
             assert after[0][0][0] == msg.claimant_id
-            # No reparse is queued; no assessment exists until a batch runs.
-            assert migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+            # The later literal migration queues a reparse; provider assessment stays absent until a batch runs.
+            assert (
+                migrated._conn.execute("SELECT reason FROM indexing_jobs").fetchone()[0]
+                == "reparse"
+            )
             assert (
                 migrated._conn.execute(
                     "SELECT COUNT(*) FROM provider_identity_assessments"

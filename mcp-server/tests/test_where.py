@@ -91,7 +91,7 @@ class TestModel:
         "leaf",
         # The flat filters' inferred names and the internal adapter
         # leaves are not part of ``where``.
-        ["sender", "recipient", "participant", "text", "subject", "folder", "authority_class"],
+        ["sender", "recipient", "participant", "text", "subject"],
     )
     def test_flat_names_are_not_explicit_leaves(self, leaf):
         with pytest.raises(ValidationError):
@@ -134,6 +134,26 @@ class TestModel:
 
     def test_leaf_list_and_roles_are_the_decided_ones(self):
         assert WHERE_LEAVES == (
+            "body_phrase",
+            "authored_body_phrase",
+            "quote_phrase",
+            "signature_phrase",
+            "forwarded_phrase",
+            "attachment_text_phrase",
+            "seen",
+            "flagged",
+            "replied",
+            "has_attachments",
+            "size_min",
+            "size_max",
+            "folder",
+            "authority_class",
+            "effective_from",
+            "effective_to",
+            "sent_from",
+            "sent_to",
+            "occurred_from",
+            "occurred_to",
             "address_is",
             "address_contains",
             "display_name_contains",
@@ -202,11 +222,15 @@ class TestNormalize:
         assert normalize_where(_where(_leaf("body_words", "a", negate=True)))
         assert normalize_where(_where(_leaf("body_words", "a", negate=False)))
 
-    @pytest.mark.parametrize("leaf", [n for n in WHERE_LEAVES if not n.startswith("header_")])
+    @pytest.mark.parametrize(
+        "leaf", [n for n in MAX_WHERE_VALUE_CHARS if not n.startswith("header_")]
+    )
     def test_blank_values_are_refused(self, leaf):
         assert _reject(_where(_leaf(leaf, "  \t"))) == f"where.all[0]: {leaf} value is empty"
 
-    @pytest.mark.parametrize("leaf", [n for n in WHERE_LEAVES if not n.startswith("header_")])
+    @pytest.mark.parametrize(
+        "leaf", [n for n in MAX_WHERE_VALUE_CHARS if not n.startswith("header_")]
+    )
     def test_value_limit_per_leaf(self, leaf):
         limit = MAX_WHERE_VALUE_CHARS[leaf]
         text = _reject(_where(_leaf(leaf, MARKER + "x" * limit)))

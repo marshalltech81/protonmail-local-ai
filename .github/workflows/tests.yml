@@ -250,6 +250,16 @@ jobs:
             --env FULL_BODY_ROOT=/task --entrypoint python full-body-runtime - \
             < mcp-server/tests/runtime_full_body.py
 
+      - name: Verify literal phrase bounds on runtime SQLite
+        run: |
+          docker run --rm -i --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --memory 1g --pids-limit 32 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=2g \
+            --mount type=bind,src="$PWD/indexer/src",dst=/task/indexer/src,readonly \
+            --mount type=bind,src="$PWD/mcp-server/src/lib",dst=/task/mcp-server/src/lib,readonly \
+            --env LITERAL_ROOT=/task --entrypoint python full-body-runtime - \
+            < mcp-server/tests/runtime_literal.py
+
       # The #1584 evidence-run code (evidence-run/, not part of any image)
       # runs on the indexer's environment, since its probe reuses the
       # indexer's parser and policy. Offline and synthetic; the coverage

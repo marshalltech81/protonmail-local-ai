@@ -59,6 +59,9 @@ STRUCTURED_TOOLS = {
 }
 
 
+_SNAPSHOT = "\nCounts cover the local indexed snapshot. Check get_mailbox_status for collection currency and mail still waiting for ingestion."
+
+
 def _server(db) -> FastMCP:
     server = FastMCP("structured-output-test")
     register_search_tools(server, db, FakeEmbedClient())
@@ -268,7 +271,7 @@ class TestQueryMessagesFields:
             "   To: Jane Doe <jane@example.com>\n"
             "   Cc: carol@other.org\n"
             "   Message-ID: m2 | Claimant ID: m2#29c1b289e7522195\n"
-            "   Thread ID: t1\n"
+            "   Thread ID: t1\n" + _SNAPSHOT
         )
         page = _call(server, "query_messages", sender="jane@example.com", limit=2)
         assert [list(m) for m in page["messages"]] == [self.ALL_FIELDS] * 2
@@ -322,7 +325,7 @@ class TestQueryMessagesFields:
             "1. 2024-01-11T10:00:00+00:00\n"
             "   Subject: Re: Budget review\n"
             "   Claimant ID: m2#29c1b289e7522195\n"
-            "   Thread ID: t1\n"
+            "   Thread ID: t1\n" + _SNAPSHOT
         )
         for absent in ("INBOX", "unread", "attachments", "From:", "To:", "Cc:", "Message-ID"):
             assert absent not in text
@@ -333,7 +336,9 @@ class TestQueryMessagesFields:
             .content[0]
             .text
         )
-        assert text.endswith("1.\n   Claimant ID: m2#29c1b289e7522195\n   Thread ID: t1\n")
+        assert text.endswith(
+            "1.\n   Claimant ID: m2#29c1b289e7522195\n   Thread ID: t1\n" + _SNAPSHOT
+        )
 
     def test_cursor_round_trip_with_a_projection(self, messages_db):
         server = _server(messages_db)

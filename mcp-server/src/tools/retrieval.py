@@ -21,6 +21,7 @@ from ..lib.predicates import (
     ADDRESS_ROLES,
     DEFAULT_DATE_BASIS,
     MAX_SIZE_BYTES,
+    WHERE_ADDRESS_LEAVES,
     Where,
     WhereLeaf,
     normalize_date_basis,
@@ -550,6 +551,18 @@ _INDETERMINATE_CAUSES: tuple[tuple[str, frozenset[str], str], ...] = (
         frozenset(),
         "observed Bcc does not establish an exhaustive original recipient list",
     ),
+    (
+        "effective_date",
+        frozenset(),
+        "no delivery date and no parseable Date header, or not yet checked",
+    ),
+    ("sent_date", frozenset(), "no parseable Date header, or not yet checked"),
+    ("occurred_date", frozenset(), "no delivery date"),
+    (
+        "literal",
+        frozenset(),
+        "literal source evidence or index incomplete, stale, unavailable, or not yet assessed",
+    ),
     ("headers", frozenset(), "header evidence incomplete or not yet assessed"),
     ("attachment_text", frozenset(), "attachment text incomplete, unavailable, or not yet indexed"),
     ("size", frozenset({"size_min", "size_max"}), "no stored size"),
@@ -568,6 +581,31 @@ def _where_cause_keys(where: list[WhereLeaf]) -> set[str]:
     incomplete display names when it reads them."""
     keys = set()
     for w in where:
+        name = w.leaf.name
+        if name.endswith("_phrase"):
+            keys.add("literal")
+            continue
+        if name in {"seen", "flagged", "replied", "folder"}:
+            continue
+        if name in {
+            "effective_from",
+            "effective_to",
+            "sent_from",
+            "sent_to",
+            "occurred_from",
+            "occurred_to",
+        }:
+            keys.add(name.split("_", 1)[0] + "_date")
+            continue
+        if name in {"size_min", "size_max"}:
+            keys.add("size")
+            continue
+        if name == "has_attachments":
+            keys.add("attachment_list")
+            continue
+        if name == "authority_class":
+            keys.update({"sender_ambiguous", "address_list"})
+            continue
         if w.leaf.name in {"list_id_is", "precedence_is"}:
             keys.add("list_metadata")
             continue
@@ -659,9 +697,11 @@ def _describe_where(where: list[WhereLeaf]) -> list[str]:
             "precedence_is",
         }:
             parts.append(f"{prefix}{w.leaf.name}({w.leaf.value!r})")
-        else:
+        elif w.leaf.name in WHERE_ADDRESS_LEAVES:
             role, value = w.leaf.value
             parts.append(f"{prefix}{w.leaf.name}({role}, {value!r})")
+        else:
+            parts.append(f"{prefix}{w.leaf.name}({w.leaf.value!r})")
     return parts
 
 
@@ -1651,7 +1691,17 @@ def register_retrieval_tools(server, db):
                       the server's RFC822.SIZE); a message without a
                       stored size is indeterminate.
             size_max: Inclusive upper bound in bytes, likewise.
-            where: Explicit leaves, ANDed with the other filters:
+            where: State, folder, authority, size and independent date leaves
+                   compose with address/header/text leaves using all/any/negate.
+                   body_phrase, authored_body_phrase, quote_phrase,
+                   signature_phrase, forwarded_phrase and attachment_text_phrase
+                   match literal contiguous source text, casefolded with original
+                   character boundaries, preserving punctuation and whitespace.
+                   1-1000 folded characters; source scopes never concatenate.
+                   Incomplete evidence gives unknown, not a definite negative.
+                   Phrase budgets can reject a broad request with a fixed error.
+                   See docs/imap-search-parity.md for the local IMAP criterion matrix.
+                   Explicit leaves are ANDed with the other filters:
                    {"all": [{"leaf": ..., "role": ..., "value": ...,
                    "id": ...}, ...]}. address_is: a full address,
                    exactly. address_contains: a case-insensitive
@@ -1792,8 +1842,8 @@ def register_retrieval_tools(server, db):
             # encode, answered by type below (Codex round 1).
             where_leaves = normalize_where(where) if where is not None else []
             authority_notice = (
-                await asyncio.to_thread(db.authority_rule_notice, authority_class)
-                if authority_class
+                await asyncio.to_thread(db.authority_rule_notice, authority_class, where_leaves)
+                if authority_class or any(w.leaf.name == "authority_class" for w in where_leaves)
                 else None
             )
             page = await asyncio.to_thread(
@@ -2057,8 +2107,8 @@ def register_retrieval_tools(server, db):
             bounds = date_bounds(*validate_date_range(date_from, date_to))
             where_leaves = normalize_where(where) if where is not None else []
             authority_notice = (
-                await asyncio.to_thread(db.authority_rule_notice, authority_class)
-                if authority_class
+                await asyncio.to_thread(db.authority_rule_notice, authority_class, where_leaves)
+                if authority_class or any(w.leaf.name == "authority_class" for w in where_leaves)
                 else None
             )
             page = await asyncio.to_thread(
@@ -2352,8 +2402,8 @@ def register_retrieval_tools(server, db):
             )
             where_leaves = normalize_where(where) if where is not None else []
             authority_notice = (
-                await asyncio.to_thread(db.authority_rule_notice, authority_class)
-                if authority_class
+                await asyncio.to_thread(db.authority_rule_notice, authority_class, where_leaves)
+                if authority_class or any(w.leaf.name == "authority_class" for w in where_leaves)
                 else None
             )
             page = await asyncio.to_thread(

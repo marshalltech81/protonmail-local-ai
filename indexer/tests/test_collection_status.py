@@ -716,7 +716,7 @@ class TestMigrationV20:
         migrated = Database(tmp_path / "v19.db", account=TEST_ACCOUNT)
         fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
         try:
-            assert SCHEMA_VERSION == 24
+            assert SCHEMA_VERSION == 25
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             assert migrated.get_collection_state() is None
             state = migrated._conn.execute(

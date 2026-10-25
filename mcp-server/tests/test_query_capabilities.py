@@ -260,6 +260,7 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
 
     conn.create_function("mcp_list_metadata", 2, sqlite_normalize_fields)
     conn.create_function("mcp_casefold", 1, lambda value: value.casefold() if value else value)
+    conn.create_function("mcp_literal", 2, lambda key, window: 0)
     values = {
         "address": ("synthetic@example.com", "synthetic"),
         "role, address": tuple((role, "synthetic@example.com") for role in WHERE_ROLES),
@@ -280,6 +281,7 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
         "direction": ("inbound", "outbound", "self"),
         "list_id": ("series.example", None),
         "precedence": ("bulk", None),
+        "literal phrase": ("synthetic",),
     }
     tables = (
         "messages",
@@ -295,6 +297,10 @@ def test_schema_rules_cover_actual_compiler_dependencies(tmp_path):
         "accounts",
         "operator_identity",
         "operator_addresses",
+        "literal_state",
+        "literal_windows",
+        "literal_attachment_state",
+        "attachment_extractions",
     )
     for table in tables:
         columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
