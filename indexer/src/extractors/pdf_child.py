@@ -430,13 +430,18 @@ def _extract_ocr(
     import pytesseract
     from pdf2image import convert_from_bytes, pdfinfo_from_bytes
 
-    dpi = _ocr_dpi(payload, pages)
+    page_dpi = _ocr_dpi(payload, pages)
     # The child's parse is done: from here on the child and the tool it
     # runs share the OCR phase's limit (#1450).
     _limit_for_ocr()
     runs: list[list[int]] = []
     for index in pages:
-        if runs and index == runs[-1][-1] + 1 and len(runs[-1]) < _PAGES_PER_RENDER:
+        if (
+            runs
+            and index == runs[-1][-1] + 1
+            and len(runs[-1]) < _PAGES_PER_RENDER
+            and page_dpi[index] == page_dpi[runs[-1][0]]
+        ):
             runs[-1].append(index)
         else:
             runs.append([index])
@@ -474,7 +479,9 @@ def _extract_ocr(
         render_budget -= page_count_seconds
 
     texts: dict[int, str] = {}
+    lowest_rendered_dpi = _OCR_DPI
     for run in runs:
+        dpi = page_dpi[run[0]]
         # In the scratch directory (``TMPDIR``), one per Poppler call.
         # ``TemporaryDirectory`` removes the dir and its contents on
         # context exit, including the exception path — so a leaked PPM
@@ -499,13 +506,14 @@ def _extract_ocr(
             images = convert_from_bytes(payload, **convert_kwargs)  # type: ignore[arg-type]
             if render_budget is not None:
                 render_budget -= time.monotonic() - started
-            if dpi < _OCR_DPI and run is runs[0]:
+            if dpi < lowest_rendered_dpi:
                 # A lower DPI lowers OCR accuracy for every page (#903):
                 # the parent logs it as an extractor cap. Reported once a
                 # render at it has run, not when it is chosen, so a
                 # Poppler failure before any render is only the failure
                 # (#917).
                 record_pdf_ocr_dpi(dpi)
+                lowest_rendered_dpi = dpi
             for index, image in zip(run, images, strict=False):
                 try:
                     text = pytesseract.image_to_string(image, **tesseract_kwargs)
@@ -548,37 +556,29 @@ def _mapped_bytes() -> int:
     return pages * os.sysconf("SC_PAGE_SIZE")
 
 
-def _ocr_dpi(payload: bytes, pages: list[int]) -> int:
-    """Return the highest DPI, up to ``_OCR_DPI``, at which every OCR'd
-    page fits ``_MAX_OCR_PAGE_PIXELS``.
-
-    Reads each page's MediaBox (scaled by UserUnit), which is what
-    ``pdftoppm`` rasterizes, over ``pages``, the pages the OCR pass will
-    render.
-    Each side is counted as a whole number of pixels, at least one,
-    because that is what gets allocated: a sliver page has a tiny area
-    but can still rasterize to one pixel by hundreds of millions. One DPI
-    applies to the whole document, so an oversized page lowers it for
-    every page. A parse failure propagates: without page sizes the raster
-    size is unknown, so the fallback fails closed.
+def _ocr_dpi(payload: bytes, pages: list[int]) -> dict[int, int]:
+    """Each selected page's highest DPI up to ``_OCR_DPI`` that fits
+    ``_MAX_OCR_PAGE_PIXELS``. Read MediaBox and UserUnit once per page;
+    rounded sides, each at least one pixel, match Poppler's allocation.
+    A page that cannot fit even at one DPI fails closed before rendering.
     """
     reader = pypdf.PdfReader(io.BytesIO(payload))
-    pages_inches: list[tuple[float, float]] = []
+    page_dpi: dict[int, int] = {}
     for index in pages:
         page = reader.pages[index]
         box = page.mediabox
         unit = float(page.user_unit)
-        pages_inches.append((abs(float(box.width)) * unit / 72, abs(float(box.height)) * unit / 72))
-
-    def fits(dpi: int) -> bool:
-        return all(
-            max(1, math.ceil(w * dpi)) * max(1, math.ceil(h * dpi)) <= _MAX_OCR_PAGE_PIXELS
-            for w, h in pages_inches
-        )
-
-    # Pixel count only grows with DPI, so the first fit going down is the
-    # highest; at most ``_OCR_DPI`` cheap checks.
-    for dpi in range(_OCR_DPI, 0, -1):
-        if fits(dpi):
-            return dpi
-    raise ValueError("PDF page too large to render for OCR")
+        width = abs(float(box.width)) * unit / 72
+        height = abs(float(box.height)) * unit / 72
+        # At most _OCR_DPI checks per selected page; no other page's
+        # dimensions can lower this one's rendering resolution.
+        for dpi in range(_OCR_DPI, 0, -1):
+            if (
+                max(1, math.ceil(width * dpi)) * max(1, math.ceil(height * dpi))
+                <= _MAX_OCR_PAGE_PIXELS
+            ):
+                page_dpi[index] = dpi
+                break
+        else:
+            raise ValueError("PDF page too large to render for OCR")
+    return page_dpi

@@ -2848,7 +2848,7 @@ digital-page and OCR page caps as `C` frames, whose configured limits
 the parent records on the result (#1418) and logs as before
 (`extractor cap pdf_digital_pages: ...`, `pdf OCR capped at ...`); the
 page counters, the skipped pages and the text loss as `N` frames; the
-lowered OCR DPI as `N pdf_ocr_dpi`, logged as the `pdf_ocr_dpi`
+lowest rendered OCR DPI as `N pdf_ocr_dpi`, logged once as the `pdf_ocr_dpi`
 extractor cap; and an OCR fallback that failed as `R <type name>`
 (`PDF OCR fallback failed: ...`). These are applied whether the child
 then returns text or raises. The child strips the text, as the
@@ -2862,6 +2862,16 @@ the repo-owned `PdfEncryptedError` or `PdfLimitError` and recorded
 (#1464); any other error, the child's own `MemoryError` and
 `RecursionError` included, is `failed` under its type name, where in
 process those two were host pressure that stopped the indexing pass.
+
+OCR chooses the highest safe DPI per selected page, up to 200, under the
+unchanged 10,000,000-pixel cap (rounded MediaBox dimensions, including
+UserUnit). Consecutive pages with the same DPI share a render, still
+bounded by the pages-per-render limit and the shared render deadline.
+An oversized page therefore does not lower ordinary pages' resolution
+(#1414). PDF extractor version 8 refreshes cached PDF results through
+the existing startup sweep; this includes digital-only PDF rows because
+all PDF modes share one module version.
+
 The move takes no version bump (`pdf@6` stays; owner exception
 2026-10-10, as for `image` on #1325): on a catalogue of synthetic PDF
 shapes (digital, scanned, mixed, encrypted, broken pages, over each

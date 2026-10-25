@@ -40,7 +40,7 @@ def _pdf(layout: str, *, encrypt: tuple[str, str] | None = None) -> bytes:
     * ``b``: a content stream pypdf cannot decode (an unknown filter),
       so the page's text extraction raises;
     * ``L``: a 200-inch square page with no text layer, which lowers the
-      OCR DPI for the whole document.
+      OCR DPI for that page.
 
     ``encrypt`` is (user password, algorithm)."""
     from pypdf import PdfWriter

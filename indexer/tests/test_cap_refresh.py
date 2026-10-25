@@ -118,7 +118,7 @@ class TestExtractorsRecordTheLimitThatCut:
         result = extract(
             content_type="application/pdf", filename="a.pdf", payload=b"%PDF-1.7", max_ocr_pages=2
         )
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-ocr@7")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-ocr@8")
         assert (result.ocr_pages_skipped, _caps(result)) == (1, (2, 0, 0))
 
     def test_a_pdf_inside_its_caps_records_zero(self, monkeypatch):
@@ -166,7 +166,7 @@ class TestExtractorsRecordTheLimitThatCut:
         whole = extract(
             content_type="application/pdf", filename="a.pdf", payload=payload, max_pdf_pages=3
         )
-        assert (cut.status, cut.extractor) == (STATUS_SUCCESS, "pdf-digital@7")
+        assert (cut.status, cut.extractor) == (STATUS_SUCCESS, "pdf-digital@8")
         assert _caps(cut) == (0, 2, 0)
         assert _caps(whole) == (0, 0, 0)
         assert "page 2" in (whole.text or "") and "page 2" not in (cut.text or "")
@@ -306,7 +306,7 @@ class TestExtractorsRecordTheLimitThatCut:
 # One eligibility for the lookup and the sweep
 
 _STATUSES = (STATUS_SUCCESS, STATUS_EMPTY, STATUS_FAILED, STATUS_UNSUPPORTED)
-_STAMPS = ("pdf-ocr@7", "pdf-digital@7", "image-ocr@4", None)
+_STAMPS = ("pdf-ocr@8", "pdf-digital@8", "image-ocr@4", None)
 _RECORDS = (None, 0, 1)
 _CAP_VALUES = (None, 0, 10)
 _SKIPPED = (None, 0, 3)
@@ -460,7 +460,7 @@ def test_the_catalogue_reaches_every_arm(catalogue_db):
 )
 def test_raising_qualifies_and_lowering_never_does(recorded, current, due):
     row = dict(zip(CAP_COLUMNS, recorded, strict=True))
-    row.update(extraction_status=STATUS_SUCCESS, extractor="pdf-digital@7", ocr_pages_skipped=0)
+    row.update(extraction_status=STATUS_SUCCESS, extractor="pdf-digital@8", ocr_pages_skipped=0)
     ocr_pages, digital, chars = current
     assert (
         cap_raised(
@@ -617,7 +617,7 @@ class TestCutThatRemainsOnACachedResult:
                 "image OCR capped: cached result stopped at 20 frames",
             ),
             (
-                "pdf-digital@7",
+                "pdf-digital@8",
                 (0, 500, 0),
                 {"ocr_capped_images": 0, "extractor_caps": 1},
                 "extractor cap pdf_digital_pages: cached result stopped at 500 pages",
@@ -668,7 +668,7 @@ class TestCutThatRemainsOnACachedResult:
                 extraction_to_persist=None,
                 cached=True,
                 caps=(0, 0, 0),
-                text_extractor="pdf-digital@7",
+                text_extractor="pdf-digital@8",
             ),
         ]
         record_committed_outcomes(plans)
@@ -687,7 +687,7 @@ def test_the_record_round_trips_and_survives_a_purge_and_restore(tmp_path):
         attachment_id="h",
         extractor_module="pdf",
         extraction_status=STATUS_SUCCESS,
-        extractor="pdf-ocr@7",
+        extractor="pdf-ocr@8",
         extracted_text=MARKER,
         extraction_error=None,
         text_complete=False,
@@ -962,15 +962,15 @@ class TestOcrOffToOn:
     # force are 20 OCR pages, 20 digital pages and no character limit.
     ROWS = {
         # OCR read nothing on the capped scanned pages: a digital stamp.
-        "digital_only": ("pdf-digital@7", 0, 4, (10, 0, 0)),
+        "digital_only": ("pdf-digital@8", 0, 4, (10, 0, 0)),
         # Digital and OCR text: an -ocr stamp.
-        "mixed": ("pdf-ocr@7", 0, 2, (10, 0, 0)),
+        "mixed": ("pdf-ocr@8", 0, 2, (10, 0, 0)),
         # Cached before v11 (no cap record) with scanned pages skipped.
-        "legacy_skipped": ("pdf-digital@7", 0, 3, (None, None, None)),
+        "legacy_skipped": ("pdf-digital@8", 0, 3, (None, None, None)),
         # Cut by the OCR page limit, no skipped count recorded.
-        "ocr_cap": ("pdf-digital@7", 0, None, (10, 0, 0)),
+        "ocr_cap": ("pdf-digital@8", 0, None, (10, 0, 0)),
         # Control: no OCR involvement, cut by the digital page limit.
-        "digital_cap_only": ("pdf-digital@7", 0, 0, (0, 10, 0)),
+        "digital_cap_only": ("pdf-digital@8", 0, 0, (0, 10, 0)),
     }
     # Hand-written: which rows each start re-queues.
     OCR_OFF = {"digital_cap_only"}
@@ -1028,7 +1028,7 @@ class TestOcrOffToOn:
     def _lookup(self, db, attachment, claimant, monkeypatch, *, ocr_enabled):
         fresh = extractors.ExtractionResult(
             status=STATUS_SUCCESS,
-            extractor="pdf-ocr@7",
+            extractor="pdf-ocr@8",
             text="fresh text",
             error=None,
             ocr_pages_skipped=0,

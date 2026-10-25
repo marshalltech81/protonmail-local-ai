@@ -2579,7 +2579,7 @@ class TestPdfDigitalExtractor:
         )
 
         assert result.status == STATUS_FAILED
-        assert result.extractor == "pdf@7"
+        assert result.extractor == "pdf@8"
         assert result.text is None
         assert result.error == "RuntimeError"
 
@@ -2651,7 +2651,7 @@ class TestPdfDigitalExtractor:
             return [Image.new("RGB", (4, 4), color="white")]
 
         monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
-        monkeypatch.setattr(pdf_child, "_ocr_dpi", lambda payload, pages: 200)
+        monkeypatch.setattr(pdf_child, "_ocr_dpi", lambda payload, pages: dict.fromkeys(pages, 200))
         monkeypatch.setattr(
             "pytesseract.image_to_string",
             lambda image, **_: "ocr text",
@@ -2697,7 +2697,7 @@ class TestPdfDigitalExtractor:
             raise OSError(28, "No space left on device")
 
         monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
-        monkeypatch.setattr(pdf_child, "_ocr_dpi", lambda payload, pages: 200)
+        monkeypatch.setattr(pdf_child, "_ocr_dpi", lambda payload, pages: dict.fromkeys(pages, 200))
         real_temp_dir = _tempfile_mod.TemporaryDirectory
         monkeypatch.setattr(
             pdf_child.tempfile,
@@ -3083,7 +3083,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-ocr@7"
+        assert result.extractor == "pdf-ocr@8"
         assert result.text is not None
         assert self.DIGITAL.format(n=1) in result.text
         assert self.SCANNED in result.text
@@ -3125,7 +3125,7 @@ class TestPdfPageLevelOcr:
             max_ocr_pages=5,
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-ocr@7"
+        assert result.extractor == "pdf-ocr@8"
         assert result.text is not None
         assert [f"{self.SCANNED} {n}" in result.text for n in range(1, 7)] == [True] * 5 + [False]
         [record] = [r for r in caplog.records if "OCR capped" in r.getMessage()]
@@ -3206,13 +3206,13 @@ class TestPdfPageLevelOcr:
         [
             # OCR off: a mixed PDF returns its digital text before OCR
             # could read the failed page.
-            ("dd", {1}, False, 20, True, "pdf-digital@7", 1),
+            ("dd", {1}, False, 20, True, "pdf-digital@8", 1),
             # OCR on: the failed page is OCR'd and its text recovered.
-            ("dd", {1}, True, 20, True, "pdf-ocr@7", 0),
+            ("dd", {1}, True, 20, True, "pdf-ocr@8", 0),
             # OCR on but it reads no text on the failed page.
-            ("dd", {1}, True, 20, False, "pdf-digital@7", 1),
+            ("dd", {1}, True, 20, False, "pdf-digital@8", 1),
             # The OCR cap leaves the failed page unread.
-            ("dsss", {3}, True, 1, True, "pdf-ocr@7", 1),
+            ("dsss", {3}, True, 1, True, "pdf-ocr@8", 1),
         ],
     )
     def test_pdf_pages_unrecovered(
@@ -3276,7 +3276,7 @@ class TestPdfPageLevelOcr:
         monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 4)
         extractors.drain_extractor_counts()
         results = [self._extract("d" + "s" * 30, max_ocr_pages=5) for _ in range(5)]
-        assert {(r.status, r.extractor) for r in results} == {(STATUS_SUCCESS, "pdf-ocr@7")}
+        assert {(r.status, r.extractor) for r in results} == {(STATUS_SUCCESS, "pdf-ocr@8")}
         # Since #1293 each capped PDF logs two lines: the child's
         # degradation and the cap.
         lines = [r for r in caplog.records if "OCR capped" in r.getMessage()]
@@ -3319,13 +3319,13 @@ class TestPdfPageLevelOcr:
     def test_digital_pdf_renders_nothing(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("dd")
-        assert result.extractor == "pdf-digital@7"
+        assert result.extractor == "pdf-digital@8"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_scanned_pdf_still_ocrs_every_page_within_the_cap(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("sss")
-        assert result.extractor == "pdf-ocr@7"
+        assert result.extractor == "pdf-ocr@8"
         assert work["renders"] == [(1, 3)]
         assert work["ocr_calls"] == 3
 
@@ -3333,7 +3333,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds", ocr_enabled=False)
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@7"
+        assert result.extractor == "pdf-digital@8"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_ocr_failure_on_a_mixed_pdf_keeps_the_digital_text(self, monkeypatch, tmp_path, caplog):
@@ -3343,7 +3343,7 @@ class TestPdfPageLevelOcr:
         self._fake_ocr(monkeypatch, tmp_path, fail=True)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@7"
+        assert result.extractor == "pdf-digital@8"
         assert result.text == self.DIGITAL.format(n=1)
         assert "RuntimeError" in caplog.text
         assert "SYNTHETIC_OCR_MARKER" not in caplog.text
@@ -3483,7 +3483,7 @@ class TestPdfPageLevelOcr:
 
     @pytest.mark.parametrize(
         ("layout", "status", "extractor"),
-        [("ds", STATUS_SUCCESS, "pdf-digital@7"), ("ss", STATUS_FAILED, "pdf@7")],
+        [("ds", STATUS_SUCCESS, "pdf-digital@8"), ("ss", STATUS_FAILED, "pdf@8")],
     )
     def test_slow_page_count_degrades_like_a_timeout(
         self, monkeypatch, tmp_path, layout, status, extractor
@@ -3510,7 +3510,7 @@ class TestPdfPageLevelOcr:
 
     @pytest.mark.parametrize(
         ("layout", "status", "extractor"),
-        [("ds", STATUS_SUCCESS, "pdf-digital@7"), ("ss", STATUS_FAILED, "pdf@7")],
+        [("ds", STATUS_SUCCESS, "pdf-digital@8"), ("ss", STATUS_FAILED, "pdf@8")],
     )
     def test_page_count_timeout_degrades_like_a_render_timeout(
         self, monkeypatch, tmp_path, layout, status, extractor
@@ -3546,8 +3546,8 @@ class TestPdfPageLevelOcr:
         writer.add_page(mixed.pages[1])
         buf = _io.BytesIO()
         writer.write(buf)
-        assert pdf_child._ocr_dpi(buf.getvalue(), [1]) == 200
-        assert pdf_child._ocr_dpi(buf.getvalue(), [0, 1]) < 200
+        assert pdf_child._ocr_dpi(buf.getvalue(), [1]) == {1: 200}
+        assert pdf_child._ocr_dpi(buf.getvalue(), [0, 1]) == {0: 15, 1: 200}
 
     def test_progress_is_reported_per_page_read(self, monkeypatch, tmp_path):
         """#485: a scanned PDF can OCR for ~20 minutes, past the
@@ -3589,7 +3589,8 @@ class TestPdfExtractorVersion:
     before any of them must re-extract. Pypdf 6.20 changes stream decoding
     and malformed page-tree recovery, so version 5 rows also refresh.
     Pypdf 6.21 adds the content-stream token cap, so version 6 rows
-    refresh under PDF extractor version 7 (#1659)."""
+    refresh under PDF extractor version 7 (#1659); per-page DPI refreshes
+    version 7 rows under version 8 (#1414)."""
 
     @pytest.mark.parametrize(
         "name",
@@ -3612,15 +3613,18 @@ class TestPdfExtractorVersion:
             "pdf-digital@6",
             "pdf-ocr@6",
             "pdf@6",
+            "pdf-digital@7",
+            "pdf-ocr@7",
+            "pdf@7",
         ],
     )
     def test_pre_bump_pdf_rows_are_stale(self, name):
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["pdf"] == 7
+        assert EXTRACTOR_VERSIONS["pdf"] == 8
         assert stale_extractor_module(name) == "pdf"
 
-    @pytest.mark.parametrize("name", ["pdf-digital@7", "pdf-ocr@7", "pdf@7"])
+    @pytest.mark.parametrize("name", ["pdf-digital@8", "pdf-ocr@8", "pdf@8"])
     def test_current_pdf_rows_are_not_stale(self, name):
         from src.extractors import stale_extractor_module
 
@@ -3720,7 +3724,7 @@ class TestPermanentFailuresAreUnsupported:
 
         assert result == ExtractionResult(
             status=STATUS_UNSUPPORTED,
-            extractor="pdf@7",
+            extractor="pdf@8",
             text=None,
             error=PDF_LIMIT_ERROR,
             text_complete=False,
@@ -3760,7 +3764,7 @@ class TestPermanentFailuresAreUnsupported:
         assert (result.status, result.error, result.extractor) == (
             STATUS_UNSUPPORTED,
             error,
-            "pdf@7",
+            "pdf@8",
         )
 
     @pytest.mark.parametrize("module", ["pptx", "docx"])
@@ -3861,7 +3865,7 @@ class TestPermanentFailuresAreUnsupported:
             content_type="application/pdf", filename="a.pdf", payload=b"%PDF-1.7", ocr_enabled=False
         )
 
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@7")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@8")
         assert result.text == good_text.strip()
         assert extractors.drain_extractor_counts()["pdf_pages_failed"] == 1
 
@@ -3947,7 +3951,7 @@ class TestEncryptedPdf:
         result = extract(content_type="application/pdf", filename="statement.pdf", payload=payload)
 
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@7"
+        assert result.extractor == "pdf-digital@8"
         assert result.text == self.MARKER
 
     @pytest.mark.parametrize("algorithm", ["AES-128", "AES-256"])
@@ -3970,7 +3974,7 @@ class TestEncryptedPdf:
         result = extract(content_type="application/pdf", filename="locked.pdf", payload=payload)
 
         assert result.status == STATUS_UNSUPPORTED
-        assert result.extractor == "pdf@7"
+        assert result.extractor == "pdf@8"
         assert result.error == ENCRYPTED_PDF_ERROR == "encrypted PDF (open password required)"
         assert result.text is None
         for marker in ("SYNTHETIC_USER_PW_MARKER", "SYNTHETIC_USER_PASSWORD", "synthetic-owner"):
@@ -4065,7 +4069,7 @@ class TestCffFontPdf:
         )
 
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@7"
+        assert result.extractor == "pdf-digital@8"
         assert result.text is not None and len(result.text) == len(self.SENTENCE)
 
     def test_fixture_resolves_text_through_the_cff_encoding_alone(self):
@@ -8384,7 +8388,7 @@ class TestTextComplete:
 
         self._pdf(monkeypatch, (self.LONG, ""), ocr=fail)
         result = extract(content_type="application/pdf", filename="a.pdf", payload=b"%PDF-1.7")
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@7")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@8")
         assert result.text_complete is False
         assert self.MARKER not in caplog.text
 
