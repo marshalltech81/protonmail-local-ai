@@ -3455,3 +3455,31 @@ class TestUnrecordedCacheRowsAreRefreshedOnce:
             "SELECT text_complete FROM attachments ORDER BY attachment_occurrence_id"
         ).fetchall()
         assert [r[0] for r in flags] == [1, 1]
+
+
+@pytest.mark.parametrize("stamp", ["eml@6", "eml@7"])
+def test_nested_email_transport_fix_refreshes_old_text_once(tmp_path, monkeypatch, stamp):
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, row = _process_with_cached_extractor(
+        db,
+        stamp,
+        STATUS_SUCCESS,
+        "old text",
+        monkeypatch,
+        filename="synthetic.eml",
+        content_type="message/rfc822",
+        fresh_extractor="eml@8",
+    )
+    extractor.assert_called_once()
+    assert (row["extractor"], row["extracted_text"]) == ("eml@8", "fresh text")
+    extractor, _ = _process_with_cached_extractor(
+        db,
+        "eml@8",
+        STATUS_SUCCESS,
+        "fresh text",
+        monkeypatch,
+        filename="synthetic.eml",
+        content_type="message/rfc822",
+        fresh_extractor="eml@8",
+    )
+    extractor.assert_not_called()

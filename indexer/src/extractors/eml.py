@@ -218,6 +218,9 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
     text = _Text()
     walk = parser.BodyWalk(parts_left=_MAX_PARTS, text_parts_left=_MAX_TEXT_PARTS)
     decodable = [_MAX_DECODED_BYTES]
+    readers: dict[int, parser._DeliveryStatusBytes] = {}
+    transport_caps: Counter[str] = Counter()
+    _remember_transport_tree(payload, root, readers, transport_caps)
     # Depth first: a nested email's text follows its parent's body and
     # precedes the parent's next nested email.
     # ``None``: a nested email in a transfer encoding no decoder here
@@ -231,7 +234,7 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
     # body chose under an alternative or related in place, with the same
     # label and headers.
     walk.max_depth = _MAX_DEPTH
-    walk.decode = lambda part: _read_nested(part, decodable)
+    walk.decode = lambda part: _read_nested(part, decodable, readers, transport_caps)
     walk.render = lambda inner, depth: _section_head(inner, depth, caps, degraded)
     while stack and not text.full:
         msg, depth = stack.pop()
@@ -259,6 +262,8 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
         found = walk.nested[start:]
         del walk.nested[start:]
         stack.extend(reversed(found))
+    if transport_caps["delivery_status_parts"]:
+        caps["eml_parts"] = None
     if walk.decode_lost_parts:
         caps["eml_body_decode"] = None
     if walk.structure_lost_parts:
@@ -314,8 +319,27 @@ def _header_lines(
     return lines
 
 
+def _remember_transport_tree(
+    raw: bytes,
+    msg: email.message.Message,
+    readers: dict[int, parser._DeliveryStatusBytes],
+    caps: Counter[str],
+) -> None:
+    # Reuse the parser's bounded part enumeration and lazy secondary
+    # stdlib parse. Index parts once so sibling lookups never rescan trees.
+    parts = parser._parts_in_order(msg, parser.MAX_WALKED_PARTS)
+    if parts is None:
+        caps["delivery_status_parts"] += 1
+        return
+    reader = parser._DeliveryStatusBytes(raw, msg, caps)
+    readers.update((id(part), reader) for part in parts)
+
+
 def _read_nested(
-    part: email.message.Message, decodable: list[int]
+    part: email.message.Message,
+    decodable: list[int],
+    readers: dict[int, parser._DeliveryStatusBytes],
+    caps: Counter[str],
 ) -> tuple[email.message.Message | None, bool, bool]:
     """``BodyWalk.decode``: the email a nested ``message/rfc822`` part
     carries (``_inner_message``), whether text was or may have been lost,
@@ -325,12 +349,15 @@ def _read_nested(
     encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
     if encoding not in _READ_ENCODINGS:
         return None, True, True
-    inner, lost = _inner_message(part, decodable)
+    inner, lost = _inner_message(part, decodable, readers, caps)
     return inner, lost, False
 
 
 def _inner_message(
-    part: email.message.Message, decodable: list[int]
+    part: email.message.Message,
+    decodable: list[int],
+    readers: dict[int, parser._DeliveryStatusBytes],
+    caps: Counter[str],
 ) -> tuple[email.message.Message | None, bool]:
     """The email a nested ``message/rfc822`` part carries, and whether
     one was there but could not be read, or was read with bytes lost
@@ -348,8 +375,11 @@ def _inner_message(
         return None, False
     if encoding in ("base64", "quoted-printable"):
         try:
-            transport = parser._transport_text(part)
-        except email.errors.MessageError, UnicodeError:
+            reader = readers.get(id(part))
+            transport = reader.get(part) if reader is not None else None
+            if transport is None or not transport.isascii():
+                return None, True
+        except email.errors.MessageError, email.errors.MessageDefect, UnicodeError:
             return None, True
         decodable[0] -= len(transport)
         if decodable[0] < 0:
@@ -364,6 +394,9 @@ def _inner_message(
         decoded = parser._parse_transport_form(raw, content_type)
         if decoded is None:
             return None, True
+        _remember_transport_tree(
+            parser._transport_form_bytes(raw, content_type), decoded, readers, caps
+        )
         # A lenient decode can drop bytes and still succeed: the email
         # is rendered, but its text is not whole (base64, and
         # quoted-printable #1288). A transport line the parse dropped is
