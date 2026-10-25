@@ -39,6 +39,7 @@
           ],
           "lane_ranks": null,
           "retrieval_score": null,
+          "normalized_subject": "trip reminder",
           "subject": "trip reminder",
           "thread_id": "t-note"
         },
@@ -192,6 +193,7 @@
           ],
           "lane_ranks": null,
           "retrieval_score": null,
+          "normalized_subject": "field trip",
           "subject": "field trip",
           "thread_id": "t-trip"
         }
@@ -239,6 +241,7 @@
           ],
           "lane_ranks": null,
           "retrieval_score": null,
+          "normalized_subject": "trip reminder",
           "subject": "trip reminder",
           "thread_id": "t-note"
         },
@@ -392,6 +395,7 @@
           ],
           "lane_ranks": null,
           "retrieval_score": null,
+          "normalized_subject": "field trip",
           "subject": "field trip",
           "thread_id": "t-trip"
         }
@@ -555,6 +559,7 @@
           ],
           "lane_ranks": null,
           "retrieval_score": null,
+          "normalized_subject": "field trip",
           "subject": "field trip",
           "thread_id": "t-trip"
         }
@@ -605,6 +610,7 @@
             "chunk_vec": 5
           },
           "retrieval_score": 0.031544957774465976,
+          "normalized_subject": "trip reminder",
           "subject": "trip reminder",
           "thread_id": "t-note"
         },
@@ -760,6 +766,7 @@
             "chunk_vec": 0
           },
           "retrieval_score": 0.01639344262295082,
+          "normalized_subject": "field trip",
           "subject": "field trip",
           "thread_id": "t-trip"
         }

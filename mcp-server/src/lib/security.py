@@ -132,6 +132,7 @@ def _names_from(allowed: tuple[str, ...]) -> Callable[[Any], bool]:
 # its order (pinned by ``tests/test_security.py``). Kept here because
 # this module cannot import ``tools.outputs`` without a cycle.
 QUERY_MESSAGE_FIELDS = (
+    "normalized_subject",
     "message_id",
     "claimant_id",
     "subject",

@@ -215,9 +215,10 @@ _SUBJECT_WHITESPACE_RE = re.compile(r"\s+")
 
 
 def _normalize_subject(subject: str, *, preserve_case: bool = False) -> str:
-    """Lowercase, strip reply/forward prefixes and collapse whitespace.
+    """Strip reply/forward prefixes and collapse whitespace; lowercase by default.
 
-    Mirrors the indexer's ``threader._normalize_subject``: one pass that
+    ``preserve_case`` is for display output, which also keeps bracketed tags.
+    The default mirrors the indexer's ``threader._normalize_subject``: one pass that
     advances an offset past each prefix, so the work is linear in the
     subject length.
     """
