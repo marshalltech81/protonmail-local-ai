@@ -248,3 +248,36 @@ def test_copy_leaf_counts_do_not_absorb_an_unknown_flat_message_filter(mailbox):
     assert (page.total_matches, page.indeterminate) == (0, 2)
     [leaf] = page.leaf_results
     assert (leaf.true, leaf.false, leaf.indeterminate) == (2, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "flags,expected", [((False, True), (1, 0)), ((False, False), (0, 1)), ((True, True), (1, 0))]
+)
+def test_folder_truth_collapses_copies_with_true_before_unknown(empty_db, flags, expected):
+    import sqlite3
+    from contextlib import closing
+
+    from tests.conftest import claimant_of, insert_occurrence
+
+    with closing(sqlite3.connect(empty_db.path)) as conn:
+        _insert_message(
+            conn,
+            message_id="same-folder",
+            thread_id="one-thread",
+            sent_at="2024-01-01T00:00:00+00:00",
+            size_bytes=None,
+            flagged=flags[0],
+        )
+        insert_occurrence(
+            conn, claimant_of("same-folder"), "INBOX", "INBOX/cur/another-copy", flagged=flags[1]
+        )
+        _finish_threads(conn)
+        conn.commit()
+    where = normalized(
+        {"any": [{"leaf": "flagged", "value": True}, {"leaf": "size_min", "value": 100}]}
+    )
+    messages = empty_db.query_messages(where=where)
+    assert (messages.total_matches, messages.indeterminate) == expected
+    groups = empty_db.aggregate_messages(where=where, group_by="folder")
+    assert (groups.total_matches, groups.indeterminate) == expected
+    assert [(g.value, g.messages, g.indeterminate) for g in groups.groups] == [("INBOX", *expected)]

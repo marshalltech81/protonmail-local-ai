@@ -5951,7 +5951,10 @@ class Database:
             rows_params = list(occurrence_params)
             if copy_where:
                 columns = "e.cid,e.tid,e.at,e.bucket,e.mid,e.att,e.sa,e.fc,e.tc,e.cc,e.current,e.inventory_known"
-                rows_sql = f"SELECT DISTINCT {columns}, (e.ok AND ({copy_sql})) AS ok,e.ns,o.folder AS value,NULL AS name FROM e JOIN messages m ON m.claimant_id=e.cid JOIN message_occurrences o ON o.claimant_id=e.cid AND ({copy_sql}) IS NOT 0"  # nosec B608 -- code-owned compiler SQL and columns; operands are bound
+                # e and the copy join retain only true/unknown evidence. MAX
+                # makes a definite witness win within one claimant/folder;
+                # an all-unknown group stays NULL.
+                rows_sql = f"SELECT {columns}, MAX(e.ok AND ({copy_sql})) AS ok,e.ns,o.folder AS value,NULL AS name FROM e JOIN messages m ON m.claimant_id=e.cid JOIN message_occurrences o ON o.claimant_id=e.cid AND ({copy_sql}) IS NOT 0 GROUP BY e.cid,o.folder"  # nosec B608 -- code-owned compiler SQL and columns; operands are bound
                 rows_params = [*copy_params, *copy_params]
 
         # Review round 3 (owner, 2026-10-08): for a sender dimension,

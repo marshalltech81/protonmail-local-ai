@@ -2282,7 +2282,9 @@ message with several From addresses counts in each observed group; a message
 with several qualifying copies can appear in several folder groups. Their sums
 can exceed `total_matches`. Year/month have one value per message. A Boolean
 folder/flag expression is evaluated on each copy: a folder group counts only
-its own definite/unknown copy evidence. An authority null group also includes
+its own definite/unknown copy evidence. Copies within a claimant/folder collapse
+to one member: any definite witness wins, otherwise the member is unknown. An
+authority null group also includes
 messages without a provably qualifying copy outside the excluded folders. A
 group's `indeterminate` covers the supplied filters only, not the
 group's own value: a message whose membership in a sender group cannot
