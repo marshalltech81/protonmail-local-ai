@@ -88,3 +88,72 @@ def test_the_g6_set_honours_a_smaller_count_for_tests():
     messages = list(fixtures.g6_messages("r", count=3, size=4096))
     assert len(messages) == 3 and all(len(m) == 4096 for m in messages)
     assert len(set(messages)) == 3
+
+
+def test_configured_addresses_replace_the_placeholders_in_every_generator():
+    kw = {"sender": "s@one.test", "recipient": "r@two.test"}
+    for raw in (
+        fixtures.control_message("r", 1, **kw),
+        fixtures.control_message("r", 2, multipart=True, **kw),
+        fixtures.forged_message("r", 3, "forged", **kw),
+        fixtures.g6_message("r", 4, size=4096, **kw),
+    ):
+        head = raw.split(b"\r\n\r\n", 1)[0].decode()
+        assert "<s@one.test>" in head and "<r@two.test>" in head
+        assert "Message-ID: <synth-r-" in head and "@one.test>" in head
+        assert b"sender.example" not in raw and b"mail.example" not in raw
+
+
+def test_bound_generators_use_the_bound_addresses():
+    bound = fixtures.bind("s@one.test", "r@two.test")
+    assert b"<s@one.test>" in bound.control_message("r", 1)
+    assert b"<s@one.test>" in next(iter(bound.g6_messages("r", 1, 4096)))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "x",
+        "a@b",
+        "a@@b.test",
+        "a b@c.test",
+        "a@c.test\r\nX: y",
+        "<a@c.test>",
+        "a@c.test>",
+        "é@c.test",
+    ],
+)
+def test_a_malformed_address_is_refused_with_fixed_text(bad):
+    with pytest.raises(fixtures.FixtureError) as err:
+        fixtures.control_message("r", 1, sender=bad)
+    assert bad.strip() not in str(err.value) or not bad.strip()
+
+
+@pytest.mark.parametrize(
+    "address,ok",
+    [
+        ("a@one.test", True),
+        ("a.b@one.test", True),
+        ("a+b_c-d@one.test", True),
+        (".abc@one.test", False),
+        ("abc.@one.test", False),
+        ("a..b@one.test", False),
+        ("a@-one.test", False),
+        ("a@one-.test", False),
+        ("a@one..test", False),
+        ("a@one.test.", False),
+    ],
+)
+def test_an_accepted_address_is_one_the_correlation_parser_reads(address, ok):
+    """The validator and the consumer agree: whatever it accepts, the parser
+    that finds the test message's sender reads back."""
+    from evidence_run import correlation
+
+    if not ok:
+        with pytest.raises(fixtures.FixtureError):
+            fixtures.control_message("r", 1, sender=address)
+        return
+    seen = correlation.summary(fixtures.control_message("r", 1, sender=address))
+    assert seen.token == "SYNTH-r-1"
+    assert seen.sender_domain == address.rsplit("@", 1)[1]

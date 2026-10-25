@@ -116,10 +116,19 @@ def test_every_message_a_run_builds_belongs_to_a_class_the_preflight_checked(inp
     seen: list[tuple] = []
     original = fixtures._build
 
-    def recording(run, n, *, size, multipart, extra, cap):
+    def recording(run, n, *, size, multipart, extra, cap, sender, recipient):
         key = (run, len(str(n)), size, multipart, tuple(e.replace(f"-{n}", "-N") for e in extra))
         seen.append((key, cap))
-        return original(run, n, size=size, multipart=multipart, extra=extra, cap=cap)
+        return original(
+            run,
+            n,
+            size=size,
+            multipart=multipart,
+            extra=extra,
+            cap=cap,
+            sender=sender,
+            recipient=recipient,
+        )
 
     monkeypatch.setattr(fixtures, "_build", recording)
     clock = driver.VirtualClock()

@@ -53,13 +53,21 @@ only messages whose token is unique in the folder; G5's identical
 appends, which share one token by design, are left out of it. Every eligible
 message needs both retained and fresh file evidence; a missing file or an
 empty comparison is unobservable. G7 compares every tracked token, and G8
-checks identity before and after the spam move plus all recorded UID
-ownership history. A disproved prediction stops subsequent operations
+checks identity before and after the spam move plus continuity over the
+whole log of snapshot observations: within a mailbox and UIDVALIDITY a UID
+names one message, a message's UID in a mailbox never moves backwards, and a
+mailbox's UIDVALIDITY changes at most once, and only in an observation made
+after the re-add step began. A disproved prediction stops subsequent operations
 immediately. G1's initial and incremental batches follow the frozen counts.
 
-The fixture addresses (`sender.example`, `mail.example`) are placeholders;
-the run's real From and To addresses are a configuration the live world
-supplies, and `allowed_domains` in `fixtures.json` must name them.
+The fixture addresses (`sender.example`, `mail.example`) are placeholders
+for the dry run. The live world passes the run's real From and To addresses
+to `Driver(sender=, recipient=)`, never committed; each is checked as plain
+ASCII `local@host.domain` (a malformed one is refused as
+`frozen_inputs_invalid` before any account activity), and the allowed
+domains are then those two addresses' domains, so a test message from any
+other domain, the placeholders included, is a `foreign_party` stop.
+`allowed_domains` in `fixtures.json` applies only while the placeholders do.
 
 Correlation reads one unambiguous top-level Subject and From using the
 standard-library header parser; quoted body fields never qualify a message.
