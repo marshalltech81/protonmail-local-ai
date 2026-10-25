@@ -57,6 +57,7 @@ services:
       # accepted (PLAN.md decision 46). Read once at startup; no control
       # depends on it.
       SOURCE_MODE: ${SOURCE_MODE:-}
+      PROTON_DECLARED_ADDRESS_SCOPE: ${PROTON_DECLARED_ADDRESS_SCOPE:-unverified}
       # The account the index is registered to (#1596), named in the
       # collection status mbsync publishes for the indexer (#1592); the
       # indexer reads a status naming another account as unknown.
@@ -173,6 +174,7 @@ services:
       # the service at startup.
       ACCOUNT_SCOPE: ${ACCOUNT_SCOPE}
       SOURCE_MODE: ${SOURCE_MODE:-}
+      PROTON_DECLARED_ADDRESS_SCOPE: ${PROTON_DECLARED_ADDRESS_SCOPE:-unverified}
       # OpenAI-compatible embedder via the openai SDK. EMBED_MODEL,
       # EMBED_API_KEY and EMBED_BASE_URL are required. The value
       # ``default`` selects the SDK default (``https://api.openai.com/v1``)

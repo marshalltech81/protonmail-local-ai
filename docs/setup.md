@@ -1081,6 +1081,7 @@ largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
 | `PROTON_IMAP_ACCOUNT_NAME` | `accounts[].sync.imap_account_name` | protonmail | text; proton-settings.sh names | mbsync (mbsyncrc) | recreate mbsync |
 | `PROTON_REMOTE_STORE_NAME` | `accounts[].sync.remote_store_name` | protonmail-remote | text; proton-settings.sh names | mbsync (mbsyncrc, output filter) | recreate mbsync |
 | `PROTON_LOCAL_STORE_NAME` | `accounts[].sync.local_store_name` | protonmail-local | text; proton-settings.sh names | mbsync (mbsyncrc) | recreate mbsync |
+| `PROTON_DECLARED_ADDRESS_SCOPE` | `accounts[].proton_bridge.declared_address_scope` | unverified | one of combined, split, unverified | mbsync, indexer | recreate mbsync and indexer; declaration changes are reported |
 | `PROTON_CHANNEL_NAME` | `accounts[].sync.channel_name` | protonmail | text; proton-settings.sh names | mbsync (mbsyncrc, output filter) | recreate mbsync |
 | `PROTON_FOLDER_EXCLUSIONS` | `accounts[].sync.mailboxes.exclude` | All Mail, Labels/\*, Starred (proton-bridge) | list of text, at most 256; joined with \|; must keep All Mail, Labels/\*, Starred | mbsync (mbsyncrc Patterns) | recreate mbsync; mail already synced stays |
 | `SYNC_INTERVAL` | `accounts[].sync.interval_seconds` | 60 | integer 1 to 999999999 | mbsync (entrypoint, healthcheck) | recreate mbsync |
@@ -1139,7 +1140,6 @@ largest value `scripts/validate-env.sh`'s shell arithmetic reads, and
 | `accounts[].password_file` | required | path, relative to config/; no other account's or model key's, nor a model key's conventional file | the collector's password secret (bridge_pass) | recreate the collector |
 | `accounts[].sync.mailboxes.include` | unset | list of text; empty for proton-bridge | proton-bridge: must be empty; imap: #1606 | - |
 | `accounts[].identity.addresses` | table absent: unconfigured | list of 1 to 1000 bare addresses (name@domain); unique | config/identity.toml for the indexer (the account at /maildir) | restart indexer |
-| `accounts[].proton_bridge.declared_address_scope` | unverified | one of combined, split, unverified | none until #1593 | - |
 | `accounts[].imap.folder_roles.trash` | unset | text | none until #1606 | - |
 | `accounts[].imap.folder_roles.sent` | unset | text | none until #1606 | - |
 | `accounts[].imap.folder_roles.drafts` | unset | text | none until #1606 | - |
@@ -1474,3 +1474,28 @@ backup.
 
 See [`troubleshooting.md`](troubleshooting.md) for Bridge, mbsync,
 indexer, and MCP client diagnostics and recovery steps.
+
+
+### Declare the Bridge address mode
+
+Set `accounts[].proton_bridge.declared_address_scope` in `config/config.toml`
+(or `PROTON_DECLARED_ADDRESS_SCOPE` with legacy `.env`) to match the account's
+address mode in the Bridge app. Select the account and inspect its **Split
+addresses** switch: off means `combined`, on means `split`. When on, select
+the intended address from Bridge's dropdown before copying its IMAP details
+([Proton's address-mode guide](https://proton.me/support/difference-combined-addresses-mode-split-addresses-mode)).
+`combined` serves the account's addresses together;
+`split` exposes addresses separately, so the configured Bridge login can cover
+only its selected address. Use `unverified` when you have not checked. It is the
+default; an unset, empty or C-whitespace-only environment value also means
+`unverified`. Environment values accept ASCII case and surrounding C whitespace.
+An invalid value refuses startup with fixed text that never quotes it.
+
+This is an operator declaration, never observed collection coverage. The indexer
+records it per account. A later change is allowed and reported with the previous
+declaration and its recording time in `get_mailbox_status` and `make status`;
+restarting with the same declaration preserves that time. Recreate mbsync and
+indexer after changing configuration. This changes no account UUID, sync rules,
+readiness criterion or coverage guarantee. `list_folders` describes indexed
+folders only; it cannot establish the Bridge address mode or complete collection
+from Proton.

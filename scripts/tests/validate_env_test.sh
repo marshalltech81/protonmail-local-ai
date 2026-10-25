@@ -433,7 +433,7 @@ malformed_bridge_cert_fingerprint_fails() {
 # padded line is read as Compose reads it.
 proton_settings_from_env_file() {
     local line
-    for line in 'BRIDGE_HOST=gateway.docker.internal' 'BRIDGE_HOST=zq9marker.local' \
+    for line in 'PROTON_DECLARED_ADDRESS_SCOPE=zq9marker' 'BRIDGE_HOST=gateway.docker.internal' 'BRIDGE_HOST=zq9marker.local' \
         'BRIDGE_CERT_HOST=zq9marker.local' 'BRIDGE_CERT_HOST=127.0.0.01' \
         'PROTON_CHANNEL_NAME=zq9marker.chan' "PROTON_IMAP_ACCOUNT_NAME='zq9marker acct'" \
         'PROTON_REMOTE_STORE_NAME=zq9marker:far' 'PROTON_LOCAL_STORE_NAME=-zq9marker' \
@@ -454,11 +454,11 @@ proton_settings_from_env_file() {
     done
     setup 'BRIDGE_HOST=" HOST.ORB.INTERNAL "' 'BRIDGE_CERT_HOST=::1' 'PROTON_CHANNEL_NAME=Chan_2-x' \
         'PROTON_IMAP_ACCOUNT_NAME=' 'PROTON_REMOTE_STORE_NAME=far' 'PROTON_LOCAL_STORE_NAME=near' \
-        'SOURCE_MODE=" Proton-Bridge "' 'BRIDGE_IMAP_PORT= 993 ' \
+        'PROTON_DECLARED_ADDRESS_SCOPE=" Combined "' 'SOURCE_MODE=" Proton-Bridge "' 'BRIDGE_IMAP_PORT= 993 ' \
         "PROTON_FOLDER_EXCLUSIONS='All Mail|Labels/*|Starred|Folders/Old *'"
     passes
     # Empty values take the defaults, as Compose passes them.
-    setup 'SOURCE_MODE=' 'BRIDGE_IMAP_PORT=' 'PROTON_FOLDER_EXCLUSIONS='
+    setup 'PROTON_DECLARED_ADDRESS_SCOPE=' 'SOURCE_MODE=' 'BRIDGE_IMAP_PORT=' 'PROTON_FOLDER_EXCLUSIONS='
     passes
 }
 

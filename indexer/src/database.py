@@ -224,7 +224,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # observations with their scan generations. Candidates are read from the
 # stored header rows, so no reparse is queued, and nothing is accepted
 # (``migrations/0021_provider_identity_assessments.sql``).
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -251,6 +251,19 @@ ACCOUNT_SCHEMA_STATEMENTS = (
         SELECT RAISE(ABORT, 'accounts rows are never removed');
     END
     """,
+)
+
+# Mutable declarations stay separate from the immutable account registry (#1593).
+ADDRESS_SCOPE_SCHEMA_STATEMENTS = (
+    """
+CREATE TABLE account_address_scope (
+    account_id INTEGER PRIMARY KEY REFERENCES accounts(id),
+    declared TEXT NOT NULL CHECK (declared IN ('combined', 'split', 'unverified')),
+    previous_declared TEXT CHECK (previous_declared IN ('combined', 'split', 'unverified')),
+    changed_at TEXT,
+    CHECK ((previous_declared IS NULL) = (changed_at IS NULL))
+)
+""",
 )
 
 # Mailbox occurrences' DDL (#1566), shared by the initial schema; the v14
@@ -1130,7 +1143,7 @@ class Database:
 
     def _verify_account(self) -> None:
         """Require the one stored account to be the configured one (#1596),
-        and keep its id for the rows that reference it. Raises
+        keep its id for referencing rows and record its scope declaration. Raises
         ``AccountMismatchError`` with fixed text otherwise."""
         rows = [
             (r["id"], r["scope_uuid"], r["provider"])
@@ -1140,6 +1153,17 @@ class Database:
         ]
         self.account_id = verified_account_id(rows, self.account)
         log.info("Account verified against the index (provider=%s)", self.account.provider)
+        row = self._conn.execute(
+            "INSERT INTO account_address_scope(account_id, declared) VALUES (?, ?) "
+            "ON CONFLICT(account_id) DO UPDATE SET "
+            "previous_declared=account_address_scope.declared, declared=excluded.declared, changed_at=? "
+            "WHERE account_address_scope.declared != excluded.declared "
+            "RETURNING previous_declared",
+            (self.account_id, self.account.declared_address_scope, datetime.now(UTC).isoformat()),
+        ).fetchone()
+        self._conn.commit()
+        if row is not None:
+            log.info("Bridge address scope declaration recorded: changed=%s", row[0] is not None)
 
     def _apply_initial_schema(self, cur: sqlite3.Cursor):
         """Create every table the indexer needs, in their final shape, and
@@ -1812,6 +1836,7 @@ class Database:
         """
         for statement in (
             ACCOUNT_SCHEMA_STATEMENTS
+            + ADDRESS_SCOPE_SCHEMA_STATEMENTS
             + OCCURRENCE_SCHEMA_STATEMENTS
             + PENDING_SCHEMA_STATEMENTS
             + COLLECTION_STATE_SCHEMA_STATEMENTS

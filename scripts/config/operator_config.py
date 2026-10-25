@@ -1036,6 +1036,7 @@ def _check_proton_account(account: dict[str, Any], path: str) -> None:
             sync["remote_store_name"],
             sync["local_store_name"],
             sync["channel_name"],
+            proton["declared_address_scope"],
         ]
     )
     if problem is not None:
@@ -1082,6 +1083,7 @@ MAPPING: tuple[Setting, ...] = (
     Setting("PROTON_IMAP_ACCOUNT_NAME", "account", "accounts[].sync.imap_account_name", "mbsync (mbsyncrc)", _RECREATE_MBSYNC, "proton-settings.sh names"),
     Setting("PROTON_REMOTE_STORE_NAME", "account", "accounts[].sync.remote_store_name", "mbsync (mbsyncrc, output filter)", _RECREATE_MBSYNC, "proton-settings.sh names"),
     Setting("PROTON_LOCAL_STORE_NAME", "account", "accounts[].sync.local_store_name", "mbsync (mbsyncrc)", _RECREATE_MBSYNC, "proton-settings.sh names"),
+    Setting("PROTON_DECLARED_ADDRESS_SCOPE", "account", "accounts[].proton_bridge.declared_address_scope", "mbsync, indexer", "recreate mbsync and indexer; declaration changes are reported"),
     Setting("PROTON_CHANNEL_NAME", "account", "accounts[].sync.channel_name", "mbsync (mbsyncrc, output filter)", _RECREATE_MBSYNC, "proton-settings.sh names"),
     Setting("PROTON_FOLDER_EXCLUSIONS", "account", "accounts[].sync.mailboxes.exclude", "mbsync (mbsyncrc Patterns)", "recreate mbsync; mail already synced stays", "joined with |; must keep All Mail, Labels/*, Starred"),
     Setting("SYNC_INTERVAL", "account", "accounts[].sync.interval_seconds", "mbsync (entrypoint, healthcheck)", _RECREATE_MBSYNC),
@@ -1141,7 +1143,6 @@ TOML_ONLY: tuple[tuple[str, str, str], ...] = (
     ("accounts[].password_file", "the collector's password secret (bridge_pass)", "recreate the collector"),
     ("accounts[].sync.mailboxes.include", "proton-bridge: must be empty; imap: #1606", "-"),
     ("accounts[].identity.addresses", "config/identity.toml for the indexer (the account at /maildir)", "restart indexer"),
-    ("accounts[].proton_bridge.declared_address_scope", "none until #1593", "-"),
     ("accounts[].imap.folder_roles.trash", "none until #1606", "-"),
     ("accounts[].imap.folder_roles.sent", "none until #1606", "-"),
     ("accounts[].imap.folder_roles.drafts", "none until #1606", "-"),

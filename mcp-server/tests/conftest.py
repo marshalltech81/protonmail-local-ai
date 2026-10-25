@@ -295,6 +295,12 @@ VALUES (1, 'unconfigured', 0,
              '2024-01-01T00:00:00+00:00');
         -- mbsync's latest collection outcome per account (indexer
         -- schema v20, #1592).
+        CREATE TABLE account_address_scope (
+            account_id INTEGER PRIMARY KEY REFERENCES accounts(id),
+            declared TEXT NOT NULL,
+            previous_declared TEXT,
+            changed_at TEXT
+        );
         CREATE TABLE account_collection_state (
             account_id                     INTEGER PRIMARY KEY REFERENCES accounts(id),
             status                         TEXT NOT NULL,

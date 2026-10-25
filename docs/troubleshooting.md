@@ -2809,3 +2809,15 @@ Identity-encoded OLE2 and ZIP attachments under any `message/*` subtype
 are preserved as container bytes. To revisit occurrences indexed before
 this handling, run `make reparse`; dead-lettered jobs first need
 `make requeue-dead`. The genuine attached-email path is unchanged.
+
+
+### Bridge address-scope declaration changed
+
+`address_scope` in `get_mailbox_status` and `make status` is the operator's
+claim, never a detected collection guarantee. Its previous value and recording
+time persist across unchanged restarts. Check the Bridge app's combined/split
+address setting, then correct `accounts[].proton_bridge.declared_address_scope`
+(or legacy `PROTON_DECLARED_ADDRESS_SCOPE`) and recreate mbsync and indexer.
+A declaration change is reported and accepted; it is separate from an
+`ACCOUNT_SCOPE` mismatch, which still refuses startup. Indexed folders do not
+prove address scope or complete collection from Proton.

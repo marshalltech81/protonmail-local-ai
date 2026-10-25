@@ -3600,6 +3600,13 @@ SETTING_CASES=(
     $'accept\tPROTON_REMOTE_STORE_NAME=9far'
     $'accept\tPROTON_REMOTE_STORE_NAME=protonmail'
     $'accept\tPROTON_LOCAL_STORE_NAME=near_store-1'
+    $'accept\tPROTON_DECLARED_ADDRESS_SCOPE=' # pragma: allowlist secret
+    $'accept\tPROTON_DECLARED_ADDRESS_SCOPE= Combined ' # pragma: allowlist secret
+    $'accept\tPROTON_DECLARED_ADDRESS_SCOPE=SPLIT' # pragma: allowlist secret
+    $'accept\tPROTON_DECLARED_ADDRESS_SCOPE=unverified' # pragma: allowlist secret
+    $'accept\tPROTON_DECLARED_ADDRESS_SCOPE= \n' # pragma: allowlist secret
+    $'refuse\tPROTON_DECLARED_ADDRESS_SCOPE=zq9marker' # pragma: allowlist secret
+    $'refuse\tPROTON_DECLARED_ADDRESS_SCOPE=comb\xc3\xadned-zq9marker' # pragma: allowlist secret
     $'accept\tPROTON_CHANNEL_NAME=Chan-9_x'
     "accept"$'\t'"PROTON_CHANNEL_NAME=${SIXTY_FOUR}"
     "refuse"$'\t'"PROTON_CHANNEL_NAME=${SIXTY_FOUR}x"
@@ -3746,7 +3753,7 @@ fixed_refusal() {
     local port="$PROTON_DEFAULT_BRIDGE_IMAP_PORT" cert="$PROTON_DEFAULT_BRIDGE_CERT_HOST"
     local exclusions="$PROTON_DEFAULT_FOLDER_EXCLUSIONS"
     local account="$PROTON_DEFAULT_IMAP_ACCOUNT_NAME" far="$PROTON_DEFAULT_REMOTE_STORE_NAME"
-    local near="$PROTON_DEFAULT_LOCAL_STORE_NAME" channel="$PROTON_DEFAULT_CHANNEL_NAME"
+    local near="$PROTON_DEFAULT_LOCAL_STORE_NAME" channel="$PROTON_DEFAULT_CHANNEL_NAME" scope=""
     case "$1" in
         SOURCE_MODE) mode="refused" ;;
         BRIDGE_HOST) host="refused" ;;
@@ -3758,10 +3765,11 @@ fixed_refusal() {
         PROTON_REMOTE_STORE_NAME) far="-" ;;
         PROTON_LOCAL_STORE_NAME) near="-" ;;
         PROTON_CHANNEL_NAME) channel="-" ;;
+        PROTON_DECLARED_ADDRESS_SCOPE) scope="refused" ;;
         stores) far="$near" ;;
     esac
     proton_settings_problem "$mode" "$host" "$port" "$cert" "$exclusions" \
-        "$account" "$far" "$near" "$channel" || true
+        "$account" "$far" "$near" "$channel" "$scope" || true
 }
 
 # Runs scripts/validate-env.sh from a scratch root with a passing .env and
@@ -3819,7 +3827,7 @@ setting_row_agrees() {
             return 1
         }
         case "${assignments[0]%%=*}" in
-            SOURCE_MODE)
+            SOURCE_MODE | PROTON_DECLARED_ADDRESS_SCOPE)
                 cmp -s "$ORDER_DIR/seen/mbsyncrc" "$GOLDEN" || {
                     printf 'the rendered config is not the golden file: %q\n' "$row"
                     return 1
@@ -3884,7 +3892,7 @@ every_setting_row_agrees_at_both_sites() {
     for ((i = 0; i < ${#SETTING_CASES[@]}; i++)); do
         setting_row_agrees "${SETTING_CASES[i]}" "$i" || return 1
     done
-    ((${#SETTING_CASES[@]} == 177)) || return 1
+    ((${#SETTING_CASES[@]} == 184)) || return 1
 }
 
 check "the Proton settings: each value is accepted or refused alike at both sites" \

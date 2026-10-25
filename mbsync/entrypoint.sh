@@ -179,7 +179,7 @@ validate_proton_settings() {
     if ! problem="$(proton_settings_problem "$SOURCE_MODE" "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" \
         "$BRIDGE_CERT_HOST" "$PROTON_FOLDER_EXCLUSIONS" \
         "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" "$PROTON_LOCAL_STORE_NAME" \
-        "$PROTON_CHANNEL_NAME")"; then
+        "$PROTON_CHANNEL_NAME" "${PROTON_DECLARED_ADDRESS_SCOPE:-}")"; then
         printf '>>> ERROR: %s\n' "$problem" >&2
         return 1
     fi
@@ -534,10 +534,10 @@ log_startup_identity() {
     [[ "$port" != *@* ]] || port="<value-with-credentials>"
     [[ "$cert_host" != *@* ]] || cert_host="<value-with-credentials>"
     boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
-    config="$(printf 'SOURCE_MODE=%s\nBRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nPROTON_FOLDER_EXCLUSIONS=%s\nPROTON_IMAP_ACCOUNT_NAME=%s\nPROTON_REMOTE_STORE_NAME=%s\nPROTON_LOCAL_STORE_NAME=%s\nPROTON_CHANNEL_NAME=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nACCOUNT_SCOPE=%s\n' \
+    config="$(printf 'SOURCE_MODE=%s\nBRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nPROTON_FOLDER_EXCLUSIONS=%s\nPROTON_IMAP_ACCOUNT_NAME=%s\nPROTON_REMOTE_STORE_NAME=%s\nPROTON_LOCAL_STORE_NAME=%s\nPROTON_CHANNEL_NAME=%s\nPROTON_DECLARED_ADDRESS_SCOPE=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nACCOUNT_SCOPE=%s\n' \
         "$SOURCE_MODE" "$host" "$port" "$cert_host" "$exclusions" \
         "$PROTON_IMAP_ACCOUNT_NAME" "$PROTON_REMOTE_STORE_NAME" \
-        "$PROTON_LOCAL_STORE_NAME" "$PROTON_CHANNEL_NAME" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
+        "$PROTON_LOCAL_STORE_NAME" "$PROTON_CHANNEL_NAME" "${PROTON_DECLARED_ADDRESS_SCOPE:-unverified}" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
         "$(expected_fingerprint)" "$ACCOUNT_SCOPE" | sha256sum)"
     printf '>>> Startup identity: service=mbsync commit=%s boot=%s config=%s\n' \
         "$commit" "$boot" "${config:0:12}"
