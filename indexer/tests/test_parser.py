@@ -2585,24 +2585,22 @@ class TestDecodeHeader:
             (1, 0, 0),
         ),
         # compat32 returns a raw 8-bit header as one ``unknown-8bit``
-        # chunk, so an encoded-word next to raw bytes stays as sent
-        # (pinned here, #1186). That partial decode logs its own line in
-        # Subject and the From fallback; an address display name decodes
-        # the word later, so it logs nothing.
+        # chunk; #1186 decodes encoded-words after decoding those bytes.
+        # Address display names and stored header evidence agree.
         "subject-raw-utf8-and-encoded-word": (
             b"Subject: RAWMARKER1147 caf\xc3\xa9 =?utf-8?q?na=C3=AFve?=\r\n",
-            {"subject": "RAWMARKER1147 café =?utf-8?q?na=C3=AFve?="},
-            (0, 0, 1),
+            {"subject": "RAWMARKER1147 café naïve"},
+            (0, 0, 0),
         ),
         "subject-raw-latin1-and-encoded-word": (
             b"Subject: RAWMARKER1147 caf\xe9 =?utf-8?q?na=C3=AFve?=\r\n",
-            {"subject": "RAWMARKER1147 caf\ufffd =?utf-8?q?na=C3=AFve?="},
-            (1, 0, 1),
+            {"subject": "RAWMARKER1147 caf\ufffd naïve"},
+            (1, 0, 0),
         ),
         "from-raw-utf8-no-address-and-encoded-word": (
             b"From: RAWMARKER1147 Jos\xc3\xa9 =?utf-8?q?na=C3=AFve?= <>\r\n",
-            {"from_addrs": [], "from_addr": "RAWMARKER1147 José =?utf-8?q?na=C3=AFve?= <>"},
-            (0, 0, 1),
+            {"from_addrs": [], "from_addr": "RAWMARKER1147 José naïve <>"},
+            (0, 0, 0),
         ),
         "to-raw-utf8-name-and-encoded-word": (
             b"From: a@example.test\r\n"
@@ -2720,12 +2718,12 @@ class TestDecodeHeader:
         # Header evidence now decodes each complete top-level field too.
         extra = {
             "subject-raw-latin1": (1, 0, 0),
-            "subject-raw-utf8-and-encoded-word": (0, 0, 1),
-            "subject-raw-latin1-and-encoded-word": (1, 0, 1),
-            "from-raw-utf8-no-address-and-encoded-word": (0, 0, 1),
-            "from-raw-utf8-name-and-encoded-word": (0, 0, 1),
-            "from-raw-latin1-no-address-and-encoded-word": (1, 0, 1),
-            "to-raw-utf8-name-and-encoded-word": (0, 0, 1),
+            "subject-raw-utf8-and-encoded-word": (0, 0, 0),
+            "subject-raw-latin1-and-encoded-word": (1, 0, 0),
+            "from-raw-utf8-no-address-and-encoded-word": (0, 0, 0),
+            "from-raw-utf8-name-and-encoded-word": (0, 0, 0),
+            "from-raw-latin1-no-address-and-encoded-word": (1, 0, 0),
+            "to-raw-utf8-name-and-encoded-word": (0, 0, 0),
             "subject-encoded-word-unknown-8bit-latin1": (1, 0, 0),
             "subject-encoded-word-unknown-label": (0, 1, 0),
             "from-raw-latin1-name": (1, 0, 0),
@@ -5496,9 +5494,9 @@ class TestRepeatedAddressHeaders:
         decoded: list[int] = []
         real = parser._decode_header
 
-        def counting(value, degraded=None):
+        def counting(value, degraded=None, **kwargs):
             decoded.append(1)
-            return real(value, degraded)
+            return real(value, degraded, **kwargs)
 
         monkeypatch.setattr(parser, "_decode_header", counting)
         size = parser._MAX_ADDRESS_HEADER_CHARS + 10
@@ -6672,3 +6670,25 @@ def test_raw_utf8_identity_headers_have_a_defined_outcome(tmp_path, caplog, fiel
         "References": msg.references,
     }[field] == ([marker] if field == "References" else marker)
     assert marker not in caplog.text
+
+
+@pytest.mark.serial
+def test_mixed_raw_header_scans_encoded_words_once(monkeypatch):
+    from email import message_from_bytes
+
+    from src import parser
+
+    text = "café " + "=?" * 500_000
+    value = message_from_bytes(b"Subject: " + text.encode() + b"\r\n\r\n")["Subject"]
+    scanned = []
+    original = parser._decode_encoded_word_runs
+
+    def counted(text, decode_word):
+        scanned.append(len(text))
+        return original(text, decode_word)
+
+    monkeypatch.setattr(parser, "_decode_encoded_word_runs", counted)
+    start = time.perf_counter()
+    assert parser._decode_text_header(value) == text
+    assert scanned == [len(text)]
+    assert time.perf_counter() - start < 2.0

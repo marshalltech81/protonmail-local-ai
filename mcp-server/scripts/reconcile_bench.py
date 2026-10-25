@@ -904,19 +904,18 @@ def header_capture(raw: bytes) -> tuple[list[tuple], bool]:
             return rows, False
         spent += size
         fetched = email.policy.compat32.header_fetch_parse(name, value)
-        if isinstance(fetched, email.header.Header):
-            decoded = _generated_header_parts(fetched).strip()
-            # The parser marks a raw 8-bit header containing encoded words degraded.
-            if _ENCODED_WORD_RE.search(decoded):
-                decoded = None
-        else:
-            decoded = _ENCODED_WORD_RUN_RE.sub(
-                lambda run: "".join(
-                    _generated_header_parts(word.group(0))
-                    for word in _ENCODED_WORD_RE.finditer(run.group(0))
-                ),
-                fetched,
-            ).strip()
+        raw_8bit = isinstance(fetched, email.header.Header)
+        if raw_8bit:
+            fetched = _generated_header_parts(fetched)
+        decoded = _ENCODED_WORD_RUN_RE.sub(
+            lambda run: "".join(
+                _generated_header_parts(word.group(0))
+                for word in _ENCODED_WORD_RE.finditer(run.group(0))
+            ),
+            fetched,
+        ).strip()
+        if raw_8bit and _ENCODED_WORD_RE.search(decoded):
+            decoded = None
         stored_name = name_bytes.decode("latin-1")
         rows.append(
             (ordinal, stored_name, stored_name.lower(), value_bytes.decode("latin-1"), decoded)

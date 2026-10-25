@@ -127,7 +127,7 @@ class TestDispatch:
         result = extract(content_type=content_type, filename=filename, payload=_text("x"))
         assert result.status == STATUS_SUCCESS
         assert result.extractor == f"eml@{EXTRACTOR_VERSIONS['eml']}"
-        assert EXTRACTOR_VERSIONS["eml"] == 6
+        assert EXTRACTOR_VERSIONS["eml"] == 7
 
     def test_a_version_1_row_is_stale(self):
         """#1398: the cached ``eml@1`` rows counted every
@@ -137,7 +137,8 @@ class TestDispatch:
         assert extractors.is_stale_extractor("eml@3") is True  # #1516
         assert extractors.is_stale_extractor("eml@4") is True  # #1456
         assert extractors.is_stale_extractor("eml@5") is True  # #1447
-        assert extractors.is_stale_extractor("eml@6") is False
+        assert extractors.is_stale_extractor("eml@6") is True
+        assert extractors.is_stale_extractor("eml@7") is False
 
     @pytest.mark.parametrize(
         ("content_type", "filename", "reruns"),
@@ -466,7 +467,7 @@ class TestNestedEmailDecodeLossAndHeaderFallbacks:
         reset_attempt()
         text, caps = eml.extract_text(self._degraded_headers())
         assert caps == []
-        assert child_degradation() == {"eml_headers_degraded": 3}
+        assert child_degradation() == {"eml_headers_degraded": 2}
         assert "body" in text
 
     def test_the_parent_logs_the_count_and_keeps_the_text_complete(self, caplog):
@@ -481,9 +482,9 @@ class TestNestedEmailDecodeLossAndHeaderFallbacks:
         assert result.text_complete is True
         lines = [r for r in caplog.records if "degraded in the child" in r.getMessage()]
         assert [(r.levelname, r.getMessage()) for r in lines] == [
-            ("WARNING", "extractor eml degraded in the child: eml_headers_degraded=3")
+            ("WARNING", "extractor eml degraded in the child: eml_headers_degraded=2")
         ]
-        assert extractors.drain_extractor_counts()["eml_headers_degraded"] == 3
+        assert extractors.drain_extractor_counts()["eml_headers_degraded"] == 2
         assert MARKER not in caplog.text
 
     def test_the_counter_is_optional(self):
@@ -1382,3 +1383,12 @@ def test_attached_container_is_not_rendered_as_nested_email(label, encoding, kin
     assert "SYNTHETIC_OLE2_MARKER" not in text
     assert "PK" not in text
     assert "PARENT_BODY" in text
+
+
+def test_mixed_subject_is_decoded_in_attached_email_text():
+    text, caps = eml.extract_text(
+        b"Subject: caf\xc3\xa9 =?utf-8?q?na=C3=AFve?=\r\nFrom: a@example.test\r\n\r\nbody\r\n"
+    )
+    assert caps == []
+    assert "café naïve" in text
+    assert "=?" not in text
