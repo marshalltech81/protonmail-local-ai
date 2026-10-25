@@ -363,3 +363,20 @@ def test_a_fresh_download_is_not_possible_without_its_configuration_or_an_operat
         PiecesWorld(config, isolation_check=lambda: True, operator=operator).fresh_files("INBOX")
         == {}
     )
+
+
+def test_c_route_sender_failure_is_a_world_error(env, monkeypatch):
+    from dataclasses import replace
+
+    from evidence_run import sender
+
+    config, _, _ = env
+    cfg = replace(config, smtp={**config.smtp, "C_check": config.smtp["C"]}, check_imap=config.imap)
+
+    def fail(*args, **kwargs):
+        raise sender.SendError("bad_password_file")
+
+    monkeypatch.setattr(sender, "send", fail)
+    with pytest.raises(WorldError) as caught:
+        PiecesWorld(cfg).route_preserves("C", fixtures.forged_message("r1g2", 900, "forged"))
+    assert caught.value.token == "bad_password_file"

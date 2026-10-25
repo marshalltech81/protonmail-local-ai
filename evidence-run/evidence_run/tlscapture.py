@@ -150,7 +150,7 @@ def capture_state(
         validity = _uidvalidity(conn)
         if selected and selected[0] is not None and int(selected[0]) == 0:
             return CaptureState(validity, {}, {})
-        status, data = conn.uid("FETCH", "1:*", "(UID RFC822.SIZE)")
+        status, data = conn.uid("FETCH", "1:*", "(UID RFC822.SIZE FLAGS)")
         if status != "OK":
             raise CaptureError("size_fetch_failed")  # never "an empty folder"
         sizes: dict[int, int] = {}

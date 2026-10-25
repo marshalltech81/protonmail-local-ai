@@ -185,7 +185,7 @@ class ImapResponder(_Server):
                     if wanted not in ("1:*", str(index)):
                         continue
                     if "RFC822.SIZE" in rest:
-                        flags = " FLAGS (\\Seen)" if self.flags else ""
+                        flags = " FLAGS (\\Seen)" if self.flags and "FLAGS" in rest else ""
                         send(f"* {index} FETCH (UID {index}{flags} RFC822.SIZE {len(raw)})")
                     else:
                         head = f"* {index} FETCH (UID {index} BODY[] {{{len(raw)}}}\r\n"

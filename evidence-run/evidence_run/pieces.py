@@ -189,16 +189,19 @@ class PiecesWorld:
         if route != "C" or check is None or self.config.check_imap is None:
             return self._operator.route_preserves(route, raw) if self._operator else None
         spec = self.config.smtp["C_check"]
-        sent = sender.send(
-            raw,
-            host=spec.host,
-            port=spec.port,
-            mail_from=spec.mail_from,
-            rcpt_to=spec.rcpt_to,
-            user=spec.user,
-            password_file=spec.password_file,
-            cafile=spec.cafile,
-        )
+        try:
+            sent = sender.send(
+                raw,
+                host=spec.host,
+                port=spec.port,
+                mail_from=spec.mail_from,
+                rcpt_to=spec.rcpt_to,
+                user=spec.user,
+                password_file=spec.password_file,
+                cafile=spec.cafile,
+            )
+        except sender.SendError as exc:
+            raise WorldError(exc.token) from None
         if sent.token != "sent":
             return None
         wanted = _token(raw)

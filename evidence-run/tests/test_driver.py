@@ -515,3 +515,97 @@ def test_a_fresh_download_that_cannot_be_made_leaves_p11_unobservable_not_a_pass
     drv, result = _run(inputs, Scenario(fresh_available=False))
     assert result.stop is None
     assert result.states["P11"] == "unobservable"
+
+
+@pytest.mark.parametrize("missing", ["retained", "fresh", "all"])
+def test_p11_requires_every_eligible_file(inputs, missing):
+    from dataclasses import replace
+
+    from evidence_run import fixtures
+
+    class Missing(SimulatedWorld):
+        def served(self, folder=None):
+            items = super().served(folder)
+            if missing == "all":
+                return []
+            if missing == "retained" and items:
+                items[0] = replace(items[0], file_bytes=None)
+            return items
+
+        def fresh_files(self, folder):
+            files = super().fresh_files(folder)
+            if missing == "fresh" and files:
+                files.pop(next(iter(files)))
+            return files
+
+    world = Missing()
+    for n in (1, 2):
+        world.send("B", fixtures.control_message("r1g3", n))
+    world.sync()
+    drv, _ = _run(inputs, world=world, groups=())
+    for n in (1, 2):
+        drv._register(fixtures.control_message("r1g3", n))
+    assert drv._p11(("INBOX",)) == "unobservable"
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_g7_missing_baseline_is_unobservable(inputs, count, monkeypatch):
+    original = driver.Driver._snapshot
+
+    def snapshot(self, label, tokens, folders):
+        snaps = original(self, label, tokens, folders)
+        return dict(list(snaps.items())[:count]) if label.endswith(".base") else snaps
+
+    monkeypatch.setattr(driver.Driver, "_snapshot", snapshot)
+    _, result = _run(inputs, groups=("g7",))
+    assert result.export["counts"].get("steps_observed", 0) == 0
+    assert result.export["counts"]["steps_unobservable"] == len(inputs.g7_steps)
+
+
+def test_g8_checks_all_uid_history(inputs):
+    drv, _ = _run(inputs, groups=())
+    drv._continuity = {
+        "a": [("INBOX", 1, 1), ("INBOX", 2, 1)],
+        "b": [("INBOX", 1, 1), ("INBOX", 3, 1)],
+    }
+    result = drv.run(("g8",))
+    assert result.stop == ("prediction_failed", "g8")
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_g8_requires_spam_arrival_and_stable_identity(inputs, missing):
+    class Spam(SimulatedWorld):
+        def served(self, folder=None):
+            return [] if missing and folder == "Spam" else super().served(folder)
+
+    _, result = _run(
+        inputs, world=Spam(Scenario(proton_id_changes_on=frozenset({"spam"}))), groups=("g8",)
+    )
+    assert result.states["P3"] == ("unobservable" if missing else "failed")
+
+
+@pytest.mark.parametrize(
+    "group,scenario,allowed",
+    [
+        ("g3", Scenario(proton_id_changes_on=frozenset({"move"})), {"move"}),
+        ("g4", Scenario(draft_replace_changes_id=False), {"draft_edit", "draft_replace"}),
+        ("g5", Scenario(append_distinct_ids=False), set()),
+    ],
+)
+def test_failure_stops_before_later_mutations(inputs, group, scenario, allowed):
+    world = SimulatedWorld(scenario)
+    _, result = _run(inputs, world=world, groups=(group,))
+    assert result.stop == ("prediction_failed", group)
+    assert {op for op, _ in world.mutate_log} <= allowed
+    if group == "g4":
+        assert len(world.msgs) == 1
+    if group == "g5":
+        assert not result.export["counts"].get("h11_matched", 0)
+
+
+def test_g1_uses_the_frozen_control_count(tmp_path):
+    inputs = frozen.load(_frozen_dir(tmp_path, edit=_tweak_fixtures(g1={"control": 1})))
+    world = SimulatedWorld()
+    _, result = _run(inputs, world=world, groups=("g1",))
+    assert result.stop is None
+    assert world.sends == 1 + inputs.fixtures["groups"]["g1"]["incremental"]

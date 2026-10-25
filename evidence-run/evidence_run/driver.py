@@ -349,11 +349,17 @@ class Driver:
             # A token that names several messages (G5's identical appends)
             # cannot pair a file with its message: those are left out.
             seen = Counter(self._token_of(s.raw) for s in everything)
-            served = [s for s in everything if seen[self._token_of(s.raw)] == 1]
+            served = [
+                s
+                for s in everything
+                if self._token_of(s.raw) is not None and seen[self._token_of(s.raw)] == 1
+            ]
             if not served:
                 continue  # nothing in this folder to compare
             retained = [p11.compare(s.file_bytes, s.raw).verdict for s in served if s.file_bytes]
-            verdicts.append("unobservable" if not retained else self._all_equal(retained))
+            verdicts.append(self._all_equal(retained))
+            if len(retained) != len(served):
+                verdicts.append("unobservable")
             self.budget.command()
             fresh = self.world.fresh_files(folder)
             self._checkpoint()
@@ -365,10 +371,12 @@ class Driver:
                 for s in served
                 if (t := self._token_of(s.raw)) is not None and t in fresh
             ]
-            verdicts.append("unobservable" if not compared else self._all_equal(compared))
+            verdicts.append(self._all_equal(compared))
+            if len(compared) != len(served):
+                verdicts.append("unobservable")
         if "failed" in verdicts:
             return "failed"
-        return "unobservable" if "unobservable" in verdicts else "observed"
+        return "unobservable" if not verdicts or "unobservable" in verdicts else "observed"
 
     @staticmethod
     def _all_equal(verdicts: Sequence[str]) -> str:
@@ -381,14 +389,17 @@ class Driver:
 
     def _g1(self) -> None:
         plan, run = self._plan("g1"), self._gid("g1")
-        first = [fixtures.control_message(run, n, size=plan["size"]) for n in range(1, 21)]
+        first = [
+            fixtures.control_message(run, n, size=plan["size"])
+            for n in range(1, plan["control"] + 1)
+        ]
         for raw in first:
             self._send("B", raw)
         tokens = {self._token_of(r) for r in first}
         served = self._converge({t for t in tokens if t}, "INBOX", ("P1",))
         more = [
             fixtures.control_message(run, n, size=plan["size"])
-            for n in range(21, 21 + plan["incremental"])
+            for n in range(plan["control"] + 1, plan["control"] + 1 + plan["incremental"])
         ]
         for raw in more:
             self._send("B", raw)
@@ -461,7 +472,7 @@ class Driver:
         tokens = [t for t in (self._token_of(r) for r in raws) if t]
         self._converge(set(tokens), "INBOX", ("P3",))
         prev = self._snapshot("g3.0", tokens, ("INBOX",))
-        bad = unknown = False
+        unknown = False
         for step, op in enumerate(plan["ops"], start=1):
             for token in tokens:
                 self.world.mutate(op, token)
@@ -471,12 +482,13 @@ class Driver:
             for token in tokens:
                 if token in prev and token in now:
                     equal = self.probe.equal(prev[token].probe_key, now[token].probe_key)
-                    bad |= equal is False
+                    if equal is False:
+                        self._mark("P3", "failed")
                     unknown |= equal is None
                 else:
                     unknown = True
             prev = now
-        self._mark("P3", "failed" if bad else "unobservable" if unknown else "observed")
+        self._mark("P3", "unobservable" if unknown else "observed")
         self._mark("P11", self._p11(("INBOX", "Archive")))
 
     def _g4(self) -> None:
@@ -499,6 +511,12 @@ class Driver:
                     i for f in _FOLDERS for i in self._read(f) if self._token_of(i.raw) == token
                 ]
                 keys.append(self._observe(items[-1], f"g4.{n}.{op}") if items else None)
+                if len(keys) >= 3 and keys[-2] is not None and keys[-1] is not None:
+                    equal = self.probe.equal(keys[-2], keys[-1])
+                    if (op == "draft_replace" and equal is True) or (
+                        op == "draft_send" and equal is False
+                    ):
+                        self._mark("P4", "failed")
             if None in keys:
                 unknown = True
                 continue
@@ -524,6 +542,7 @@ class Driver:
             for a in range(len(keys))
             for b in range(a + 1, len(keys))
         )
+        self._mark("P5", "observed" if distinct else "failed")
         for number, case in enumerate(plan["h11"], start=100):
             raw = fixtures.forged_message(run, number, "forged", size=plan["size"])
             self._register(raw)
@@ -537,7 +556,7 @@ class Driver:
                 self._counts["h11_matched"] += 1
             else:
                 self._counts["h11_mismatched"] += 1
-                distinct = False
+                self._mark("P5", "failed")
         self._sync()
         recovered = [self._observe(i, "g5.rec") for i in self._read("Recovered Messages")]
         self._mark("P5", "observed" if distinct else "failed")
@@ -610,7 +629,7 @@ class Driver:
                 self._mark(step["prediction"], "unobservable")
                 continue
             after = self._snapshot(f"g7.{step['id']}.after", tokens, ("INBOX",))
-            verdict = self._compare(step["expect"], base, after)
+            verdict = self._compare(step["expect"], base, after, tokens)
             if verdict == "observed":
                 self._counts["steps_observed"] += 1
             elif verdict == "unobservable":
@@ -619,11 +638,13 @@ class Driver:
         self._sync()
         self._mark("P11", self._p11(("INBOX",)))
 
-    def _compare(self, expect: Mapping[str, str], base: dict, after: dict) -> str:
+    def _compare(
+        self, expect: Mapping[str, str], base: dict, after: dict, tokens: Sequence[str]
+    ) -> str:
         unknown = False
-        for token, before in base.items():
-            now = after.get(token)
-            if now is None:
+        for token in tokens:
+            before, now = base.get(token), after.get(token)
+            if before is None or now is None:
                 unknown = True
                 continue
             observed = {
@@ -650,6 +671,7 @@ class Driver:
         scope = self.world.flag_scope()
         self._booleans["flag_scope_ok"] = scope.mailbox_local_deleted_ok and scope.shared_flags_ok
         ok = bool(self._booleans["flag_scope_ok"])
+        self._mark("P3", "observed" if ok else "failed")
         if plan.get("spam_probe"):
             run = self._gid("g8")
             raws = [fixtures.control_message(run, n, size=2048) for n in (1, 2)]
@@ -657,10 +679,12 @@ class Driver:
                 self._send("B", raw)
             tokens = [t for t in (self._token_of(r) for r in raws) if t]
             self._converge(set(tokens), "INBOX", ("P3",))
+            before = self._snapshot("g8.before", tokens, ("INBOX",))
             for token in tokens:
                 self.world.mutate("spam", token)
                 self._checkpoint()
-            self._sync()
+            after = self._snapshot("g8.after", tokens, ("Spam",))
+            self._mark("P3", self._compare({"proton_id": "same"}, before, after, tokens))
             spam = self._read("Spam")
             places = [(s.folder, s.uid, s.uidvalidity) for s in spam]
             ok &= len(places) == len(set(places))  # a UID is never handed out twice
@@ -668,7 +692,7 @@ class Driver:
         # names one message.
         owners: dict[tuple[str, int, int], str] = {}
         for token, seen in self._continuity.items():
-            for place in seen[-1:]:
+            for place in seen:
                 if owners.setdefault(place, token) != token:
                     ok = False
         self._mark("P3", "observed" if ok else "failed")

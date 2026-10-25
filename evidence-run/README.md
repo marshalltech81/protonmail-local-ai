@@ -50,7 +50,12 @@ approval file and the report are never committed.
 
 P11 pairs a file with its message by correlation token, so it compares
 only messages whose token is unique in the folder; G5's identical
-appends, which share one token by design, are left out of it.
+appends, which share one token by design, are left out of it. Every eligible
+message needs both retained and fresh file evidence; a missing file or an
+empty comparison is unobservable. G7 compares every tracked token, and G8
+checks identity before and after the spam move plus all recorded UID
+ownership history. A disproved prediction stops subsequent operations
+immediately. G1's initial and incremental batches follow the frozen counts.
 
 The fixture addresses (`sender.example`, `mail.example`) are placeholders;
 the run's real From and To addresses are a configuration the live world
