@@ -164,13 +164,13 @@ class TestRouting:
         assert calls == []
         assert extraction_module(content_type, filename, _PNG) == "image"
 
-    def test_other_labels_are_not_rerouted(self):
+    def test_pdf_text_and_other_labels_follow_their_format_rules(self):
         pdf = _digital_pdf()
         assert extraction_module("application/pdf", "a.pdf", pdf) == "pdf"
         assert label_extraction_modules("application/pdf", "a.pdf") == {"pdf"}
-        # A PDF under a text label stays the text module's binary-as-text row.
-        assert extraction_module("text/plain", "a.txt", pdf) == "text"
-        assert label_extraction_modules("text/plain", "a.txt") == {"text"}
+        # A text label can now route PDF/image signatures to their namespaces (#969).
+        assert extraction_module("text/plain", "a.txt", pdf) == "pdf"
+        assert label_extraction_modules("text/plain", "a.txt") == {"text", "pdf", "image"}
 
 
 class TestLegacyPredicate:
