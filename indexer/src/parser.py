@@ -1396,8 +1396,7 @@ def _attachment_payload(
         # The lenient decode's bytes are kept either way; a loss makes
         # them incomplete (base64 #1311, quoted-printable #1288).
         if transport_lost is not None and (
-            _transport_decode_lost(transport, encoding)
-            or (delivery_status is None and _transport_lines_dropped(part))
+            _transport_decode_lost(transport, encoding) or _transport_lines_dropped(part)
         ):
             transport_lost.append(True)
             # Counted so the loss is logged, not only flagged (#1311).

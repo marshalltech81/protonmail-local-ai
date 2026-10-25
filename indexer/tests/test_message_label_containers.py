@@ -391,3 +391,15 @@ def test_encoded_transport_bytes_are_recovered_once(tmp_path, monkeypatch, outer
     outer_attachments = [a for a in msg.attachments if a.filename == "outer.eml"]
     assert len(outer_attachments) == 2
     assert outer_attachments[0].content_hash == outer_attachments[1].content_hash
+
+
+def test_raw_transport_keeps_the_existing_header_loss_signal(tmp_path):
+    # A literal leading space is allowed in quoted-printable. Both the
+    # transport pseudo-parse and the decoded email can drop this malformed
+    # header line, so preserving raw bytes must not erase the loss signal.
+    payload = b" orphan header\r\nSubject: synthetic\r\n\r\nbody\r\n"
+    data = catalogue.message_bytes("message/rfc822", "quoted-printable", payload)
+    data = data.replace(b"=20orphan=20header", b" orphan header")
+    msg = _parse(tmp_path, data)
+    assert msg.parse_caps["transport_lossy"] == 1
+    assert msg.attachments[0].payload_complete is False
