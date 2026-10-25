@@ -930,10 +930,16 @@ The parts of a `multipart/alternative` are renderings of one body, so
 it contributes a single child: the first carrying non-blank plain text,
 else the first carrying any text. A whitespace-only plain alternative
 therefore gives way to the HTML one. A `multipart/related` contributes
-only its root, taken to be its first part (RFC 2387's default), since
-its other parts are resources the root refers to; a `start` parameter
-naming a different root is not read, so such a message gets its first
-part's text instead. The parts of any other container
+only its root: the unique direct child whose `Content-ID` matches the
+`start` parameter, or the first part when `start` is absent (RFC 2387).
+Its other parts are resources. An empty, missing or ambiguous explicit
+root contributes no body and records `body_structure`, so negatives
+remain indeterminate. A designated attachment is still an attachment;
+resources are never promoted into its place. Root header inspection
+shares 10,000 work units per message (and across nested EML walks), one
+per field plus one per 16 raw header characters, and each MIME root
+field is capped at 16 KiB before the standard library parses parameters.
+A cut child walk cannot establish a unique explicit root (#1359). The parts of any other container
 (`multipart/mixed`, an inline `message/rfc822`) are
 sequential content, so text, an attachment, then more text keeps both
 texts. Nothing inside an attachment, such as a forwarded email attached
@@ -945,6 +951,11 @@ so it adds nothing to the body. At most 200 text parts per message
 walk over a message's parts stops after 10,000 parts
 (`MAX_WALKED_PARTS`, the parts inside attachments included); later
 parts add no body text and no attachments.
+
+The `start` fix applies to future parses; existing stored messages keep
+their body selection until reparsed. EML extractor version 9 uses the
+same assembler and refreshes cached attached-email text through the
+existing module-scoped startup sweep. No mailbox-wide reparse is queued.
 
 For transfer-encoded attached emails, the existing bounded secondary parse
 keeps the original transport body opaque before decoding (#1458). Rebuilding

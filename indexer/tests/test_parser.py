@@ -3430,14 +3430,13 @@ def test_body_assembly_shape_catalogue(tmp_path, shape, expected):
 # multipart/related root shape catalogue (#450)
 # ---------------------------------------------------------------------------
 #
-# Invariant: a multipart/related contributes only its first child, and
+# Invariant without start: a multipart/related contributes only its first child, and
 # contributes nothing when that child is presented as an attachment (a
 # filename or an attachment disposition); a later part is never promoted
-# to the root. The standard library's ``get_body()`` also takes the first
-# part as the root candidate and never a later one (it differs only on an
+# to the root. Without start, the standard library's ``get_body()`` also
+# takes the first part as root (it differs only on an
 # inline root with a filename, which this parser treats as an attachment
-# everywhere). A ``start`` parameter naming another root is not read
-# (pinned below).
+# everywhere). An explicit ``start`` chooses its uniquely matching direct child (#1359).
 
 _CID_IMG = ("image/png", "iVBORw0=", {"Content-ID": "<img1@example.test>"})
 _BARE_IMG = ("image/png", "iVBORw0=", {})
@@ -3477,15 +3476,14 @@ _RELATED_SHAPES = {
         _multi("alternative", _plain("P1"), _multi("related", _PDF, _RESOURCE)),
         "P1",
     ),
-    # Not read: the root is the first child even when ``start`` names
-    # another part.
+    # RFC 2387: start can name another direct child as the root.
     "related-start-names-second-part": (
         (
             'multipart/related; start="<root@example.test>"',
             [_html("FIRST"), ("text/html", "<p>NAMED</p>", {"Content-ID": "<root@example.test>"})],
             {},
         ),
-        "FIRST",
+        "NAMED",
     ),
 }
 # The #450 class: each root presented as an attachment, followed by a
