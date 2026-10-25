@@ -266,6 +266,7 @@ def _mailbox_status(
         header_predicates=stats["header_predicates"],
         query_capabilities=stats["query_capabilities"],
         operator_identity=stats["operator_identity"],
+        authority_rules=stats.get("authority_rules", {}),
         index_schema_version=stats["index_schema_version"],
         checked_at=now,
     )
@@ -293,6 +294,13 @@ def _render(out: MailboxStatusOutput) -> str:
     lines += [f"  - {reason}" for reason in out.not_current_reasons]
     lines.append(
         f"Ingestion caught up: {'yes' if out.ingestion_caught_up else 'no'} (excludes reparses and terminal failures)"
+    )
+    rules = out.authority_rules
+    lines.append(
+        "Authority rules: unknown"
+        if rules.configured is None
+        else f"Authority rules: configured={rules.configured}, patterns={rules.rule_count}, "
+        f"defined classes={', '.join(rules.classes or []) or 'none'}"
     )
     identity = out.operator_identity
     lines.append(
@@ -328,7 +336,9 @@ def _render(out: MailboxStatusOutput) -> str:
             f"  {q.reparse:,} waiting message{'' if one else 's'} "
             f"{'is' if one else 'are'} already indexed and being reparsed after an "
             f"upgrade: search finds {'it' if one else 'them'}, but data the upgrade "
-            "adds is unknown until a successful reparse."
+            "adds is unknown until a successful reparse. Sender, participant and "
+            "authority filters count messages with unassessed metadata as indeterminate; "
+            "queue membership alone does not establish that metadata is missing."
         )
     lines.append(
         "Reparse-added fields remain unknown until a successful reparse; "

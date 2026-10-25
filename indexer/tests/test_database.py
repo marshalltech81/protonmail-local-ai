@@ -125,8 +125,8 @@ class TestSchema:
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        the current version (v23), skipping the migration files."""
-        assert SCHEMA_VERSION == 23
+        the current version (v24), skipping the migration files."""
+        assert SCHEMA_VERSION == 24
         assert (
             db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         )
@@ -570,6 +570,7 @@ def _revert_v21(db: Database) -> None:
     policy selector and the label observations, with their guards. Safe
     to repeat: older revert helpers call it from several paths."""
     conn = db._conn
+    conn.execute("DROP TABLE IF EXISTS authority_rule_state")
     for kind, name in (
         ("VIEW", "effective_accepted_occurrences"),
         ("TABLE", "provider_identity_assessments"),

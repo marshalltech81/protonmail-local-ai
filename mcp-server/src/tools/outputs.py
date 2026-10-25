@@ -74,6 +74,13 @@ class _Output(BaseModel):
     model_config = ConfigDict(validate_by_name=True)
 
 
+class _AuthorityFilteredOutput(_Output):
+    authority_notice: str | None = Field(
+        default=None,
+        description="Fixed diagnostic from current applied-rule metadata when authority_class has no rule, no file is configured, or metadata is unknown. Null for unclassified or a defined class; this does not certify sender identity.",
+    )
+
+
 class _SubjectOutput(_Output):
     normalized_subject: str | None = Field(
         default=None,
@@ -93,6 +100,8 @@ class _SubjectOutput(_Output):
 
 def tool_result(text: str, output: _Output) -> CallToolResult:
     """The prose as ``content`` plus ``output`` as ``structuredContent``."""
+    if isinstance(output, _AuthorityFilteredOutput) and output.authority_notice:
+        text += "\n" + output.authority_notice
     return CallToolResult(
         content=[TextContent(type="text", text=text)],
         structured_content=output.model_dump(mode="json", by_alias=True),
@@ -531,7 +540,7 @@ _EXTRACT_FROM_NAME_MATCHES_DESCRIPTION = (
 )
 
 
-class SearchEmailsOutput(_Output):
+class SearchEmailsOutput(_AuthorityFilteredOutput):
     mode: str = Field(description="The search mode used: hybrid, semantic, or keyword.")
     resolved_from_addr: str | None = Field(description=_RESOLVED_FROM_ADDR_DESCRIPTION)
     from_name_matches: int | None = Field(
@@ -1008,7 +1017,7 @@ class WhereLeafResult(_Output):
     )
 
 
-class QueryMessagesOutput(_Output):
+class QueryMessagesOutput(_AuthorityFilteredOutput):
     collapse: Literal["message_id"] | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -1121,7 +1130,7 @@ class QueriedThreadRow(_SubjectOutput):
     )
 
 
-class QueryThreadsOutput(_Output):
+class QueryThreadsOutput(_AuthorityFilteredOutput):
     metadata_diagnostics: dict[str, dict[str, int]] = Field(
         default_factory=dict,
         exclude_if=lambda v: not v,
@@ -1263,7 +1272,7 @@ class MessageGroupRow(_Output):
     )
 
 
-class AggregateMessagesOutput(_Output):
+class AggregateMessagesOutput(_AuthorityFilteredOutput):
     unknown_group_messages: int | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
@@ -1767,7 +1776,31 @@ class OperatorIdentityStatus(_Output):
     )
 
 
+class AuthorityRulesStatus(_Output):
+    configured: bool | None = Field(
+        default=None,
+        description="Whether an authority rules file was loaded; null before applied metadata is recorded.",
+    )
+    rule_count: int | None = Field(
+        default=None,
+        ge=0,
+        description="Unit: applied exact-address and domain patterns. Null when unknown; patterns are withheld.",
+    )
+    classes: (
+        list[
+            Literal[
+                "counsel", "management", "vendor", "government", "personal", "other", "unclassified"
+            ]
+        ]
+        | None
+    ) = Field(
+        default=None,
+        description="Classes with at least one applied rule, not classes observed in mail. Null when unknown.",
+    )
+
+
 class MailboxStatusOutput(_Output):
+    authority_rules: AuthorityRulesStatus = Field(default_factory=AuthorityRulesStatus)
     rerank_mode: Literal["none", "cohere"] = Field(
         description="Whether this server reranks search candidates; no provider URL or credential."
     )

@@ -4115,6 +4115,12 @@ def _open_database(account: AccountConfig) -> Database:
     db.set_operator_identity(operator_identity)
     db.report_direction_conflicts()
     reclassified = db.set_authority_rules(authority_rules)
+    log.info(
+        "Authority rules applied: configured=%s patterns=%d defined_classes=%d",
+        authority_rules.configured,
+        authority_rules.pattern_count,
+        len(set(authority_rules.addresses.values()) | set(authority_rules.domains.values())),
+    )
     if reclassified:
         log.info("Authority rules: reclassified %d existing entities", reclassified)
     return db
