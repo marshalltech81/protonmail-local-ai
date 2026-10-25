@@ -891,15 +891,14 @@ def parse_email_bytes(
     # logged once below.
     caps: Counter[str] = Counter()
     headers, headers_complete = _read_top_headers(msg, caps)
-    in_reply_to = _clean_id(msg.get("In-Reply-To", ""))
-    if len(in_reply_to) > MESSAGE_ID_MAX_CHARS:
-        caps["in_reply_to_length"] += 1
-        in_reply_to = ""
+    in_reply_to = ""
+    for ref in _reply_ids(msg.get("In-Reply-To", "")):
+        if len(ref) <= MESSAGE_ID_MAX_CHARS:
+            in_reply_to = ref
+        else:
+            caps["in_reply_to_length"] += 1
     references: list[str] = []
-    reference_header = msg.get("References", "")
-    if isinstance(reference_header, email.header.Header):
-        reference_header = _decode_header(reference_header)
-    for ref in (_clean_id(r) for r in reference_header.split() if r.strip()):
+    for ref in _reply_ids(msg.get("References", "")):
         if len(ref) <= MESSAGE_ID_MAX_CHARS:
             references.append(ref)
         else:
@@ -2519,6 +2518,93 @@ def _read_top_headers(
             )
         )
     return rows, complete
+
+
+def _reply_id_spans(value: str) -> Iterator[tuple[int, int, bool]]:
+    """Token spans, with brackets distinguished from bare compatibility IDs.
+
+    Comments, quoted strings and domain literals each protect their own
+    delimiters. Spans avoid retaining a second copy of a large header.
+    """
+    start: int | None = None
+    bracketed = False
+    comments = 0
+    quoted = False
+    literal = False
+    escaped = False
+    for index, char in enumerate(value):
+        if comments:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == "(":
+                comments += 1
+            elif char == ")":
+                comments -= 1
+            continue
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and (quoted or literal):
+            escaped = True
+            continue
+        if literal:
+            if char == "]":
+                literal = False
+            continue
+        if char == '"':
+            if start is None:
+                start = index
+            quoted = not quoted
+            continue
+        if quoted:
+            continue
+        if char == "[" and (bracketed or (index > 0 and value[index - 1] == "@")):
+            if start is None:
+                start = index
+            literal = True
+        elif char == "(":
+            if start is not None and not bracketed:
+                yield start, index, False
+                start = None
+            comments = 1
+        elif char == "<":
+            if start is not None and not bracketed:
+                yield start, index, False
+            start = index + 1
+            bracketed = True
+        elif char == ">" and bracketed:
+            assert start is not None
+            yield start, index, True
+            start = None
+            bracketed = False
+        elif char.isspace() and not bracketed:
+            if start is not None:
+                yield start, index, False
+                start = None
+        elif start is None:
+            start = index
+    if start is not None and not bracketed:
+        yield start, len(value), False
+
+
+def _reply_ids(value: str | email.header.Header) -> Iterator[str]:
+    """Read reply IDs in two linear scans, ignoring comments.
+
+    Prefer bracketed IDs when present outside comments and literals; keep
+    legacy bare IDs otherwise. Each character is visited at most twice,
+    and only the selected disjoint spans are copied. No recursive parser
+    or repeated search over a suffix is used.
+    """
+    if isinstance(value, email.header.Header):
+        value = _decode_header(value)
+    bracketed = any(angled for _, _, angled in _reply_id_spans(value))
+    for start, end, angled in _reply_id_spans(value):
+        if angled == bracketed:
+            ref = value[start:end].strip() if angled else _clean_id(value[start:end])
+            if ref:
+                yield ref
 
 
 def _clean_id(value: str | email.header.Header) -> str:
