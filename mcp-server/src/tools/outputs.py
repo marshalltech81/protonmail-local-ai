@@ -2160,7 +2160,39 @@ class ExtractionRetrieval(_Output):
     )
 
 
+class AttachmentPromptCoverage(_Output):
+    thread_id: str
+    claimant_id: str | None
+    attachment_id: str
+    scope: Literal["retrieved_passages"] = "retrieved_passages"
+    model_extraction_completeness: Literal["unknown"] = "unknown"
+    passages_available: int = Field(
+        ge=0,
+        description="Unit: retrieved attachment passages before prompt budgeting; not every passage in the document.",
+    )
+    passages_shown: int = Field(
+        ge=0,
+        description="Unit: retrieved passages included, wholly or partly, in prepared model input.",
+    )
+    passages_truncated: int = Field(ge=0, description="Unit: shown passages cut to fit the prompt.")
+    passages_omitted: int = Field(
+        ge=0, description="Unit: retrieved passages left out of prepared input."
+    )
+    chars_available: int = Field(
+        ge=0,
+        description="Unit: characters across retrieved passages, including overlap; not the document's character count.",
+    )
+    chars_shown: int = Field(
+        ge=0,
+        description="Unit: source characters retained across prepared passages, excluding provenance headers; overlap is counted.",
+    )
+
+
 class ExtractFromEmailsOutput(_Output):
+    attachment_prompt_coverage: list[AttachmentPromptCoverage] = Field(
+        default_factory=list,
+        description="Per-attachment budgeting for retrieved passages, including cut and omitted ones. Never certifies whole-document coverage or completeness of model extraction.",
+    )
     retrieval: ExtractionRetrieval = Field(
         description="Always set: retrieval and prompt sample coverage, never exhaustive."
     )

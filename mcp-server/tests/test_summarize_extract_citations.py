@@ -478,7 +478,9 @@ class TestExtractCheck:
             "fields": ["vendor"],
         }
         assert [f["value_check"] for f in data["fields"]] == ["uncited"]
-        assert "1 field value(s) in 1 record(s) cite no supplied passage" in out.content[-1].text
+        assert "1 field value(s) in 1 record(s) cite no supplied passage" in "\n".join(
+            item.text for item in out.content
+        )
 
     def test_a_misattributed_value_is_reported(self, invoice_db):
         _llm, out, (_a, beta_body, beta_att) = self._two_passes(

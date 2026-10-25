@@ -45,6 +45,7 @@ from .outputs import (
     AnswerStatement,
     AskMailboxOutput,
     AskRetrieval,
+    AttachmentPromptCoverage,
     Citation,
     CitationProblem,
     EvidenceScope,
@@ -2193,6 +2194,7 @@ def _build_evidence(
     first_label: int = 1,
     scope: ScopeLabels | None = None,
     show_scope: bool = True,
+    attachment_coverage: dict[tuple[str, str | None, str], dict[str, int]] | None = None,
 ) -> tuple[list[str], EvidenceCoverage]:
     """Render each thread's evidence so all of it fits in ``budget`` chars.
 
@@ -2322,6 +2324,23 @@ def _build_evidence(
         allocation,
         strict=True,
     ):
+        if attachment_coverage is not None:
+            for chunk, text in pieces:
+                if chunk is not None and chunk.attachment_id is not None:
+                    attachment_key = (thread.thread_id, chunk.claimant_id, chunk.attachment_id)
+                    row = attachment_coverage.setdefault(
+                        attachment_key,
+                        {
+                            "passages_available": 0,
+                            "passages_shown": 0,
+                            "passages_truncated": 0,
+                            "passages_omitted": 0,
+                            "chars_available": 0,
+                            "chars_shown": 0,
+                        },
+                    )
+                    row["passages_available"] += 1
+                    row["chars_available"] += len(text)
         parts: list[str] = []
         used = 0
         complete = 0  # pieces rendered in full; later ones were cut or left out
@@ -2340,6 +2359,17 @@ def _build_evidence(
                 coverage.truncated += 1
             else:
                 complete += 1
+            if (
+                attachment_coverage is not None
+                and chunk is not None
+                and chunk.attachment_id is not None
+            ):
+                row = attachment_coverage[
+                    (thread.thread_id, chunk.claimant_id, chunk.attachment_id)
+                ]
+                row["passages_shown"] += 1
+                row["passages_truncated"] += int(cut)
+                row["chars_shown"] += len(text)
             # A cut chunk's header states the range actually kept; it is
             # never longer than the full-range header budgeted.
             char_end = chunk.char_start + len(text) if chunk else None
@@ -2366,6 +2396,9 @@ def _build_evidence(
         if coverage.omitted + coverage.truncated > lost_before:
             coverage.threads_trimmed += 1
         rendered.append("\n\n".join(parts))
+    if attachment_coverage is not None:
+        for row in attachment_coverage.values():
+            row["passages_omitted"] = row["passages_available"] - row["passages_shown"]
     return rendered, coverage
 
 
@@ -3913,7 +3946,40 @@ def register_intelligence_tools(
                 }
             )
 
+            attachment_coverage: dict[tuple[str, str | None, str], dict[str, int]] = {}
+
             def output(texts: list[str], notice: str | None = None) -> CallToolResult:
+                attachments = [
+                    AttachmentPromptCoverage(
+                        thread_id=thread_id,
+                        claimant_id=claimant_id,
+                        attachment_id=attachment_id,
+                        passages_available=counts["passages_available"],
+                        passages_shown=counts["passages_shown"],
+                        passages_truncated=counts["passages_truncated"],
+                        passages_omitted=counts["passages_omitted"],
+                        chars_available=counts["chars_available"],
+                        chars_shown=counts["chars_shown"],
+                    )
+                    for (
+                        thread_id,
+                        claimant_id,
+                        attachment_id,
+                    ), counts in attachment_coverage.items()
+                ]
+                if attachments:
+                    cut = sum(
+                        item.passages_truncated > 0 or item.passages_omitted > 0
+                        for item in attachments
+                    )
+                    if cut:
+                        count("attachment_prompt_cuts", cut)
+                    note = (
+                        f"Attachment prompt coverage: {cut} of {len(attachments)} retrieved attachment payloads had passages cut or omitted. "
+                        "Counts describe retrieved passages in prepared input, not complete documents; whether the model extracted every relevant record is unknown."
+                    )
+                    texts = [*texts, note]
+                    notice = f"{notice} {note}" if notice else note
                 citations = [_citation(evidence_map[label]) for label in used]
                 sample = retrieval.model_copy(
                     update={
@@ -3924,6 +3990,7 @@ def register_intelligence_tools(
                     content=[TextContent(type="text", text=t) for t in texts],
                     structured_content=ExtractFromEmailsOutput(
                         retrieval=sample,
+                        attachment_prompt_coverage=attachments,
                         records=extracted_records,
                         citations=citations,
                         fields=fields,
@@ -4073,6 +4140,7 @@ def register_intelligence_tools(
                     first_label=next_label,
                     scope=scope,
                     show_scope=shows_scope(thread),
+                    attachment_coverage=attachment_coverage,
                 )
                 next_label = 1 + max((int(label[1:]) for label in known), default=next_label - 1)
                 evidence_map.update(known)
