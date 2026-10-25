@@ -609,3 +609,38 @@ def test_g1_uses_the_frozen_control_count(tmp_path):
     _, result = _run(inputs, world=world, groups=("g1",))
     assert result.stop is None
     assert world.sends == 1 + inputs.fixtures["groups"]["g1"]["incremental"]
+
+
+def test_untriggered_expected_h11_case_is_unobservable(inputs):
+    scenario = Scenario(h11={**DEFAULT_H11, "d": "no_trigger"})
+    _, result = _run(inputs, scenario, groups=("g5",))
+    assert result.stop is None
+    assert result.states["P5"] == "unobservable"
+
+
+def test_unavailable_initial_isolation_never_exports_a_pass(inputs):
+    from evidence_run.world import WorldError
+
+    class Unavailable(SimulatedWorld):
+        def isolation_ok(self):
+            raise WorldError("isolation_not_configured")
+
+    clock = driver.VirtualClock()
+    drv = driver.Driver(Unavailable(), inputs, clock=clock, sleep=clock.sleep)
+    result = drv.run(("g1",))
+    assert result.stop == ("world_error", "g1")
+    assert result.export["booleans"]["isolation_passed"] is False
+
+
+def test_unavailable_later_isolation_does_not_reuse_an_earlier_pass(inputs):
+    from evidence_run.world import WorldError
+
+    class LaterUnavailable(SimulatedWorld):
+        def isolation_ok(self):
+            if self.isolation_calls:
+                raise WorldError("isolation_not_configured")
+            return super().isolation_ok()
+
+    _, result = _run(inputs, world=LaterUnavailable(), groups=("g1", "g2"))
+    assert result.stop == ("world_error", "g2")
+    assert result.export["booleans"]["isolation_passed"] is False

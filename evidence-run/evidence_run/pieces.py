@@ -17,16 +17,13 @@ reports none (documented in the README, not assumed).
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import isolation, sender, syncdriver, tlscapture
+from . import correlation, isolation, sender, syncdriver, tlscapture
 from .world import FlagScope, HeaderPass, RaceResult, Served, World, WorldError
-
-_SUBJECT = re.compile(rb"(?im)^Subject: (SYNTH-[A-Za-z0-9]{1,16}-\d+)")
 
 
 @dataclass(frozen=True)
@@ -59,7 +56,7 @@ class PiecesConfig:
     sync_config: Path
     channel: str
     isolation_targets: Path | None = None
-    fresh_sync_config: Path | None = None  # isync into a new, empty Maildir
+    fresh_sync_config: Path | None = None  # Reserved; independent live download awaits #1783.
     fresh_maildir: Path | None = None
     accounts: frozenset[str] = frozenset({"A", "B", "C"})
     check_polls: int = 12
@@ -67,8 +64,7 @@ class PiecesConfig:
 
 
 def _token(raw: bytes) -> str | None:
-    found = _SUBJECT.search(raw)
-    return found.group(1).decode() if found else None
+    return correlation.summary(raw).token
 
 
 class PiecesWorld:
@@ -167,20 +163,12 @@ class PiecesWorld:
         return out
 
     def fresh_files(self, folder: str) -> dict[str, bytes] | None:
-        """A fresh download: the supervised isync into a new, empty Maildir
-        (its own configuration), read back; the retained Maildir is not
-        touched. Without that configuration the operator, else ``None``."""
-        if self.config.fresh_sync_config is None or self.config.fresh_maildir is None:
-            return self._operator.fresh_files(folder) if self._operator else None
-        fresh = syncdriver.SupervisedSync(
-            self.config.fresh_sync_config, self.config.channel, mbsync=self.config.mbsync
-        ).sync_once()
-        if fresh.token != "ok":
-            raise WorldError("fresh_sync_failed")
-        out: dict[str, bytes] = {}
-        for token, files in self._files(folder, self.config.fresh_maildir).items():
-            out[token] = files[0]
-        return out
+        """Require an operator-owned independent download for each comparison.
+
+        Reusing configured paths cannot prove empty Maildir and sync state;
+        until the live interface exists (#1783), that evidence is unavailable.
+        """
+        return self._operator.fresh_files(folder) if self._operator else None
 
     def route_preserves(self, route: str, raw: bytes) -> bool | None:
         """The C route: send the same forged message to C's second address

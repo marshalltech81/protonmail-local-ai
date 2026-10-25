@@ -60,3 +60,15 @@ immediately. G1's initial and incremental batches follow the frozen counts.
 The fixture addresses (`sender.example`, `mail.example`) are placeholders;
 the run's real From and To addresses are a configuration the live world
 supplies, and `allowed_domains` in `fixtures.json` must name them.
+
+Correlation reads one unambiguous top-level Subject and From using the
+standard-library header parser; quoted body fields never qualify a message.
+Header bytes, field count, and correlation-field lengths are bounded
+before parsing. Missing or malformed evidence cannot certify a test sender.
+
+P11 fresh files must come from the operator-world interface with a new
+empty destination and independent sync state for every comparison. The
+configured fresh paths alone cannot prove that isolation and are not used;
+without the interface, P11 is unobservable (#1783). An untriggered H11
+expectation is also unobservable unless its frozen expectation is itself
+`no_trigger`. Isolation is reported passed only after a successful check.

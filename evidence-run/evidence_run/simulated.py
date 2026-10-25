@@ -12,13 +12,12 @@ network, a file or an account.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import ClassVar
 
+from . import correlation
 from .world import FlagScope, HeaderPass, RaceResult, Served, WorldError
 
-_SUBJECT = re.compile(rb"(?im)^Subject: (SYNTH-[A-Za-z0-9]{1,16}-\d+)")
 DEFAULT_H11 = {
     "a": "rebuilt",
     "a2": "refused",
@@ -122,8 +121,7 @@ class SimulatedWorld:
 
     @staticmethod
     def _token(raw: bytes) -> str | None:
-        found = _SUBJECT.search(raw)
-        return found.group(1).decode() if found else None
+        return correlation.summary(raw).token
 
     def _add(self, raw: bytes, folder: str, *, same_id_as: _Msg | None = None) -> _Msg:
         proton, gluon = self._new_ids()

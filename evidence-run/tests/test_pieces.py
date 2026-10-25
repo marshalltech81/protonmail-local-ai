@@ -339,7 +339,7 @@ def test_a_run_that_needs_an_operator_step_stops_with_a_fixed_token_without_one(
     assert result.stop[1] in {"g2", "g3"}
 
 
-def test_a_fresh_download_is_a_second_isync_run_into_an_empty_maildir_read_only(env, tmp_path):
+def test_configured_fresh_paths_cannot_prove_an_independent_download(env, tmp_path):
     config, imap, _ = env
     fresh = tmp_path / "fresh-maildir"
     (fresh / "INBOX" / "cur").mkdir(parents=True)
@@ -352,7 +352,7 @@ def test_a_fresh_download_is_a_second_isync_run_into_an_empty_maildir_read_only(
     served = _bridge(raw, 1)
     (fresh / "INBOX" / "cur" / "1:2,S").write_bytes(_as_file(served))
     files = world.fresh_files("INBOX")
-    assert files == {"SYNTH-r1g3-1": _as_file(served)}
+    assert files is None
 
 
 def test_a_fresh_download_is_not_possible_without_its_configuration_or_an_operator(env):
@@ -380,3 +380,22 @@ def test_c_route_sender_failure_is_a_world_error(env, monkeypatch):
     with pytest.raises(WorldError) as caught:
         PiecesWorld(cfg).route_preserves("C", fixtures.forged_message("r1g2", 900, "forged"))
     assert caught.value.token == "bad_password_file"
+
+
+def test_each_fresh_comparison_calls_the_operator_again(env):
+    config, _, _ = env
+
+    class Independent(SimulatedWorld):
+        def __init__(self):
+            super().__init__()
+            self.downloads = []
+
+        def fresh_files(self, folder):
+            self.downloads.append(folder)
+            return {}
+
+    operator = Independent()
+    world = PiecesWorld(config, operator=operator)
+    assert world.fresh_files("INBOX") == {}
+    assert world.fresh_files("INBOX") == {}
+    assert operator.downloads == ["INBOX", "INBOX"]

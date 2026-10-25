@@ -25,7 +25,6 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import secrets
 import sys
 import time
@@ -33,7 +32,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from . import export, fixtures, frozen, p11, runner
+from . import correlation, export, fixtures, frozen, p11, runner
 from .probe import Probe, ProbeError
 from .runner import Limits, MessageSummary, Refused, StopRun
 from .world import Served, World, WorldError
@@ -62,8 +61,6 @@ STOP_TOKENS = frozenset(
 )
 _FOLDERS = ("INBOX", "Folder", "Archive", "Trash", "Drafts", "Sent", "Spam")
 _ROUTE_BOOLEAN = {"B": "route_b_preserved", "C": "route_c_preserved", "A2": "route_a2_preserved"}
-_SUBJECT = re.compile(rb"(?im)^Subject: (SYNTH-[A-Za-z0-9]{1,16}-\d+)")
-_FROM_DOMAIN = re.compile(rb"(?im)^From:[^\r\n]*@([A-Za-z0-9.-]+)")
 _ORDER = {"observed": 0, "unobservable": 1, "failed": 2}
 
 
@@ -192,8 +189,7 @@ class Driver:
         return f"{self.run_id}{group}"
 
     def _token_of(self, raw: bytes) -> str | None:
-        found = _SUBJECT.search(raw)
-        return found.group(1).decode() if found else None
+        return correlation.summary(raw).token
 
     def _digest(self, value: bytes | None) -> bytes | None:
         return None if value is None else hmac.new(self._key, value, hashlib.sha256).digest()
@@ -265,10 +261,9 @@ class Driver:
         out = self.world.served(folder)
         self.budget.pace()
         for item in out:
-            token = self._token_of(item.raw)
-            found = _FROM_DOMAIN.search(item.raw)
-            domain = found.group(1).decode().lower() if found else None
-            kind = self.state.classify(MessageSummary(token, domain))
+            observed = correlation.summary(item.raw)
+            domain = observed.sender_domain
+            kind = self.state.classify(observed)
             if kind == "test" and domain not in self._allowed:
                 raise StopRun("foreign_party")
             if kind == "service":
@@ -552,6 +547,8 @@ class Driver:
             expected = self.inputs.h11_expect[case]
             if outcome == "no_trigger":
                 self._counts["h11_unresolved"] += 1
+                if expected != "no_trigger":
+                    self._mark("P5", "unobservable")
             elif outcome == expected:
                 self._counts["h11_matched"] += 1
             else:
@@ -701,6 +698,7 @@ class Driver:
 
     def _begin(self, group: str) -> None:
         self._group = group
+        self._isolation_checked = False
         if not self.world.isolation_ok():
             raise StopRun("isolation_failed")
         self._isolation_checked = True
@@ -747,8 +745,7 @@ class Driver:
                 booleans={
                     **self._booleans,
                     "isolation_passed": self._isolation_checked
-                    and stop is None
-                    or (stop is not None and stop[0] != "isolation_failed"),
+                    and (stop is None or stop[0] != "isolation_failed"),
                     "tls_pin_checked": self._tls_checked,
                     "stopped_early": stop is not None,
                     "all_predictions_held": stop is None
