@@ -21,7 +21,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from . import full_body, provider_identity, vector_sums
+from . import full_body, literal, provider_identity, vector_sums
 from .account import AccountConfig, register_account_functions, verified_account_id
 from .chunker import l2_normalize, truncate_to_tokens
 from .entities import (
@@ -223,7 +223,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # observations with their scan generations. Candidates are read from the
 # stored header rows, so no reparse is queued, and nothing is accepted
 # (``migrations/0021_provider_identity_assessments.sql``).
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -744,7 +744,7 @@ def _require_minimum_sqlite() -> None:
 
 # Every FTS5 table in the schema, in the order ``scrub_reaped_fts``
 # visits them.
-_FTS_TABLES = ("threads_fts", "message_chunks_fts", "attachments_fts")
+_FTS_TABLES = ("threads_fts", "message_chunks_fts", "attachments_fts", *literal.FTS_TABLES)
 
 # One ``scrub_reaped_fts`` step: FTS5 ``merge`` with this page budget,
 # committed on its own so the write lock is free between steps (#670).
@@ -918,6 +918,12 @@ class Database:
         continues its merge on the next pass; one whose step fails stays
         pending, and the failure propagates to the caller.
         """
+        with self._lock:
+            if self._conn.execute("SELECT 1 FROM literal_scrub").fetchone():
+                for table in literal.FTS_TABLES:
+                    self._mark_fts_scrub(table)
+                self._conn.execute("DELETE FROM literal_scrub")
+                self._conn.commit()
         done: list[str] = []
         for table in _FTS_TABLES:
             if table not in self._fts_pending_scrub:
@@ -1190,6 +1196,7 @@ class Database:
                 "INSERT INTO accounts (scope_uuid, provider, created_at) VALUES (?, ?, ?)",
                 (self.account.scope_uuid, self.account.provider, datetime.now(UTC).isoformat()),
             )
+            literal.create_schema(cur)
             cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
             cur.execute(f"PRAGMA application_id = {SCHEMA_APPLICATION_ID}")
             self._conn.commit()
@@ -2651,6 +2658,10 @@ class Database:
         except Exception:
             self._rollback_if_started(started)
             raise
+
+    @_synchronized
+    def rebuild_literal_attachments(self, claimant_id: str, enabled: bool) -> None:
+        literal.rebuild_attachments(self._conn.cursor(), claimant_id, enabled)
 
     @_synchronized
     def get_attachment_occurrence_states(
@@ -5473,6 +5484,9 @@ class Database:
         # The parsed file is this message's occurrence at its path (#1566).
         self._bind_occurrence(cur, msg.claimant_id, msg.filepath, provenance="parse")
         full_body.store(cur, msg.claimant_id, msg.full_body)
+        literal.rebuild_body(
+            cur, msg.claimant_id, msg.full_body.deadline if msg.full_body else None
+        )
         cur.execute("DELETE FROM message_headers WHERE claimant_id = ?", (msg.claimant_id,))
         cur.executemany(
             "INSERT INTO message_headers "

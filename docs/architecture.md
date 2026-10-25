@@ -5294,3 +5294,38 @@ both, and the in-memory rules are published only after that transaction
 succeeds. It stores no rule patterns or addresses. Existing indexes start
 with no state row (unknown); normal indexer startup fills it. No mail
 reparse or embedding is needed for this metadata migration.
+
+
+### Literal source indexes (#1388)
+
+Schema v25 adds `literal_windows`, separate long/short contentless FTS5 gram
+membership indexes, per-message `literal_state`, and current-generation
+attachment state/fragments. Body windows reuse `message_body_spans`; source
+text is never copied per scope or overlap window. Each 8192-codepoint base window
+uses at most 999 following codepoints from its own contiguous source. Scope runs
+refer to original offsets. Attachment fragments contain extracted text only,
+read through SQLite's incremental BLOB API; payload bytes remain in Maildir.
+
+Phase 1 writes the body index with source generation evidence and invalidates
+old attachment windows. Phase 2 replaces the attachment index after committing
+its current occurrence results, in the same message transaction. Metadata and
+membership admission share the per-message window/byte/work limits. Partial
+indexes keep current positives and cannot certify missing text. Generation,
+extractor stamp, current-inventory and deferral checks prevent stale attachment
+windows from qualifying or certifying a negative.
+
+The reader preflights at most 200,001 integer candidate IDs per leaf, before
+source transfer, under shared request and verification-byte budgets. Fixed ASCII
+encoding permits NUL and Unicode candidate grams in FTS MATCH. At most eight
+distinct trigrams are ANDed, never a positional query for the whole needle;
+short operands use aligned one/two-codepoint membership. Original-boundary and
+scope verification is cached per read connection and reused for all result
+counts/pages. SQL type/byte guards precede source transfer. A cooperative deadline
+continues through count/page work; exhaustion returns a fixed error without
+partial counts or a full-corpus fallback. See `docs/imap-search-parity.md`.
+
+Foreign-key cascades remove windows with their body source, attachment or
+claimant. A deletion trigger removes both posting rows and records a durable
+scrub marker; the existing bounded FTS merge controller consumes it. Both new
+FTS tables also receive the existing startup scrub. The migration queues the
+shared in-place reparse; unchanged retrieval chunks and vectors are reused.

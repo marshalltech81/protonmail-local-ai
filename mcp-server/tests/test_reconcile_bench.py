@@ -1054,7 +1054,7 @@ def no_build(bench, monkeypatch):
 
 def test_the_documented_wal_run_is_within_the_budget(bench, tmp_path, no_build):
     # docs/mcp-tools.md's command (50,000 typical messages, three PDFs
-    # each): estimated at about eight minutes, well inside 30.
+    # each): estimated at about twelve minutes, well inside 30.
     argv = ["--workdir", str(tmp_path), "--messages", "50000", "--identity", "typical"]
     args = bench.parse_args([*argv, "--wal", "--filtered"])
     assert bench.wal_baseline_estimate(args) < bench.WAL_BASELINE_BUDGET_S / 2
@@ -1112,6 +1112,19 @@ def test_the_wal_baseline_budget_adds_its_dimensions(bench, tmp_path, no_build):
         {"--identity": "ascii998common", "--messages": "5000", "--per-message": "9998"}, tmp_path
     )
     assert "estimated" in (_refused(bench, example) or "")
+    assert not list(tmp_path.iterdir())
+
+
+def test_repeated_literal_attachment_indexing_is_in_the_wal_budget(bench, tmp_path, no_build):
+    fixed = {"--messages": "500", "--per-message": "20"}
+    # Each continuation reindexes all current extracted text, including kept
+    # attachments. Text alone and continuations alone fit; together they do not.
+    assert _refused(bench, _wal_argv({**fixed, "--extracted-chars": "10000"}, tmp_path)) is None
+    assert _refused(bench, _wal_argv({**fixed, "--writer-extract-seconds": "5"}, tmp_path)) is None
+    combined = _wal_argv(
+        {**fixed, "--extracted-chars": "10000", "--writer-extract-seconds": "5"}, tmp_path
+    )
+    assert "estimated" in (_refused(bench, combined) or "")
     assert not list(tmp_path.iterdir())
 
 

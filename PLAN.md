@@ -829,6 +829,15 @@ superseded entries keep their number and one line.
     holds (`body_words`, `attachment_text_words`), never by Gluon's
     behaviour. Omit IMAP UID, KEYWORD, DRAFT and DELETED. The
     assessment behind this is in the issues' bodies (#1077–#1093).
+    *2026-10-25 (#1388):* the owner-approved source-backed literal layer and
+    typed Boolean extension add preserved body/classification/attachment phrase
+    leaves; the practical criterion matrix is `docs/imap-search-parity.md`.
+    Literal matching preserves punctuation/spacing and original-character
+    casefold boundaries, including contiguous cross-fragment matches. Candidate
+    grams use fixed ASCII encoding (owner approval, 2026-10-25) so NUL-containing
+    operands are representable in FTS MATCH. Existing query meanings and omitted
+    server-state criteria stay; limits fail explicitly without partial counts.
+
 36. **Predicate leaves, reparse and sender evidence (2026-10-08):**
     parser-only backfills run as an in-place reparse through the job
     queue, queued by the migration that needs it (#1078), with fresh

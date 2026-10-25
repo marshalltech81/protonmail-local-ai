@@ -179,7 +179,6 @@ def test_occurrence_cutover_preserves_main_bcc_and_full_body_rows(tmp_path):
         "message_body_ranges",
         "message_chunks",
         "threads_vec",
-        "indexing_jobs",
     )
     before = {
         table: [tuple(r) for r in db._conn.execute(f"SELECT * FROM {table}")] for table in tables
@@ -196,6 +195,7 @@ def test_occurrence_cutover_preserves_main_bcc_and_full_body_rows(tmp_path):
         assert (
             tuple(upgraded._conn.execute(f"SELECT {columns} FROM messages").fetchone()) == evidence
         )
+        assert upgraded._conn.execute("SELECT reason FROM indexing_jobs").fetchone()[0] == "reparse"
         assert upgraded._conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         upgraded.close()

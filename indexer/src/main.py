@@ -49,7 +49,7 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 from watchdog.utils import UnsupportedLibcError
 
-from . import full_body, provider_identity
+from . import full_body, literal, provider_identity
 from .account import AccountConfig, account_config_from_env, maildir_root_from_env
 from .attachment_indexing import (
     AttachmentWritePlan,
@@ -1532,6 +1532,7 @@ def _log_attachment_outcomes(*, force: bool = False) -> None:
     ):
         return
     full_body.log_summary()
+    literal.log_summary()
     counts = attachment_outcomes.drain()
     line = format_attachment_outcomes(counts)
     if not line:
@@ -1680,6 +1681,7 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
     _log_reparse_progress(c["reparse"], c["reparse_parked_trashed"], c["reparse_dead"])
     _log_extraction_deferral_recovery(c["extraction_deferred"])
     full_body.log_summary()
+    literal.log_summary()
 
 
 def _steady_state_summary_due(
@@ -2492,6 +2494,7 @@ def _phase2c_commit_vectors(
                 msg.claimant_id, state.stale_occurrences, purged_extractions
             )
             db.set_attachment_rows_current(msg.claimant_id, INDEXER_ATTACHMENT_EXTRACTION_ENABLED)
+            db.rebuild_literal_attachments(msg.claimant_id, INDEXER_ATTACHMENT_EXTRACTION_ENABLED)
             # Replace the Phase 1 seed thread vector. Three cases:
             #   1. Thread now has chunks (this message contributed
             #      some, or earlier messages already had them) → use

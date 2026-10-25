@@ -37,7 +37,7 @@ from email.utils import parseaddr
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
 from .list_metadata import canonical_list_id, metadata_known_sql, metadata_value_sql
 from .sources import active_sql, authority_excluded_sql, default_scope_sql
@@ -1147,6 +1147,83 @@ _AUTHORITY_COVERAGE = (
 )
 
 
+def _literal_compile(scope):
+    def compile(value, params):
+        from .literal import compile_phrase
+
+        return compile_phrase(scope, value, params)
+
+    return compile
+
+
+def _literal_kinds():
+    from .literal import LEAF_SCOPES, complete_sql, unassessed_sql
+
+    return [
+        LeafKind(
+            name,
+            "literal phrase",
+            _literal_compile(scope),
+            Evaluability.UNKNOWN_WHEN_NULL,
+            coverage=(
+                complete_sql(scope),
+                unassessed_sql(scope),
+            ),
+            schema={
+                "messages": (
+                    "claimant_id",
+                    "full_body_generation",
+                    "full_body_version",
+                    "attachments_manifest_complete",
+                    "has_attachments",
+                    "attachment_rows_current",
+                ),
+                "literal_state": (
+                    "claimant_id",
+                    "version",
+                    "unicode_version",
+                    "generation",
+                    "body_complete",
+                    "classified_complete",
+                    "attachments_complete",
+                ),
+                "literal_windows": (
+                    "id",
+                    "claimant_id",
+                    "part",
+                    "occurrence_id",
+                    "generation",
+                    "read_bytes",
+                    "byte_count",
+                    "ordinal",
+                    "ranges",
+                ),
+                "message_body_spans": ("claimant_id", "part", "ordinal", "data"),
+                "literal_attachment_spans": ("occurrence_id", "ordinal", "data"),
+                "literal_long_fts": ("tokens",),
+                "literal_short_fts": ("tokens",),
+                "attachments": (
+                    "claimant_id",
+                    "attachment_occurrence_id",
+                    "attachment_id",
+                    "extractor_module",
+                    "text_extractor",
+                    "text_complete",
+                    "extraction_deferred_at",
+                ),
+                "attachment_extractions": (
+                    "attachment_id",
+                    "extractor_module",
+                    "extracted_at",
+                    "extractor",
+                ),
+                "literal_attachment_state": ("occurrence_id", "generation", "complete"),
+            },
+        )
+        for name, scope in LEAF_SCOPES.items()
+    ]
+
+
 LEAVES: dict[str, LeafKind] = {
     kind.name: kind
     for kind in (
@@ -1235,6 +1312,7 @@ LEAVES: dict[str, LeafKind] = {
                 ("domain_is", "role, domain"),
             )
         ),
+        *_literal_kinds(),
         LeafKind(
             "header_exists",
             "header name",
@@ -1558,6 +1636,10 @@ def leaf_digest(
         for clause in where_clauses(where)
     ]
     payload = [QUERY_DIGEST_FORMAT, date_basis, flat, explicit]
+    if any(w.leaf.name.endswith("_phrase") for w in where):
+        from .literal import UNICODE_VERSION
+
+        payload.append("literal-source-boundaries-v1-" + UNICODE_VERSION)
     return hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:16]
 
 
@@ -1574,6 +1656,26 @@ WHERE_ADDRESS_LEAVES = (
     "domain_is",
 )
 WHERE_LEAVES = (
+    "body_phrase",
+    "authored_body_phrase",
+    "quote_phrase",
+    "signature_phrase",
+    "forwarded_phrase",
+    "attachment_text_phrase",
+    "seen",
+    "flagged",
+    "replied",
+    "has_attachments",
+    "size_min",
+    "size_max",
+    "folder",
+    "authority_class",
+    "effective_from",
+    "effective_to",
+    "sent_from",
+    "sent_to",
+    "occurred_from",
+    "occurred_to",
     *WHERE_ADDRESS_LEAVES,
     "body_words",
     "subject_contains",
@@ -1593,6 +1695,14 @@ WHERE_ROLES = ("from", "to", "cc", "bcc", "visible_recipient", "recipient", "any
 MAX_WHERE_NODES = 16
 # The longest value each leaf takes, checked before it is normalized.
 MAX_WHERE_VALUE_CHARS = {
+    "folder": 500,
+    "authority_class": 64,
+    "effective_from": 64,
+    "effective_to": 64,
+    "sent_from": 64,
+    "sent_to": 64,
+    "occurred_from": 64,
+    "occurred_to": 64,
     "address_is": 320,
     "address_contains": 320,
     "display_name_contains": 320,
@@ -1614,6 +1724,26 @@ MAX_WHERE_ID_CHARS = 64
 ADDRESS_LEAF_READS_NAMES = {mode: reads for mode, (_, reads) in _ADDRESS_MODES.items()}
 
 WhereLeafName = Literal[
+    "body_phrase",
+    "authored_body_phrase",
+    "quote_phrase",
+    "signature_phrase",
+    "forwarded_phrase",
+    "attachment_text_phrase",
+    "seen",
+    "flagged",
+    "replied",
+    "has_attachments",
+    "size_min",
+    "size_max",
+    "folder",
+    "authority_class",
+    "effective_from",
+    "effective_to",
+    "sent_from",
+    "sent_to",
+    "occurred_from",
+    "occurred_to",
     "address_is",
     "address_contains",
     "display_name_contains",
@@ -1644,7 +1774,7 @@ class WhereLeafItem(BaseModel):
     leaf: WhereLeafName
     role: WhereRole | None = None
     name: str | None = None
-    value: str | None = None
+    value: str | StrictBool | StrictInt | None = None
     negate: bool = False
     id: str | None = None
 
@@ -1668,6 +1798,15 @@ class WhereLeafItem(BaseModel):
                 raise ValueError("value is required on this leaf")
         elif self.value is None:
             raise ValueError("value is required on this leaf")
+        if self.value is not None:
+            if self.leaf in {"seen", "flagged", "replied", "has_attachments"}:
+                if type(self.value) is not bool:
+                    raise ValueError("value must be a boolean on a state leaf")
+            elif self.leaf in {"size_min", "size_max"}:
+                if type(self.value) is not int:
+                    raise ValueError("value must be an integer on a size leaf")
+            elif not isinstance(self.value, str):
+                raise ValueError("value must be a string on this leaf")
         return self
 
 
@@ -1710,7 +1849,7 @@ def where_clauses(where: Sequence[WhereLeaf]) -> list[list[WhereLeaf]]:
     return list(clauses.values())
 
 
-def compile_where(where: Sequence[WhereLeaf]) -> tuple[str, list]:
+def compile_where(where: Sequence[WhereLeaf], *, on_copy: bool = False) -> tuple[str, list]:
     """The SQL predicate over ``messages m`` of the ``where``
     expression, with its bound values: each leaf compiled once,
     ``NOT`` for a negated leaf, ``OR`` within an ``all`` clause and
@@ -1723,12 +1862,54 @@ def compile_where(where: Sequence[WhereLeaf]) -> tuple[str, list]:
     params: list = []
     clauses = []
     for clause in where_clauses(where):
-        terms = [
-            f"{'NOT ' if w.negate else ''}({LEAVES[w.leaf.name].compile(w.leaf.value, params)})"
-            for w in clause
-        ]
+        terms = []
+        for w in clause:
+            kind = LEAVES[w.leaf.name]
+            if on_copy and kind.occurrence is not None:
+                parts = [kind.message(w.leaf.value, params)] if kind.message is not None else []
+                parts.append(kind.occurrence(w.leaf.value, params))
+                term = " AND ".join(parts)
+            else:
+                term = kind.compile(w.leaf.value, params)
+            terms.append(f"{'NOT ' if w.negate else ''}({term})")
         clauses.append(terms[0] if len(terms) == 1 else f"({' OR '.join(terms)})")
     return " AND ".join(clauses) or "1", params
+
+
+def has_copy_where(where: Sequence[WhereLeaf]) -> bool:
+    return any(LEAVES[w.leaf.name].occurrence is not None for w in where)
+
+
+def compile_copy_expression(leaves: Sequence[Leaf], where: Sequence[WhereLeaf]) -> tuple[str, list]:
+    sql, params = compile_occurrence_terms(leaves)
+    explicit, values = compile_where(where, on_copy=True)
+    return f"({sql}) AND ({explicit})", [*params, *values]
+
+
+def compile_message_expression(
+    leaves: Sequence[Leaf], where: Sequence[WhereLeaf]
+) -> tuple[str, list]:
+    if not has_copy_where(where):
+        sql, params = compile_leaves(leaves)
+        if where:
+            explicit, values = compile_where(where)
+            sql = f"{sql} AND {explicit}"
+            params.extend(values)
+        return sql, params
+    params = []
+    message = []
+    for leaf in leaves:
+        kind = LEAVES[leaf.name]
+        if kind.occurrence is None:
+            message.append(kind.compile(leaf.value, params))
+        elif kind.message is not None:
+            message.append(kind.message(leaf.value, params))
+    copy, values = compile_copy_expression(leaves, where)
+    # A decided witness wins; otherwise an undecided eligible copy is unknown.
+    yes = occurrence_exists([f"({copy}) IS 1"])
+    unknown = occurrence_exists([f"({copy}) IS NULL"])
+    message.append(f"CASE WHEN {yes} THEN 1 WHEN {unknown} THEN NULL ELSE 0 END")
+    return " AND ".join(f"({part})" for part in message), [*params, *values, *values]
 
 
 def _where_value(path: str, item: WhereLeafItem) -> Any:
@@ -1754,12 +1935,40 @@ def _where_value(path: str, item: WhereLeafItem) -> Any:
         if name in {"list_id_is", "precedence_is"}:
             return None
         raise InvalidFilterError("where", f"{path}: value is required")
+    if name in {"seen", "flagged", "replied", "has_attachments"}:
+        return value
+    if name in {"size_min", "size_max"}:
+        return normalize_size_bound("where", value)
+    # The model rejects numeric and boolean values on string leaves.
+    assert isinstance(value, str)
+    if name.endswith("_phrase"):
+        from .literal import normalize_phrase
+
+        try:
+            return normalize_phrase(value)
+        except ValueError as e:
+            raise InvalidFilterError("where", str(e)) from None
     limit = MAX_WHERE_VALUE_CHARS[name]
     if len(value) > limit:
         raise InvalidFilterError("where", f"{path}: {name} value is longer than {limit} characters")
     value = value.strip()
     if not value:
         raise InvalidFilterError("where", f"{path}: {name} value is empty")
+    if name == "folder":
+        return (value,)
+    if name == "authority_class":
+        return normalize_authority_class(value)
+    if name in {
+        "effective_from",
+        "effective_to",
+        "sent_from",
+        "sent_to",
+        "occurred_from",
+        "occurred_to",
+    }:
+        return _parse_filter_date(
+            value, end_of_day=name.endswith("_to"), _field_name="where"
+        ).isoformat()
     if name in {"body_words", "attachment_text_words"}:
         terms = _text_terms(value)
         if not terms:

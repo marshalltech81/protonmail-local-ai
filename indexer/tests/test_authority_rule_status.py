@@ -89,6 +89,9 @@ def test_v23_migration_keeps_existing_evidence_and_unknown_rules(tmp_path):
     old = Database(path, account=TEST_ACCOUNT)
     old.upsert_thread(make_thread(messages=[make_message()]), [0.0] * 4096)
     before = [tuple(row) for row in old._conn.execute("SELECT * FROM messages")]
+    from tests.conftest import drop_literal_schema
+
+    drop_literal_schema(old._conn)
     old._conn.execute("DROP TABLE authority_rule_state")
     old._conn.execute("UPDATE schema_version SET version=23")
     old._conn.commit()
@@ -104,7 +107,9 @@ def test_v23_migration_keeps_existing_evidence_and_unknown_rules(tmp_path):
         assert (
             migrated._conn.execute("SELECT COUNT(*) FROM authority_rule_state").fetchone()[0] == 0
         )
-        assert migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+        assert (
+            migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 1
+        )  # v25 queues literal-index backfill.
         assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
     finally:
         migrated.close()

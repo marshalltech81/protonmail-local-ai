@@ -96,6 +96,9 @@ def test_effective_clock_index_migrates_without_changing_evidence(tmp_path):
     db.upsert_thread(make_thread(messages=[message]), [0.1] * 4096)
     db._conn.execute("DROP INDEX idx_messages_effective")
     db._conn.execute("CREATE INDEX idx_messages_effective ON messages(effective_at)")
+    from tests.conftest import drop_literal_schema
+
+    drop_literal_schema(db._conn)
     db._conn.execute("DROP TABLE IF EXISTS authority_rule_state")
     db._conn.execute("UPDATE schema_version SET version = 21")
     db._conn.commit()
@@ -103,6 +106,16 @@ def test_effective_clock_index_migrates_without_changing_evidence(tmp_path):
     before = {
         table: [tuple(r) for r in db._conn.execute(f"SELECT * FROM {table}")] for table in tables
     }
+    from src.migrations.runner import apply_pending
+
+    apply_pending(
+        db._conn,
+        current_version=21,
+        target_version=22,
+        migration_dir=Path(__file__).parents[1] / "src/migrations",
+    )
+    for table, rows in before.items():
+        assert [tuple(r) for r in db._conn.execute(f"SELECT * FROM {table}")] == rows
     db.close()
     migrated = Database(path, account=TEST_ACCOUNT)
     fresh = Database(tmp_path / "fresh-effective.db", account=TEST_ACCOUNT)
@@ -112,7 +125,11 @@ def test_effective_clock_index_migrates_without_changing_evidence(tmp_path):
             == SCHEMA_VERSION
         )
         for table, rows in before.items():
-            assert [tuple(r) for r in migrated._conn.execute(f"SELECT * FROM {table}")] == rows
+            if table != "indexing_jobs":
+                assert [tuple(r) for r in migrated._conn.execute(f"SELECT * FROM {table}")] == rows
+        assert (
+            migrated._conn.execute("SELECT reason FROM indexing_jobs").fetchall()[0][0] == "reparse"
+        )  # v25 literal backfill.
         for conn in (migrated._conn, fresh._conn):
             assert [r[2] for r in conn.execute("PRAGMA index_info(idx_messages_effective)")] == [
                 "effective_at",
@@ -128,6 +145,9 @@ def test_effective_clock_index_migration_failure_is_atomic(tmp_path):
     db = Database(tmp_path / "effective-failure.db", account=TEST_ACCOUNT)
     db._conn.execute("DROP INDEX idx_messages_effective")
     db._conn.execute("CREATE INDEX idx_messages_effective ON messages(effective_at)")
+    from tests.conftest import drop_literal_schema
+
+    drop_literal_schema(db._conn)
     db._conn.execute("DROP TABLE IF EXISTS authority_rule_state")
     db._conn.execute("UPDATE schema_version SET version = 21")
     db._conn.commit()

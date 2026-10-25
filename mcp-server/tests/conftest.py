@@ -399,6 +399,13 @@ VALUES (1, 'unconfigured', 0,
         """
     )
 
+    conn.execute("ALTER TABLE attachments ADD COLUMN text_extractor TEXT")
+    # The complete-source and literal schemas are used by phrase predicates.
+    migrations = Path(__file__).resolve().parents[2] / "indexer/src/migrations"
+    for filename in ("0018_full_decoded_body.sql", "0025_literal_phrases.sql"):
+        sql = (migrations / filename).read_text()
+        conn.executescript(sql[: sql.index("INSERT INTO indexing_jobs")])
+
 
 def write_ingestion(
     db_path: str,

@@ -36,6 +36,7 @@ from .list_metadata import (
     sqlite_normalize_fields,
     with_metadata,
 )
+from .literal import QueryBudget
 from .predicates import (
     ADDRESS_LEAF_ROWS,
     ADDRESS_ROLES,
@@ -61,13 +62,16 @@ from .predicates import (
     _substring_participant_rows,
     address_match_mode,
     canonical_addr,
+    compile_copy_expression,
     compile_leaves,
+    compile_message_expression,
     compile_occurrence_terms,
-    compile_where,
+    has_copy_where,
     leaf_digest,
     message_scope_leaves,
     normalize_authority_class,
     normalize_date_basis,
+    occurrence_exists,
     query_messages_leaves,
     search_emails_leaves,
     where_clauses,
@@ -1602,6 +1606,7 @@ def _leaf_results(
     where_sql: str,
     where_params: list,
     metadata: tuple[str, ...] = (),
+    flat_leaves: Sequence[Leaf] = (),
 ) -> list[LeafResult]:
     """Each ``where`` leaf's result (``LeafResult``), on the caller's
     read transaction: one statement that evaluates every leaf's own SQL
@@ -1612,10 +1617,24 @@ def _leaf_results(
     message need not satisfy every member, so that query also requires
     the leaf's own SQL to be 1 (#1087)."""
     params: list = []
-    columns = ", ".join(
-        f"({LEAVES[w.leaf.name].compile(w.leaf.value, params)}) AS l{i}"
-        for i, w in enumerate(where)
-    )
+    column_parts = []
+    for i, w in enumerate(where):
+        kind = LEAVES[w.leaf.name]
+        if kind.occurrence is not None:
+            message_params: list = []
+            message = (
+                kind.message(w.leaf.value, message_params) if kind.message is not None else None
+            )
+            scope, values = compile_occurrence_terms(flat_leaves)
+            own = kind.occurrence(w.leaf.value, values)
+            sql = occurrence_exists([scope, own])
+            if message is not None:
+                sql = f"({message}) AND ({sql})"
+            params.extend([*message_params, *values])
+        else:
+            sql = kind.compile(w.leaf.value, params)
+        column_parts.append(f"({sql}) AS l{i}")
+    columns = ", ".join(column_parts)
     sums = ", ".join(
         f"TOTAL(l{i} IS 1), TOTAL(l{i} IS 0), TOTAL(l{i} IS NULL)" for i in range(len(where))
     )
@@ -1662,15 +1681,7 @@ def _leaf_results(
 
 
 def _message_expression(leaves: Sequence[Leaf], where: Sequence[WhereLeaf]) -> tuple[str, list]:
-    """The SQL over ``messages m`` that the flat ``leaves`` and the
-    ``where`` expression (``compile_where``) decide together, ANDed,
-    with its bound values: 1, 0 or NULL (undecided) per message."""
-    where_sql, params = compile_leaves(leaves)
-    if where:
-        explicit_sql, explicit_params = compile_where(where)
-        where_sql = f"{where_sql} AND {explicit_sql}"
-        params += explicit_params
-    return where_sql, params
+    return compile_message_expression(leaves, where)
 
 
 def _record_clock(record: MessageRecord | AttachmentOccurrenceRecord, basis: DateBasis) -> str:
@@ -5156,10 +5167,16 @@ class Database:
             return unknown
         return {"configured": bool(row[0]), "rule_count": row[1], "classes": json.loads(row[2])}
 
-    def authority_rule_notice(self, authority_class: str | None) -> str | None:
+    def authority_rule_notice(
+        self, authority_class: str | None, where: Sequence[WhereLeaf] = ()
+    ) -> str | None:
         """Fixed diagnostics from the currently applied rule metadata."""
         authority_class = normalize_authority_class(authority_class)
-        if authority_class is None or authority_class == "unclassified":
+        classes = {w.leaf.value for w in where if w.leaf.name == "authority_class"}
+        if authority_class is not None:
+            classes.add(authority_class)
+        classes.discard("unclassified")
+        if not classes:
             return None
         with closing(self._connect()) as conn:
             rules = self._read_authority_rules(conn)
@@ -5167,7 +5184,7 @@ class Database:
             return "Authority rules status is unknown: applied configuration has not been recorded."
         if not rules["configured"]:
             return "No authority rules file is configured; a zero result does not establish that the mailbox has no senders in this class."
-        if authority_class not in rules["classes"]:
+        if any(value not in rules["classes"] for value in classes):
             return "No applied authority rule defines the requested class; a zero result does not establish that the mailbox has no senders in this class."
         return None
 
@@ -5545,7 +5562,7 @@ class Database:
         )
         offset = 0
 
-        with closing(self._connect()) as conn:
+        with closing(self._connect()) as conn, QueryBudget(conn) as literal_budget:
             # One read transaction: the count, the page, and its
             # participants come from the same snapshot even while the
             # indexer commits.
@@ -5558,6 +5575,7 @@ class Database:
                 # Selected clocks have composite indexes including the claimant tie-break.
                 page_where_sql += f" AND ({clock}, m.claimant_id) < (?, ?)"
                 page_params += [last_at, last_id]
+            literal_budget.prepare(where)
             total, distinct_ids, missing_ids = conn.execute(
                 with_metadata(
                     "SELECT COUNT(*), COUNT(DISTINCT m.message_id), COUNT(*) - COUNT(m.message_id) FROM messages m WHERE "  # nosec B608 — compiler SQL; values bound
@@ -5600,7 +5618,9 @@ class Database:
                     ),
                     params,
                 ).fetchone()[0]
-            leaf_results = _leaf_results(conn, where, where_sql, params, metadata) if where else []
+            leaf_results = (
+                _leaf_results(conn, where, where_sql, params, metadata, leaves) if where else []
+            )
             if collapse:
                 # Group only definite matches, before any page/cursor limit. The
                 # representative's ordinary fields still satisfy the entire filter.
@@ -5754,12 +5774,13 @@ class Database:
             "FROM t LEFT JOIN pg ON 1 LEFT JOIN threads th ON th.thread_id=pg.tid "
             "LEFT JOIN meta ON meta.tid=pg.tid LEFT JOIN people ON people.tid=pg.tid ORDER BY pg.tid"
         )
-        with closing(self._connect()) as conn:
+        with closing(self._connect()) as conn, QueryBudget(conn) as literal_budget:
             if metadata or _uses_identity(leaves, where):
                 conn.execute("BEGIN")
             if _uses_identity(leaves, where):
                 digest = _identity_digest(conn, digest)
             last_id, offset = _decode_thread_cursor(cursor, digest) if cursor else (None, 0)
+            literal_budget.prepare(where)
             rows = conn.execute(
                 with_metadata(sql, metadata), [*params, last_id, last_id, limit + 1]
             ).fetchall()
@@ -5916,11 +5937,23 @@ class Database:
         digest = _aggregate_digest(group_by, leaves, where, basis.name, period, period_breakdown)
         offset = 0
         occurrence_sql, occurrence_params = compile_occurrence_terms(leaves)
+        copy_where = has_copy_where(where)
+        copy_sql, copy_params = compile_copy_expression(leaves, where) if copy_where else ("1", [])
+        ns_sql = f"EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id=m.claimant_id AND {occurrence_sql} AND NOT {authority_excluded_sql()})"  # nosec B608 -- code-owned compiler SQL and columns; operands are bound
+        ns_params = occurrence_params
+        if copy_where:
+            ns_sql = f"EXISTS (SELECT 1 FROM message_occurrences o WHERE o.claimant_id=m.claimant_id AND ({copy_sql}) IS 1 AND NOT {authority_excluded_sql()})"  # nosec B608 -- code-owned compiler SQL and columns; operands are bound
+            ns_params = copy_params
         rows_sql = _GROUP_ROWS[group_by]
         rows_params: list = []
         if group_by == "folder":
             rows_sql = rows_sql.replace("{occurrence}", occurrence_sql)
             rows_params = list(occurrence_params)
+            if copy_where:
+                columns = "e.cid,e.tid,e.at,e.bucket,e.mid,e.att,e.sa,e.fc,e.tc,e.cc,e.current,e.inventory_known"
+                rows_sql = f"SELECT DISTINCT {columns}, (e.ok AND ({copy_sql})) AS ok,e.ns,o.folder AS value,NULL AS name FROM e JOIN messages m ON m.claimant_id=e.cid JOIN message_occurrences o ON o.claimant_id=e.cid AND ({copy_sql}) IS NOT 0"  # nosec B608 -- code-owned compiler SQL and columns; operands are bound
+                rows_params = [*copy_params, *copy_params]
+
         # Review round 3 (owner, 2026-10-08): for a sender dimension,
         # the messages not rejected whose sender is safe but whose From
         # list is not known complete (0 a known loss, NULL not reparsed),
@@ -6013,9 +6046,7 @@ class Database:
             # the class of a message only copied there is not counted
             # (#463, #1568, #1569). ``messages.folder`` no longer exists
             # post-occurrence-cutover, so this reads the occurrences.
-            f"({expr}) AS ok, EXISTS (SELECT 1 FROM message_occurrences o "
-            f"WHERE o.claimant_id = m.claimant_id AND {occurrence_sql} "
-            f"AND NOT {authority_excluded_sql()}) AS ns"
+            f"({expr}) AS ok, {ns_sql} AS ns"
             + (f", {DIRECTION_LABEL_SQL} AS direction" if group_by == "direction" else "")
             + (
                 f", {metadata_value_sql(group_by)} AS metadata_value, {metadata_known_sql(group_by)} AS metadata_known"
@@ -6071,15 +6102,16 @@ class Database:
             + sample_join
             + "ORDER BY pg.n DESC, pg.value IS NULL, pg.value, pg.period IS NULL, pg.period"
         )
-        with closing(self._connect()) as conn:
+        with closing(self._connect()) as conn, QueryBudget(conn) as literal_budget:
             if metadata or group_by == "direction" or _uses_identity(leaves, where):
                 conn.execute("BEGIN")
             if group_by == "direction" or _uses_identity(leaves, where):
                 digest = _identity_digest(conn, digest)
             offset = _decode_aggregate_cursor(cursor, digest) if cursor else 0
+            literal_budget.prepare(where)
             params = [
                 *expr_params,
-                *occurrence_params,
+                *ns_params,
                 *expr_params,
                 *rows_params,
                 limit + 1,

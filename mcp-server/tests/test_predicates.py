@@ -21,6 +21,7 @@ from src.lib.predicates import (
     SENT_CLOCK_SQL,
     Evaluability,
     Leaf,
+    WhereLeaf,
     compile_leaves,
     inferred_address_leaf,
     leaf_digest,
@@ -354,6 +355,7 @@ _SAMPLES: dict[str, object] = {
     "address": "jane@example.test",
     "text": "budget",
     "words": ("budget", "plan"),
+    "literal phrase": "budget plan",
     "MIME type": "application/pdf",
     "folders": ("INBOX", "Archive"),
     "instant": "2024-01-01T00:00:00+00:00",
@@ -381,6 +383,12 @@ _NOT_BUILT: dict[str, str] = {
         "domain_is",
         "subject_contains",
         "attachment_text_words",
+        "body_phrase",
+        "authored_body_phrase",
+        "quote_phrase",
+        "signature_phrase",
+        "forwarded_phrase",
+        "attachment_text_phrase",
         "attachment_content_type_is",
         "header_exists",
         "header_contains",
@@ -487,7 +495,7 @@ class TestLeafRegistry:
 
     def test_registry_is_keyed_by_leaf_name(self):
         assert all(name == kind.name for name, kind in LEAVES.items())
-        assert len(LEAVES) == 35
+        assert len(LEAVES) == 41
 
     @pytest.mark.parametrize("name", sorted(LEAVES))
     def test_leaf_compiles_with_a_rule_and_a_docs_entry(self, name, mixed_db):
@@ -510,7 +518,11 @@ class TestLeafRegistry:
         )
         assert sql.count("?") == len(params)
         # The fragment runs as written against the schema.
-        with closing(mixed_db._connect()) as conn:
+        from src.lib.literal import QueryBudget
+
+        with closing(mixed_db._connect()) as conn, QueryBudget(conn) as budget:
+            if name.endswith("_phrase"):
+                budget.prepare([WhereLeaf("all[0]", None, Leaf(name, _SAMPLES[kind.param]), 0)])
             from src.lib.list_metadata import with_metadata
 
             metadata = (kind.normalized_metadata,) if kind.normalized_metadata else ()
@@ -1061,6 +1073,12 @@ class TestClockSizeAndRepliedLeaves:
             "body_words",
             "subject_contains",
             "attachment_text_words",
+            "body_phrase",
+            "authored_body_phrase",
+            "quote_phrase",
+            "signature_phrase",
+            "forwarded_phrase",
+            "attachment_text_phrase",
             "attachment_content_type_is",
             "header_exists",
             "header_contains",

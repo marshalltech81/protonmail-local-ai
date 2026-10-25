@@ -30,6 +30,9 @@ CREATE TABLE attachment_extractions (
 
 
 def _v22(db):
+    from tests.conftest import drop_literal_schema
+
+    drop_literal_schema(db._conn)
     db._conn.execute("DROP TABLE IF EXISTS authority_rule_state")
     db._conn.execute("DROP TABLE attachment_extractions")
     db._conn.execute(_V22_CACHE)
@@ -94,7 +97,9 @@ def test_v22_cache_migration_preserves_every_value_and_rowid(tmp_path):
             actual = migrated.get_attachment_extraction(expected["attachment_id"], "text")
             assert actual is not None
             assert dict(actual) == {key: value for key, value in expected.items() if key != "rowid"}
-        assert migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+        assert (
+            migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+        )  # This fixture has cache rows but no indexed files to backfill.
     finally:
         migrated.close()
         fresh.close()
