@@ -103,6 +103,17 @@ def _field_value(raw: bytes, name: bytes) -> bytes | None:
 
 
 @dataclass(frozen=True)
+class Observation:
+    """One tracked message seen in a snapshot: where, and under which UID."""
+
+    label: str
+    token: str
+    folder: str
+    uid: int
+    uidvalidity: int
+
+
+@dataclass(frozen=True)
 class Snap:
     probe_key: str
     gluon: bytes | None
@@ -150,6 +161,8 @@ class Driver:
         account_stage: bool = True,
         isolation_checked: bool = False,
         tls_checked: bool = False,
+        sender: str = fixtures.SENDER,
+        recipient: str = fixtures.RECIPIENT,
     ) -> None:
         if account_stage:
             inputs.require_service_frozen()  # refused before anything runs
@@ -167,7 +180,19 @@ class Driver:
         self._probe0 = self.probe
         self._key = secrets.token_bytes(32)
         self._clocks = inputs.group_clocks(self.limits)
-        self._allowed = {d.lower() for d in inputs.fixtures["allowed_domains"]}
+        # The run's own From and To addresses (never committed); the allowed
+        # domains are theirs, so a test message from any other domain stops
+        # the run. Unset, the frozen placeholder domains apply (dry run).
+        try:
+            self._fx = fixtures.bind(sender, recipient)
+            configured = (sender, recipient) != (fixtures.SENDER, fixtures.RECIPIENT)
+            self._allowed = (
+                {fixtures.domain_of(sender), fixtures.domain_of(recipient)}
+                if configured
+                else {d.lower() for d in inputs.fixtures["allowed_domains"]}
+            )
+        except fixtures.FixtureError:
+            raise Refused("frozen_inputs_invalid") from None
         self._group = "start"
         self._group_clock: runner.GroupClock | None = None
         self._timings: dict[str, float] = {}
@@ -179,7 +204,7 @@ class Driver:
         self._ordinary: Counter[str] = Counter()
         self._recovered: Counter[str] = Counter()
         self.snapshots: list[str] = []  # the labels of snapshots taken, in order
-        self._continuity: dict[str, list[tuple[str, int, int]]] = {}
+        self._observations: list[Observation] = []  # G8's continuity log, in order
         self._isolation_checked, self._tls_checked = isolation_checked, tls_checked
         self._preflight_fixtures()  # refused before any account activity
 
@@ -206,13 +231,13 @@ class Driver:
         ) -> Iterator[tuple[Callable[..., bytes], str, int, dict]]:
             """Numbers 1..count, multipart up to ``multipart``, plain after."""
             cut = min(multipart, count)
-            yield from widths(group, 1, cut, fixtures.control_message, size=size, multipart=True)
+            yield from widths(group, 1, cut, self._fx.control_message, size=size, multipart=True)
             yield from widths(
-                group, cut + 1, count, fixtures.control_message, size=size, multipart=False
+                group, cut + 1, count, self._fx.control_message, size=size, multipart=False
             )
 
         g = self.inputs.fixtures["groups"]
-        ctrl = fixtures.control_message
+        ctrl = self._fx.control_message
         yield from widths(
             "g1", 1, g["g1"]["control"] + g["g1"]["incremental"], ctrl, size=g["g1"]["size"]
         )
@@ -220,7 +245,7 @@ class Driver:
         kinds, period = g2["kinds"], g2["per_route"]
         for index in range(len(g2["routes"])):
             yield (
-                fixtures.forged_message,
+                self._fx.forged_message,
                 self._gid("g2"),
                 900 + index,
                 {
@@ -241,7 +266,7 @@ class Driver:
                 n = low - r + (i if i < period else period + j)
                 if n <= high:
                     yield (
-                        fixtures.forged_message,
+                        self._fx.forged_message,
                         self._gid("g2"),
                         n,
                         {
@@ -254,11 +279,11 @@ class Driver:
         g5 = g["g5"]
         yield ctrl, self._gid("g5"), 1, {"size": g5["size"]}
         yield from widths(
-            "g5", 100, 99 + len(g5["h11"]), fixtures.forged_message, kind="forged", size=g5["size"]
+            "g5", 100, 99 + len(g5["h11"]), self._fx.forged_message, kind="forged", size=g5["size"]
         )
         g6 = g["g6"]
         for n in fixtures.width_representatives(1, g6["messages"]):
-            yield fixtures.g6_message, self._gid("g6"), n, {"size": g6["message_bytes"]}
+            yield self._fx.g6_message, self._gid("g6"), n, {"size": g6["message_bytes"]}
         g7 = g["g7"]
         yield from split(
             "g7", g7["tracked_multipart"] + g7["tracked_plain"], g7["tracked_multipart"], g7["size"]
@@ -407,7 +432,9 @@ class Driver:
         seen = self.probe.observe(item.raw, item.folder, token=key)
         bucket = self._recovered if item.folder == "Recovered Messages" else self._ordinary
         bucket[seen.reason or "unavailable"] += 1
-        self._continuity.setdefault(token, []).append((item.folder, item.uid, item.uidvalidity))
+        self._observations.append(
+            Observation(label, token, item.folder, item.uid, item.uidvalidity)
+        )
         return key
 
     def _snapshot(self, label: str, tokens: Sequence[str], folders: Sequence[str]) -> dict:
@@ -498,7 +525,7 @@ class Driver:
     def _g1(self) -> None:
         plan, run = self._plan("g1"), self._gid("g1")
         first = [
-            fixtures.control_message(run, n, size=plan["size"])
+            self._fx.control_message(run, n, size=plan["size"])
             for n in range(1, plan["control"] + 1)
         ]
         for raw in first:
@@ -506,7 +533,7 @@ class Driver:
         tokens = {self._token_of(r) for r in first}
         served = self._converge({t for t in tokens if t}, "INBOX", ("P1",))
         more = [
-            fixtures.control_message(run, n, size=plan["size"])
+            self._fx.control_message(run, n, size=plan["size"])
             for n in range(plan["control"] + 1, plan["control"] + 1 + plan["incremental"])
         ]
         for raw in more:
@@ -536,7 +563,7 @@ class Driver:
         survived_internal = survived_gluon = False
         preserved_routes: list[str] = []
         for index, route in enumerate(plan["routes"]):
-            check = fixtures.forged_message(run, 900 + index, plan["kinds"][0], size=plan["size"])
+            check = self._fx.forged_message(run, 900 + index, plan["kinds"][0], size=plan["size"])
             self.budget.attempt()
             self._checkpoint()
             result = self.world.route_preserves(route, check)
@@ -552,7 +579,7 @@ class Driver:
             for i in range(plan["per_route"]):
                 n = index * plan["per_route"] + i + 1
                 kind = plan["kinds"][i % len(plan["kinds"])]
-                raw = fixtures.forged_message(run, n, kind, size=plan["size"])
+                raw = self._fx.forged_message(run, n, kind, size=plan["size"])
                 self._send(route, raw)
                 token = self._token_of(raw)
                 assert token
@@ -587,7 +614,7 @@ class Driver:
     def _g3(self) -> None:
         plan, run = self._plan("g3"), self._gid("g3")
         raws = [
-            fixtures.control_message(run, n, size=plan["size"], multipart=n <= plan["multipart"])
+            self._fx.control_message(run, n, size=plan["size"], multipart=n <= plan["multipart"])
             for n in range(1, plan["messages"] + 1)
         ]
         for raw in raws:
@@ -624,7 +651,7 @@ class Driver:
         replaced = kept = True
         unknown = False
         for n in range(1, plan["drafts"] + 1):
-            raw = fixtures.control_message(run, n, size=plan["size"])
+            raw = self._fx.control_message(run, n, size=plan["size"])
             self._append(raw, "Drafts")
             token = self._token_of(raw)
             assert token
@@ -667,7 +694,7 @@ class Driver:
 
     def _g5(self) -> None:
         plan, run = self._plan("g5"), self._gid("g5")
-        same = fixtures.control_message(run, 1, size=plan["size"])
+        same = self._fx.control_message(run, 1, size=plan["size"])
         for _ in range(plan["identical_appends"]):
             self._append(same, "INBOX")
         token = self._token_of(same)
@@ -688,7 +715,7 @@ class Driver:
         distinct = not unknown
         self._mark("P5", "observed" if distinct else "unobservable")
         for number, case in enumerate(plan["h11"], start=100):
-            raw = fixtures.forged_message(run, number, "forged", size=plan["size"])
+            raw = self._fx.forged_message(run, number, "forged", size=plan["size"])
             self._register(raw)
             self.budget.attempt()
             self._checkpoint()
@@ -718,7 +745,7 @@ class Driver:
         plan, run = self._plan("g6"), self._gid("g6")
         tokens: set[str] = set()
         for index, raw in enumerate(
-            fixtures.g6_messages(run, plan["messages"], plan["message_bytes"]), start=1
+            self._fx.g6_messages(run, plan["messages"], plan["message_bytes"]), start=1
         ):
             self.budget.add_unique(len(raw))
             self._append(raw, "G6")
@@ -779,7 +806,7 @@ class Driver:
     def _g7(self) -> None:
         plan, run = self._plan("g7"), self._gid("g7")
         raws = [
-            fixtures.control_message(
+            self._fx.control_message(
                 run, n, size=plan["size"], multipart=n <= plan["tracked_multipart"]
             )
             for n in range(1, plan["tracked_multipart"] + plan["tracked_plain"] + 1)
@@ -851,7 +878,7 @@ class Driver:
         self._mark("P3", "observed" if ok else "failed")
         if plan.get("spam_probe"):
             run = self._gid("g8")
-            raws = [fixtures.control_message(run, n, size=2048) for n in (1, 2)]
+            raws = [self._fx.control_message(run, n, size=2048) for n in (1, 2)]
             for raw in raws:
                 self._send("B", raw)
             tokens = [t for t in (self._token_of(r) for r in raws) if t]
@@ -864,14 +891,41 @@ class Driver:
             spam = self._read("Spam")
             places = [(s.folder, s.uid, s.uidvalidity) for s in spam]
             ok &= len(places) == len(set(places))  # a UID is never handed out twice
-        # Continuity over G3 to G7: within one mailbox and UIDVALIDITY a UID
-        # names one message.
-        owners: dict[tuple[str, int, int], str] = {}
-        for token, seen in self._continuity.items():
-            for place in seen:
-                if owners.setdefault(place, token) != token:
-                    ok = False
+        ok &= self._continuous()
         self._mark("P3", "observed" if ok else "failed")
+
+    def _continuous(self) -> bool:
+        """UID and UIDVALIDITY continuity over every snapshot of G3 to G8.
+
+        Within one mailbox and UIDVALIDITY a UID names one message; a
+        message's UID in a mailbox never moves backwards; a mailbox's
+        UIDVALIDITY changes only in the snapshot that follows the re-add
+        step (the G7 step expecting UIDVALIDITY to change). Copies of one
+        token in a snapshot (``.duplicate.``) are separate messages and do
+        not take part in the ordering rule.
+        """
+        readd = {
+            f"g7.{step['id']}.after"
+            for step in self.inputs.g7_steps
+            if step["expect"].get("uidvalidity") == "changed"
+        }
+        owners: dict[tuple[str, int, int], str] = {}
+        newest: dict[tuple[str, str, int], int] = {}
+        validity: dict[str, int] = {}
+        for o in self._observations:
+            if owners.setdefault((o.folder, o.uid, o.uidvalidity), o.token) != o.token:
+                return False
+            if validity.setdefault(o.folder, o.uidvalidity) != o.uidvalidity:
+                if o.label not in readd:
+                    return False
+                validity[o.folder] = o.uidvalidity
+            if ".duplicate." in o.label:
+                continue
+            key = (o.token, o.folder, o.uidvalidity)
+            if o.uid < newest.get(key, 0):
+                return False
+            newest[key] = o.uid
+        return True
 
     # ---- run -------------------------------------------------------
 

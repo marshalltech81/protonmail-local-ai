@@ -2,7 +2,8 @@
 
 Every message is ASCII with CRLF line endings only (P11), carries a
 correlation token ("SYNTH-<run>-<n>") in its subject and body, and uses
-``.example`` addresses. The G6 set is generated on demand and never kept.
+``.example`` placeholder addresses unless the run supplies its own (#1784).
+The G6 set is generated on demand and never kept.
 """
 
 from __future__ import annotations
@@ -10,18 +11,35 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 PLAIN_MAX_BYTES = 64 * 1024
 G6_COUNT = 200
 G6_MESSAGE_BYTES = 256 * 1024  # 200 x 256 KiB = 52,428,800 bytes of unique payload
 
+SENDER = "sender@sender.example"
+RECIPIENT = "recipient@mail.example"
+
 _RUN = re.compile(r"[A-Za-z0-9]{1,16}")
 FORGED_KINDS = ("forged", "duplicated", "conflicting")
+_ADDRESS = re.compile(r"[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63}){1,8}")
 _LINE = 76  # filler line length, before CRLF
 
 
 class FixtureError(ValueError):
     """The generator cannot build the requested message; the text is fixed."""
+
+
+def check_address(address: str) -> str:
+    """The address, if it is a plain ASCII ``local@host.tld`` that cannot
+    alter a header; the refusal text never repeats it."""
+    if not _ADDRESS.fullmatch(address):
+        raise FixtureError("an address is plain ASCII local@host.domain")
+    return address
+
+
+def domain_of(address: str) -> str:
+    return check_address(address).rsplit("@", 1)[1].lower()
 
 
 def width_representatives(low: int, high: int) -> list[int]:
@@ -85,18 +103,29 @@ def _identity_fields(run: str, n: int, kind: str) -> list[str]:
     return [f"X-Pm-Internal-Id: {v}" for v in internal] + [f"X-Pm-Gluon-Id: {v}" for v in gluon]
 
 
-def _build(run: str, n: int, *, size: int, multipart: bool, extra: list[str], cap: int) -> bytes:
+def _build(
+    run: str,
+    n: int,
+    *,
+    size: int,
+    multipart: bool,
+    extra: list[str],
+    cap: int,
+    sender: str,
+    recipient: str,
+) -> bytes:
     _check_run(run)
+    sender, recipient = check_address(sender), check_address(recipient)
     if not 0 < size <= cap:
         raise FixtureError("size is positive and within the cap for this fixture")
     tok = token(run, n)
     boundary = f"SYNTHBOUNDARY{run}x{n}"
     head = [
-        "From: Synthetic Sender <sender@sender.example>",
-        "To: Synthetic Recipient <recipient@mail.example>",
+        f"From: Synthetic Sender <{sender}>",
+        f"To: Synthetic Recipient <{recipient}>",
         f"Subject: {tok}",
         "Date: Mon, 01 Jan 2024 12:00:00 +0000",
-        f"Message-ID: <synth-{run}-{n}@sender.example>",
+        f"Message-ID: <synth-{run}-{n}@{sender.rsplit('@', 1)[1]}>",
         *extra,
         "MIME-Version: 1.0",
     ]
@@ -119,13 +148,37 @@ def _build(run: str, n: int, *, size: int, multipart: bool, extra: list[str], ca
     return raw
 
 
-def control_message(run: str, n: int, *, size: int = 2048, multipart: bool = False) -> bytes:
+def control_message(
+    run: str,
+    n: int,
+    *,
+    size: int = 2048,
+    multipart: bool = False,
+    sender: str = SENDER,
+    recipient: str = RECIPIENT,
+) -> bytes:
     """Ordinary mail with no identity field (Bridge adds its own on delivery)."""
-    return _build(run, n, size=size, multipart=multipart, extra=[], cap=PLAIN_MAX_BYTES)
+    return _build(
+        run,
+        n,
+        size=size,
+        multipart=multipart,
+        extra=[],
+        cap=PLAIN_MAX_BYTES,
+        sender=sender,
+        recipient=recipient,
+    )
 
 
 def forged_message(
-    run: str, n: int, kind: str, *, size: int = 2048, multipart: bool = False
+    run: str,
+    n: int,
+    kind: str,
+    *,
+    size: int = 2048,
+    multipart: bool = False,
+    sender: str = SENDER,
+    recipient: str = RECIPIENT,
 ) -> bytes:
     """Mail carrying forged, duplicated or conflicting ``X-Pm-*`` fields."""
     return _build(
@@ -135,15 +188,56 @@ def forged_message(
         multipart=multipart,
         extra=_identity_fields(run, n, kind),
         cap=PLAIN_MAX_BYTES,
+        sender=sender,
+        recipient=recipient,
     )
 
 
-def g6_message(run: str, n: int, *, size: int = G6_MESSAGE_BYTES) -> bytes:
-    return _build(run, n, size=size, multipart=False, extra=[], cap=G6_MESSAGE_BYTES)
+def g6_message(
+    run: str,
+    n: int,
+    *,
+    size: int = G6_MESSAGE_BYTES,
+    sender: str = SENDER,
+    recipient: str = RECIPIENT,
+) -> bytes:
+    return _build(
+        run,
+        n,
+        size=size,
+        multipart=False,
+        extra=[],
+        cap=G6_MESSAGE_BYTES,
+        sender=sender,
+        recipient=recipient,
+    )
 
 
-def g6_messages(run: str, count: int = G6_COUNT, size: int = G6_MESSAGE_BYTES) -> Iterator[bytes]:
+def g6_messages(
+    run: str,
+    count: int = G6_COUNT,
+    size: int = G6_MESSAGE_BYTES,
+    *,
+    sender: str = SENDER,
+    recipient: str = RECIPIENT,
+) -> Iterator[bytes]:
     """The G6 workload, one message at a time: nothing is kept between
     yields, so the set is never in memory or on disk as a whole."""
     for n in range(1, count + 1):
-        yield g6_message(run, n, size=size)
+        yield g6_message(run, n, size=size, sender=sender, recipient=recipient)
+
+
+def bind(sender: str, recipient: str) -> SimpleNamespace:
+    """The four generators with the run's own From and To addresses.
+
+    Each call looks the generator up by name, so a replaced module function
+    is the one a run uses.
+    """
+    check_address(sender), check_address(recipient)
+    fixed = {"sender": sender, "recipient": recipient}
+    return SimpleNamespace(
+        control_message=lambda *a, **k: control_message(*a, **k, **fixed),
+        forged_message=lambda *a, **k: forged_message(*a, **k, **fixed),
+        g6_message=lambda *a, **k: g6_message(*a, **k, **fixed),
+        g6_messages=lambda *a, **k: g6_messages(*a, **k, **fixed),
+    )

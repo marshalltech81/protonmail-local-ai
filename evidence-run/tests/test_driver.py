@@ -562,14 +562,54 @@ def test_g7_missing_baseline_is_unobservable(inputs, count, monkeypatch):
     assert result.export["counts"]["steps_unobservable"] == len(inputs.g7_steps)
 
 
-def test_g8_checks_all_uid_history(inputs):
+def _g8_with(inputs, observations):
     drv, _ = _run(inputs, groups=())
-    drv._continuity = {
-        "a": [("INBOX", 1, 1), ("INBOX", 2, 1)],
-        "b": [("INBOX", 1, 1), ("INBOX", 3, 1)],
-    }
-    result = drv.run(("g8",))
-    assert result.stop == ("prediction_failed", "g8")
+    drv._observations = [driver.Observation(*o) for o in observations]
+    return drv.run(("g8",))
+
+
+READD = "g7.g.after"  # the frozen step whose UIDVALIDITY is expected to change
+
+
+@pytest.mark.parametrize(
+    "observations,failed",
+    [
+        # one UID names one message within a mailbox and UIDVALIDITY
+        ([("s1", "a", "Archive", 1, 1), ("s2", "b", "Archive", 1, 1)], True),
+        ([("s1", "a", "Archive", 1, 1), ("s2", "a", "Archive", 1, 1)], False),
+        ([("s1", "a", "Archive", 1, 1), ("s2", "b", "Folder", 1, 1)], False),
+        # a message's UID in a mailbox never moves backwards
+        ([("s1", "a", "Archive", 5, 1), ("s2", "a", "Archive", 3, 1)], True),
+        ([("s1", "a", "Archive", 3, 1), ("s2", "a", "Archive", 5, 1)], False),
+        # UIDVALIDITY changes only at the re-add step
+        ([("s1", "a", "Archive", 1, 1), ("s2", "a", "Archive", 1, 2)], True),
+        ([("s1", "a", "Archive", 1, 1), (READD, "a", "Archive", 1, 2)], False),
+        (
+            [
+                ("s1", "a", "Archive", 1, 1),
+                (READD, "a", "Archive", 1, 2),
+                ("s3", "a", "Archive", 1, 3),
+            ],
+            True,
+        ),
+        # a new UIDVALIDITY starts its own UID space
+        ([("s1", "a", "Archive", 9, 1), (READD, "a", "Archive", 1, 2)], False),
+        ([("s1", "a", "Archive", 9, 1), (READD, "b", "Archive", 9, 2)], False),
+        # duplicate copies of one token are not one message moving backwards
+        ([("s1", "a", "Archive", 5, 1), ("s1.duplicate.1", "a", "Archive", 3, 1)], False),
+    ],
+)
+def test_g8_continuity_is_checked_over_the_whole_log(inputs, observations, failed):
+    result = _g8_with(inputs, observations)
+    assert result.stop == (("prediction_failed", "g8") if failed else None)
+
+
+def test_g8_logs_every_snapshot_observation(inputs):
+    drv, result = _run(inputs, groups=("g3", "g8"))
+    assert result.stop is None
+    labels = {o.label for o in drv._observations}
+    assert any(label.startswith("g3.") for label in labels)
+    assert "g8.before" in labels and "g8.after" in labels
 
 
 @pytest.mark.parametrize("missing", [False, True])
@@ -981,3 +1021,62 @@ def test_identity_experiments_report_separate_gluon_evidence(inputs, group, pred
     )
     assert "SYNTHGLUON" not in json.dumps(result.export)
     export.validate_export(result.export)
+
+
+# ---- the run's own addresses (#1784) -------------------------------------
+
+LIVE = {"sender": "run.b@sender-live.test", "recipient": "run.a@mail-live.test"}
+
+
+def test_configured_addresses_are_the_fixture_parties_and_the_allowed_domains(inputs):
+    drv, result = _run(inputs, **LIVE)
+    assert result.stop is None
+    assert drv._allowed == {"sender-live.test", "mail-live.test"}
+    served = [s.raw for s in drv.world.served("INBOX")]
+    assert served and all(b"@sender-live.test>" in raw for raw in served[:1])
+    assert not any(b"sender.example" in raw for raw in served)
+
+
+def test_the_foreign_party_stop_still_fires_for_a_domain_that_is_not_configured(inputs):
+    _, result = _run(inputs, Scenario(foreign_party_after_sends=2), **LIVE)
+    _stopped(result, "foreign_party", "g1")
+
+
+def test_the_placeholder_domains_are_foreign_once_real_addresses_are_configured(inputs):
+    class Placeholder(SimulatedWorld):
+        def served(self, folder=None):
+            out = super().served(folder)
+            return [
+                s.__class__(
+                    s.folder,
+                    s.uid,
+                    s.uidvalidity,
+                    s.flags,
+                    s.raw.replace(b"sender-live.test", b"sender.example"),
+                    s.file_bytes,
+                )
+                for s in out
+            ]
+
+    _, result = _run(inputs, world=Placeholder(), **LIVE)
+    _stopped(result, "foreign_party", "g1")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "no-at-sign",
+        "a@b",
+        "a b@c.test",
+        "a@c.test\r\nBcc: x@y.test",
+        "<a@c.test>",
+        "a@c.test,d@e.test",
+        "",
+    ],
+)
+def test_a_malformed_configured_address_is_refused_before_any_activity(inputs, bad):
+    world = SimulatedWorld()
+    with pytest.raises(Refused) as refused:
+        _run(inputs, world=world, sender=bad, recipient=LIVE["recipient"])
+    assert refused.value.token == "frozen_inputs_invalid"
+    assert world.mutate_log == [] and world.sends == 0
