@@ -38,7 +38,7 @@ def _capture(db, monkeypatch):
     return statements, connect
 
 
-@pytest.mark.parametrize("basis", ["sent", "occurred"])
+@pytest.mark.parametrize("basis", ["sent", "occurred", "effective"])
 @pytest.mark.parametrize("bounded", [False, True])
 def test_real_cursor_page_seeks_through_large_timestamp_ties(tmp_path, monkeypatch, basis, bounded):
     work = []
@@ -86,6 +86,16 @@ def test_real_cursor_page_seeks_through_large_timestamp_ties(tmp_path, monkeypat
         if bounded:
             kwargs.update(date_from="2023-01-01", date_to="2025-01-01")
         first = db.query_messages(**kwargs)
+        assert first.total_matches == size + 1
+        first_sql, first_params = next(
+            s for s in statements if s[0].startswith("SELECT m.message_id")
+        )
+        with closing(connect()) as reader:
+            first_plan = " ".join(
+                r[3] for r in reader.execute("EXPLAIN QUERY PLAN " + first_sql, first_params)
+            )
+            assert f"idx_messages_{basis}" in first_plan
+            assert "TEMP B-TREE" not in first_plan
         payload = json.loads(
             base64.urlsafe_b64decode(first.next_cursor + "=" * (-len(first.next_cursor) % 4))
         )

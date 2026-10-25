@@ -13,7 +13,7 @@ from src.lib.sqlite import _clock_page_predicate, _message_expression
 
 class RuntimeClockIndexes(unittest.TestCase):
     def test_tuple_seeks_and_unchanged_count_plans(self):
-        work = {"sent": [], "occurred": []}
+        work = {"sent": [], "occurred": [], "effective": []}
         for size in (5000, 50000):
             conn = sqlite3.connect(":memory:")
             try:
@@ -32,7 +32,8 @@ class RuntimeClockIndexes(unittest.TestCase):
                 conn.execute(
                     "CREATE TABLE messages (claimant_id TEXT PRIMARY KEY, sent_at TEXT, "
                     "sent_at_status TEXT, occurred_at TEXT, subject TEXT, "
-                    "subject_complete INTEGER DEFAULT 1)"
+                    "subject_complete INTEGER DEFAULT 1, "
+                    "effective_at TEXT GENERATED ALWAYS AS (COALESCE(occurred_at, sent_at)) VIRTUAL)"
                 )
                 conn.execute(
                     "CREATE TABLE message_occurrences (id INTEGER PRIMARY KEY, "
@@ -59,7 +60,7 @@ class RuntimeClockIndexes(unittest.TestCase):
                     ((f"claim-{i:06d}",) for i in range(size)),
                 )
                 conn.create_function("mcp_casefold", 1, str.casefold, deterministic=True)
-                for basis_name in ("sent", "occurred"):
+                for basis_name in ("sent", "occurred", "effective"):
                     basis = DATE_BASES[basis_name]
                     for filters in (
                         {},
@@ -101,15 +102,17 @@ class RuntimeClockIndexes(unittest.TestCase):
                             if basis_name == "sent"
                             else "(occurred_at IS NOT NULL) = 1"
                         )
-                        clock = "sent_at" if basis_name == "sent" else "occurred_at"
+                        clock = f"{basis_name}_at"
                         conn.execute(
-                            f"CREATE INDEX {index} ON messages({clock}, claimant_id) WHERE {guard}"
+                            f"CREATE INDEX {index} ON messages({clock}, claimant_id)"
+                            + (f" WHERE {guard}" if basis_name != "effective" else "")
                         )
                         after = [
                             r[3]
                             for r in conn.execute("EXPLAIN QUERY PLAN " + count_sql + " ", params)
                         ]
-                        self.assertEqual(before, after)
+                        if basis_name != "effective":
+                            self.assertEqual(before, after)
                         self.assertEqual(conn.execute(count_sql, params).fetchone()[0], size)
                         page_where, page_params = _clock_page_predicate(
                             where, params, basis, leaves, has_cursor=True

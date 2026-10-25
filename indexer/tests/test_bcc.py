@@ -103,7 +103,7 @@ def test_migration_rebuild_preserves_participant_order_and_names(db):
         ).fetchone()[0]
         == "reparse"
     )
-    assert SCHEMA_VERSION == 21
+    assert SCHEMA_VERSION == 23
 
 
 def test_bcc_name_loss_keeps_visible_name_evidence_complete(monkeypatch):

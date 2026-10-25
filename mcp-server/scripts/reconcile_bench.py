@@ -143,7 +143,7 @@ CREATE TABLE messages (
 CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
 CREATE INDEX idx_messages_message_effective ON messages(message_id, effective_at, claimant_id);
 CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
-CREATE INDEX idx_messages_effective ON messages(effective_at);
+CREATE INDEX idx_messages_effective ON messages(effective_at, claimant_id);
 CREATE INDEX idx_messages_content_hash ON messages(content_hash);
 CREATE INDEX idx_messages_sent ON messages(sent_at, claimant_id)
     WHERE sent_at_status = 'parsed';
@@ -230,7 +230,6 @@ CREATE TABLE attachment_extractions (
     extractor_module   TEXT NOT NULL,
     extraction_status  TEXT NOT NULL,
     extractor          TEXT,
-    extracted_text     TEXT,
     extraction_error   TEXT,
     extracted_at       TEXT NOT NULL,
     ocr_pages_skipped  INTEGER CHECK (ocr_pages_skipped >= 0),
@@ -239,6 +238,7 @@ CREATE TABLE attachment_extractions (
     digital_pages_cap  INTEGER CHECK (digital_pages_cap >= 0),
     extracted_chars_cap INTEGER CHECK (extracted_chars_cap >= 0),
     identifier         TEXT,
+    extracted_text     TEXT,
     PRIMARY KEY (attachment_id, extractor_module)
 );
 CREATE TABLE pending_deletions (

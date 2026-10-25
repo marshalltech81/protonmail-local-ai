@@ -125,8 +125,8 @@ class TestSchema:
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        the current version (v21), skipping the migration files."""
-        assert SCHEMA_VERSION == 21
+        the current version (v23), skipping the migration files."""
+        assert SCHEMA_VERSION == 23
         assert (
             db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         )
@@ -161,8 +161,8 @@ class TestSchema:
 
     def test_database_from_the_old_numbering_fails_with_rebuild_instructions(self, tmp_path):
         """Before the renumber the baseline was v21 and the latest v22.
-        Such a database now reads as newer than the code and must fail
-        closed with the volume-wipe step."""
+        Such a database has no application ID and must fail closed
+        with the volume-wipe step, even when its version overlaps."""
         db_path = tmp_path / "v22.db"
         Database(db_path, account=TEST_ACCOUNT).close()
         import sqlite3
@@ -170,6 +170,7 @@ class TestSchema:
         conn = sqlite3.connect(str(db_path))
         try:
             conn.execute("UPDATE schema_version SET version = 22")
+            conn.execute("PRAGMA application_id = 0")
             conn.commit()
         finally:
             conn.close()
@@ -327,10 +328,7 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert (
-            "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
-            in caplog.text
-        )
+        assert f"applied migrations: {list(range(1, SCHEMA_VERSION + 1))}" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -903,10 +901,7 @@ class TestMigrationV6:
         finally:
             migrated.close()
             fresh.close()
-        assert (
-            "applied migrations: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
-            in caplog.text
-        )
+        assert f"applied migrations: {list(range(6, SCHEMA_VERSION + 1))}" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
     @pytest.mark.parametrize("table, column", [c for c in _V6_COLUMNS if c[1] == "text_complete"])
@@ -1196,7 +1191,7 @@ class TestMigrationV12:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21]" in caplog.text
+        assert f"applied migrations: {list(range(12, SCHEMA_VERSION + 1))}" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
 
@@ -1241,7 +1236,7 @@ class TestMigrationV11:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]" in caplog.text
+        assert f"applied migrations: {list(range(11, SCHEMA_VERSION + 1))}" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
 
@@ -1287,7 +1282,7 @@ class TestMigrationV10:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]" in caplog.text
+        assert f"applied migrations: {list(range(10, SCHEMA_VERSION + 1))}" in caplog.text
 
 
 class TestMigrationV9:
@@ -1327,9 +1322,7 @@ class TestMigrationV9:
         finally:
             migrated.close()
             fresh.close()
-        assert (
-            "applied migrations: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]" in caplog.text
-        )
+        assert f"applied migrations: {list(range(9, SCHEMA_VERSION + 1))}" in caplog.text
 
 
 class TestMigrationV8:
@@ -1438,10 +1431,7 @@ class TestMigrationV8:
         finally:
             migrated.close()
             fresh.close()
-        assert (
-            "applied migrations: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
-            in caplog.text
-        )
+        assert f"applied migrations: {list(range(8, SCHEMA_VERSION + 1))}" in caplog.text
         assert "SYNTHETIC_V8_MARKER" not in caplog.text
 
     def test_a_failed_rebuild_leaves_v7_intact(self, tmp_path):
@@ -1513,10 +1503,7 @@ class TestMigrationV7:
         finally:
             migrated.close()
             fresh.close()
-        assert (
-            "applied migrations: [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
-            in caplog.text
-        )
+        assert f"applied migrations: {list(range(7, SCHEMA_VERSION + 1))}" in caplog.text
 
 
 class TestAttachmentTextCompleteness:
@@ -1639,10 +1626,7 @@ class TestMigrationV5:
         finally:
             migrated.close()
             fresh.close()
-        assert (
-            "applied migrations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
-            in caplog.text
-        )
+        assert f"applied migrations: {list(range(5, SCHEMA_VERSION + 1))}" in caplog.text
 
     @pytest.mark.parametrize("column", [c for c in _V5_COLUMNS if c != "caps_json"])
     def test_the_flag_columns_reject_other_values(self, db, column):
@@ -1772,10 +1756,7 @@ class TestMigrationV2:
         finally:
             migrated.close()
             fresh.close()
-        assert (
-            "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
-            in caplog.text
-        )
+        assert f"applied migrations: {list(range(2, SCHEMA_VERSION + 1))}" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
         db = Database(tmp_path / "v1.db", account=TEST_ACCOUNT)
@@ -1827,10 +1808,7 @@ class TestMigrationV3:
         finally:
             migrated.close()
             fresh.close()
-        assert (
-            "applied migrations: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]"
-            in caplog.text
-        )
+        assert f"applied migrations: {list(range(3, SCHEMA_VERSION + 1))}" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path, monkeypatch):
@@ -5143,7 +5121,7 @@ class TestOccurredAt:
                 " AND name LIKE 'idx_%'"
             )
         }
-        assert indexes["idx_messages_effective"] == ["effective_at"]
+        assert indexes["idx_messages_effective"] == ["effective_at", "claimant_id"]
         assert indexes["idx_messages_thread_effective"] == ["thread_id", "effective_at"]
         # The folder index went with the column (#1568): folders are the
         # occurrences'.
