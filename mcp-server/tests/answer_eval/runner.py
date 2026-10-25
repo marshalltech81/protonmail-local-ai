@@ -190,7 +190,7 @@ class RecordingInference:
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
-        self.mode = inner.mode
+        self.mode = getattr(inner, "mode", "")
         self.base_url = getattr(inner, "base_url", "")
         # ``extract_from_emails`` reads this before sending a schema (#808).
         self.structured_output = getattr(inner, "structured_output", False)

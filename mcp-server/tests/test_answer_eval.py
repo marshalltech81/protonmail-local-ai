@@ -2900,3 +2900,23 @@ class TestTokenUsageReports:
         assert outcome.status == "error"
         assert outcome.calls[0].usage["input_tokens"] == 25
         assert outcome.calls[0].usage["output_tokens"] == 9
+
+    def test_judge_accepts_a_minimal_client_without_mode(self):
+        async def complete(system, user):
+            return "{}"
+
+        outcome = asyncio.run(
+            judge_answer(
+                SimpleNamespace(complete=complete),
+                _judge_config(),
+                CASES["ask-roof-total"],
+                "answer",
+                {},
+                False,
+                statements=[],
+            )
+        )
+        assert outcome.status == "error"  # invalid verdict, not a wrapper failure
+        assert len(outcome.calls) == 1
+        assert outcome.calls[0].usage is None
+        assert outcome.calls[0].outcome == "ok"
