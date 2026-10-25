@@ -640,7 +640,7 @@ class TestScaleDownIsVisible:
             content_type="image/jpeg", filename=f"{MARKER}.jpg", payload=_jpeg((150, 150))
         )
         assert (result.status, result.text, result.text_complete) == (STATUS_SUCCESS, MARKER, False)
-        assert result.extractor == "image-ocr@8"
+        assert result.extractor == "image-ocr@9"
         lines = [
             (r.levelno, r.getMessage()) for r in caplog.records if r.name.startswith("indexer")
         ]
@@ -689,7 +689,7 @@ class TestScaleDownIsVisible:
             IMAGE_PIXEL_CEILING_ERROR,
             None,
         )
-        assert result.extractor == "image@8"
+        assert result.extractor == "image@9"
         assert IMAGE_PIXEL_CEILING_ERROR in extractors.PERMANENT_FAILURE_ERRORS
         assert "decompression bomb" not in caplog.text
         assert MARKER not in caplog.text
@@ -839,7 +839,7 @@ class TestRealChild:
             IMAGE_PIXEL_CEILING_ERROR,
             None,
         )
-        assert result.extractor == "image@8"
+        assert result.extractor == "image@9"
         assert pages == []
         assert MARKER not in caplog.text
         assert "decompression bomb" not in caplog.text
@@ -871,7 +871,7 @@ class TestRealChild:
         pages: list[int] = []
         result = _extract(_tiff(4), max_ocr_pages=2, on_progress=lambda: pages.append(1))
         assert result.status in (STATUS_SUCCESS, STATUS_EMPTY)
-        assert result.extractor == "image-ocr@8"
+        assert result.extractor == "image-ocr@9"
         assert result.text_complete is False
         assert len(pages) == 2
         assert extractors.drain_extractor_counts()["ocr_capped_images"] == 1
