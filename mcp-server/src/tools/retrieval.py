@@ -1472,7 +1472,10 @@ def register_retrieval_tools(server, db):
         definitely match, newest first, one message per row.
         ``total_matches`` counts the messages the filters definitely
         match; it is the complete count only when ``indeterminate`` is
-        0. ``indeterminate`` counts messages a filter could not decide
+        0. ``distinct_message_ids`` counts their distinct sender-controlled
+        Message-IDs in the same snapshot, not identical content. Rows and
+        ``indeterminate`` remain per claimant; no rows are grouped.
+        ``indeterminate`` counts messages a filter could not decide
         (a size bound on a message without a stored size; a sender or
         participant filter, or an authority_class filter on a message
         outside Spam and Recovered Messages whose sender is ambiguous or
@@ -1840,6 +1843,7 @@ def register_retrieval_tools(server, db):
             ],
             date_bounds=bounds,
             total_matches=page.total_matches,
+            distinct_message_ids=page.distinct_message_ids,
             indeterminate=page.indeterminate,
             returned=len(page.messages),
             offset=page.offset,
@@ -1859,6 +1863,9 @@ def register_retrieval_tools(server, db):
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}")
+        lines.append(
+            f"distinct_message_ids: {page.distinct_message_ids} (sender-controlled IDs; rows remain per claimant)"
+        )
         if page.indeterminate:
             # Stated whenever non-zero, so a count is never read as
             # complete when some messages could not be decided. Fixed

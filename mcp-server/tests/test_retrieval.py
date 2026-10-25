@@ -1634,7 +1634,8 @@ class TestQueryMessages:
         assert out.structured_content["total_matches"] == 1
         assert out.structured_content["indeterminate"] == 1
         text = _text(out)
-        assert "total_matches: 1\nindeterminate: 1 (messages the filters could neither" in text
+        assert "total_matches: 1\n" in text
+        assert "indeterminate: 1 (messages the filters could neither" in text
         assert "in neither total_matches nor the pages)" in text
         # The timing line says so too, so the log never
         # shows a call that could not decide every message as complete.
