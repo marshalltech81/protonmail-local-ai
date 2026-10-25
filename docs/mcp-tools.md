@@ -3779,7 +3779,9 @@ own sent date, chunk, `extraction_deferred`, whose prose note the
 `Findings:` lines repeat) plus `excerpt`, the first 300 characters of the
 passage text the model was shown, verbatim from the index (longer text
 is cut with a marker). The excerpt is the server's, not the model's, so
-it is not checked.
+it is not checked. Each source also carries `scope`: `in_scope` when its
+message meets the request's message filters, `context` otherwise, or `null`
+when scope was not assessed. These are server-computed labels, not model claims.
 
 Words the model quotes are checked with `ask_mailbox`'s quote checker
 (see [Quotes](#ask_mailbox) above, same rules and caps, at most 20
