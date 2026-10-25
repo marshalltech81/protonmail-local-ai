@@ -644,3 +644,45 @@ def test_unavailable_later_isolation_does_not_reuse_an_earlier_pass(inputs):
     _, result = _run(inputs, world=LaterUnavailable(), groups=("g1", "g2"))
     assert result.stop == ("world_error", "g2")
     assert result.export["booleans"]["isolation_passed"] is False
+
+
+@pytest.mark.parametrize("cold_stop", [False, True])
+def test_g6_checks_stop_signals_after_each_header_pass(inputs, cold_stop):
+    class WarningAfterPass(SimulatedWorld):
+        def __init__(self):
+            super().__init__(Scenario(cold_provable=True))
+            self.warned = False
+            self.passes = []
+            self.races = 0
+
+        def header_pass(self, *, cold):
+            self.passes.append(cold)
+            result = super().header_pass(cold=cold)
+            self.warned = cold == cold_stop
+            return result
+
+        def warnings(self):
+            return ["synthetic_warning"] if self.warned else []
+
+        def race(self, repeats):
+            self.races += 1
+            return super().race(repeats)
+
+    world = WarningAfterPass()
+    _, result = _run(inputs, world=world, groups=("g6",))
+    _stopped(result, "provider_warning", "g6")
+    assert world.passes == ([False, True] if cold_stop else [False])
+    assert world.races == 0
+
+
+@pytest.mark.parametrize("outcomes", [(), ("old",), ("unknown",) * 20])
+def test_g6_missing_or_unrecognized_race_observations_are_unobservable(inputs, outcomes):
+    from evidence_run.world import RaceResult
+
+    class IncompleteRace(SimulatedWorld):
+        def race(self, repeats):
+            return RaceResult(outcomes, False)
+
+    _, result = _run(inputs, world=IncompleteRace(), groups=("g6",))
+    assert result.stop is None
+    assert result.states["P10"] == "unobservable"

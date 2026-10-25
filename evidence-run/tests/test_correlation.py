@@ -96,3 +96,14 @@ def test_identity_shape_and_gluon_reads_cannot_use_body_headers(ending):
     )
     assert driver.header_shape(raw) == driver.Shape(0, 0, False, 0, 0)
     assert driver._field_value(raw, b"x-pm-gluon-id") is None
+
+
+def test_identity_fields_are_unfolded_before_comparisons():
+    from evidence_run import driver
+
+    raw = (
+        b"X-Pm-Gluon-Id:\r\n SYNTHFORGEDGLUON-1\r\nX-Pm-Internal-Id:\r\n SYNTHFORGED-1\r\n\r\nbody"
+    )
+    shape = driver.header_shape(raw)
+    assert (shape.forged_internal, shape.forged_gluon) == (1, 1)
+    assert driver._field_value(raw, b"x-pm-gluon-id") == b"SYNTHFORGEDGLUON-1"

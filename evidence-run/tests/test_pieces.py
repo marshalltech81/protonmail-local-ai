@@ -220,6 +220,7 @@ def _check_env(tmp_path, secret, *, served_messages):
     "mutate, expected",
     [
         (lambda raw: raw, True),  # the second address's copy kept every forged field
+        (lambda raw: raw.replace(b": SYNTHFORGED", b":\r\n SYNTHFORGED"), True),
         (
             lambda raw: raw.replace(b"X-Pm-Internal-Id: SYNTHFORGED", b"X-Dropped: SYNTHFORGED"),
             False,
@@ -399,3 +400,15 @@ def test_each_fresh_comparison_calls_the_operator_again(env):
     assert world.fresh_files("INBOX") == {}
     assert world.fresh_files("INBOX") == {}
     assert operator.downloads == ["INBOX", "INBOX"]
+
+
+def test_missing_uidvalidity_refuses_capture_instead_of_fabricating_zero(env, monkeypatch):
+    from evidence_run import tlscapture
+
+    config, _, _ = env
+    monkeypatch.setattr(
+        tlscapture, "capture_state", lambda *a, **k: tlscapture.CaptureState(None, {}, {})
+    )
+    with pytest.raises(WorldError) as refused:
+        PiecesWorld(config).served()
+    assert refused.value.token == "capture_failed"

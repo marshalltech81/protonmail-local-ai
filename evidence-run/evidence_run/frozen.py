@@ -95,13 +95,18 @@ def _read(directory: Path, name: str) -> dict[str, Any]:
 
 def _validate(predictions: dict[str, Any], fixtures: dict[str, Any]) -> None:
     rows = predictions.get("predictions")
-    if not isinstance(rows, list) or [r.get("id") for r in rows] != [f"P{n}" for n in range(1, 13)]:
+    if not isinstance(rows, list) or [
+        r.get("id") if isinstance(r, dict) else None for r in rows
+    ] != [f"P{n}" for n in range(1, 13)]:
         raise _invalid()
     for row in rows:
         if row.get("expected") != "predicted" or not row.get("text") or not row.get("basis"):
             raise _invalid()
     steps = predictions.get("g7_steps")
-    if not isinstance(steps, list) or [s.get("id") for s in steps] != _G7_ORDER:
+    if (
+        not isinstance(steps, list)
+        or [s.get("id") if isinstance(s, dict) else None for s in steps] != _G7_ORDER
+    ):
         raise _invalid()
     for step in steps:
         expect = step.get("expect")
@@ -118,9 +123,53 @@ def _validate(predictions: dict[str, Any], fixtures: dict[str, Any]) -> None:
     groups = fixtures.get("groups")
     if not isinstance(groups, dict) or set(groups) != set(GROUPS):
         raise _invalid()
-    for plan in groups.values():
-        if not (isinstance(plan.get("batches"), int) and isinstance(plan.get("operations"), int)):
+    numeric = {
+        "g1": ("control", "incremental", "size"),
+        "g2": ("per_route", "size"),
+        "g3": ("messages", "multipart", "size"),
+        "g4": ("drafts", "size"),
+        "g5": ("identical_appends", "size"),
+        "g6": ("messages", "message_bytes", "labels", "race_repeats"),
+        "g7": ("tracked_multipart", "tracked_plain", "size"),
+        "g8": (),
+    }
+    for group, keys in numeric.items():
+        plan = groups[group]
+        if not isinstance(plan, dict) or any(
+            type(plan.get(key)) is not int or plan[key] < 0
+            for key in (*keys, "batches", "operations")
+        ):
             raise _invalid()
+    sequences = (
+        ("g2", "routes", {"B", "C", "A2"}),
+        ("g2", "kinds", {"forged", "duplicated", "conflicting"}),
+        ("g3", "ops", {"move", "label_add", "label_remove", "archive", "trash", "restore", "flag"}),
+        ("g5", "h11", set(h11)),
+    )
+    for group, key, allowed in sequences:
+        values = groups[group].get(key)
+        if (
+            not isinstance(values, list)
+            or not values
+            or any(not isinstance(value, str) or value not in allowed for value in values)
+        ):
+            raise _invalid()
+    if set(groups["g5"]["h11"]) != set(h11) or not set(h11.values()) <= {
+        "rebuilt",
+        "no_trigger",
+        "reused_existing",
+        "imported",
+        "recovered_unchanged",
+        "refused",
+    }:
+        raise _invalid()
+    domains = fixtures.get("allowed_domains")
+    if (
+        not isinstance(domains, list)
+        or not domains
+        or any(not isinstance(value, str) or not value.strip() for value in domains)
+    ):
+        raise _invalid()
 
 
 def load(directory: Path | str = FROZEN_DIR) -> FrozenInputs:

@@ -145,6 +145,8 @@ class PiecesWorld:
                 )
             except (tlscapture.CaptureError, OSError) as exc:
                 raise WorldError(getattr(exc, "token", "capture_failed")) from None
+            if state.uidvalidity is None:
+                raise WorldError("capture_failed")
             files = self._files(name)
             for uid in sorted(state.messages):
                 raw = state.messages[uid]
@@ -154,7 +156,7 @@ class PiecesWorld:
                     Served(
                         name,
                         uid,
-                        state.uidvalidity or 0,
+                        state.uidvalidity,
                         state.flags.get(uid, frozenset()),
                         raw,
                         pool.pop(0) if pool else None,
@@ -207,10 +209,18 @@ class PiecesWorld:
                 return None
             for message in messages:
                 if _token(message) == wanted:
-                    head = message.split(b"\r\n\r\n", 1)[0].lower()
-                    return (
-                        b"x-pm-internal-id: synthforged-" in head
-                        and b"x-pm-gluon-id: synthforgedgluon-" in head
+                    headers = correlation.read_headers(message)
+                    if headers is None:
+                        return None
+                    return all(
+                        any(
+                            str(value).strip().startswith(prefix)
+                            for value in headers.get_all(name, [])
+                        )
+                        for name, prefix in (
+                            ("X-Pm-Internal-Id", "SYNTHFORGED-"),
+                            ("X-Pm-Gluon-Id", "SYNTHFORGEDGLUON-"),
+                        )
                     )
             self._sleep(self.config.poll_seconds)
         return None

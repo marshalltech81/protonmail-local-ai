@@ -79,9 +79,9 @@ def header_shape(raw: bytes) -> Shape:
     if headers is None:
         return Shape(0, 0, False, 0, 0)
     names, values = [], []
-    for name, value in headers.raw_items():
+    for name, value in headers.items():
         names.append(name.lower())
-        values.append(value.strip())
+        values.append(str(value).strip())
     internal = [v for n, v in zip(names, values, strict=True) if n == "x-pm-internal-id"]
     gluon = [v for n, v in zip(names, values, strict=True) if n == "x-pm-gluon-id"]
     return Shape(
@@ -97,10 +97,10 @@ def _field_value(raw: bytes, name: bytes) -> bytes | None:
     headers = correlation.read_headers(raw)
     if headers is None:
         return None
-    values = [value for key, value in headers.raw_items() if key.lower() == name.decode("ascii")]
+    values = headers.get_all(name.decode("ascii"), [])
     if len(values) != 1:
         return None
-    return values[0].strip().encode("utf-8", errors="surrogateescape")
+    return str(values[0]).strip().encode("utf-8", errors="surrogateescape")
 
 
 @dataclass(frozen=True)
@@ -581,11 +581,13 @@ class Driver:
             self._checkpoint()
         self._converge(tokens, "G6", ("P9", "P10"))
         warm = self.world.header_pass(cold=False)
+        self._checkpoint()
         ok = warm.flags_set == 0 and warm.membership_ok
         self.budget.add_transfer(warm.bytes_transferred)
         proved = False
         if self.world.can_prove_cold():
             cold = self.world.header_pass(cold=True)
+            self._checkpoint()
             proved = cold.cold_proved
             ok &= cold.flags_set == 0 and cold.membership_ok
             self.budget.add_transfer(cold.bytes_transferred)
@@ -599,7 +601,20 @@ class Driver:
         self._counts["race_neither"] = outcomes["neither"]
         self._counts["race_both"] = outcomes["both"]
         self._counts["race_one"] = outcomes["old"] + outcomes["new"]
-        self._mark("P10", "failed" if outcomes["neither"] or race.id_changed else "observed")
+        complete = len(race.outcomes) == plan["race_repeats"] and set(outcomes) <= {
+            "old",
+            "new",
+            "both",
+            "neither",
+        }
+        self._mark(
+            "P10",
+            "failed"
+            if outcomes["neither"] or race.id_changed
+            else "observed"
+            if complete
+            else "unobservable",
+        )
 
     def _g7(self) -> None:
         plan, run = self._plan("g7"), self._gid("g7")

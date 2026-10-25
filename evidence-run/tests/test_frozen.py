@@ -217,3 +217,28 @@ def test_live_is_refused_while_the_service_list_is_not_frozen(tmp_path):
     with pytest.raises(runner.Refused) as refused:
         frozen.authorize_live(token, report, inputs)
     assert refused.value.token == "service_list_not_frozen"
+
+
+@pytest.mark.parametrize(
+    "group,field", [("g2", "per_route"), ("g3", "ops"), ("g6", "race_repeats")]
+)
+def test_missing_executable_plan_fields_are_refused_before_loading(tmp_path, group, field):
+    directory = _copy(tmp_path)
+    path = directory / "fixtures.json"
+    data = json.loads(path.read_text())
+    del data["groups"][group][field]
+    path.write_text(json.dumps(data))
+    with pytest.raises(runner.Refused) as refused:
+        frozen.load(directory)
+    assert refused.value.token == "frozen_inputs_invalid"
+
+
+def test_missing_h11_expectation_is_refused_before_loading(tmp_path):
+    directory = _copy(tmp_path)
+    path = directory / "predictions.json"
+    data = json.loads(path.read_text())
+    del data["h11_expect"]["d"]
+    path.write_text(json.dumps(data))
+    with pytest.raises(runner.Refused) as refused:
+        frozen.load(directory)
+    assert refused.value.token == "frozen_inputs_invalid"
