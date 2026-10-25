@@ -426,3 +426,41 @@ def test_c_route_smtp_refusal_is_a_provider_warning(env, monkeypatch):
     with pytest.raises(WorldError) as caught:
         PiecesWorld(cfg).route_preserves("C", fixtures.forged_message("r1g2", 900, "forged"))
     assert caught.value.token == "provider_warning"
+
+
+@pytest.mark.parametrize("operation", ["read_bytes", "iterdir"])
+def test_local_maildir_io_failure_is_a_fixed_world_error(env, monkeypatch, operation):
+    from pathlib import Path
+
+    config, _, _ = env
+    path = config.maildir / "INBOX" / "cur" / "synthetic"
+    path.write_bytes(b"SYNTHETIC_PRIVATE_IO_MARKER")
+    original = getattr(Path, operation)
+
+    def fail(self, *args, **kwargs):
+        if self == (path if operation == "read_bytes" else path.parent):
+            raise OSError("SYNTHETIC_PRIVATE_IO_MARKER")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, operation, fail)
+    with pytest.raises(WorldError) as caught:
+        PiecesWorld(config)._files("INBOX")
+    assert caught.value.token == "capture_failed"
+    assert "SYNTHETIC_PRIVATE_IO_MARKER" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "contents", [None, "{invalid", '[{"unexpected":"SYNTHETIC_PRIVATE_IO_MARKER"}]']
+)
+def test_invalid_isolation_configuration_is_a_fixed_world_error(env, tmp_path, contents):
+    from dataclasses import replace
+
+    config, _, _ = env
+    path = tmp_path / "synthetic-targets.json"
+    if contents is not None:
+        path.write_text(contents)
+    cfg = replace(config, isolation_targets=path)
+    with pytest.raises(WorldError) as caught:
+        PiecesWorld(cfg).isolation_ok()
+    assert caught.value.token == "isolation_not_configured"
+    assert "SYNTHETIC_PRIVATE_IO_MARKER" not in str(caught.value)

@@ -117,17 +117,20 @@ class PiecesWorld:
     def _files(self, folder: str, root: Path | None = None) -> dict[str, list[bytes]]:
         """What isync wrote for ``folder``, by correlation token; read only."""
         out: dict[str, list[bytes]] = {}
-        for sub in ("cur", "new"):
-            directory = (root or self.config.maildir) / folder / sub
-            if not directory.is_dir():
-                continue
-            for path in sorted(directory.iterdir()):
-                if path.is_symlink() or not path.is_file():
+        try:
+            for sub in ("cur", "new"):
+                directory = (root or self.config.maildir) / folder / sub
+                if not directory.is_dir():
                     continue
-                data = path.read_bytes()
-                token = _token(data)
-                if token is not None:
-                    out.setdefault(token, []).append(data)
+                for path in sorted(directory.iterdir()):
+                    if path.is_symlink() or not path.is_file():
+                        continue
+                    data = path.read_bytes()
+                    token = _token(data)
+                    if token is not None:
+                        out.setdefault(token, []).append(data)
+        except OSError:
+            raise WorldError("capture_failed") from None
         return out
 
     def served(self, folder: str | None = None) -> list[Served]:
@@ -232,8 +235,11 @@ class PiecesWorld:
             return self._isolation_check()
         if self.config.isolation_targets is None:
             raise WorldError("isolation_not_configured")
-        targets = isolation.load_targets(str(self.config.isolation_targets))
-        return isolation.evaluate(targets, self._prober, timeout=3.0).verdict == "pass"
+        try:
+            targets = isolation.load_targets(str(self.config.isolation_targets))
+            return isolation.evaluate(targets, self._prober, timeout=3.0).verdict == "pass"
+        except OSError, ValueError, TypeError, AttributeError:
+            raise WorldError("isolation_not_configured") from None
 
     def accounts(self) -> set[str]:
         return set(self.config.accounts)
