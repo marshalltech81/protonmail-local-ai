@@ -5472,28 +5472,28 @@ class TestBinaryPayloadLabelledAsText:
 
     @pytest.mark.parametrize("signature", sorted(_NON_CONTAINER_SIGNATURES))
     @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS)
-    def test_binary_signature_is_unsupported_without_decoding(
+    def test_binary_signature_uses_format_reader_without_text_decoding(
         self, signature, content_type, filename, monkeypatch, caplog
     ):
-        from src.extractors import BINARY_AS_TEXT_ERROR
+        from src import extractors
 
-        caplog.set_level("DEBUG")
-        calls = _count_extractor_calls(monkeypatch)
-        payload = _NON_CONTAINER_SIGNATURES[signature] + b"SYNTHETIC_PAYLOAD_MARKER" + bytes(64)
+        calls = []
+
+        def reader(module):
+            def run(payload, **kwargs):
+                calls.append(module)
+                return "synthetic words", "pdf-digital" if module == "pdf" else "image-ocr"
+
+            return run
+
+        monkeypatch.setattr(extractors, "_safe_import", reader)
+        payload = _NON_CONTAINER_SIGNATURES[signature] + b"SYNTHETIC_PAYLOAD_MARKER"
         result = extract(content_type=content_type, filename=filename, payload=payload)
-        assert result == ExtractionResult(
-            status=STATUS_UNSUPPORTED,
-            extractor=None,
-            text=None,
-            error=BINARY_AS_TEXT_ERROR,
-            text_complete=False,
-            identifier=NOT_CONTAINER_IDENTIFIER,
-        )
-        assert calls == []
-        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-        for marker in ("SYNTHETIC_PAYLOAD_MARKER", "SYNTHETIC_FILENAME_MARKER"):
-            assert marker not in caplog.text
-            assert marker not in BINARY_AS_TEXT_ERROR
+        assert result.status == STATUS_SUCCESS
+        assert result.text == "synthetic words"
+        assert calls == ["pdf" if payload.startswith(b"%PDF-") else "image"]
+        assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text
+        assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
 
     @pytest.mark.parametrize("signature", sorted(_BINARY_SIGNATURES))
     def test_partial_signature_keeps_todays_path(self, signature, monkeypatch):
@@ -5515,21 +5515,27 @@ class TestBinaryPayloadLabelledAsText:
         assert calls == ["text"]
 
     def test_signature_check_is_bounded_on_a_large_payload(self, monkeypatch):
-        """The guard is a fixed-prefix check: a payload at the default size
-        cap is rejected without reading past its signature, and genuine
-        text of the same size still reaches the extractor once."""
-        import time
+        from src import extractors
+        from src.extractors import DEFAULT_MAX_BYTES
 
-        from src.extractors import BINARY_AS_TEXT_ERROR, DEFAULT_MAX_BYTES
+        calls = []
 
-        calls = _count_extractor_calls(monkeypatch)
+        def reader(module):
+            def run(payload, **kwargs):
+                calls.append((module, len(payload)))
+                return "synthetic", "pdf-digital" if module == "pdf" else "image-ocr"
+
+            return run
+
+        monkeypatch.setattr(extractors, "_safe_import", reader)
         tail = b"A" * (DEFAULT_MAX_BYTES - 16)
-        start = time.perf_counter()
         for magic in _NON_CONTAINER_SIGNATURES.values():
-            result = extract(content_type="text/plain", filename="a.txt", payload=magic + tail)
-            assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
-        assert time.perf_counter() - start < 2.0
-        assert calls == []
+            assert (
+                extract(content_type="text/plain", filename="a.txt", payload=magic + tail).status
+                == STATUS_SUCCESS
+            )
+        assert len(calls) == len(_NON_CONTAINER_SIGNATURES)
+        assert all(module != "text" for module, _ in calls)
 
     def test_other_extractors_still_read_their_formats(self, monkeypatch):
         """The guard covers only the text extractor: a PNG labelled as an

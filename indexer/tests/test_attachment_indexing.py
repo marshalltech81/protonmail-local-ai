@@ -1965,117 +1965,84 @@ _TEXT_LABELS = (
 
 
 class TestBinaryPayloadLabelledAsText:
-    """#932: a binary payload labelled as text is cached ``unsupported``
-    through the real dispatcher, produces no chunk, is counted in the
-    aggregate, and the row is served to later text occurrences."""
+    """#969: binary text labels use the format reader and its cache."""
 
     @pytest.mark.parametrize("magic", _BINARY_SIGNATURES)
     @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS)
-    def test_binary_payload_is_unsupported_with_no_chunk(
-        self, magic, content_type, filename, tmp_path, caplog
+    def test_binary_payload_is_routed_cached_and_searchable(
+        self, magic, content_type, filename, tmp_path, monkeypatch, caplog
     ):
-        from src.extractors import BINARY_AS_TEXT_ERROR
+        from src import extractors
 
         caplog.set_level("DEBUG")
-        attachment_indexing.attachment_outcomes.drain()
+        calls = []
+
+        def reader(module):
+            def run(payload, **kwargs):
+                calls.append(module)
+                return "synthetic routed words", "pdf-digital" if module == "pdf" else "image-ocr"
+
+            return run
+
+        monkeypatch.setattr(extractors, "_safe_import", reader)
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(
-            magic + b"SYNTHETIC_TEXT_MARKER" + bytes(64),
-            filename=filename,
-            content_type=content_type,
+            magic + b"SYNTHETIC_PRIVATE_MARKER", filename=filename, content_type=content_type
         )
         plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
-        assert plan.status == STATUS_UNSUPPORTED
-        assert plan.chunks == []
+        assert plan.status == STATUS_SUCCESS
+        assert [chunk.text for chunk in plan.chunks] == ["synthetic routed words"]
+        _embed_new_chunks(
+            plan, db=db, claimant_id="msg@x", embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
+        )
         with db.transaction():
             apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
-        attachment_indexing.record_committed_outcomes([plan])
-        row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
-        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
-            STATUS_UNSUPPORTED,
-            None,
-            BINARY_AS_TEXT_ERROR,
+        again = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert again.cached is True
+        assert calls == ["pdf" if magic == b"%PDF-" else "image"]
+        assert "SYNTHETIC_PRIVATE_MARKER" not in caplog.text
+        assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
+
+    def test_legacy_decline_is_queued_once_then_uses_the_routed_cache(self, tmp_path, monkeypatch):
+        from src import extractors
+        from src.main import _occurrence_reruns_extraction
+
+        monkeypatch.setattr(
+            extractors,
+            "_safe_import",
+            lambda module: lambda payload, **kwargs: ("synthetic words", "pdf-digital"),
         )
-        assert not db.get_chunk_ids_for_message("msg@x", attachment_id=attachment.content_hash)
-        counts = attachment_indexing.attachment_outcomes.drain()
-        assert counts["unsupported"] == 1
-        assert counts["success"] == 0
-        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-        for marker in ("SYNTHETIC_TEXT_MARKER", "SYNTHETIC_FILENAME_MARKER"):
-            assert marker not in caplog.text
-
-    @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS + (("text/csv", "a.csv"),))
-    def test_row_holds_for_later_text_occurrences(
-        self, content_type, filename, tmp_path, monkeypatch
-    ):
-        from src.extractors import BINARY_AS_TEXT_ERROR
-
-        db = _seed_thread_for_cache_test(tmp_path)
+        db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(
-            b"%PDF-1.7" + bytes(64), filename=filename, content_type=content_type
+            b"%PDF-1.7 synthetic", filename="note.txt", content_type="text/plain"
         )
-        extractor = _run_process_with_cached_status(
-            db, attachment, STATUS_UNSUPPORTED, monkeypatch, error=BINARY_AS_TEXT_ERROR
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        _embed_new_chunks(
+            plan, db=db, claimant_id="msg@x", embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
         )
-        extractor.assert_not_called()
-
-    def test_row_is_re_run_for_an_occurrence_with_another_extractor(self, tmp_path, monkeypatch):
-        """The same bytes labelled ``.pdf`` reach the PDF extractor: the row is
-        the text module's (#928)."""
-        from src.extractors import BINARY_AS_TEXT_ERROR
-
-        db = _seed_thread_for_cache_test(tmp_path)
-        attachment = _attachment(
-            b"%PDF-1.7" + bytes(64), filename="a.pdf", content_type="application/pdf"
-        )
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        # The pre-fix occurrence and row were keyed by the text label.
+        db._conn.execute("UPDATE attachments SET extractor_module='text'")
+        db._conn.commit()
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
             extractor_module="text",
             extraction_status=STATUS_UNSUPPORTED,
             extractor=None,
             extracted_text=None,
-            extraction_error=BINARY_AS_TEXT_ERROR,
+            extraction_error=extractors.BINARY_AS_TEXT_ERROR,
+            identifier=extractors.NOT_CONTAINER_IDENTIFIER,
         )
-        extractor = MagicMock(
-            return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="pdf-digital@4", text="words", error=None
-            )
-        )
-        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
-        prepare_attachment_writes(db=db, **_kwargs(attachment, claimant_id="message@example.com"))
-        extractor.assert_called_once()
-
-    def test_stale_text_success_row_is_refreshed_to_unsupported_once(self, tmp_path, caplog):
-        """A ``success`` row the previous text version wrote for a binary
-        payload is stale after the bump: it is refreshed once, through the
-        real dispatcher, to ``unsupported``, and then served from the cache."""
-        from src.extractors import BINARY_AS_TEXT_ERROR
-
-        caplog.set_level("DEBUG")
-        db = _setup_db_for_attachment(tmp_path)
-        attachment = _attachment(b"%PDF-1.7" + b"SYNTHETIC_TEXT_MARKER" + bytes(64))
-        db.store_attachment_extraction(
-            attachment_id=attachment.content_hash,
-            extractor_module=_module(attachment),
-            extraction_status=STATUS_SUCCESS,
-            extractor="text@2",
-            extracted_text="%PDF-1.7 \ufffd\ufffd",
-            extraction_error=None,
-            text_complete=True,
-        )
-        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
-        assert (plan.status, plan.cached, plan.chunks) == (STATUS_UNSUPPORTED, False, [])
+        assert db.find_no_extractor_attachment_filepaths(_occurrence_reruns_extraction)
+        refreshed = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert refreshed.cached is True
         with db.transaction():
-            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
-        row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
-        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
-            STATUS_UNSUPPORTED,
-            None,
-            BINARY_AS_TEXT_ERROR,
-        )
-        again = prepare_attachment_writes(db=db, **_kwargs(attachment))
-        assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)
-        assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+            apply_attachment_writes(
+                plan=refreshed, claimant_id="msg@x", thread_id="thread-x", db=db
+            )
+        assert db.find_no_extractor_attachment_filepaths(_occurrence_reruns_extraction) == set()
+        assert db._conn.execute("SELECT extractor_module FROM attachments").fetchone()[0] == "pdf"
 
 
 def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
@@ -2690,9 +2657,9 @@ _CATALOGUE: dict[str, tuple[Any, tuple[tuple[str, str], ...]]] = {
         ),
     ),
 }
-# Shapes whose result no label changes: an OLE2 or ZIP payload whose
-# directory names its kind runs that extractor under any label (#1416).
-_LABEL_INDEPENDENT_SHAPES = frozenset({"ole2", "zip"})
+# Shapes whose listed labels select the same reader: container directory
+# identification (#1416), or PDF signatures under text/PDF labels (#969).
+_LABEL_INDEPENDENT_SHAPES = frozenset({"ole2", "zip", "pdf-as-text"})
 
 _CATALOGUE_PAIRS = [
     (shape, first, second)

@@ -1227,11 +1227,12 @@ def _dispatch(
         if isinstance(identified, ExtractionResult):
             return identified
         module_name = identified
-    # PDF or HTML bytes under an image label run their extractor (#1415,
+    # PDF/image bytes under a text label and PDF/HTML under an image label
+    # run their existing extractor (#969, #1415,
     # #1417), decided
     # before the OCR gate below, since that extractor reads a digital text
     # layer without OCR: the same constant-size prefix check.
-    elif module_name == "image":
+    elif module_name in {"image", "text"}:
         module_name = _route_container(module_name, payload)
 
     # Image types are gated by ``ocr_enabled`` because the only sensible
@@ -1610,11 +1611,17 @@ def _route_container(module_name: str, payload: bytes) -> str | None:
       digital text layer whatever the OCR setting.
     * An HTML-looking prefix under an image label goes to ``html``
       before the OCR gate (#1417); this is a bounded heuristic.
+    * PDF and image signatures under a text label select that format and
+      cache namespace before the OCR gate (#969).
     * Anything else is unchanged.
     """
+    if module_name in {"image", "text"} and payload.startswith(_PDF_SIGNATURE):
+        return "pdf"
+    if module_name == "text" and payload.startswith(
+        (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")
+    ):
+        return "image"
     if module_name == "image":
-        if payload.startswith(_PDF_SIGNATURE):
-            return "pdf"
         # Heuristic approved in #1417: slice before stripping/lowercasing,
         # so even an arbitrarily long whitespace prefix costs 256 bytes.
         prefix = payload[:256].removeprefix(b"\xef\xbb\xbf").lstrip().lower()
@@ -1672,6 +1679,7 @@ def label_extraction_modules(content_type: str, filename: str) -> frozenset[str]
     label, whatever the bytes: a legacy label's OOXML namespace for
     bytes that are not OLE2, and an image label's ``pdf`` one for PDF
     bytes (#1415), and ``html`` for the bounded HTML heuristic (#1417).
+    Text labels can also select ``pdf`` or ``image`` by signature (#969).
     These are cache keys, not the modules that run: an
     OLE2 or ZIP payload runs what its directory names (#1416). Empty
     when the label selects none."""
@@ -1682,6 +1690,8 @@ def label_extraction_modules(content_type: str, filename: str) -> frozenset[str]
         return frozenset({selected, _LEGACY_TO_OOXML[selected]})
     if selected == "image":
         return frozenset({selected, "pdf", "html"})
+    if selected == "text":
+        return frozenset({selected, "pdf", "image"})
     return frozenset({selected})
 
 

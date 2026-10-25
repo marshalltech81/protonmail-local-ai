@@ -418,8 +418,9 @@ def _unsupported_still_holds(
 
     An unstamped image "OCR disabled" result never holds
     (``unstamped_ocr_disabled``, #1415); any other "OCR disabled" result
-    holds until OCR is turned on. An OLE2 result
-    under an OOXML label, a "binary payload labelled as text" result, a
+    holds until OCR is turned on. Legacy "binary payload labelled as text"
+    declines are reassessed once because PDF/image signatures now route to
+    their format namespace (#969). An OLE2 result under an OOXML label, a
     "not an OLE2 compound file" result under the ``ppt`` label, a "not an
     OLE2 or OOXML container" result under a legacy label and the "no
     extractor" result are decided by the label and the bytes alone (#694,
@@ -438,14 +439,13 @@ def _unsupported_still_holds(
     extractor not importable in this image) holds only while the
     occurrence selects no extractor.
     """
-    if unstamped_ocr_disabled(error, extractor):
+    if unstamped_ocr_disabled(error, extractor) or error == BINARY_AS_TEXT_ERROR:
         return False
     error = error or ""
     if "OCR disabled" in error:
         return not ocr_enabled
     if error in {
         LEGACY_OLE2_ERROR,
-        BINARY_AS_TEXT_ERROR,
         NON_OLE2_PPT_ERROR,
         NOT_OLE2_OR_OOXML_ERROR,
     }:

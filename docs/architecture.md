@@ -3011,21 +3011,16 @@ re-runs cached image OCR with OCR on; while OCR is off, existing
 `image-ocr` text is preserved until OCR is enabled. Dead letters require
 `make requeue-dead`, as with other extractor version bumps.
 
-Binary payloads labelled as text: the text extractor decodes whatever
-it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent
-as `text/plain`, or named `.txt` / `.csv` / `.md` with no usable
-Content-Type, was indexed as replacement characters. When a payload
-bound for the text extractor starts with one of those formats' fixed
-signatures (`%PDF-`, `89 50 4E 47 0D 0A 1A 0A`, `FF D8 FF`, `GIF87a` /
-`GIF89a`), the dispatcher records it `unsupported` ("binary payload
-labelled as text") without decoding it (#932). An OLE2 or ZIP payload
-under a text label is identified by its directory instead (#1416,
-above); before that, it too was recorded "binary payload labelled as
-text", and such a row has no `identifier`, so it is identified once. Only those fixed prefixes are checked; the
-bytes decide, and the row is the text module's. An occurrence
-labelled with the real type (`.pdf`, an image) runs that type's
-extractor and has its own row (#928). A binary file labelled only as
-text is therefore not extracted (#969).
+Binary payloads labelled as text: fixed PDF, PNG, JPEG and GIF prefixes
+under a text label select the existing PDF or image extractor and its cache
+namespace before the OCR gate (#969). Genuine text keeps the text reader;
+no search beyond those prefixes is performed. OCR-disabled images remain
+unsupported, while a digital PDF can still yield text. OLE2 and ZIP bytes
+continue through directory identification (#1416). Legacy binary-as-text
+declines are queued once by the existing unsupported-result sweep; reparsing
+moves each occurrence to its routed cache namespace. The old decline no
+longer joins that occurrence on subsequent starts. No unrelated text cache
+version is bumped, and existing child, payload, page and pixel bounds apply.
 
 Word templates: the template MIME type
 (`application/vnd.openxmlformats-officedocument.wordprocessingml.template`)

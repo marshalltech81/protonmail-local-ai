@@ -34,6 +34,7 @@ from .entities import (
     person_entity_id,
 )
 from .extractors import (
+    BINARY_AS_TEXT_ERROR,
     CONTAINER_IDENTIFICATION_VERSION,
     CONTAINER_SIGNATURE_VERSION,
     LEGACY_OLE2_ERROR,
@@ -2860,7 +2861,8 @@ class Database:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is the "no extractor for this
         content type or filename extension" result, or the OLE2 result
-        recorded when no extractor read an OLE2 payload (#694, #935), and
+        recorded when no extractor read an OLE2 payload (#694, #935), or
+        the legacy binary-as-text decline (#969), and
         for which ``qualifies`` holds, with the same row columns as
         ``find_ocr_disabled_attachment_filepaths``."""
         return self._stream_filepaths(
@@ -2874,9 +2876,9 @@ class Database:
                 AND a.extractor_module = e.extractor_module
             JOIN message_occurrences m ON m.id = (SELECT o.id FROM message_occurrences o WHERE o.claimant_id = a.claimant_id ORDER BY o.state <> 'active', o.trashed, CASE WHEN o.state = 'active' THEN o.id ELSE -o.id END LIMIT 1)
             WHERE e.extraction_status = 'unsupported'
-              AND e.extraction_error IN (?, ?)
+              AND e.extraction_error IN (?, ?, ?)
             """,
-            (NO_EXTRACTOR_ERROR, LEGACY_OLE2_ERROR),
+            (NO_EXTRACTOR_ERROR, LEGACY_OLE2_ERROR, BINARY_AS_TEXT_ERROR),
             qualifies,
             assessed,
         )
