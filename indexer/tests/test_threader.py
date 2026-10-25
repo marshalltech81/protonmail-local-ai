@@ -317,6 +317,17 @@ class TestAssignThread:
         t2 = threader.assign_thread(followup)
         assert t2.thread_id == "subj_orig@example.com"
 
+    def test_tagged_reply_falls_back_to_root_subject(self, db, threader):
+        root = make_message(message_id="tag-root@example.com", subject="[TAG] Topic")
+        db.upsert_thread(threader.assign_thread(root), [0.0] * EMBEDDING_DIM)
+        reply = make_message(
+            message_id="tag-reply@example.com",
+            subject="Re: [TAG] Topic",
+            filepath="/maildir/INBOX/cur/tag-reply",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        assert threader.assign_thread(reply).thread_id == root.message_id
+
     def test_subject_fallback_rejected_when_no_participant_overlap(self, db, threader):
         """Regression: subject-only fallback merged any two messages with
         the same normalized subject in the same folder — "Re: Follow up"
@@ -676,13 +687,15 @@ _REFERENCE_PREFIX_RE = re.compile(
 
 
 def _reference_normalize_subject(subject: str) -> str:
-    """The pre-#293 algorithm: strip one prefix per pass, copying the rest.
+    """A copying reference with #1775's preserved gateway-tag boundary.
 
-    Ground truth for the differential test below; quadratic in the number
-    of prefixes, so only called on short inputs.
+    Quadratic in the number of prefixes, so called only on short inputs.
     """
     s = subject.lower().strip()
     while True:
+        match = _REFERENCE_PREFIX_RE.match(s)
+        if match and "[" in match.group():
+            return re.sub(r"\s+", " ", s[s.index("[", 0, match.end()) :]).strip()
         stripped = _REFERENCE_PREFIX_RE.sub("", s).strip()
         if stripped == s:
             break
@@ -720,7 +733,7 @@ _SUBJECT_FRAGMENTS = [
 
 
 class TestNormalizeSubjectMatchesReference:
-    def test_every_fragment_triple_matches_the_previous_algorithm(self):
+    def test_every_fragment_triple_matches_the_reference_grammar(self):
         mismatches = [
             subject
             for subject in (
@@ -1174,3 +1187,10 @@ class TestSubjectFallbackProvenance:
         assert not db.thread_has_assessed_correspondents(
             "missing", ["alice@example.com"], ["bob@example.com"]
         )
+
+
+@pytest.mark.parametrize(
+    "prefix", ["Re: ", "Re:", "Fw: Re: ", "Sv: 回复: ", "Ant: ", "Fwd: " * 100]
+)
+def test_matching_key_preserves_gateway_tag(prefix):
+    assert _normalize_subject(prefix + "[TAG] Topic") == "[tag] topic"

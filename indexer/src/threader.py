@@ -379,6 +379,10 @@ def _normalize_subject(subject: str) -> str:
     s = subject.lower().strip()
     pos = 0
     while match := _SUBJECT_PREFIX_RE.match(s, pos):
+        if "[" in match.group():
+            # The opening bracket belongs to the subject's gateway tag.
+            pos = s.index("[", match.start(), match.end())
+            break
         pos = match.end()
         # ``str.isspace()``: the whitespace set ``str.strip()`` removes.
         while pos < len(s) and s[pos].isspace():
