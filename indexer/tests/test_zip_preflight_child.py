@@ -41,6 +41,8 @@ def test_child_checks_member_and_total_sizes_before_the_decoder(monkeypatch, mod
         pytest.fail("decoder opened an oversized package")
 
     monkeypatch.setattr(decoder, "extract_text", forbidden)
+    # A real child starts without the parent parser's aggregate counts.
+    extractors.drain_counters()
     assert extractor_child.run(module, data.getvalue()) == b"E ZipUncompressedSizeError\n"
     assert calls == []
 
