@@ -467,6 +467,10 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
     lines = [f"{i}. " + " | ".join(head) if head else f"{i}."]
     if shown("subject"):
         lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
+    if shown("normalized_subject"):
+        normalized = message_headers(m).normalized_subject
+        if not shown("subject") or normalized != clip(m.subject, HEADER_CHAR_LIMIT):
+            lines.append(f"   Normalized subject: {normalized}")
     for name, label, people, count in (
         ("from", "From", m.from_, m.from_count),
         ("to", "To", m.to, m.to_count),

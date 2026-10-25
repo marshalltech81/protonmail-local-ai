@@ -70,7 +70,7 @@ def test_attachment_headers_match_carrying_messages(
         hit = hits[row["claimant_id"]]
         msg = db.get_message_view(row["claimant_id"])
         headers = message_headers(msg.record).model_dump(by_alias=True)
-        for key in ["subject", "from", "from_count", "sender_ambiguous"]:
+        for key in ["subject", "normalized_subject", "from", "from_count", "sender_ambiguous"]:
             assert row[key] == hit[key] == headers[key]
         assert row["sent_at"] == "2024-02-01T00:01:00+00:00"
         assert "senders" not in hit and "date_last" not in hit

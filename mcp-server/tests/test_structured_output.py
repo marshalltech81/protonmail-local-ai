@@ -217,6 +217,7 @@ class TestQueryMessagesFields:
     output carries every field (``ALL_FIELDS``)."""
 
     ALL_FIELDS = [
+        "normalized_subject",
         "message_id",
         "claimant_id",
         "subject",
@@ -261,6 +262,7 @@ class TestQueryMessagesFields:
             "\n"
             "1. 2024-01-11T10:00:00+00:00 | INBOX | unread | attachments | direction unknown\n"
             "   Subject: Re: Budget review\n"
+            "   Normalized subject: Budget review\n"
             "   From: bob@example.com\n"
             "   To: Jane Doe <jane@example.com>\n"
             "   Cc: carol@other.org\n"
@@ -292,6 +294,14 @@ class TestQueryMessagesFields:
         assert [r["claimant_id"] for r in page["messages"]] == [
             r["claimant_id"] for r in full["messages"]
         ]
+
+    def test_normalized_subject_can_be_projected_without_the_original(self, messages_db):
+        out = _wire(_server(messages_db), "query_messages", {"fields": ["normalized_subject"]})
+        assert out.structured_content["messages"]
+        for row in out.structured_content["messages"]:
+            assert set(row) == {"normalized_subject", "claimant_id", "thread_id"}
+        assert "   Normalized subject:" in out.content[0].text
+        assert "   Subject:" not in out.content[0].text
 
     def test_empty_list_keeps_only_the_ids(self, messages_db):
         page = _call(_server(messages_db), "query_messages", fields=[], limit=1)
@@ -348,12 +358,12 @@ class TestQueryMessagesFields:
             result = _wire(_server(messages_db), "query_messages", {"fields": ["subject"] * 10_000})
         assert result.is_error
         text = result.content[0].text
-        assert "fields lists at most 33 names" in text
+        assert "fields lists at most 34 names" in text
         assert len(text) < 200
         assert "'subject'" not in caplog.text
         assert "query_messages rejected invalid fields" in caplog.text
         # Up to one entry per field, repeats included, is accepted.
-        page = _call(_server(messages_db), "query_messages", fields=["subject"] * 33, limit=1)
+        page = _call(_server(messages_db), "query_messages", fields=["subject"] * 34, limit=1)
         assert set(page["messages"][0]) == {"claimant_id", "thread_id", "subject"}
 
     def test_unknown_field_is_rejected_by_name_and_not_logged(self, messages_db, caplog):
@@ -375,7 +385,7 @@ class TestQueryMessagesFields:
         with caplog.at_level("DEBUG"):
             for _ in range(5):
                 assert _wire(server, "query_messages", {"fields": [marker]}).is_error
-                assert _wire(server, "query_messages", {"fields": ["subject"] * 34}).is_error
+                assert _wire(server, "query_messages", {"fields": ["subject"] * 35}).is_error
         lines = [
             r.getMessage()
             for r in caplog.records

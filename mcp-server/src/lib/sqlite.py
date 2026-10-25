@@ -214,16 +214,22 @@ _SUBJECT_PREFIX_RE = re.compile(
 _SUBJECT_WHITESPACE_RE = re.compile(r"\s+")
 
 
-def _normalize_subject(subject: str) -> str:
-    """Lowercase, strip reply/forward prefixes and collapse whitespace.
+def _normalize_subject(subject: str, *, preserve_case: bool = False) -> str:
+    """Strip reply/forward prefixes and collapse whitespace; lowercase by default.
 
-    Mirrors the indexer's ``threader._normalize_subject``: one pass that
+    ``preserve_case`` is for display output, which also keeps bracketed tags.
+    The default mirrors the indexer's ``threader._normalize_subject``: one pass that
     advances an offset past each prefix, so the work is linear in the
     subject length.
     """
-    s = subject.lower().strip()
+    s = (subject if preserve_case else subject.lower()).strip()
     pos = 0
     while match := _SUBJECT_PREFIX_RE.match(s, pos):
+        if preserve_case and "[" in match.group():
+            # Display normalization preserves gateway tags even when the
+            # matching-key prefix rule would consume their opening bracket.
+            pos = s.index("[", match.start(), match.end())
+            break
         pos = match.end()
         while pos < len(s) and s[pos].isspace():
             pos += 1
