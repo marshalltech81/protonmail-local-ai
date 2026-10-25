@@ -1203,6 +1203,7 @@ make test-mbsync-tls
 make test-mbsync-layout
 make test-compose
 make test-config
+make test-evidence-run
 make baseline
 make typecheck
 ```
@@ -1299,6 +1300,7 @@ mbsync/        Mail sync container
 indexer/       Parser, threader, embeddings, SQLite writer
 mcp-server/    MCP server and tool layer
 docs/          Architecture, setup, troubleshooting, and tool documentation
+evidence-run/  Offline code for the #1584 live evidence run (in no image)
 ```
 
 ## Bottom Line
