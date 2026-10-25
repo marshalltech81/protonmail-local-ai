@@ -45,6 +45,7 @@ from .outputs import (
     EvidenceThread,
     SearchAttachmentsOutput,
     SearchEmailsOutput,
+    attachment_message_headers,
     clip,
     date_bounds,
     describe_date_bounds,
@@ -1404,6 +1405,7 @@ def register_search_tools(
             date_bounds=bounds,
             results=[
                 AttachmentHit(
+                    **attachment_message_headers(a.message_metadata),
                     attachment_id=a.attachment_id,
                     filename=clip(a.filename, HEADER_CHAR_LIMIT),
                     content_type=clip(a.content_type, HEADER_CHAR_LIMIT),
@@ -1411,14 +1413,12 @@ def register_search_tools(
                     thread_id=a.thread_id,
                     message_id=a.message_id,
                     claimant_id=a.claimant_id,
-                    subject=clip(a.subject, HEADER_CHAR_LIMIT),
+                    thread_subject=clip(a.subject, HEADER_CHAR_LIMIT),
                     folder=a.folder,
-                    date_last=a.date_last,
+                    thread_date_last=a.date_last,
                     sent_at=a.sent_at,
                     sent_at_status=a.sent_at_status,
                     occurred_at=a.occurred_at,
-                    senders=[clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:MAX_LISTED]],
-                    sender_count=len(a.senders),
                     extraction_status=a.extraction_status,
                     text_snippet=a.text_snippet,
                     source_file=source_ref(a.source_file),
@@ -1483,7 +1483,9 @@ def register_search_tools(
             fname = clip(a.filename, HEADER_CHAR_LIMIT)
             mime = clip(a.content_type, HEADER_CHAR_LIMIT)
             lines.append(f"[{i}] {fname}  ({mime}, {size_kb:.1f} KB)")
-            lines.append(f"    Thread: {clip(a.subject, HEADER_CHAR_LIMIT)}  [{a.folder}]")
+            headers = attachment_message_headers(a.message_metadata)
+            lines.append(f"    Message: {headers['subject']}  [{a.folder}]")
+            lines.append(f"    Thread: {clip(a.subject, HEADER_CHAR_LIMIT)}")
             lines.append(
                 f"    Thread ID: {a.thread_id} | Message-ID: {a.message_id} "
                 f"| Claimant ID: {a.claimant_id}"
@@ -1492,8 +1494,8 @@ def register_search_tools(
             lines.append(f"    Sent: {sent_text(sent, a.sent_at_status)}")
             if a.occurred_at:
                 lines.append(f"    Delivered: {a.occurred_at[:10]}")
-            if a.senders:
-                senders = ", ".join(clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:3])
+            if headers["from_"]:
+                senders = ", ".join(p.address for p in headers["from_"])
                 lines.append(f"    From: {senders}")
             lines.append(f"    Text extraction: {a.extraction_status or 'not extracted'}")
             if a.text_snippet:

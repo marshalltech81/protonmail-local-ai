@@ -163,7 +163,9 @@ def test_worst_records_carry_four_byte_fields_past_their_clips(report):
     assert messages["references"] == 10 * 10
     occurrences = report["reconcile"]["occurrences"]["stream"]["10"]
     assert occurrences["record_bytes_max"] > 500 * 4 + 500
-    assert occurrences["participant_rows"] == occurrences["references"] == 0
+    # Occurrences now include their carrying message's headers (#1347).
+    assert occurrences["participant_rows"] == 10 * 30
+    assert occurrences["references"] == 10 * 10
 
 
 def test_cardinality_records_transfer_only_the_listed_rows(cardinality):

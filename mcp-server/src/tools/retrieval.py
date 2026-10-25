@@ -72,6 +72,7 @@ from .outputs import (
     ThreadAttachment,
     ThreadMessage,
     WhereLeafResult,
+    attachment_message_headers,
     clip,
     date_bounds,
     describe_date_bounds,
@@ -705,6 +706,7 @@ def _describe_filters(
 def _listed_attachment(a: AttachmentOccurrenceRecord) -> ListedAttachment:
     """One query_attachments row; filename and MIME type come cut."""
     return ListedAttachment(
+        **attachment_message_headers(a.message_metadata),
         attachment_occurrence_id=a.attachment_occurrence_id,
         attachment_id=a.attachment_id,
         extractor_module=a.extractor_module,
@@ -741,8 +743,11 @@ def _attachment_lines(i: int, a: AttachmentOccurrenceRecord) -> list[str]:
     extraction = a.extraction_status or "none recorded"
     if a.ocr_pages_skipped:
         extraction += f" ({a.ocr_pages_skipped} scanned pages not OCRed)"
+    headers = attachment_message_headers(a.message_metadata)
     return [
         f"{i}. " + " | ".join(head),
+        f"   Message subject: {headers['subject']}",
+        "   From: " + ", ".join(p.address for p in headers["from_"]),
         f"   File: {name} ({mime}, {a.size_bytes / 1024:.1f} KB)",
         f"   Extraction: {extraction}",
         f"   Occurrence ID: {a.attachment_occurrence_id} | Attachment ID: {a.attachment_id}",

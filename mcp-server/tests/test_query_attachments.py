@@ -478,9 +478,17 @@ class TestWork:
         db, _ = corpus
         statements = self._trace(db, monkeypatch)
         db.query_attachments(limit=7)
-        # BEGIN, manifest coverage, grouped count, page, ROLLBACK: whatever the
-        # corpus size, and no indeterminate count without an unknown leaf.
-        assert self._shape(statements) == ["BEGIN", "SELECT", "SELECT", "WITH", "ROLLBACK"]
+        # The page plus two batched message-header reads, regardless of
+        # corpus size; no per-attachment query and one read snapshot.
+        assert self._shape(statements) == [
+            "BEGIN",
+            "SELECT",
+            "SELECT",
+            "WITH",
+            "SELECT",
+            "WITH",
+            "ROLLBACK",
+        ]
         assert "LIMIT 8" in statements[3]
         statements.clear()
         db.query_attachments(limit=7, extraction_status="failed")
@@ -488,6 +496,8 @@ class TestWork:
             "BEGIN",
             "SELECT",
             "SELECT",
+            "SELECT",
+            "WITH",
             "SELECT",
             "WITH",
             "ROLLBACK",

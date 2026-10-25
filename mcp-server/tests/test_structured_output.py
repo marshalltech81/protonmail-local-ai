@@ -747,7 +747,7 @@ def test_get_thread_rows_do_not_repeat_the_thread_id(tmp_path):
 
 def test_listing_tools_cut_long_participant_values(tmp_path):
     """search_emails and list_threads list ten
-    participants (search_attachments ten senders) where the prose shows
+    participants (search_attachments ten From entries) where the prose shows
     two or three, so each value is cut at 500 characters."""
     people = [f"{'N' * 100_000}{i} <p{i}@example.com>" for i in range(12)]
     with _open_fixture_db(tmp_path) as (conn, db):
@@ -774,9 +774,9 @@ def test_listing_tools_cut_long_participant_values(tmp_path):
         assert summary["participant_count"] == 12
         assert summary["participants"][0].endswith("more characters]")
     hit = attachments["results"][0]
-    assert len(hit["senders"]) == 10
-    assert hit["sender_count"] == 12
-    assert hit["senders"][0].endswith("more characters]")
+    assert len(hit["from"]) == 10
+    assert hit["from_count"] == 12
+    assert hit["from"][0]["name"].endswith("more characters]")
     for out in (found, listed, attachments):
         assert len(json.dumps(out)) < 20_000
 
