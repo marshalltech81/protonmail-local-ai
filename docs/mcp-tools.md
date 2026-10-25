@@ -3278,6 +3278,16 @@ retrieval did not run and both thread counts are zero.
 {"vendor": "string", "amount": "number", "due_date": "string"}
 ```
 
+`attachment_prompt_coverage` reports each retrieved attachment payload per
+thread and claimant, including payloads whose passages were wholly omitted.
+It counts passages available, shown, truncated and omitted, and source characters
+available and shown. Counts cover retrieved passages before and after prompt
+budgeting; overlap is counted. `scope` is `retrieved_passages` and
+`model_extraction_completeness` is always `unknown`. The counts describe prepared
+model input, even when the model returns no records; they establish neither
+whole-document coverage nor that every relevant record was extracted. Body-only
+calls return an empty list. A fixed notice reports how many payloads lost passages.
+
 The extractor accepts either a single JSON object matching the schema
 or a JSON array of such objects (useful when a thread contains
 multiple invoices, receipts, etc.). Every returned record carries
