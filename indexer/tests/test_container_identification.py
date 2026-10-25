@@ -1165,3 +1165,62 @@ class TestStartupSweep:
         monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", False)
         assert main._requeue_stale_extractions(db, queue) == 0
         assert self._queued(db) == {}
+
+    @pytest.mark.parametrize(
+        ("ctype", "filename", "legacy", "old_module"),
+        [
+            ("application/msword", "old.doc", "doc", "docx"),
+            ("application/vnd.ms-excel", "old.xls", "xls", "xlsx"),
+            ("application/vnd.ms-powerpoint", "old.ppt", "ppt", "pptx"),
+        ],
+    )
+    def test_pre_1411_non_container_failure_refreshes_once(
+        self, tmp_path, monkeypatch, caplog, ctype, filename, legacy, old_module
+    ):
+        """#1431: the certification sweep reparses the old OOXML namespace
+        into the label's legacy namespace and its permanent unsupported result."""
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
+        path = maildir / "INBOX" / "cur" / "legacy.eml"
+        _write_eml(path, "legacy@example.test", self.PLAIN, ctype, filename)
+        db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
+        try:
+            queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+            self._drain(db, queue)
+            # Reconstruct the persisted rows before #1411, not only the
+            # status: both the occurrence and cache used the OOXML module.
+            db._conn.execute(
+                "UPDATE attachments SET extractor_module = ?, text_complete = 0",
+                (old_module,),
+            )
+            db._conn.execute(
+                "UPDATE attachment_extractions SET extractor_module = ?, "
+                "extraction_status = 'failed', extractor = ?, identifier = NULL, "
+                "text_complete = 0, extraction_error = 'BadZipFile'",
+                (old_module, f"{old_module}@1"),
+            )
+            db._conn.commit()
+            with caplog.at_level(logging.INFO):
+                assert main._requeue_stale_extractions(db, queue) == 1
+                assert self._queued(db) == {str(path): REASON_REEXTRACT}
+                self._drain(db, queue)
+                assert main._requeue_stale_extractions(db, queue) == 0
+            [row] = db._conn.execute(
+                "SELECT a.extractor_module, e.extraction_status, e.extraction_error "
+                "FROM attachments a JOIN attachment_extractions e "
+                "ON e.attachment_id = a.attachment_id "
+                "AND e.extractor_module = a.extractor_module"
+            ).fetchall()
+            assert tuple(row) == (
+                legacy,
+                STATUS_UNSUPPORTED,
+                "not an OLE2 compound file (labelled legacy .ppt)"
+                if legacy == "ppt"
+                else extractors.NOT_OLE2_OR_OOXML_ERROR,
+            )
+            assert self._queued(db) == {}
+            assert MARKER not in caplog.text
+        finally:
+            db.close()
