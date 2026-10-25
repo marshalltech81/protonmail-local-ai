@@ -1327,6 +1327,8 @@ class MessagePage:
     ``total_matches`` counts every message matching the predicates, not
     just this page; ``offset`` is how many matches earlier pages returned.
     ``next_cursor`` is ``None`` exactly when ``has_more`` is false.
+    ``distinct_message_ids`` counts distinct sender-controlled Message-IDs
+    among definite matches in that same snapshot, not identical content.
     ``address_matches`` maps each given address filter (``sender``,
     ``recipient``, ``participant``) to the addresses it matched over the
     whole set, read in the same snapshot as ``total_matches``.
@@ -1344,6 +1346,7 @@ class MessagePage:
     """
 
     total_matches: int
+    distinct_message_ids: int
     offset: int
     messages: list[MessageRecord]
     has_more: bool
@@ -5491,10 +5494,14 @@ class Database:
                 # Selected clocks have composite indexes including the claimant tie-break.
                 page_where_sql += f" AND ({clock}, m.claimant_id) < (?, ?)"
                 page_params += [last_at, last_id]
-            total = conn.execute(
-                with_metadata("SELECT COUNT(*) FROM messages m WHERE " + where_sql, metadata),  # nosec B608
+            total, distinct_ids = conn.execute(
+                with_metadata(
+                    "SELECT COUNT(*), COUNT(DISTINCT m.message_id) FROM messages m WHERE "  # nosec B608 — compiler SQL; values bound
+                    + where_sql,
+                    metadata,
+                ),
                 params,
-            ).fetchone()[0]
+            ).fetchone()
             address_matches = {
                 name: _address_matches(conn, value, roles, where_sql, params, total, metadata)
                 for name, value, roles in address_filters
@@ -5540,6 +5547,7 @@ class Database:
         next_offset = offset + len(records)
         return MessagePage(
             total_matches=total,
+            distinct_message_ids=distinct_ids,
             offset=offset,
             messages=records,
             has_more=has_more,

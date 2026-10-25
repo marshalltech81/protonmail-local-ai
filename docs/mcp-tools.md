@@ -1527,6 +1527,12 @@ unclassified).
 
 ### `query_messages`
 
+`distinct_message_ids` counts distinct sender-controlled Message-ID values
+among definite matches over the whole matching set, in the same snapshot as
+`total_matches`. A shared ID does not prove identical content. Returned rows,
+`total_matches` and `indeterminate` remain per claimant; this field does not
+group rows. It is independent of page size and field projection.
+
 `direction="inbound"|"outbound"|"self"` filters claimed direction on this tool,
 `query_threads` and `aggregate_messages`. Explicit `where` uses
 `{"leaf":"direction_is","value":"inbound"}` with normal `any`/`negate` semantics.

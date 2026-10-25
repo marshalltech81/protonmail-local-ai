@@ -1030,6 +1030,12 @@ class QueryMessagesOutput(_Output):
             "complete count only when indeterminate is 0."
         )
     )
+    distinct_message_ids: int = Field(
+        description="Unit: distinct sender-controlled Message-ID values among definite "
+        "matches over the whole matching set, in the same snapshot as total_matches. "
+        "A shared ID does not prove identical content. Rows and indeterminate remain "
+        "claimant-level; this count does not group the returned rows."
+    )
     indeterminate: int = Field(
         description=_CLAIMANT_COUNT_UNIT
         + (

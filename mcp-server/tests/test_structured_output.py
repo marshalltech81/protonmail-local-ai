@@ -257,6 +257,7 @@ class TestQueryMessagesFields:
             "Query: subject='Re: Budget' (case-insensitive substring)\n"
             "date_basis: effective\n"
             "total_matches: 1\n"
+            "distinct_message_ids: 1 (sender-controlled IDs; rows remain per claimant)\n"
             "returned: 1 (matches 1-1)\n"
             "has_more: false\n"
             "\n"
