@@ -194,6 +194,7 @@ def test_public_filters_match_existing_message_tool_and_logs_withhold_content(th
     handlers = _handlers(FakeMCPServer(), thread_db)
     message_args = set(inspect.signature(handlers["query_messages"]).parameters) - {
         "fields",
+        "collapse",
         "date_basis",
     }
     assert set(inspect.signature(handlers["query_threads"]).parameters) == message_args

@@ -1529,9 +1529,10 @@ unclassified).
 
 `distinct_message_ids` counts distinct sender-controlled Message-ID values
 among definite matches over the whole matching set, in the same snapshot as
-`total_matches`. A shared ID does not prove identical content. Returned rows,
-`total_matches` and `indeterminate` remain per claimant; this field does not
-group rows. It is independent of page size and field projection.
+`total_matches`. A shared ID does not prove identical content. By default,
+rows, `total_matches` and `indeterminate` remain per claimant. Opt in to
+`collapse="message_id"` to group rows; its contract is below. The distinct
+count is independent of page size and field projection.
 
 `direction="inbound"|"outbound"|"self"` filters claimed direction on this tool,
 `query_threads` and `aggregate_messages`. Explicit `where` uses
@@ -3958,3 +3959,26 @@ participants and ranked participant filtering retain their visible meaning.
 An external observed Bcc can prove claimed outbound direction under the usual
 From/identity guards; own-only Bcc cannot establish self direction. Classifier
 v2 invalidates earlier message/direction-sensitive cursors.
+
+### Message-ID grouping on query_messages
+
+`collapse="message_id"` returns one representative per sender-controlled
+Message-ID. Every claimant must satisfy the whole predicate independently
+before grouping; different copies cannot contribute different leaves. The
+representative is chosen among definite matches: an active copy outside
+its provider's Trash first, then earliest `effective_at`, then claimant ID.
+The selected clock still orders representative rows newest first.
+
+`total_matches`, `returned`, and `indeterminate` count groups in this mode.
+A group is indeterminate only if none of its claimants definitely matches
+and at least one is unknown. Each returned row always includes
+`claimant_count`, the number of definitely matching claimants, even with
+`fields`. Address matches, leaf diagnostics and metadata diagnostics remain
+claimant-level. Rows without a Message-ID are singleton groups. A shared
+Message-ID does not prove identical bytes.
+
+The default remains one row per claimant. `distinct_message_ids` counts
+distinct non-null Message-ID values among definite matches in either mode.
+Cursors must keep the same grouping mode, predicates and selected clock;
+they remain stable only for an unchanged population. `search_emails` and
+`get_evidence` keep their thread and passage behavior.

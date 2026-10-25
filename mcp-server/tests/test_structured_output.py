@@ -359,12 +359,12 @@ class TestQueryMessagesFields:
             result = _wire(_server(messages_db), "query_messages", {"fields": ["subject"] * 10_000})
         assert result.is_error
         text = result.content[0].text
-        assert "fields lists at most 34 names" in text
+        assert "fields lists at most 35 names" in text
         assert len(text) < 200
         assert "'subject'" not in caplog.text
         assert "query_messages rejected invalid fields" in caplog.text
         # Up to one entry per field, repeats included, is accepted.
-        page = _call(_server(messages_db), "query_messages", fields=["subject"] * 34, limit=1)
+        page = _call(_server(messages_db), "query_messages", fields=["subject"] * 35, limit=1)
         assert set(page["messages"][0]) == {"claimant_id", "thread_id", "subject"}
 
     def test_unknown_field_is_rejected_by_name_and_not_logged(self, messages_db, caplog):
@@ -386,7 +386,7 @@ class TestQueryMessagesFields:
         with caplog.at_level("DEBUG"):
             for _ in range(5):
                 assert _wire(server, "query_messages", {"fields": [marker]}).is_error
-                assert _wire(server, "query_messages", {"fields": ["subject"] * 35}).is_error
+                assert _wire(server, "query_messages", {"fields": ["subject"] * 36}).is_error
         lines = [
             r.getMessage()
             for r in caplog.records

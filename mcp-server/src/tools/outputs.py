@@ -366,6 +366,11 @@ MetadataStatus = Literal[
 
 
 class QueriedMessage(ListedMessage):
+    claimant_count: int | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Unit: definitely matching stored claimants in this Message-ID group. Present only with collapse=message_id; a shared sender-controlled ID does not prove identical bytes.",
+    )
     direction: Literal["inbound", "outbound", "unknown"] = Field(
         description="Claimed direction from configured own addresses; unknown includes own-only recipients without exhaustive Bcc provenance. Headers are unauthenticated; folders do not classify direction."
     )
@@ -395,7 +400,12 @@ def queried_message(m: MessageRecord) -> QueriedMessage:
         for key, value in ((name, value), (name + "_status", status))
     }
     return QueriedMessage.model_validate(
-        {**listed_message(m).model_dump(), "direction": m.direction, **metadata}
+        {
+            **listed_message(m).model_dump(),
+            "direction": m.direction,
+            "claimant_count": m.claimant_count,
+            **metadata,
+        }
     )
 
 
@@ -971,8 +981,9 @@ class WhereLeafResult(_Output):
     true: int = Field(
         description=_CLAIMANT_COUNT_UNIT
         + (
-            "Of the messages the query does not reject (total_matches plus "
-            "indeterminate), how many this leaf on its own is true of, before negate."
+            "Of the claimants the query does not reject, before grouping "
+            "(total_matches plus indeterminate only in default mode), how many "
+            "this leaf on its own is true of, before negate."
         )
     )
     false: int = Field(
@@ -998,6 +1009,11 @@ class WhereLeafResult(_Output):
 
 
 class QueryMessagesOutput(_Output):
+    collapse: Literal["message_id"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Message-ID grouping when requested; omitted for claimant-level rows.",
+    )
     metadata_diagnostics: dict[str, dict[str, int]] = Field(
         default_factory=dict,
         exclude_if=lambda v: not v,
@@ -1019,27 +1035,27 @@ class QueryMessagesOutput(_Output):
         "matched; empty without one."
     )
     leaf_results: list[WhereLeafResult] = Field(
-        description="Per where leaf, in request order, how it decided the matches; empty "
+        description="Per where leaf, in request order, claimant-level diagnostics before grouping; empty "
         "without where."
     )
     date_bounds: QueryDateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(
-        description=_CLAIMANT_COUNT_UNIT
+        description="Unit: stored claimants by default; Message-ID groups under collapse=message_id. "
         + (
-            "Every message the filters definitely match, not just this page; the "
+            "Every claimant the filters definitely match, or Message-ID groups with collapse=message_id, not just this page; the "
             "complete count only when indeterminate is 0."
         )
     )
     distinct_message_ids: int = Field(
         description="Unit: distinct sender-controlled Message-ID values among definite "
         "matches over the whole matching set, in the same snapshot as total_matches. "
-        "A shared ID does not prove identical content. Rows and indeterminate remain "
-        "claimant-level; this count does not group the returned rows."
+        "A shared ID does not prove identical content. collapse=message_id groups rows and "
+        "counts indeterminate groups; otherwise rows and indeterminate are claimant-level."
     )
     indeterminate: int = Field(
-        description=_CLAIMANT_COUNT_UNIT
+        description="Unit: stored claimants by default; Message-ID groups under collapse=message_id. "
         + (
-            "Messages the filters could neither accept nor reject (a filtered size, "
+            "Claimants the filters could neither accept nor reject, or groups with no definite match and at least one unknown under collapse=message_id (a filtered size, "
             "date, subject, body, attachment list, address or display name the index does not "
             "hold, holds cut by a parse limit, or has not checked yet; a sender or participant "
             "filter, or an authority_class filter on a message outside Spam and Recovered "
@@ -1049,7 +1065,9 @@ class QueryMessagesOutput(_Output):
             "decided for every message; when not 0, report it with any count."
         )
     )
-    returned: int = Field(description="Unit: returned stored claimants. ")
+    returned: int = Field(
+        description="Unit: returned stored claimants, or Message-ID groups with collapse=message_id. "
+    )
     offset: int = Field(description="Matches returned by earlier pages.")
     has_more: bool
     next_cursor: str | None = Field(
@@ -1057,7 +1075,7 @@ class QueryMessagesOutput(_Output):
     )
     messages: list[QueriedMessage] = Field(
         description="Newest first by date_basis, with claimant_id breaking ties. With fields, each "
-        "row holds those fields plus claimant_id and thread_id; selected list metadata values also include their status. Default rows omit normalized list metadata."
+        "row holds those fields plus claimant_id and thread_id (and claimant_count under grouping); selected list metadata values also include their status. Default rows omit normalized list metadata."
     )
 
 

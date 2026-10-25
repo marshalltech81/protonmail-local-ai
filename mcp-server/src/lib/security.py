@@ -161,6 +161,7 @@ QUERY_MESSAGE_FIELDS = (
     "source_file",
     "thread_id",
     "pending_deletion",
+    "claimant_count",
     "direction",
     "list_id",
     "list_id_status",

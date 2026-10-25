@@ -79,6 +79,7 @@ from .sources import (
     REPRESENTATIVE_ID_BITS,
     REPRESENTATIVE_KEY,
     REPRESENTATIVE_ORDER,
+    active_outside_trash_sql,
     active_sql,
     authority_excluded_sql,
     category_of,
@@ -793,6 +794,8 @@ class MessageRecord:
     # The representative occurrence's source category (``folder``'s,
     # ``sources.category_of``, #1569), retired or not; None without one.
     category: str | None = None
+    # Definitely matching claimants, only on Message-ID grouped query rows.
+    claimant_count: int | None = None
     # The reconciler tombstoned the indexed file (``T``-flagged or
     # missing): it awaits the reaper under mirror retention.
     pending_deletion: bool = False
@@ -1301,7 +1304,9 @@ class LeafResult:
     expression does not reject (its matches plus the indeterminate
     ones; owner, 2026-10-08): ``true`` / ``false`` / ``indeterminate``
     count them by the leaf's own value (1, 0, NULL), before ``negate``
-    (#1087), so the three sum to ``total_matches + indeterminate``. For
+    (#1087), so the three sum to claimant-level matches plus unknowns
+    before any Message-ID grouping (``total_matches + indeterminate`` in
+    the default mode). For
     a non-negated address leaf, ``distinct`` and ``addresses`` are the
     distinct addresses its own match selects on the messages the
     expression returns that the leaf itself is true of, the matches
@@ -1323,8 +1328,8 @@ class LeafResult:
 class MessagePage:
     """One page of an exhaustive enumeration.
 
-    ``total_matches`` counts every message matching the predicates, not
-    just this page; ``offset`` is how many matches earlier pages returned.
+    ``total_matches`` counts every matching claimant, or Message-ID group
+    under ``collapse=message_id``, not just this page; ``offset`` is how many matches earlier pages returned.
     ``next_cursor`` is ``None`` exactly when ``has_more`` is false.
     ``distinct_message_ids`` counts distinct sender-controlled Message-IDs
     among definite matches in that same snapshot, not identical content.
@@ -5378,6 +5383,7 @@ class Database:
         metadata_fields: Sequence[str] = (),
         limit: int = 25,
         cursor: str | None = None,
+        collapse: str | None = None,
     ) -> MessagePage:
         """Enumerate every message matching all given predicates.
 
@@ -5439,6 +5445,8 @@ class Database:
         unknown ``date_basis``, an invalid or inverted size bound, or a
         malformed / foreign cursor.
         """
+        if collapse not in (None, "message_id"):
+            raise InvalidFilterError("collapse", "collapse must be message_id or omitted")
         basis = DATE_BASES[normalize_date_basis(date_basis)]
         leaves = query_messages_leaves(
             sender=sender,
@@ -5474,6 +5482,10 @@ class Database:
         # A cursor is only meaningful for the predicates and the ordering
         # it was issued under; bind it to a digest of both.
         digest = leaf_digest(leaves, basis.name, where)
+        if collapse:
+            digest = hashlib.sha256(
+                json.dumps(["message-id-grouping-v1", digest]).encode()
+            ).hexdigest()[:16]
         clock = basis.page_clock
         page_where_sql, page_params = _clock_page_predicate(
             where_sql, params, basis, leaves, where=where, has_cursor=bool(cursor)
@@ -5493,14 +5505,16 @@ class Database:
                 # Selected clocks have composite indexes including the claimant tie-break.
                 page_where_sql += f" AND ({clock}, m.claimant_id) < (?, ?)"
                 page_params += [last_at, last_id]
-            total, distinct_ids = conn.execute(
+            total, distinct_ids, missing_ids = conn.execute(
                 with_metadata(
-                    "SELECT COUNT(*), COUNT(DISTINCT m.message_id) FROM messages m WHERE "  # nosec B608 — compiler SQL; values bound
+                    "SELECT COUNT(*), COUNT(DISTINCT m.message_id), COUNT(*) - COUNT(m.message_id) FROM messages m WHERE "  # nosec B608 — compiler SQL; values bound
                     + where_sql,
                     metadata,
                 ),
                 params,
             ).fetchone()
+            if collapse:
+                total = distinct_ids + missing_ids
             address_matches = {
                 name: _address_matches(conn, value, roles, where_sql, params, total, metadata)
                 for name, value, roles in address_filters
@@ -5521,21 +5535,61 @@ class Database:
                     ),  # nosec B608
                     params,
                 ).fetchone()[0]
+            if collapse and indeterminate:
+                indeterminate = conn.execute(
+                    with_metadata(
+                        "WITH evaluated AS MATERIALIZED (SELECT m.claimant_id, m.message_id, "  # nosec B608 — compiler SQL and fixed identifiers; values bound
+                        f"({where_sql}) AS verdict FROM messages m) "
+                        "SELECT COUNT(*) FROM (SELECT 1 FROM evaluated "
+                        "GROUP BY message_id, CASE WHEN message_id IS NULL THEN claimant_id END "
+                        "HAVING MAX(verdict IS TRUE) = 0 AND MAX(verdict IS NULL) = 1)",
+                        metadata,
+                    ),
+                    params,
+                ).fetchone()[0]
             leaf_results = _leaf_results(conn, where, where_sql, params, metadata) if where else []
-            rows = conn.execute(
-                with_metadata(
-                    f"SELECT {_MESSAGE_COLUMNS}, {DIRECTION_LABEL_SQL} AS direction{metadata_columns} FROM messages m WHERE "  # nosec B608
-                    + page_where_sql
-                    + f" ORDER BY {clock} DESC, m.claimant_id DESC LIMIT ?",
-                    metadata,
-                ),
-                [*page_params, limit + 1],
-            ).fetchall()
+            if collapse:
+                # Group only definite matches, before any page/cursor limit. The
+                # representative's ordinary fields still satisfy the entire filter.
+                group_key = "m.message_id, CASE WHEN m.message_id IS NULL THEN m.claimant_id END"
+                outside_trash = (
+                    "EXISTS (SELECT 1 FROM message_occurrences o "  # nosec B608 — module-owned source-role SQL only
+                    "WHERE o.claimant_id=m.claimant_id AND " + active_outside_trash_sql() + ")"
+                )
+                rows = conn.execute(
+                    with_metadata(
+                        "WITH matching AS (SELECT m.claimant_id, "  # nosec B608 — compiler SQL and fixed identifiers; values bound
+                        f"COUNT(*) OVER (PARTITION BY {group_key}) AS claimant_count, "
+                        f"ROW_NUMBER() OVER (PARTITION BY {group_key} ORDER BY "
+                        f"{outside_trash} DESC, m.effective_at, m.claimant_id) AS position "
+                        f"FROM messages m WHERE {where_sql}) "
+                        f"SELECT {_MESSAGE_COLUMNS}, {DIRECTION_LABEL_SQL} AS direction"
+                        f"{metadata_columns}, g.claimant_count FROM messages m "
+                        "JOIN matching g ON g.claimant_id=m.claimant_id "
+                        "WHERE g.position=1 AND "
+                        + page_where_sql
+                        + f" ORDER BY {clock} DESC, m.claimant_id DESC LIMIT ?",
+                        metadata,
+                    ),
+                    [*params, *page_params, limit + 1],
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    with_metadata(
+                        f"SELECT {_MESSAGE_COLUMNS}, {DIRECTION_LABEL_SQL} AS direction{metadata_columns} FROM messages m WHERE "  # nosec B608
+                        + page_where_sql
+                        + f" ORDER BY {clock} DESC, m.claimant_id DESC LIMIT ?",
+                        metadata,
+                    ),
+                    [*page_params, limit + 1],
+                ).fetchall()
             has_more = len(rows) > limit
             records = [_row_to_message_record(r) for r in rows[:limit]]
             _attach_occurrences(conn, records)
             for record, row in zip(records, rows):
                 record.direction = row["direction"] or "unknown"
+                if collapse:
+                    record.claimant_count = row["claimant_count"]
                 record.list_metadata = {
                     name: tuple(json.loads(row[name + "_metadata"])) for name in metadata
                 }
