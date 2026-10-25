@@ -1660,13 +1660,14 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
     # rate limit withheld since the last heartbeat; the attachment
     # WARNINGs it withheld are in the attachments line instead.
     log.info(
-        "queue: pending=%d retrying=%d deferred_permission=%d parked_trashed=%d "
+        "queue: pending=%d retrying=%d deferred_permission=%d deferred_embed=%d parked_trashed=%d "
         "extraction_deferred=%d dead=%d "
         "oldest_due_age=%ds; deferrals since last heartbeat: parse=%d embed=%d trashed=%d; "
         "suppressed_lines=%d",
         c["pending"],
         c["retrying"],
         c["deferred_permission"],
+        c["deferred_embed"],
         c["parked_trashed"],
         c["extraction_deferred"],
         c["dead"],

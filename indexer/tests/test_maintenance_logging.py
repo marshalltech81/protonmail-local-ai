@@ -427,6 +427,7 @@ class TestQueueHeartbeatCounts:
             "pending": 2,
             "retrying": 2,
             "deferred_permission": 1,
+            "deferred_embed": 0,
             "parked_trashed": 1,
             "extraction_deferred": 1,
             "dead": 1,
@@ -444,6 +445,7 @@ class TestQueueHeartbeatCounts:
             "pending": 0,
             "retrying": 0,
             "deferred_permission": 0,
+            "deferred_embed": 0,
             "parked_trashed": 0,
             "extraction_deferred": 0,
             "dead": 0,
@@ -463,8 +465,8 @@ class TestQueueHeartbeatCounts:
             error_class=ERROR_CLASS_RETRYABLE,
             delay_seconds=30,
         )
-        assert queue.drain_deferrals() == {"parse": 1, "embed": 1, "trashed": 1}
-        assert queue.drain_deferrals() == {"parse": 0, "embed": 0, "trashed": 0}
+        assert queue.drain_deferrals() == {"parse": 1, "embed_deferred": 1, "trashed": 1}
+        assert queue.drain_deferrals() == {"parse": 0, "embed_deferred": 0, "trashed": 0}
         db.close()
 
 
@@ -482,7 +484,7 @@ class TestQueueHeartbeatLine:
         assert len(lines) == 1
         assert lines[0].levelno == logging.INFO
         assert re.fullmatch(
-            r"queue: pending=2 retrying=2 deferred_permission=1 parked_trashed=1 "
+            r"queue: pending=2 retrying=2 deferred_permission=1 deferred_embed=0 parked_trashed=1 "
             r"extraction_deferred=1 dead=1 "
             r"oldest_due_age=1\d\ds; deferrals since last heartbeat: parse=1 embed=0 trashed=1; "
             r"suppressed_lines=0",

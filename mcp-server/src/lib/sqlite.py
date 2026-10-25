@@ -1200,10 +1200,11 @@ MESSAGE_ID_CONFLICTS_SQL = """
 #   reaper removes it or the file is restored.
 # - ``parse`` with one of ``QUEUE_DEFERRED_PARSE_ERRORS``: a file the
 #   indexer cannot read yet, or a job waiting for a rename.
-# - ``embed`` with no attempt spent, or with
+# - ``embed_deferred``: an explicit embedder outage/configuration deferral,
+#   irrespective of earlier attempts. Legacy ``embed`` with no attempt spent, or with
 #   ``operator_action_required`` (only a deferral records that class): an
 #   embedder outage or configuration error. A job that had already
-#   failed before an outage deferred it cannot be told from an embed
+#   failed before a legacy outage deferred it cannot be told from an embed
 #   failure, and stays under ``retrying``.
 # - ``extract`` with ``QUEUE_EXTRACTION_DEFERRED_ERROR``: a message whose
 #   attachment extraction reached the indexer's per-message budget,
@@ -1234,6 +1235,8 @@ QUEUE_BUCKETS_SQL = """
                 THEN 'parked_trashed'
             WHEN last_error_class IS NOT NULL AND last_stage = 'parse'
                  AND last_error IN (:permission, :rename)
+                THEN 'deferred'
+            WHEN last_error_class IS NOT NULL AND last_stage = 'embed_deferred'
                 THEN 'deferred'
             WHEN last_error_class IS NOT NULL AND last_stage = 'embed'
                  AND (attempts = 0 OR last_error_class = 'operator_action_required')

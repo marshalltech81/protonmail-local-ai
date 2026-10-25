@@ -154,7 +154,7 @@ ON CONFLICT(filepath) DO NOTHING;"""
 # per stage, and tells permission deferrals and parked trashed files
 # apart from retries (#874).
 STAGE_PARSE = "parse"
-STAGE_EMBED = "embed"
+STAGE_EMBED = "embed_deferred"
 STAGE_TRASHED = "trashed"
 DEFER_STAGES = (STAGE_PARSE, STAGE_EMBED, STAGE_TRASHED)
 # A message whose attachment extraction reached the per-message budget
@@ -677,8 +677,10 @@ class IndexingQueue:
         were last deferred because mbsync has not opened the file yet;
         ``parked_trashed`` rows are trashed files waiting to be reaped;
         ``retrying`` is every other queued row (failures, including a
-        permission error past its deferral window, embedder deferrals,
-        a row interrupted mid-step). ``extraction_deferred`` rows are
+        permission error past its deferral window,
+        a row interrupted mid-step). ``deferred_embed`` rows explicitly
+        record an embedder outage or configuration deferral regardless of
+        earlier failures. ``extraction_deferred`` rows are
         messages continued because their attachment extraction reached
         the per-message budget (``STAGE_EXTRACT``, #1236). ``reparse``
         counts the queued rows
@@ -697,6 +699,7 @@ class IndexingQueue:
             permission_stage=STAGE_PARSE,
             permission_deferred_error=PERMISSION_DEFERRED_ERROR,
             trashed_stage=STAGE_TRASHED,
+            embed_deferred_stage=STAGE_EMBED,
             extract_stage=STAGE_EXTRACT,
             extraction_deferred_error=EXTRACTION_DEFERRED_ERROR,
             reparse_reason=REASON_REPARSE,
@@ -708,6 +711,7 @@ class IndexingQueue:
             "pending": counts.get("pending", 0),
             "retrying": counts.get("retrying", 0),
             "deferred_permission": counts.get("deferred_permission", 0),
+            "deferred_embed": counts.get("deferred_embed", 0),
             "parked_trashed": counts.get("parked_trashed", 0),
             "extraction_deferred": counts.get("extraction_deferred", 0),
             "dead": counts.get("dead", 0),

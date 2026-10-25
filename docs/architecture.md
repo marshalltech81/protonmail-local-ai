@@ -5267,3 +5267,14 @@ leaves the episode active until an actual success. HTTP shutdown drains and
 cancels every registered limiter, including tool-closure instances. Timer
 and request rollover share one lock and generation, preventing a stale
 callback from draining a later window. Reasons remain fixed tokens.
+
+### Embedder queue deferrals
+
+Outage and configuration deferrals record `last_stage=embed_deferred`,
+preserving earlier attempt counts without charging another attempt. Status
+keeps these in `deferred` and the indexer heartbeat reports
+`deferred_embed`, including after an earlier parse failure. Actual embed
+failures retain `embed`. Older `embed` rows cannot always distinguish an
+outage from a failed request; their existing classification is retained.
+No historical rows are rewritten. Recovery clears the job through the
+existing successful indexing path.
