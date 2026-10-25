@@ -807,3 +807,64 @@ def test_a_pacing_wait_cannot_start_a_submission_after_the_group_clock_expires(i
         drv._append(raw, "INBOX") if append else drv._send("B", raw)
     assert stopped.value.token == "clock_exhausted"
     assert world.sends == 0 and not world.msgs
+
+
+@pytest.mark.parametrize("missing", ["parse_none", "one_copy", "all_copies"])
+@pytest.mark.parametrize("copies", [1, 5])
+def test_g5_unavailable_identity_evidence_is_not_a_disproved_prediction(inputs, missing, copies):
+    from copy import deepcopy
+    from dataclasses import replace
+
+    plan = deepcopy(inputs.fixtures)
+    plan["groups"]["g5"]["identical_appends"] = copies
+    inputs = replace(inputs, fixtures=plan)
+
+    class UnavailableCopies(SimulatedWorld):
+        def served(self, folder=None):
+            rows = super().served(folder)
+            if folder != "INBOX":
+                return rows
+            if missing == "parse_none":
+                return [
+                    replace(row, raw=re.sub(rb"(?m)^Message-ID:[^\r\n]*\r?\n", b"", row.raw))
+                    for row in rows
+                ]
+            return rows[:-1] if missing == "one_copy" else []
+
+    _, result = _run(inputs, world=UnavailableCopies(), groups=("g5",))
+    assert result.stop is None
+    assert result.states["P5"] == "unobservable"
+
+
+def test_retained_p11_difference_stops_before_fresh_account_activity(inputs):
+    class FreshCalls(SimulatedWorld):
+        def __init__(self):
+            super().__init__(Scenario(file_drift=True))
+            self.fresh_calls = 0
+
+        def fresh_files(self, folder):
+            self.fresh_calls += 1
+            return super().fresh_files(folder)
+
+    world = FreshCalls()
+    _, result = _run(inputs, world=world, groups=("g3",))
+    _stopped(result, "prediction_failed", "g3")
+    assert result.states["P11"] == "failed"
+    assert world.fresh_calls == 0
+
+
+def test_warm_p9_failure_stops_before_the_cold_pass(inputs):
+    class PassCalls(SimulatedWorld):
+        def __init__(self):
+            super().__init__(Scenario(cold_provable=True, header_read_sets_flags=1))
+            self.passes = []
+
+        def header_pass(self, *, cold):
+            self.passes.append(cold)
+            return super().header_pass(cold=cold)
+
+    world = PassCalls()
+    _, result = _run(inputs, world=world, groups=("g6",))
+    _stopped(result, "prediction_failed", "g6")
+    assert result.states["P9"] == "failed"
+    assert world.passes == [False]

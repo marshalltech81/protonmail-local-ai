@@ -362,6 +362,8 @@ class Driver:
             if not served:
                 continue  # nothing in this folder to compare
             retained = [p11.compare(s.file_bytes, s.raw).verdict for s in served if s.file_bytes]
+            if "different" in retained:
+                return "failed"
             verdicts.append(self._all_equal(retained))
             if len(retained) != len(served):
                 verdicts.append("unobservable")
@@ -378,6 +380,8 @@ class Driver:
                 for s in served
                 if (t := self._token_of(s.raw)) is not None and t in fresh
             ]
+            if "different" in compared:
+                return "failed"
             verdicts.append(self._all_equal(compared))
             if len(compared) != len(served):
                 verdicts.append("unobservable")
@@ -544,12 +548,19 @@ class Driver:
         self._sync()
         copies = [i for i in self._read("INBOX") if self._token_of(i.raw) == token]
         keys = [self._observe(c, f"g5.{k}") for k, c in enumerate(copies)]
-        distinct = len(keys) == plan["identical_appends"] and all(
-            self.probe.equal(keys[a] or "", keys[b] or "") is False
-            for a in range(len(keys))
-            for b in range(a + 1, len(keys))
+        unknown = (
+            len(keys) != plan["identical_appends"]
+            or not keys
+            or any(self.probe.equal(key or "", key or "") is None for key in keys)
         )
-        self._mark("P5", "observed" if distinct else "failed")
+        for a in range(len(keys)):
+            for b in range(a + 1, len(keys)):
+                equal = self.probe.equal(keys[a] or "", keys[b] or "")
+                if equal is True:
+                    self._mark("P5", "failed")
+                unknown |= equal is None
+        distinct = not unknown
+        self._mark("P5", "observed" if distinct else "unobservable")
         for number, case in enumerate(plan["h11"], start=100):
             raw = fixtures.forged_message(run, number, "forged", size=plan["size"])
             self._register(raw)
@@ -569,7 +580,7 @@ class Driver:
                 self._mark("P5", "failed")
         self._sync()
         recovered = [self._observe(i, "g5.rec") for i in self._read("Recovered Messages")]
-        self._mark("P5", "observed" if distinct else "failed")
+        self._mark("P5", "observed" if distinct else "unobservable")
         if not [r for r in recovered if r]:
             self._mark("P12", "unobservable")
         else:
@@ -599,6 +610,8 @@ class Driver:
         self._checkpoint()
         ok = warm.flags_set == 0 and warm.membership_ok
         self.budget.add_transfer(warm.bytes_transferred)
+        if not ok:
+            self._mark("P9", "failed")
         proved = False
         if self.world.can_prove_cold():
             self.budget.pace()
