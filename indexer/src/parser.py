@@ -1745,6 +1745,8 @@ class _BodyNode:
     parent: int
     alternative: bool
     related: bool = False
+    related_start: str | None = None  # None: default root; empty: unresolved explicit root.
+    content_id: str | None = None
     text: str = ""
     has_plain: bool = False
     has_text: bool = False
@@ -1773,10 +1775,9 @@ def _assemble_body(nodes: list[_BodyNode]) -> str:
     separated by a blank line, where a ``multipart/alternative``
     contributes one child, the first carrying plain text, else the first
     carrying any text (the parts of an alternative are renderings of one
-    body), and a ``multipart/related`` contributes only its root, taken
-    to be its first child (RFC 2387's default; a ``start`` parameter
-    naming another root is not read), and nothing when that child is an
-    attachment (#450): its other parts are resources the root refers to.
+    body), and a ``multipart/related`` contributes only its root, named
+    by ``start`` or the first child when absent (RFC 2387), and nothing
+    when that child is an attachment (#450): its other parts are resources the root refers to.
     The parts of any other container are sequential content (#295).
 
     ``nodes`` is in walk (pre-)order, so a child always follows its
@@ -1797,7 +1798,15 @@ def _kept_nodes(nodes: list[_BodyNode]) -> list[bool]:
             with_text = (c for c in node.children if nodes[c].has_text)
             node.chosen = next(with_plain, next(with_text, -1))
         elif node.related:
-            node.chosen = node.children[0] if node.children else -1
+            if node.related_start is None:
+                node.chosen = node.children[0] if node.children else -1
+            else:
+                matches = [
+                    c
+                    for c in node.children
+                    if node.related_start and nodes[c].content_id == node.related_start
+                ]
+                node.chosen = matches[0] if len(matches) == 1 else -1
         if node.chosen >= 0:
             node.has_plain = nodes[node.chosen].has_plain
             node.has_text = nodes[node.chosen].has_text
@@ -1862,6 +1871,7 @@ class BodyWalk:
     whole."""
 
     parts_left: int = MAX_WALKED_PARTS
+    related_header_units: int = MAX_ATTACHED_MESSAGE_FIELDS
     text_parts_left: int = MAX_BODY_TEXT_PARTS
     nested: list[tuple[email.message.Message | None, int]] = field(default_factory=list)
     degraded: Counter[str] = field(default_factory=Counter)
@@ -1880,6 +1890,48 @@ class BodyWalk:
         Callable[[email.message.Message], tuple[email.message.Message | None, bool, bool]] | None
     ) = None
     render: Callable[[email.message.Message, int], str] | None = None
+
+
+def _related_fields(
+    part: email.message.Message, remaining: list[int]
+) -> email.message.Message | None:
+    """Copy only MIME root fields after charging fields and bytes together.
+
+    One shared per-message budget, including nested EML walks. The stdlib
+    parses parameters only after their individual header and aggregate
+    work bounds pass; no MIME syntax is parsed here.
+    """
+    fields = email.message.Message()
+    for name, value in part.raw_items():
+        if not isinstance(value, str):
+            return None
+        remaining[0] -= (
+            1 + (len(name) + len(value) + _HEADER_BYTES_PER_UNIT - 1) // _HEADER_BYTES_PER_UNIT
+        )
+        if remaining[0] < 0:
+            return None
+        if name.lower() in ("content-type", "content-id"):
+            if len(value) > MAX_STORED_HEADER_VALUE_BYTES:
+                return None
+            fields[name] = value
+    return fields
+
+
+def _related_start(fields: email.message.Message | None) -> str | None:
+    if fields is None or len(fields.get_all("Content-Type", [])) != 1:
+        return ""
+    try:
+        starts = [value for name, value in fields.get_params() or [] if name == "start"]
+        if not starts:
+            return None
+        if len(starts) != 1:
+            return ""
+        value = starts[0]
+        return (
+            value if isinstance(value, str) else email.utils.collapse_rfc2231_value(value)
+        ).strip()
+    except email.errors.MessageError, email.errors.MessageDefect, UnicodeError, LookupError:
+        return ""
 
 
 def _extract_body_and_attachments(
@@ -1944,6 +1996,7 @@ def _extract_body_and_attachments(
     # parser exposes such an email as its encoded transport text, not
     # its content, so none of it is body text.
     budget = _SerializationBudget()
+    related_remaining = [MAX_ATTACHED_MESSAGE_FIELDS if walk is None else walk.related_header_units]
     # One frame per open container: its children, taken one at a time as
     # they are visited (#1020), so the walk keeps the
     # first MAX_WALKED_PARTS parts in document order and never queues a
@@ -1971,6 +2024,9 @@ def _extract_body_and_attachments(
             continue
         if walked >= max_parts:
             caps["mime_parts"] += 1
+            for _siblings, _inside, _depth, ancestor, _skip, _reader in frames:
+                if ancestor >= 0 and nodes[ancestor].related_start is not None:
+                    nodes[ancestor].related_start = ""
             break
         walked += 1
         ct = part.get_content_type()
@@ -2058,12 +2114,29 @@ def _extract_body_and_attachments(
                 )
             )
         inside = in_attachment or is_attachment
+        root_child = (
+            parent >= 0 and nodes[parent].related and nodes[parent].related_start is not None
+        )
+        fields = (
+            _related_fields(part, related_remaining)
+            if (not inside and not no_body and ct == "multipart/related") or root_child
+            else None
+        )
+        content_id = None
+        if root_child:
+            ids = fields.get_all("Content-ID", []) if fields is not None else []
+            if fields is None or len(ids) > 1:
+                nodes[parent].related_start = ""
+            elif len(ids) == 1:
+                content_id = str(ids[0]).strip()
         node: _BodyNode | None = None
         if not inside and not no_body:
             node = _BodyNode(
                 parent,
                 alternative=ct == "multipart/alternative",
                 related=ct == "multipart/related",
+                related_start=_related_start(fields) if ct == "multipart/related" else None,
+                content_id=content_id,
             )
             node.selected_above = selected_above
             node.depth = node_depth
@@ -2112,7 +2185,7 @@ def _extract_body_and_attachments(
             # An attachment keeps its position among a related's children
             # as an empty node, so one that is the root makes the related
             # contribute nothing rather than promoting the next part (#450).
-            nodes.append(_BodyNode(parent, alternative=False))
+            nodes.append(_BodyNode(parent, alternative=False, content_id=content_id))
             nodes[parent].children.append(len(nodes) - 1)
         if part.is_multipart():
             if leaf or (walk is not None and is_attachment):
@@ -2251,6 +2324,13 @@ def _extract_body_and_attachments(
         node.has_text = bool(node.text)
         node.has_plain = node.has_text and not is_html
 
+    _kept_nodes(nodes)
+    for index, candidate in enumerate(nodes):
+        if candidate.related and candidate.related_start is not None and candidate.chosen < 0:
+            candidate.source_losses |= full_body.STRUCTURE_LOSS
+            unsplit.append((index, False))
+    if walk is not None:
+        walk.related_header_units = related_remaining[0]
     if html_parts:
         _convert_html_parts(nodes, html_parts, caps)
         if full_parts is not None:
