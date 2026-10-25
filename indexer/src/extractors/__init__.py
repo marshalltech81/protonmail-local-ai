@@ -1324,24 +1324,6 @@ def _dispatch(
             error=f"extractor module {module_name!r} not importable in this image",
         )
 
-    # Zip-based formats (DOCX, XLSX, PPTX) need a zip-bomb pre-check: the
-    # ``max_bytes`` cap above only bounds the compressed payload; a
-    # malicious workbook can declare 200× expansion in its central
-    # directory. Reject before handing to lxml.
-    if module_name in OOXML_MODULES:
-        zip_error = _validate_zip_payload(payload)
-        if zip_error is not None:
-            # A ``failed`` row drops the attachment out of search, so it
-            # is visible at WARNING (#871); fixed text, as the error
-            # names only sizes.
-            _warn_failed(module_name, dispatch_via, "zip uncompressed-size cap exceeded")
-            return ExtractionResult(
-                status=STATUS_FAILED,
-                extractor=_stamp_extractor(module_name, module_name),
-                text=None,
-                error=zip_error,
-            )
-
     # Known zero for a PDF unless its OCR cap records a count; unknown for
     # every other module (#891).
     _attempt.ocr_pages_skipped = 0 if module_name == "pdf" else None
@@ -1406,6 +1388,8 @@ def _dispatch(
         # extraction in the extractor child (#1040, #1291) reports the
         # type name of what it raised.
         error_type = exc.type_name if isinstance(exc, ChildError) else type(exc).__name__
+        if error_type == "ZipUncompressedSizeError":
+            error_type = "zip uncompressed-size cap exceeded"
         _warn_failed(module_name, dispatch_via, error_type)
         return ExtractionResult(
             status=STATUS_FAILED,
@@ -1752,8 +1736,8 @@ def _validate_zip_payload(payload: bytes) -> str | None:
     * the sum of declared uncompressed sizes exceeds the cap.
 
     Reading ``ZipInfo.file_size`` does not decompress anything — it just
-    parses the central directory header — so this check is cheap and
-    runs before lxml gets involved.
+    parses the central directory header. It runs only in the resource-
+    limited extractor child, before a format library is opened (#1438).
     """
     try:
         import io

@@ -97,6 +97,10 @@ _ROOT = _HERE.parent.parent
 _EXIT_USAGE = 2
 
 
+class ZipUncompressedSizeError(Exception):
+    """The shared OOXML declared-size guard refused a package."""
+
+
 def run(
     module: str,
     payload: bytes,
@@ -115,6 +119,8 @@ def run(
     Image.MAX_IMAGE_PIXELS = package.GLOBAL_MAX_IMAGE_PIXELS
     package.reset_attempt()
     try:
+        if module in package.OOXML_MODULES and package._validate_zip_payload(payload) is not None:
+            raise ZipUncompressedSizeError
         extractor = importlib.import_module(f"{_PACKAGE}.{MODULES[module]}")
         text, caps, *name = extractor.extract_text(payload, *options, **kwargs)
     except Exception as exc:  # noqa: BLE001 — reported by type name only

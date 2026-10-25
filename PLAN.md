@@ -925,10 +925,9 @@ superseded entries keep their number and one line.
     the configured input budget times the decode's worst expansion).
     Only `text` is exempt: a fixed codec set and constant-pass decoding
     with no structural parsing, to be locked by a CI test (#1295;
-    updated 2026-10-11: not written yet, #1295 is open). Not yet met
-    (2026-10-11): the dispatcher's OOXML ZIP-size guard
-    (`_validate_zip_payload`) still reads the central directory in the
-    indexer process until #1438 moves it. Order:
+    updated 2026-10-11: not written yet, #1295 is open). The shared OOXML ZIP-size guard
+    (`_validate_zip_payload`) runs in the resource-limited extractor
+    child before the decoder (#1438). Order:
     #1230, the runner (#1291), `image` (#1292), `pdf` (#1293), `html`
     with body HTML conversion (#1294), then #922; extracted text stays
     byte-identical. The stdlib message parse stays in-process for now:
