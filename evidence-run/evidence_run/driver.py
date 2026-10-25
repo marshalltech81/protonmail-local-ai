@@ -75,32 +75,32 @@ class Shape:
 
 def header_shape(raw: bytes) -> Shape:
     """The identity fields of a message's top-level header block."""
-    head = raw.split(b"\r\n\r\n", 1)[0].replace(b"\r\n", b"\n")
-    names: list[bytes] = []
-    values: list[bytes] = []
-    for line in head.split(b"\n"):
-        if line[:1] in (b" ", b"\t"):
-            continue  # a folded continuation
-        name, _, value = line.partition(b":")
-        names.append(name.strip().lower())
+    headers = correlation.read_headers(raw)
+    if headers is None:
+        return Shape(0, 0, False, 0, 0)
+    names, values = [], []
+    for name, value in headers.raw_items():
+        names.append(name.lower())
         values.append(value.strip())
-    internal = [v for n, v in zip(names, values, strict=True) if n == b"x-pm-internal-id"]
-    gluon = [v for n, v in zip(names, values, strict=True) if n == b"x-pm-gluon-id"]
+    internal = [v for n, v in zip(names, values, strict=True) if n == "x-pm-internal-id"]
+    gluon = [v for n, v in zip(names, values, strict=True) if n == "x-pm-gluon-id"]
     return Shape(
         len(internal),
         len(gluon),
-        bool(names) and names[0] == b"x-pm-gluon-id",
-        sum(1 for v in internal if v.startswith(b"SYNTHFORGED-")),
-        sum(1 for v in gluon if v.startswith(b"SYNTHFORGEDGLUON-")),
+        bool(names) and names[0] == "x-pm-gluon-id",
+        sum(1 for v in internal if v.startswith("SYNTHFORGED-")),
+        sum(1 for v in gluon if v.startswith("SYNTHFORGEDGLUON-")),
     )
 
 
 def _field_value(raw: bytes, name: bytes) -> bytes | None:
-    for line in raw.split(b"\r\n\r\n", 1)[0].replace(b"\r\n", b"\n").split(b"\n"):
-        key, _, value = line.partition(b":")
-        if key.strip().lower() == name:
-            return value.strip()
-    return None
+    headers = correlation.read_headers(raw)
+    if headers is None:
+        return None
+    values = [value for key, value in headers.raw_items() if key.lower() == name.decode("ascii")]
+    if len(values) != 1:
+        return None
+    return values[0].strip().encode("utf-8", errors="surrogateescape")
 
 
 @dataclass(frozen=True)

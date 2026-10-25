@@ -79,3 +79,20 @@ def test_valid_correlation_and_service_sender_share_parsed_fields(ending):
             )
         )
         assert observed.token == token and observed.sender_domain == "sender.example"
+
+
+@pytest.mark.parametrize("ending", [b"\r\n", b"\n"])
+def test_identity_shape_and_gluon_reads_cannot_use_body_headers(ending):
+    from evidence_run import driver
+
+    raw = ending.join(
+        [
+            b"From: a@sender.example",
+            b"Subject: SYNTH-r1g1-1",
+            b"",
+            b"X-Pm-Internal-Id: SYNTHFORGED-1",
+            b"X-Pm-Gluon-Id: SYNTHFORGEDGLUON-1",
+        ]
+    )
+    assert driver.header_shape(raw) == driver.Shape(0, 0, False, 0, 0)
+    assert driver._field_value(raw, b"x-pm-gluon-id") is None
