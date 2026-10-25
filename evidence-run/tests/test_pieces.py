@@ -412,3 +412,17 @@ def test_missing_uidvalidity_refuses_capture_instead_of_fabricating_zero(env, mo
     with pytest.raises(WorldError) as refused:
         PiecesWorld(config).served()
     assert refused.value.token == "capture_failed"
+
+
+def test_c_route_smtp_refusal_is_a_provider_warning(env, monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from evidence_run import sender
+
+    config, _, _ = env
+    cfg = replace(config, smtp={**config.smtp, "C_check": config.smtp["C"]}, check_imap=config.imap)
+    monkeypatch.setattr(sender, "send", lambda *args, **kwargs: SimpleNamespace(token="refused"))
+    with pytest.raises(WorldError) as caught:
+        PiecesWorld(cfg).route_preserves("C", fixtures.forged_message("r1g2", 900, "forged"))
+    assert caught.value.token == "provider_warning"

@@ -192,6 +192,8 @@ class PiecesWorld:
             )
         except sender.SendError as exc:
             raise WorldError(exc.token) from None
+        if sent.token == "refused":
+            raise WorldError("provider_warning")
         if sent.token != "sent":
             return None
         wanted = _token(raw)

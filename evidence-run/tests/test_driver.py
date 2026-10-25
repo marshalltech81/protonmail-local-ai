@@ -868,3 +868,61 @@ def test_warm_p9_failure_stops_before_the_cold_pass(inputs):
     _stopped(result, "prediction_failed", "g6")
     assert result.states["P9"] == "failed"
     assert world.passes == [False]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_token_observations_cannot_hide_an_identity_change(inputs, reverse):
+    from dataclasses import replace
+
+    class Duplicates(SimulatedWorld):
+        duplicate = False
+
+        def served(self, folder=None):
+            items = super().served(folder)
+            if not self.duplicate or not items:
+                return items
+            first = items[0]
+            changed = replace(first, raw=first.raw.replace(b"X-Pm-Internal-Id:", b"X-Ignored:"))
+            pair = [changed, first] if reverse else [first, changed]
+            return pair + items[1:]
+
+    world = Duplicates()
+    clock = driver.VirtualClock()
+    drv = driver.Driver(world, inputs, clock=clock, sleep=clock.sleep, isolation_checked=True)
+    raw = driver.fixtures.control_message(drv._gid("g3"), 1)
+    token = drv._register(raw)
+    world.send("B", raw)
+    base = drv._snapshot("before", [token], ("INBOX",))
+    world.duplicate = True
+    after = drv._snapshot("after", [token], ("INBOX",))
+    assert drv._compare({"proton_id": "same"}, base, after, [token]) == "unobservable"
+
+
+def test_duplicate_draft_tokens_are_unobservable_instead_of_selecting_the_last(inputs):
+    class Duplicates(SimulatedWorld):
+        def served(self, folder=None):
+            items = super().served(folder)
+            return [item for item in items for _ in range(2)]
+
+    _, result = _run(inputs, world=Duplicates(), groups=("g4",))
+    assert result.stop is None
+    assert result.states["P4"] == "unobservable"
+
+
+def test_a_c_route_refusal_stops_before_later_routes_or_submissions(inputs):
+    from evidence_run.world import WorldError
+
+    class Refuses(SimulatedWorld):
+        routes = []
+
+        def route_preserves(self, route, raw):
+            self.routes.append(route)
+            if route == "C":
+                raise WorldError("provider_warning")
+            return True
+
+    world = Refuses()
+    _, result = _run(inputs, world=world, groups=("g2",))
+    _stopped(result, "provider_warning", "g2")
+    assert world.routes == ["B", "C"]
+    assert not world.msgs

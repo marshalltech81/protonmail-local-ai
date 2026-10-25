@@ -329,11 +329,17 @@ class Driver:
         for folder in folders:
             served += self._read(folder)
         snaps: dict[str, Snap] = {}
-        for item in served:
+        ambiguous: set[str] = set()
+        for index, item in enumerate(served):
             token = self._token_of(item.raw)
             if token is not None and token in tokens:
-                key = self._observe(item, label)
+                duplicate = token in snaps or token in ambiguous
+                key = self._observe(item, f"{label}.duplicate.{index}" if duplicate else label)
                 assert key is not None
+                if duplicate:
+                    snaps.pop(token, None)
+                    ambiguous.add(token)
+                    continue
                 snaps[token] = Snap(
                     key,
                     self._digest(_field_value(item.raw, b"x-pm-gluon-id")),
@@ -521,7 +527,12 @@ class Driver:
                 items = [
                     i for f in _FOLDERS for i in self._read(f) if self._token_of(i.raw) == token
                 ]
-                keys.append(self._observe(items[-1], f"g4.{n}.{op}") if items else None)
+                if len(items) == 1:
+                    keys.append(self._observe(items[0], f"g4.{n}.{op}"))
+                else:
+                    for index, item in enumerate(items):
+                        self._observe(item, f"g4.{n}.{op}.duplicate.{index}")
+                    keys.append(None)
                 if len(keys) >= 3 and keys[-2] is not None and keys[-1] is not None:
                     equal = self.probe.equal(keys[-2], keys[-1])
                     if (op == "draft_replace" and equal is True) or (
@@ -769,8 +780,11 @@ class Driver:
                 self._timings[f"{name}_seconds"] = max(self._clock() - started, 0.0)
         except StopRun as exc:
             stop = (exc.token, self._group)
-        except WorldError:
-            stop = ("world_error", self._group)
+        except WorldError as exc:
+            stop = (
+                "provider_warning" if exc.token == "provider_warning" else "world_error",
+                self._group,
+            )
         except ProbeError:
             stop = ("probe_failed", self._group)
         for name, state in self._marks.items():
