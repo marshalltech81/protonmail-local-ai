@@ -759,7 +759,48 @@ class SearchAttachmentsOutput(_Output):
 # --- retrieval tools ----------------------------------------------------
 
 
+class ThreadAttachment(_Output):
+    attachment_occurrence_id: str = Field(
+        description="One attachment on one message; pass to get_attachment."
+    )
+    claimant_id: str = Field(description="The carrying message's claimant ID.")
+    attachment_id: str = Field(
+        description="Payload content hash; repeated payloads retain separate occurrences."
+    )
+    filename: str = Field(
+        description=f"At most {HEADER_CHAR_LIMIT} characters; see filename_clipped."
+    )
+    filename_clipped: bool
+    content_type: str = Field(
+        description=f"Declared MIME type, at most {HEADER_CHAR_LIMIT} characters."
+    )
+    content_type_clipped: bool
+    extraction_status: str | None = Field(
+        description="success, empty, unsupported, too_large, failed or deferred; null when no extraction is recorded for this occurrence's cache key."
+    )
+
+
 class ThreadMessage(MessageHeaders):
+    attachments: list[ThreadAttachment] | None = Field(
+        default=None,
+        description=f"Stored attachment occurrences, at most {MAX_LISTED}; null when metadata is disabled. No attachment text. Inventory can be incomplete or obsolete; check its flags.",
+    )
+    attachment_count: int | None = Field(
+        default=None,
+        description="Unit: stored attachment occurrences on this claimant, before the list cap; not a claim of exhaustive inventory. Null when metadata is disabled.",
+    )
+    attachments_truncated: bool | None = Field(
+        default=None,
+        description="More stored occurrences exist than attachments lists; null when metadata is disabled.",
+    )
+    attachment_rows_current: bool | None = Field(
+        default=None,
+        description="True when the stored inventory was committed as current; false when extraction was disabled, null when unassessed or metadata is disabled. Independent of manifest completeness.",
+    )
+    attachments_manifest_complete: bool | None = Field(
+        default=None,
+        description="True when parsing captured the complete attachment manifest; false when a cap lost entries, null when unassessed or metadata is disabled.",
+    )
     body: str | None = Field(
         description=(
             "Indexed body after quoted-reply stripping, cut at the page's body "

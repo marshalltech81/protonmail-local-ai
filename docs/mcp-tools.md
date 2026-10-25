@@ -1247,7 +1247,30 @@ also carries quoted replies) is shown instead, headed as context and
 not any one message's text, with `indexed_thread_text_scope:
 "context"` in the structured output.
 
-For attachment inventory (filename, MIME type, size and extraction status),
+By default, each message also lists up to ten stored attachment occurrences
+in `attachments`: `attachment_occurrence_id`, the carrying `claimant_id`,
+`attachment_id` (payload hash), filename, declared MIME type and
+`extraction_status`. Repeated payloads remain separate occurrences, even
+within one message. No attachment text or extraction error is included.
+Status comes from the occurrence's own extraction cache key; it is
+`deferred` when that occurrence is awaiting extraction and null when no
+extraction is recorded.
+
+`attachment_count` counts all stored occurrences on that message, before
+the ten-item cap. `attachments_truncated` and a prose marker say when more
+are stored. Filenames and MIME types are cut at 500 characters, with
+`filename_clipped` and `content_type_clipped` flags and prose markers.
+These rows, counts and inventory flags share the message page's snapshot.
+`attachment_rows_current` says whether the stored inventory was committed
+as current; false means extraction was disabled, null means unassessed.
+`attachments_manifest_complete` says whether parsing captured the complete
+manifest; false means a cap lost entries, null means unassessed. Unless
+both are true, an empty list does not prove no attachments, and retained
+rows may be incomplete or obsolete. The count is of stored rows, not an
+assertion of completeness. Setting `include_attachments_metadata=false`
+skips these reads and makes the metadata fields null.
+
+For a paged attachment inventory (also size and completeness fields),
 call `query_attachments` with `thread_id` or a message's `claimant_id`;
 add `folder="Trash"` for messages in Trash. Read one occurrence's stored
 extracted text with `get_attachment`, following `next_offset` until null.
@@ -1290,7 +1313,7 @@ found` ([Reaped sources](#reaped-sources)).
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `thread_id` | string | required | Thread ID from search results |
-| `include_attachments_metadata` | bool | `true` | Show the local attachment-availability note when the indexed thread has attachments |
+| `include_attachments_metadata` | bool | `true` | Include bounded attachment metadata per message, stored counts and inventory flags, plus the local availability note |
 | `offset` | int | `0` | Messages to skip in the selected order |
 | `order` | string | `oldest` | `oldest` or `newest`; offsets follow this order |
 | `limit` | int | `10` | Messages per page; clamped to `[1, 50]` |

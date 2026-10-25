@@ -41,6 +41,7 @@ from ..lib.sqlite import (
     OccurrenceRecord,
     Participant,
     ReapedSource,
+    ThreadAttachmentMetadata,
     address_match_mode,
     canonical_addr,
 )
@@ -68,6 +69,7 @@ from .outputs import (
     QueryMessagesOutput,
     QueryThreadsOutput,
     ReapedMessage,
+    ThreadAttachment,
     ThreadMessage,
     WhereLeafResult,
     clip,
@@ -377,13 +379,51 @@ def _body_page(text: str, offset: int) -> tuple[str, int | None]:
     return window[:cut], offset + cut
 
 
-def _thread_message(m: MessageRecord, body: MessageBody | None) -> ThreadMessage:
+def _thread_message(
+    m: MessageRecord, body: MessageBody | None, metadata: ThreadAttachmentMetadata | None = None
+) -> ThreadMessage:
     """One get_thread message: bounded headers plus its cut body."""
     return ThreadMessage(
         **message_headers(m).model_dump(),
         body=body.text if body else None,
         body_omitted_chars=body.omitted_chars if body else 0,
+        attachments=None
+        if metadata is None
+        else [ThreadAttachment(**vars(a)) for a in metadata.attachments],
+        attachment_count=metadata.total if metadata is not None else None,
+        attachments_truncated=metadata.total > len(metadata.attachments)
+        if metadata is not None
+        else None,
+        attachment_rows_current=metadata.rows_current if metadata is not None else None,
+        attachments_manifest_complete=metadata.manifest_complete if metadata is not None else None,
     )
+
+
+def _thread_attachment_lines(message: ThreadMessage) -> list[str]:
+    """The same bounded occurrence metadata as the structured row."""
+    if message.attachments is None:
+        return []
+    assert message.attachment_count is not None
+    lines = [f"Stored attachments: {message.attachment_count}"]
+    for attachment in message.attachments:
+        name = attachment.filename + (" … [cut]" if attachment.filename_clipped else "")
+        mime = attachment.content_type + (" … [cut]" if attachment.content_type_clipped else "")
+        lines += [
+            f"  {name} ({mime}); extraction: {attachment.extraction_status or 'none recorded'}",
+            f"  Occurrence ID: {attachment.attachment_occurrence_id} | Attachment ID: {attachment.attachment_id}",
+        ]
+    if message.attachments_truncated:
+        lines.append(
+            f"  [{message.attachment_count - len(message.attachments)} more attachments; use query_attachments with claimant_id]"
+        )
+    if (
+        message.attachment_rows_current is not True
+        or message.attachments_manifest_complete is not True
+    ):
+        lines.append(
+            "  [Stored inventory may be incomplete or obsolete; check inventory flags and query_attachments.]"
+        )
+    return lines
 
 
 def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> list[str]:
@@ -827,7 +867,8 @@ def register_retrieval_tools(server, db):
     ) -> CallToolResult:
         """
         Get one thread's messages by thread ID, oldest first by default — each
-        message's own headers and body; no attachment content.
+        message's own headers and body, plus bounded attachment metadata by
+        default; no attachment content.
 
         For a potentially exhaustive review, disclose the target thread
         and planned content read before the first call, including transfer
@@ -853,7 +894,14 @@ def register_retrieval_tools(server, db):
         limits: paging cannot recover removed messages. Pages use separate
         snapshots, so concurrent indexing can change the conversation.
 
-        For attachment inventory (filename, MIME type, size and extraction status),
+        With include_attachments_metadata, each message lists up to ten stored
+        attachment occurrences (IDs, filename, MIME type, extraction status),
+        with the full stored count and an explicit truncation marker. Filenames
+        and MIME types are cut at 500 characters. Check attachment_rows_current
+        and attachments_manifest_complete: missing or obsolete rows do not prove
+        absence. False disables the metadata read and returns null metadata.
+        For a paged attachment inventory (filename, MIME type, size and extraction status,
+        plus completeness fields),
         use ``query_attachments`` with thread_id or claimant_id; add
         ``folder="Trash"`` for messages in Trash. Read an occurrence's
         stored extracted text with ``get_attachment``, following ``next_offset``
@@ -868,7 +916,7 @@ def register_retrieval_tools(server, db):
 
         Args:
             thread_id: The opaque thread ID returned by search_emails
-            include_attachments_metadata: Include the local attachment availability note
+            include_attachments_metadata: Include bounded per-message attachment metadata and the availability note
             offset: Messages to skip in the selected order (default 0)
             order: oldest (default) or newest; keep the same order when paging
             limit: Messages per page (default 10, clamped to [1, 50])
@@ -904,6 +952,7 @@ def register_retrieval_tools(server, db):
                 limit=limit,
                 body_char_limit=_THREAD_BODY_CHAR_LIMIT,
                 order=order,
+                include_attachments_metadata=include_attachments_metadata,
             )
             # Fixed-text causes: the ID is the caller's and stays out of the log.
             if isinstance(page, ReapedSource):
@@ -914,6 +963,30 @@ def register_retrieval_tools(server, db):
                 raise ToolError(f"Thread not found: {thread_id}")
             thread, messages, total = page.thread, page.messages, page.total_messages
             timings.count("messages", len(messages))
+            thread_messages = [
+                _thread_message(
+                    m,
+                    page.bodies.get(m.claimant_id),
+                    page.attachments[m.claimant_id] if page.attachments is not None else None,
+                )
+                for m in messages
+            ]
+            if page.attachments is not None:
+                omitted = sum(a.total - len(a.attachments) for a in page.attachments.values())
+                clipped = sum(
+                    a.filename_clipped + a.content_type_clipped
+                    for m in page.attachments.values()
+                    for a in m.attachments
+                )
+                uncertain = sum(
+                    m.rows_current is not True or m.manifest_complete is not True
+                    for m in page.attachments.values()
+                )
+                timings.count("attachment_metadata_omitted", omitted)
+                timings.count("attachment_metadata_clipped", clipped)
+                timings.count("attachment_inventory_uncertain", uncertain)
+                if omitted or clipped or uncertain:
+                    timings.count("degraded_attachment_metadata", 1)
 
             if messages:
                 count = f"{total} (showing {offset + 1}-{offset + len(messages)}, {order} first)"
@@ -938,10 +1011,13 @@ def register_retrieval_tools(server, db):
                 )
             elif total:
                 lines.append(f"No messages at offset {offset}; the thread has {total}.")
-            for i, m in enumerate(messages, offset + 1):
+            for i, (m, message_output) in enumerate(
+                zip(messages, thread_messages, strict=True), offset + 1
+            ):
                 lines += ["", f"[{i}/{total}] Message-ID: {m.message_id}"]
                 lines.append(f"Claimant ID: {m.claimant_id}")
                 lines += _header_lines(m)
+                lines += _thread_attachment_lines(message_output)
                 lines.append("")
                 body = page.bodies.get(m.claimant_id)
                 if body is None:
@@ -1006,7 +1082,7 @@ def register_retrieval_tools(server, db):
                 thread=thread_summary(thread),
                 total_messages=total,
                 offset=offset,
-                messages=[_thread_message(m, page.bodies.get(m.claimant_id)) for m in messages],
+                messages=thread_messages,
                 next_offset=next_offset if next_offset < total else None,
                 indexed_thread_text=thread_text,
                 indexed_thread_text_scope="context" if thread_text is not None else None,
