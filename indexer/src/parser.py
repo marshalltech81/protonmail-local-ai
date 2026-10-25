@@ -891,15 +891,14 @@ def parse_email_bytes(
     # logged once below.
     caps: Counter[str] = Counter()
     headers, headers_complete = _read_top_headers(msg, caps)
-    in_reply_to = _clean_id(msg.get("In-Reply-To", ""))
-    if len(in_reply_to) > MESSAGE_ID_MAX_CHARS:
-        caps["in_reply_to_length"] += 1
-        in_reply_to = ""
+    in_reply_to = ""
+    for ref in _reply_ids(msg.get("In-Reply-To", "")):
+        if len(ref) <= MESSAGE_ID_MAX_CHARS:
+            in_reply_to = ref
+        else:
+            caps["in_reply_to_length"] += 1
     references: list[str] = []
-    reference_header = msg.get("References", "")
-    if isinstance(reference_header, email.header.Header):
-        reference_header = _decode_header(reference_header)
-    for ref in (_clean_id(r) for r in reference_header.split() if r.strip()):
+    for ref in _reply_ids(msg.get("References", "")):
         if len(ref) <= MESSAGE_ID_MAX_CHARS:
             references.append(ref)
         else:
@@ -2519,6 +2518,64 @@ def _read_top_headers(
             )
         )
     return rows, complete
+
+
+def _reply_ids(value: str | email.header.Header) -> Iterator[str]:
+    """Read bracketed reply IDs in one pass, ignoring nested comments.
+
+    Bare whitespace-separated IDs remain supported when no bracketed form
+    is present. Each character is visited at most twice; slices are disjoint.
+    No recursive comment parser or repeated search over a suffix is used.
+    """
+    if isinstance(value, email.header.Header):
+        value = _decode_header(value)
+    bracketed = "<" in value
+    start: int | None = None
+    comments = 0
+    quoted = False
+    escaped = False
+    for index, char in enumerate(value):
+        if comments:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == "(":
+                comments += 1
+            elif char == ")":
+                comments -= 1
+            continue
+        if bracketed and start is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quoted:
+                escaped = True
+            elif char == '"':
+                quoted = not quoted
+            elif not quoted and char == ">":
+                if ref := value[start:index].strip():
+                    yield ref
+                start = None
+            elif not quoted and char == "<":
+                start = index + 1
+            continue
+        if char == "(":
+            if not bracketed and start is not None:
+                yield value[start:index]
+                start = None
+            comments = 1
+        elif bracketed:
+            if char == "<":
+                start = index + 1
+                quoted = False
+        elif char.isspace():
+            if start is not None:
+                yield value[start:index]
+                start = None
+        elif start is None:
+            start = index
+    if not bracketed and start is not None:
+        yield value[start:]
 
 
 def _clean_id(value: str | email.header.Header) -> str:

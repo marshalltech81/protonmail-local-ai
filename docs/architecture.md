@@ -746,6 +746,13 @@ discovery, with **per-message chunks** as the precise unit of retrieval.
    write keyed on deterministic chunk IDs) and rewrite the parent
    thread's vector
 
+Reply headers yield individual bracketed Message-IDs in header order, even
+without separating whitespace; nested comments are ignored. The last retained
+`In-Reply-To` ID is the direct parent, and `References` keeps its ordered IDs.
+Each ID still has the 998-character bound. Legacy bare whitespace-separated IDs
+remain supported. This is applied when parsing; it does not automatically
+reassign already-indexed messages or enqueue a reparse (#1517).
+
 The indexer writes a thread in two phases. **Phase 1** commits the
 thread row, `message_thread_map` entry, and `indexed_files` row in a
 single `upsert_thread` call, with a seed thread vector chosen from a
