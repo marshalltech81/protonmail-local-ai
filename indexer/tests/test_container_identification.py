@@ -655,7 +655,7 @@ def test_the_cache_namespace_is_the_labels(stubbed_extractors):
     ``doc``; ``label_extraction_modules`` names namespaces, not what ran."""
     payload = make_ole2(*_WORD)
     assert extractors.extraction_module("image/png", "a.png", payload) == "image"
-    assert extractors.label_extraction_modules("image/png", "a.png") == {"image", "pdf"}
+    assert extractors.label_extraction_modules("image/png", "a.png") == {"image", "pdf", "html"}
     result = extract(content_type="image/png", filename="a.png", payload=payload)
     assert result.extractor == f"doc@{EXTRACTOR_VERSIONS['doc']}"
 

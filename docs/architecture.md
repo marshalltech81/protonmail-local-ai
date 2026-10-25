@@ -2949,6 +2949,20 @@ whatever the OCR setting, by the cache check and by the startup sweep
 (see the `attachment_extractions` cache and *OCR*), and the re-run
 writes a stamped row or a `pdf` one, so it is not matched again.
 
+HTML labelled as images (#1417): after slicing the first 256 bytes,
+removing an optional UTF-8 BOM and leading ASCII whitespace, a
+case-insensitive `<!DOCTYPE html` or `<html` followed by whitespace,
+`>` or `/` selects the HTML extractor before the OCR gate. This is a
+heuristic: HTML without that prefix, or after more leading whitespace
+than fits in the slice, keeps the image route. Conversion runs in the
+existing HTML child; the cache key is `html`, shared with HTML-labelled
+occurrences of the same bytes. `image@9` refreshes older image results
+once at startup, including stamped OCR-disabled and failed rows, so
+previously indexed HTML gains text even with OCR off. This also
+re-runs cached image OCR with OCR on; while OCR is off, existing
+`image-ocr` text is preserved until OCR is enabled. Dead letters require
+`make requeue-dead`, as with other extractor version bumps.
+
 Binary payloads labelled as text: the text extractor decodes whatever
 it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent
 as `text/plain`, or named `.txt` / `.csv` / `.md` with no usable
