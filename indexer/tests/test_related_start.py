@@ -216,3 +216,23 @@ def test_nonfirst_text_root_is_not_lost_behind_an_image_resource():
     raw = _related().replace(b"Content-Type: text/plain", b"Content-Type: image/png", 1)
     message = _parse(raw)
     assert message.body_text == "ROOT" and message.body_complete
+
+
+@pytest.mark.parametrize(
+    "charset", ["utf\x00-8", "utf-8\x00", "\x00"], ids=["inner-nul", "trailing-nul", "nul-only"]
+)
+@pytest.mark.parametrize("consumer", ["parser", "eml"])
+def test_invalid_related_start_charset_keeps_the_message_with_unknown_body(
+    charset, consumer, caplog
+):
+    raw = _related(f"; start*={charset}''%3Croot%40example.test%3E")
+    if consumer == "parser":
+        message = _parse(raw)
+        assert message.body_text == ""
+        assert message.body_complete is False
+        assert message.parse_caps["body_structure"] == 1
+    else:
+        text, caps = eml.extract_text(raw)
+        assert "ROOT" not in text and "RESOURCE" not in text
+        assert caps == ["eml_body_structure"]
+    assert "root@example.test" not in caplog.text

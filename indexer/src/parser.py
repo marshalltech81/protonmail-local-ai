@@ -1930,7 +1930,7 @@ def _related_start(fields: email.message.Message | None) -> str | None:
         return (
             value if isinstance(value, str) else email.utils.collapse_rfc2231_value(value)
         ).strip()
-    except email.errors.MessageError, email.errors.MessageDefect, UnicodeError, LookupError:
+    except email.errors.MessageError, ValueError, LookupError:
         return ""
 
 
