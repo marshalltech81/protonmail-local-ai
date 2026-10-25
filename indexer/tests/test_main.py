@@ -6813,10 +6813,15 @@ class TestMainStartupAndLoop:
         """Pins the watchdog 6.0.0 behaviour the loop check relies on:
         an exception from ``on_created`` (here, the queue's enqueue
         failing) is not caught by the dispatcher and ends its thread."""
+        from threading import Event
+
         from watchdog.observers import Observer
+
+        failed = Event()
 
         class _FailingQueue:
             def enqueue(self, *a, **kw):
+                failed.set()
                 raise sqlite3.OperationalError("database is locked")
 
         cur = tmp_path / "INBOX" / "cur"
@@ -6826,7 +6831,15 @@ class TestMainStartupAndLoop:
         observer.schedule(handler, str(tmp_path), recursive=True)
         observer.start()
         try:
-            (cur / "1.eml:2,S").write_text("x")
+            # A native backend can miss a file created while its watch
+            # starts. Keep producing distinct events for at most ten
+            # seconds, then prove the failing handler actually ran before
+            # assessing whether the dispatcher ended.
+            for i in range(100):
+                (cur / f"{i}.eml:2,S").write_text("x")
+                if failed.wait(timeout=0.1):
+                    break
+            assert failed.is_set(), "native watcher did not deliver the handler failure"
             observer.join(timeout=10)
             assert not observer.is_alive()
         finally:
