@@ -828,7 +828,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
     "docx": 7,
     "eml": 6,  # Normalize lone surrogates in decoded attached-email text (#1447).
-    "image": 8,  # Preserve unreadable-frame cap visibility in the extraction cache.
+    "image": 9,  # Re-assess image-labelled HTML, including OCR-disabled rows (#1417).
     "pdf": 7,
     "ppt": 2,
     "pptx": 3,
@@ -1227,7 +1227,8 @@ def _dispatch(
         if isinstance(identified, ExtractionResult):
             return identified
         module_name = identified
-    # A PDF under an image label runs the PDF extractor (#1415), decided
+    # PDF or HTML bytes under an image label run their extractor (#1415,
+    # #1417), decided
     # before the OCR gate below, since that extractor reads a digital text
     # layer without OCR: the same constant-size prefix check.
     elif module_name == "image":
@@ -1607,10 +1608,27 @@ def _route_container(module_name: str, payload: bytes) -> str | None:
     * A PDF (``%PDF-``) under an image label goes to ``pdf`` (#1415): the
       image extractor cannot read it, and the PDF extractor reads its
       digital text layer whatever the OCR setting.
+    * An HTML-looking prefix under an image label goes to ``html``
+      before the OCR gate (#1417); this is a bounded heuristic.
     * Anything else is unchanged.
     """
-    if module_name == "image" and payload.startswith(_PDF_SIGNATURE):
-        return "pdf"
+    if module_name == "image":
+        if payload.startswith(_PDF_SIGNATURE):
+            return "pdf"
+        # Heuristic approved in #1417: slice before stripping/lowercasing,
+        # so even an arbitrarily long whitespace prefix costs 256 bytes.
+        prefix = payload[:256].removeprefix(b"\xef\xbb\xbf").lstrip().lower()
+        for start in (b"<!doctype html", b"<html"):
+            if prefix.startswith(start) and prefix[len(start) : len(start) + 1] in (
+                b" ",
+                b"\t",
+                b"\r",
+                b"\n",
+                b"\f",
+                b">",
+                b"/",
+            ):
+                return "html"
     ole2 = payload.startswith(_OLE2_SIGNATURE)
     if module_name in _LEGACY_TO_OOXML:
         return module_name if ole2 else _LEGACY_TO_OOXML[module_name]
@@ -1653,7 +1671,8 @@ def label_extraction_modules(content_type: str, filename: str) -> frozenset[str]
     """Every cache namespace ``extraction_module`` can return for this
     label, whatever the bytes: a legacy label's OOXML namespace for
     bytes that are not OLE2, and an image label's ``pdf`` one for PDF
-    bytes (#1415). These are cache keys, not the modules that run: an
+    bytes (#1415), and ``html`` for the bounded HTML heuristic (#1417).
+    These are cache keys, not the modules that run: an
     OLE2 or ZIP payload runs what its directory names (#1416). Empty
     when the label selects none."""
     selected = _resolve_extractor(content_type, filename)[0]
@@ -1662,7 +1681,7 @@ def label_extraction_modules(content_type: str, filename: str) -> frozenset[str]
     if selected in _LEGACY_TO_OOXML:
         return frozenset({selected, _LEGACY_TO_OOXML[selected]})
     if selected == "image":
-        return frozenset({selected, "pdf"})
+        return frozenset({selected, "pdf", "html"})
     return frozenset({selected})
 
 

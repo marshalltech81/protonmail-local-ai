@@ -131,7 +131,7 @@ class TestRouting:
         assert calls == ["pdf"]
         # The cache key and every module the label can select agree.
         assert extraction_module(content_type, filename, payload) == "pdf"
-        assert label_extraction_modules(content_type, filename) == {"image", "pdf"}
+        assert label_extraction_modules(content_type, filename) == {"image", "pdf", "html"}
 
     @pytest.mark.parametrize(("content_type", "filename"), _IMAGE_LABELS)
     def test_a_scanned_pdf_under_an_image_label_with_ocr_off_is_the_pdf_row(

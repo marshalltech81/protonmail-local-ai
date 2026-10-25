@@ -4248,7 +4248,7 @@ class TestMultipageTiff:
         assert result.status == STATUS_SUCCESS
         assert result.text is not None
         assert result.text.split() == ["PAGE_0", "PAGE_1", "PAGE_2"]
-        assert result.extractor == "image-ocr@8"
+        assert result.extractor == "image-ocr@9"
 
     def test_pages_are_capped_by_max_ocr_pages(self, monkeypatch):
         seen = self._ocr_by_color(monkeypatch)
@@ -4431,7 +4431,7 @@ class TestMultipageTiffOcrCap:
         seen = self._ocr(monkeypatch)
         seeks = self._count_seeks(monkeypatch)
         result = self._extract(self._frames(3), max_ocr_pages=2)
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "image-ocr@8")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "image-ocr@9")
         assert result.text is not None
         assert result.text.split() == ["PAGE_0", "PAGE_1"]
         assert seen == ["PAGE_0", "PAGE_1"]
@@ -5076,7 +5076,7 @@ class TestHeicImages:
         )
 
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "image-ocr@8"
+        assert result.extractor == "image-ocr@9"
         assert result.text == "SYNTHETIC_HEIC_TEXT"
         # One page OCR'd, decoded at its real size and (lossy) colour.
         assert len(seen) == 1
@@ -5145,7 +5145,7 @@ class TestHeicImages:
         assert results["heic"] == results["png"]
         assert results["heic"].status == STATUS_UNSUPPORTED
         assert results["heic"].error == IMAGE_PIXEL_CEILING_ERROR
-        assert results["heic"].extractor == "image@8"
+        assert results["heic"].extractor == "image@9"
         assert decodes == []
 
     def test_only_the_primary_heif_image_is_ocrd(self, monkeypatch):
@@ -5186,7 +5186,7 @@ class TestHeicImages:
         assert pillow_heif.options.DEPTH_IMAGES is False
         assert pillow_heif.options.AUX_IMAGES is False
 
-    def test_image_version_8_rows_are_current(self):
+    def test_image_version_9_rows_are_current(self):
         """image 4 (#1400): rows from 3 hold the ``failed`` result of a
         CMYK image. image 6 (#1401; 5 is #1415's): rows up to 5 hold the
         ``failed`` result of an image over 30,000,000 pixels, which a
@@ -5196,12 +5196,12 @@ class TestHeicImages:
         input was clipped or incorrectly scaled before normalization."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["image"] == 8
-        for older in (2, 3, 4, 5, 6, 7):
+        assert EXTRACTOR_VERSIONS["image"] == 9
+        for older in (2, 3, 4, 5, 6, 7, 8):
             assert stale_extractor_module(f"image@{older}") == "image"
             assert stale_extractor_module(f"image-ocr@{older}") == "image"
-        assert stale_extractor_module("image@8") is None
-        assert stale_extractor_module("image-ocr@8") is None
+        assert stale_extractor_module("image@9") is None
+        assert stale_extractor_module("image-ocr@9") is None
         assert stale_extractor_module("image-ocr@5", ocr_enabled=False) is None
         assert stale_extractor_module("image@5", ocr_enabled=False) == "image"
 
