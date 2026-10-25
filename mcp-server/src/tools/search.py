@@ -406,6 +406,15 @@ def register_search_tools(
         except InvalidFilterError as e:
             rejections.reject("search_emails", e.field_name)
             raise ToolError(f"Search error: {e}") from e
+        try:
+            authority_notice = (
+                await asyncio.to_thread(db.authority_rule_notice, authority_class)
+                if authority_class
+                else None
+            )
+        except Exception as e:
+            log.error("search_emails authority status error: %s", type(e).__name__)
+            raise ToolError(f"Search error: {type(e).__name__}") from e
         # A blank person filter is absent and padding is stripped, as in
         # get_evidence and ask_mailbox (#702, #705).
         from_name = blank_to_none(from_name)
@@ -439,6 +448,7 @@ def register_search_tools(
                 return tool_result(
                     f"{empty}\n{bounds_line}" if bounds_line else empty,
                     SearchEmailsOutput(
+                        authority_notice=authority_notice,
                         mode=mode,
                         resolved_from_addr=None,
                         from_name_matches=0,
@@ -518,6 +528,7 @@ def register_search_tools(
 
             count("results", len(results))
             output = SearchEmailsOutput(
+                authority_notice=authority_notice,
                 mode=mode,
                 resolved_from_addr=resolved_from_addr,
                 from_name_matches=from_name_matches,

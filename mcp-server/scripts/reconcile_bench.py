@@ -82,6 +82,14 @@ CERT_DOMAIN = b"protonmail-local-ai/query-certificate/v0\x00"
 IDENTITY_DOMAIN = b"protonmail-local-ai/identity-hash/v0\x00"
 
 _SCHEMA = """
+-- Applied rule counts/classes are unknown until indexer startup (#1234).
+CREATE TABLE authority_rule_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    configured INTEGER NOT NULL CHECK (configured IN (0, 1)),
+    rule_count INTEGER NOT NULL CHECK (rule_count >= 0),
+    classes TEXT NOT NULL CHECK (json_valid(classes))
+);
+
 -- v6 -> v7 (#824): store the operator's own addresses from
 -- ``config/identity.toml``, for the message-direction classifier.
 

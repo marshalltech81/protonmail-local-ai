@@ -1791,6 +1791,11 @@ def register_retrieval_tools(server, db):
             # tokenizing body_words can raise on text SQLite cannot
             # encode, answered by type below (Codex round 1).
             where_leaves = normalize_where(where) if where is not None else []
+            authority_notice = (
+                await asyncio.to_thread(db.authority_rule_notice, authority_class)
+                if authority_class
+                else None
+            )
             page = await asyncio.to_thread(
                 db.query_messages,
                 metadata_fields=tuple(projection),
@@ -1827,6 +1832,7 @@ def register_retrieval_tools(server, db):
             for key, _ in _indeterminate_cause_entries(uses, where_leaves, date_basis):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = QueryMessagesOutput(
+            authority_notice=authority_notice,
             collapse=collapse,
             metadata_diagnostics=page.metadata_diagnostics,
             date_basis=date_basis,
@@ -2050,6 +2056,11 @@ def register_retrieval_tools(server, db):
         try:
             bounds = date_bounds(*validate_date_range(date_from, date_to))
             where_leaves = normalize_where(where) if where is not None else []
+            authority_notice = (
+                await asyncio.to_thread(db.authority_rule_notice, authority_class)
+                if authority_class
+                else None
+            )
             page = await asyncio.to_thread(
                 db.query_threads,
                 **args,
@@ -2083,6 +2094,7 @@ def register_retrieval_tools(server, db):
             for key, _ in _indeterminate_cause_entries(uses, where_leaves):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = QueryThreadsOutput(
+            authority_notice=authority_notice,
             metadata_diagnostics=page.metadata_diagnostics,
             filters=uses,
             date_bounds=bounds,
@@ -2339,6 +2351,11 @@ def register_retrieval_tools(server, db):
                 else None
             )
             where_leaves = normalize_where(where) if where is not None else []
+            authority_notice = (
+                await asyncio.to_thread(db.authority_rule_notice, authority_class)
+                if authority_class
+                else None
+            )
             page = await asyncio.to_thread(
                 db.aggregate_messages,
                 group_by=group_by,
@@ -2386,6 +2403,7 @@ def register_retrieval_tools(server, db):
             for key, _ in _indeterminate_cause_entries(uses, where_leaves, date_basis):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = AggregateMessagesOutput(
+            authority_notice=authority_notice,
             metadata_diagnostics=page.metadata_diagnostics,
             unknown_group_messages=page.unknown_group_messages,
             unknown_group_indeterminate_messages=page.unknown_group_indeterminate_messages,

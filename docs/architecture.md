@@ -5289,3 +5289,13 @@ failures retain `embed`. Older `embed` rows cannot always distinguish an
 outage from a failed request; their existing classification is retained.
 No historical rows are rewritten. Recovery clears the job through the
 existing successful indexing path.
+
+### Applied authority-rule metadata
+
+Schema v24 adds a singleton `authority_rule_state` table. The indexer writes
+configured-file state, pattern count and the set of classes with rules in
+the same transaction as entity reclassification. A failed write rolls back
+both, and the in-memory rules are published only after that transaction
+succeeds. It stores no rule patterns or addresses. Existing indexes start
+with no state row (unknown); normal indexer startup fills it. No mail
+reparse or embedding is needed for this metadata migration.

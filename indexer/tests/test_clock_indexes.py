@@ -96,6 +96,7 @@ def test_effective_clock_index_migrates_without_changing_evidence(tmp_path):
     db.upsert_thread(make_thread(messages=[message]), [0.1] * 4096)
     db._conn.execute("DROP INDEX idx_messages_effective")
     db._conn.execute("CREATE INDEX idx_messages_effective ON messages(effective_at)")
+    db._conn.execute("DROP TABLE IF EXISTS authority_rule_state")
     db._conn.execute("UPDATE schema_version SET version = 21")
     db._conn.commit()
     tables = ("messages", "message_thread_map", "threads", "threads_vec", "indexing_jobs")
@@ -127,6 +128,7 @@ def test_effective_clock_index_migration_failure_is_atomic(tmp_path):
     db = Database(tmp_path / "effective-failure.db", account=TEST_ACCOUNT)
     db._conn.execute("DROP INDEX idx_messages_effective")
     db._conn.execute("CREATE INDEX idx_messages_effective ON messages(effective_at)")
+    db._conn.execute("DROP TABLE IF EXISTS authority_rule_state")
     db._conn.execute("UPDATE schema_version SET version = 21")
     db._conn.commit()
     db._conn.set_authorizer(

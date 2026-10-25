@@ -3,7 +3,7 @@
 import sqlite3
 
 import pytest
-from src.database import Database
+from src.database import SCHEMA_VERSION, Database
 
 from tests.conftest import TEST_ACCOUNT
 from tests.test_database import _schema_shape
@@ -30,6 +30,7 @@ CREATE TABLE attachment_extractions (
 
 
 def _v22(db):
+    db._conn.execute("DROP TABLE IF EXISTS authority_rule_state")
     db._conn.execute("DROP TABLE attachment_extractions")
     db._conn.execute(_V22_CACHE)
     db._conn.execute("UPDATE schema_version SET version = 22")
@@ -79,7 +80,10 @@ def test_v22_cache_migration_preserves_every_value_and_rowid(tmp_path):
     migrated = Database(path, account=TEST_ACCOUNT)
     fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
     try:
-        assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 23
+        assert (
+            migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+            == SCHEMA_VERSION
+        )
         assert _rows(migrated._conn) == before
         assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
         columns = [

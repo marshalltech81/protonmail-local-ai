@@ -3982,3 +3982,26 @@ distinct non-null Message-ID values among definite matches in either mode.
 Cursors must keep the same grouping mode, predicates and selected clock;
 they remain stable only for an unchanged population. `search_emails` and
 `get_evidence` keep their thread and passage behavior.
+
+### Applied authority rules
+
+`get_mailbox_status.authority_rules` reports whether a rules file was
+loaded, its applied pattern count and the classes with at least one rule.
+Addresses and domain patterns are withheld. Missing metadata on a legacy
+index is null (unknown), including the class list, until the indexer applies
+its configuration. A loaded empty file has configured=true, rule_count=0
+and classes=[]; an absent file has configured=false with the same counts.
+
+`search_emails`, `query_messages`, `query_threads` and `aggregate_messages`
+include a fixed `authority_notice` in prose and structured output when an
+explicit class filter has no defining rule, no file is loaded, or applied
+metadata is unknown. The notice describes current applied-rule metadata;
+ranked search can read multiple database snapshots. A defined class with no
+matches gets no notice. `unclassified` is meaningful without a rules file
+and gets no no-rule notice. These are unauthenticated From classifications,
+not verified identities or a census of senders' actual roles.
+
+While reparses are pending, the status line explains that sender,
+participant and authority filters count unassessed metadata as
+indeterminate. The metadata's completeness flags decide this; a queued
+reparse alone does not make otherwise complete metadata unknown.

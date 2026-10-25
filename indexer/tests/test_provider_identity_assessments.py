@@ -226,7 +226,7 @@ def _new_objects(conn: sqlite3.Connection) -> dict[str, str]:
 
 class TestSchema:
     def test_fresh_install_has_the_current_version_and_selector(self, db):
-        assert SCHEMA_VERSION == 23
+        assert SCHEMA_VERSION == 24
         assert (
             db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         )

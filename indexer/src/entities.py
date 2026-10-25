@@ -141,6 +141,7 @@ class AuthorityRules:
 
     addresses: dict[str, str] = field(default_factory=dict)
     domains: dict[str, str] = field(default_factory=dict)
+    configured: bool = True
 
     @property
     def pattern_count(self) -> int:
@@ -253,7 +254,7 @@ def load_authority_rules(path: Path) -> AuthorityRules:
         path, AUTHORITY_RULES_MAX_BYTES, "authority rules", AuthorityRulesError
     )
     if data is None:
-        return AuthorityRules()
+        return AuthorityRules(configured=False)
 
     addresses: dict[str, str] = {}
     domains: dict[str, str] = {}

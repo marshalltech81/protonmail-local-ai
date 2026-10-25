@@ -222,7 +222,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # observations with their scan generations. Candidates are read from the
 # stored header rows, so no reparse is queued, and nothing is accepted
 # (``migrations/0021_provider_identity_assessments.sql``).
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -1624,6 +1624,13 @@ class Database:
             );
             CREATE INDEX idx_indexing_jobs_status_next
                 ON indexing_jobs(status, next_attempt_at);
+
+            CREATE TABLE authority_rule_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                configured INTEGER NOT NULL CHECK (configured IN (0, 1)),
+                rule_count INTEGER NOT NULL CHECK (rule_count >= 0),
+                classes TEXT NOT NULL CHECK (json_valid(classes))
+            );
 
             -- One row: mbsync's last successful sync as the indexer last
             -- read it from the Maildir stamp, and when the indexer last
@@ -5558,7 +5565,6 @@ class Database:
         of entities whose class or rule changed. One dictionary lookup
         per entity (plus one per domain label), so cost follows the
         entity count, not the rule count."""
-        self._authority_rules = rules
         with self.transaction():
             rows = self._conn.execute(
                 "SELECT entity_id, kind, canonical_key, authority_class, authority_rule "
@@ -5576,6 +5582,18 @@ class Database:
                 "UPDATE entities SET authority_class = ?, authority_rule = ? WHERE entity_id = ?",
                 changes,
             )
+            self._conn.execute(
+                "INSERT INTO authority_rule_state (id, configured, rule_count, classes) "
+                "VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                "configured=excluded.configured, rule_count=excluded.rule_count, "
+                "classes=excluded.classes",
+                (
+                    int(rules.configured),
+                    rules.pattern_count,
+                    json.dumps(sorted(set(rules.addresses.values()) | set(rules.domains.values()))),
+                ),
+            )
+        self._authority_rules = rules
         return len(changes)
 
     @_synchronized

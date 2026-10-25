@@ -38,3 +38,8 @@ domains = ["city.example"]
 
 [personal]
 addresses = ["a.friend@mail.example"]
+
+# Mailbox status reports whether this file was loaded, the applied pattern
+# count and classes with rules; it withholds these addresses and patterns.
+# A class with no rule produces an authority_notice on explicit class filters.
+# An empty file is configured with zero rules; an absent file is unconfigured.

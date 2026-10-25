@@ -5142,6 +5142,35 @@ class Database:
             return None
         return int(match.group(1))
 
+    @staticmethod
+    def _read_authority_rules(conn: sqlite3.Connection) -> dict:
+        unknown = {"configured": None, "rule_count": None, "classes": None}
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='authority_rule_state'"
+        ).fetchone():
+            return unknown
+        row = conn.execute(
+            "SELECT configured, rule_count, classes FROM authority_rule_state WHERE id=1"
+        ).fetchone()
+        if row is None:
+            return unknown
+        return {"configured": bool(row[0]), "rule_count": row[1], "classes": json.loads(row[2])}
+
+    def authority_rule_notice(self, authority_class: str | None) -> str | None:
+        """Fixed diagnostics from the currently applied rule metadata."""
+        authority_class = normalize_authority_class(authority_class)
+        if authority_class is None or authority_class == "unclassified":
+            return None
+        with closing(self._connect()) as conn:
+            rules = self._read_authority_rules(conn)
+        if rules["configured"] is None:
+            return "Authority rules status is unknown: applied configuration has not been recorded."
+        if not rules["configured"]:
+            return "No authority rules file is configured; a zero result does not establish that the mailbox has no senders in this class."
+        if authority_class not in rules["classes"]:
+            return "No applied authority rule defines the requested class; a zero result does not establish that the mailbox has no senders in this class."
+        return None
+
     def get_mailbox_status(self) -> dict:
         """Index counts, queue depth, the indexer's ``ingestion_state``
         row (``None`` until the indexer first reports) and the account's
@@ -5186,6 +5215,7 @@ class Database:
             )
             stats["index_schema_version"] = version[0] if version else None
             stats["query_capabilities"] = query_capabilities(conn)
+            stats["authority_rules"] = self._read_authority_rules(conn)
             identity_columns = {
                 r[0]
                 for r in conn.execute("SELECT name FROM pragma_table_xinfo('operator_identity')")
