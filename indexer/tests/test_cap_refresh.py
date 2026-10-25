@@ -623,7 +623,7 @@ class TestCutThatRemainsOnACachedResult:
                 "extractor cap pdf_digital_pages: cached result stopped at 500 pages",
             ),
             (
-                "docx@7",
+                "docx@8",
                 (None, None, 2_000_000),
                 {"ocr_capped_images": 0, "extractor_caps": 1},
                 "extractor cap extracted_chars: cached result was cut at 2000000 chars",

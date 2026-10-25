@@ -319,7 +319,7 @@ def test_the_reparse_replaces_the_old_occurrence_and_embeds_the_new_text(tmp_pat
         words = " ".join(["synthetic", "container", "words"] * 10)
         return ExtractionResult(
             status="success",
-            extractor="docx@7" if has_container_prefix(payload) else "eml@3",
+            extractor="docx@8" if has_container_prefix(payload) else "eml@3",
             text=f"{hashlib.sha256(payload).hexdigest()} {words}",
             error=None,
             text_complete=True,

@@ -3070,9 +3070,14 @@ text elements with XPath unions, which libxml2 merges in time
 quadratic in the number of siblings: plainly timed, 1 MiB of a
 paragraph alternating runs and hyperlinks took 4.2 s and a synthetic
 1,500-page report 15 s, and 31 MiB of either shape ran past five
-minutes. The walk keeps the same elements in the same order
-(`indexer/tests/test_docx_walk.py` pins the text on a catalogue of
-shapes) and reads the report in about half a second. It counts its
+minutes. The walk preserves document order and reads the report in
+about half a second. It also descends into content controls, tracked
+insertions, moved-to text, smart tags, custom XML and simple fields
+(#1224), including wrapped table rows and cells. Deleted and moved-from
+text stays excluded. Each wrapper spends the surrounding walk budget
+before descent; traversal uses an iterator stack without recursive
+wrapper calls. `docx@8` refreshes older cached rows through the existing
+startup sweep; dead-lettered messages still require `make requeue-dead`. It counts its
 work against four budgets per document: 500,000 blocks (each
 paragraph and table in the body, headers, footers and table cells,
 plus 20 for each section's header and footer references; a header

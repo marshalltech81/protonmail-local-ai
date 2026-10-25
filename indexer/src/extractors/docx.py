@@ -17,10 +17,12 @@ flat list per top-level row so their text is copied once; lxml rejects
 XML nested deeper than 256 elements, which keeps the recursion shallow.
 
 The walk reads the opened XML directly, one child element at a time,
-and keeps what python-docx's ``iter_inner_content()`` and
-``Paragraph.text`` keep, in the same order (#1031). Those select a
-container's paragraphs and tables, a paragraph's runs and hyperlinks,
-and a run's text elements with XPath unions, which libxml2 merges in
+and preserves document order (#1031). It also reads displayed text in
+content controls, tracked insertions, moved-to text, smart tags, custom
+XML and simple fields (#1224); deleted and moved-from text stays excluded.
+Wrappers spend the same walk budgets before descent. The old walk selected
+a container's paragraphs and tables, a paragraph's runs and hyperlinks,
+and a run's text elements with XPath unions, which libxml2 merged in
 time quadratic in the number of siblings: plainly timed, 1 MiB of a
 paragraph alternating runs and hyperlinks took 4.2 s, and a 1,500-page
 synthetic report 15 s. ``tests/test_docx_walk.py`` pins the text the
@@ -88,7 +90,7 @@ from __future__ import annotations
 
 import io
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 from docx.document import Document as DocxDocument
 from docx.opc.constants import CONTENT_TYPE as CT
@@ -111,6 +113,13 @@ _W_TR = qn("w:tr")
 _W_TC = qn("w:tc")
 _W_R = qn("w:r")
 _W_HYPERLINK = qn("w:hyperlink")
+# Wrappers whose displayed children retain their document order. Deleted
+# and moved-from content is deliberately excluded.
+_VISIBLE_WRAPPERS = tuple(
+    qn(f"w:{tag}")
+    for tag in ("sdt", "sdtContent", "ins", "moveTo", "smartTag", "customXml", "fldSimple")
+)
+
 # The run children whose text python-docx's ``Run.text`` joins.
 _RUN_TEXT_TAGS = tuple(qn(f"w:{tag}") for tag in ("br", "cr", "noBreakHyphen", "ptab", "t", "tab"))
 
@@ -386,6 +395,31 @@ def _header_footer_lines(document: DocxDocument, budget: _Budget, lines: list[st
     return True
 
 
+def _visible_children(
+    container: BaseOxmlElement,
+    tags: tuple[str, ...],
+    budget: _Budget,
+    cap: str,
+) -> Iterator[BaseOxmlElement]:
+    """Visit transparent wrappers iteratively, charging each before descent.
+
+    Target elements are charged by the existing callers. The iterator
+    stack retains one iterator per XML nesting level, without recursion
+    or copying child lists; skipped wrapper metadata is never text.
+    """
+    stack = [container.iterchildren(*tags, *_VISIBLE_WRAPPERS)]
+    while stack:
+        child = next(stack[-1], None)
+        if child is None:
+            stack.pop()
+        elif child.tag in tags:
+            yield child
+        else:
+            if not budget.take(cap):
+                return
+            stack.append(child.iterchildren(*tags, *_VISIBLE_WRAPPERS))
+
+
 def _block_lines(container: BaseOxmlElement, budget: _Budget, lines: list[str]) -> bool:
     """Append one line per non-empty paragraph and one per non-empty table
     row of a body, header or footer, in document order. False once a
@@ -397,7 +431,7 @@ def _block_lines(container: BaseOxmlElement, budget: _Budget, lines: list[str]) 
     time quadratic in the number of blocks before returning the first
     (#1031).
     """
-    for block in container.iterchildren(_W_P, _W_TBL):
+    for block in _visible_children(container, (_W_P, _W_TBL), budget, "docx_blocks"):
         if not budget.take("docx_blocks"):
             return False
         if block.tag == _W_P:
@@ -408,7 +442,7 @@ def _block_lines(container: BaseOxmlElement, budget: _Budget, lines: list[str]) 
                 return False
         elif not _table_lines(block, budget, lines):
             return False
-    return True
+    return budget.cut is None
 
 
 def _table_lines(tbl: BaseOxmlElement, budget: _Budget, lines: list[str]) -> bool:
@@ -418,7 +452,7 @@ def _table_lines(tbl: BaseOxmlElement, budget: _Budget, lines: list[str]) -> boo
     runs of double-spaces that would dilute FTS scoring. Each row costs
     one table-cell unit. False once a budget ran out.
     """
-    for tr in tbl.iterchildren(_W_TR):
+    for tr in _visible_children(tbl, (_W_TR,), budget, "docx_table_cells"):
         if not budget.take("docx_table_cells"):
             return False
         pieces: list[str] = []
@@ -427,7 +461,7 @@ def _table_lines(tbl: BaseOxmlElement, budget: _Budget, lines: list[str]) -> boo
             lines.append(" ".join(pieces))
         if not complete:
             return False
-    return True
+    return budget.cut is None
 
 
 def _row_pieces(tr: BaseOxmlElement, budget: _Budget, pieces: list[str]) -> bool:
@@ -439,14 +473,14 @@ def _row_pieces(tr: BaseOxmlElement, budget: _Budget, pieces: list[str]) -> bool
     joined once, so text inside nested tables is copied once rather than
     once per level of nesting.
     """
-    for tc in tr.iterchildren(_W_TC):
+    for tc in _visible_children(tr, (_W_TC,), budget, "docx_table_cells"):
         if not budget.take("docx_table_cells"):
             return False
         # A vertically merged cell's continuation rows hold no content
         # of their own; ``row.cells`` would repeat the first row's.
         if isinstance(tc, CT_Tc) and tc.vMerge == "continue":
             continue
-        for block in tc.iterchildren(_W_P, _W_TBL):
+        for block in _visible_children(tc, (_W_P, _W_TBL), budget, "docx_blocks"):
             if not budget.take("docx_blocks"):
                 return False
             if block.tag == _W_P:
@@ -456,12 +490,12 @@ def _row_pieces(tr: BaseOxmlElement, budget: _Budget, pieces: list[str]) -> bool
                 if budget.cut is not None:
                     return False
                 continue
-            for nested_tr in block.iterchildren(_W_TR):
+            for nested_tr in _visible_children(block, (_W_TR,), budget, "docx_table_cells"):
                 if not budget.take("docx_table_cells"):
                     return False
                 if not _row_pieces(nested_tr, budget, pieces):
                     return False
-    return True
+    return budget.cut is None
 
 
 def _paragraph_text(p: BaseOxmlElement, budget: _Budget) -> str:
@@ -479,10 +513,14 @@ def _paragraph_text(p: BaseOxmlElement, budget: _Budget) -> str:
     ``budget.cut`` set.
     """
     pieces: list[str] = []
-    for child in p.iterchildren(_W_R, _W_HYPERLINK):
+    for child in _visible_children(p, (_W_R, _W_HYPERLINK), budget, "docx_text_elements"):
         if not budget.take("docx_text_elements"):
             break
-        runs = (child,) if child.tag == _W_R else child.iterchildren(_W_R)
+        runs = (
+            (child,)
+            if child.tag == _W_R
+            else _visible_children(child, (_W_R,), budget, "docx_text_elements")
+        )
         for run in runs:
             if run is not child and not budget.take("docx_text_elements"):
                 break
