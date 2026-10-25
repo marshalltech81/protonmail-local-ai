@@ -3,7 +3,8 @@ receives an attachment's preserved, transfer-decoded bytes before any
 nested-email interpretation. An OLE2 or ZIP payload labelled
 ``message/*`` is kept as sent, under every transfer encoding, and is a
 leaf the walk does not open; a genuine attached email or delivery report
-parses exactly as before.
+retains its pinned parse except for #1458's corrected quoted-printable
+serialization.
 
 The catalogue (``tests/message_label_catalogue.py``) crosses every
 ``message/*`` label the parser reads as a container with every transfer
@@ -46,7 +47,10 @@ def _sha(data: bytes) -> str:
 def test_genuine_contents_parse_as_pinned(tmp_path, label, encoding, name, nested):
     data = catalogue.message_bytes(label, encoding, catalogue.GENUINE[name], nested=nested)
     got = catalogue.outcome(tmp_path / "m.eml", data)
-    assert [list(a) for a in got] == _PIN[_key(label, encoding, name, nested)]
+    # #1458 fixes quoted-printable's header reconstruction. Its direct
+    # container now agrees with the already-pinned base64 serialization.
+    pin_encoding = "base64" if encoding == "quoted-printable" and not nested else encoding
+    assert [list(a) for a in got] == _PIN[_key(label, pin_encoding, name, nested)]
 
 
 @pytest.mark.parametrize("nested", [False, True], ids=["top", "nested"])
@@ -99,17 +103,13 @@ def test_genuine_contents_in_a_decoded_attached_email_parse_as_identity(
     tmp_path, label, encoding, name, outer
 ):
     """The same genuine contents parse the same whichever transfer
-    encoding the attached email around them is in. A quoted-printable
-    email's own serialized payload differs from the identity-encoded
-    one's (pre-existing, #1458), so only the parts inside it are compared
-    for that encoding."""
+    encoding the attached email around them is in, including its own
+    serialized payload and attachment identity (#1458)."""
     contents = catalogue.GENUINE[name]
     data = catalogue.message_bytes(label, encoding, contents, nested=True, outer=outer)
     plain = catalogue.message_bytes(label, encoding, contents, nested=True)
     got = catalogue.outcome(tmp_path / "m.eml", data)
     expected = catalogue.outcome(tmp_path / "plain.eml", plain)
-    if outer == "quoted-printable":
-        got, expected = got[1:], expected[1:]
     assert got == expected
 
 
@@ -357,3 +357,49 @@ def test_the_reparse_replaces_the_old_occurrence_and_embeds_the_new_text(tmp_pat
     assert len(p.fts_rowids()) == 1
     embedded = [t for call in p.embedder.embed_batch.call_args_list for t in call.args[0]]
     assert any(hashlib.sha256(payload).hexdigest() in text for text in embedded)
+
+
+@pytest.mark.parametrize("outer", ["base64", "quoted-printable"])
+def test_encoded_transport_bytes_are_recovered_once(tmp_path, monkeypatch, outer):
+    from src import parser
+
+    reads = []
+    real = parser._DeliveryStatusBytes._read
+
+    def counting(self):
+        reads.append(len(self._raw))
+        return real(self)
+
+    monkeypatch.setattr(parser._DeliveryStatusBytes, "_read", counting)
+    data = catalogue.message_bytes(
+        "message/delivery-status",
+        "quoted-printable",
+        catalogue.GENUINE["dsn"],
+        nested=True,
+        outer=outer,
+    )
+    marker = b"--out\r\nContent-Type: message/rfc822"
+    _, _, tail = data.partition(marker)
+    duplicate = marker + tail.partition(b"--out--")[0]
+    data = data.replace(b"--out--", duplicate + b"--out--")
+    msg = _parse(tmp_path, data)
+    # The primary tree is read once despite two encoded siblings. Each
+    # decoded tree has its own lazy reader, only if its content needs it.
+    assert reads.count(len(data)) == 1
+    assert len(reads) <= 3
+    assert sum(reads) <= 3 * len(data)
+    outer_attachments = [a for a in msg.attachments if a.filename == "outer.eml"]
+    assert len(outer_attachments) == 2
+    assert outer_attachments[0].content_hash == outer_attachments[1].content_hash
+
+
+def test_raw_transport_keeps_the_existing_header_loss_signal(tmp_path):
+    # A literal leading space is allowed in quoted-printable. Both the
+    # transport pseudo-parse and the decoded email can drop this malformed
+    # header line, so preserving raw bytes must not erase the loss signal.
+    payload = b" orphan header\r\nSubject: synthetic\r\n\r\nbody\r\n"
+    data = catalogue.message_bytes("message/rfc822", "quoted-printable", payload)
+    data = data.replace(b"=20orphan=20header", b" orphan header")
+    msg = _parse(tmp_path, data)
+    assert msg.parse_caps["transport_lossy"] == 1
+    assert msg.attachments[0].payload_complete is False
