@@ -513,16 +513,17 @@ class Driver:
             self._send("B", raw)
         wanted = {t for t in (self._token_of(r) for r in first + more) if t}
         served = self._converge(wanted, "INBOX", ("P1",))
-        ok = True
+        ok, observed = True, 0
         for item in served:
             if self._token_of(item.raw) not in wanted:
                 continue
+            observed += 1
             self._observe(item, "g1")
             shape = header_shape(item.raw)
             ok &= (shape.internal, shape.gluon, shape.gluon_topmost) == (1, 1, True)
             if shape.internal > 1:
                 self._counts["duplicate_internal_fields_seen"] += 1
-        self._mark("P1", "observed" if ok else "failed")
+        self._mark("P1", "failed" if not ok else "observed" if observed else "unobservable")
         self._check_p12_ordinary()
 
     def _check_p12_ordinary(self) -> None:
@@ -594,11 +595,12 @@ class Driver:
         tokens = [t for t in (self._token_of(r) for r in raws) if t]
         self._converge(set(tokens), "INBOX", ("P3",))
         prev = self._snapshot("g3.0", tokens, ("INBOX",))
-        unknown = False
+        unknown, compared = False, 0
         for step, op in enumerate(plan["ops"], start=1):
             for token in tokens:
                 self._mutate(op, token)
-            now = self._snapshot(f"g3.{op}", tokens, _FOLDERS)
+            # The step number keeps a repeated operation's keys apart.
+            now = self._snapshot(f"g3.{step}.{op}", tokens, _FOLDERS)
             for token in tokens:
                 unknown |= self._compare_gluon(
                     "g3",
@@ -606,6 +608,7 @@ class Driver:
                     now[token].gluon if token in now else None,
                 )
                 if token in prev and token in now:
+                    compared += 1
                     equal = self.probe.equal(prev[token].probe_key, now[token].probe_key)
                     if equal is False:
                         self._mark("P3", "failed")
@@ -613,7 +616,7 @@ class Driver:
                 else:
                     unknown = True
             prev = now
-        self._mark("P3", "unobservable" if unknown else "observed")
+        self._mark("P3", "unobservable" if unknown or not compared else "observed")
         self._mark("P11", self._p11(("INBOX", "Archive")))
 
     def _g4(self) -> None:
@@ -659,6 +662,7 @@ class Driver:
             replaced &= at_replace is False or at_replace is None
             kept &= after_send is True or after_send is None
         ok = replaced and kept
+        unknown |= plan["drafts"] < 1  # nothing was exercised
         self._mark("P4", "failed" if not ok else "unobservable" if unknown else "observed")
 
     def _g5(self) -> None:
@@ -746,7 +750,8 @@ class Driver:
             if proved and cold.connector_fetches is not None:
                 self._counts["header_pass_connector_fetches"] = cold.connector_fetches
         self._booleans["cold_pass_proved"] = proved
-        self._mark("P9", "observed" if ok else "failed")
+        exercised = plan["messages"] >= 1 and plan["labels"] >= 1
+        self._mark("P9", "failed" if not ok else "observed" if exercised else "unobservable")
         self.budget.pace()
         self._checkpoint()
         race = self.world.race(plan["race_repeats"])
@@ -755,7 +760,8 @@ class Driver:
         self._counts["race_neither"] = outcomes["neither"]
         self._counts["race_both"] = outcomes["both"]
         self._counts["race_one"] = outcomes["old"] + outcomes["new"]
-        complete = len(race.outcomes) == plan["race_repeats"] and set(outcomes) <= {
+        complete = plan["messages"] >= 1 and 0 < plan["race_repeats"] == len(race.outcomes)
+        complete = complete and set(outcomes) <= {
             "old",
             "new",
             "both",
@@ -809,7 +815,7 @@ class Driver:
     def _compare(
         self, expect: Mapping[str, str], base: dict, after: dict, tokens: Sequence[str]
     ) -> str:
-        unknown = False
+        unknown = not tokens  # nothing to compare is not an observation
         for token in tokens:
             before, now = base.get(token), after.get(token)
             if before is None or now is None:

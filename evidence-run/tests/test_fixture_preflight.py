@@ -163,3 +163,9 @@ def test_the_fixture_stop_token_is_in_both_allowlists():
 def test_a_valid_plan_is_unchanged_by_the_preflight(inputs):
     _, result = _run(inputs)
     assert result.stop is None
+
+
+def test_repeated_g3_operations_keep_independent_snapshots(inputs):
+    plan = _edited(inputs, g3={"ops": ["flag", "flag"]})
+    drv, _ = _run(plan, groups=("g3",))
+    assert len(drv.snapshots) == len(set(drv.snapshots))
