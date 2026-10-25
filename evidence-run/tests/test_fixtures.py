@@ -128,3 +128,32 @@ def test_a_malformed_address_is_refused_with_fixed_text(bad):
     with pytest.raises(fixtures.FixtureError) as err:
         fixtures.control_message("r", 1, sender=bad)
     assert bad.strip() not in str(err.value) or not bad.strip()
+
+
+@pytest.mark.parametrize(
+    "address,ok",
+    [
+        ("a@one.test", True),
+        ("a.b@one.test", True),
+        ("a+b_c-d@one.test", True),
+        (".abc@one.test", False),
+        ("abc.@one.test", False),
+        ("a..b@one.test", False),
+        ("a@-one.test", False),
+        ("a@one-.test", False),
+        ("a@one..test", False),
+        ("a@one.test.", False),
+    ],
+)
+def test_an_accepted_address_is_one_the_correlation_parser_reads(address, ok):
+    """The validator and the consumer agree: whatever it accepts, the parser
+    that finds the test message's sender reads back."""
+    from evidence_run import correlation
+
+    if not ok:
+        with pytest.raises(fixtures.FixtureError):
+            fixtures.control_message("r", 1, sender=address)
+        return
+    seen = correlation.summary(fixtures.control_message("r", 1, sender=address))
+    assert seen.token == "SYNTH-r-1"
+    assert seen.sender_domain == address.rsplit("@", 1)[1]

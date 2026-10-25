@@ -562,46 +562,62 @@ def test_g7_missing_baseline_is_unobservable(inputs, count, monkeypatch):
     assert result.export["counts"]["steps_unobservable"] == len(inputs.g7_steps)
 
 
-def _g8_with(inputs, observations):
+def _g8_with(inputs, observations, readd_at=None):
     drv, _ = _run(inputs, groups=())
     drv._observations = [driver.Observation(*o) for o in observations]
+    drv._readd_at = readd_at
     return drv.run(("g8",))
 
 
-READD = "g7.g.after"  # the frozen step whose UIDVALIDITY is expected to change
-
-
 @pytest.mark.parametrize(
-    "observations,failed",
+    "observations,readd_at,failed",
     [
         # one UID names one message within a mailbox and UIDVALIDITY
-        ([("s1", "a", "Archive", 1, 1), ("s2", "b", "Archive", 1, 1)], True),
-        ([("s1", "a", "Archive", 1, 1), ("s2", "a", "Archive", 1, 1)], False),
-        ([("s1", "a", "Archive", 1, 1), ("s2", "b", "Folder", 1, 1)], False),
+        ([("s1", "a", "Archive", 1, 1), ("s2", "b", "Archive", 1, 1)], None, True),
+        ([("s1", "a", "Archive", 1, 1), ("s2", "a", "Archive", 1, 1)], None, False),
+        ([("s1", "a", "Archive", 1, 1), ("s2", "b", "Folder", 1, 1)], None, False),
         # a message's UID in a mailbox never moves backwards
-        ([("s1", "a", "Archive", 5, 1), ("s2", "a", "Archive", 3, 1)], True),
-        ([("s1", "a", "Archive", 3, 1), ("s2", "a", "Archive", 5, 1)], False),
-        # UIDVALIDITY changes only at the re-add step
-        ([("s1", "a", "Archive", 1, 1), ("s2", "a", "Archive", 1, 2)], True),
-        ([("s1", "a", "Archive", 1, 1), (READD, "a", "Archive", 1, 2)], False),
+        ([("s1", "a", "Archive", 5, 1), ("s2", "a", "Archive", 3, 1)], None, True),
+        ([("s1", "a", "Archive", 3, 1), ("s2", "a", "Archive", 5, 1)], None, False),
+        # UIDVALIDITY changes only once the re-add step has begun
+        ([("s1", "a", "Archive", 1, 1), ("s2", "a", "Archive", 1, 2)], None, True),
+        ([("s1", "a", "Archive", 1, 1), ("s2", "a", "Archive", 1, 2)], 2, True),
+        ([("s1", "a", "Archive", 1, 1), ("s2", "a", "Archive", 1, 2)], 1, False),
+        # ... and the first snapshot to show the mailbox afterwards may be a
+        # later one, when none of the tracked messages was visible straight after
+        (
+            [("s1", "a", "Archive", 1, 1), ("g7.h.base", "a", "Archive", 1, 2)],
+            1,
+            False,
+        ),
+        # ... but only once per mailbox
         (
             [
                 ("s1", "a", "Archive", 1, 1),
-                (READD, "a", "Archive", 1, 2),
+                ("s2", "a", "Archive", 1, 2),
                 ("s3", "a", "Archive", 1, 3),
             ],
+            1,
             True,
         ),
         # a new UIDVALIDITY starts its own UID space
-        ([("s1", "a", "Archive", 9, 1), (READD, "a", "Archive", 1, 2)], False),
-        ([("s1", "a", "Archive", 9, 1), (READD, "b", "Archive", 9, 2)], False),
+        ([("s1", "a", "Archive", 9, 1), ("s2", "a", "Archive", 1, 2)], 1, False),
+        ([("s1", "a", "Archive", 9, 1), ("s2", "b", "Archive", 9, 2)], 1, False),
         # duplicate copies of one token are not one message moving backwards
-        ([("s1", "a", "Archive", 5, 1), ("s1.duplicate.1", "a", "Archive", 3, 1)], False),
+        ([("s1", "a", "Archive", 5, 1), ("s1.duplicate.1", "a", "Archive", 3, 1)], None, False),
     ],
 )
-def test_g8_continuity_is_checked_over_the_whole_log(inputs, observations, failed):
-    result = _g8_with(inputs, observations)
+def test_g8_continuity_is_checked_over_the_whole_log(inputs, observations, readd_at, failed):
+    result = _g8_with(inputs, observations, readd_at)
     assert result.stop == (("prediction_failed", "g8") if failed else None)
+
+
+def test_the_readd_step_marks_where_the_uidvalidity_change_may_begin(inputs):
+    drv, result = _run(inputs, groups=("g7", "g8"))
+    assert result.stop is None
+    first = next(i for i, o in enumerate(drv._observations) if o.label.startswith("g7.g.after"))
+    assert drv._readd_at is not None and drv._readd_at <= first
+    assert drv._readd_at > 0
 
 
 def test_g8_logs_every_snapshot_observation(inputs):

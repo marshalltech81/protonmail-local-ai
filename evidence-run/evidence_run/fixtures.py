@@ -22,7 +22,11 @@ RECIPIENT = "recipient@mail.example"
 
 _RUN = re.compile(r"[A-Za-z0-9]{1,16}")
 FORGED_KINDS = ("forged", "duplicated", "conflicting")
-_ADDRESS = re.compile(r"[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63}){1,8}")
+_ATOM = r"[A-Za-z0-9_+-]+"
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+# A dot-atom local part (no leading, trailing or doubled dot) and a host of
+# two to nine labels: what the header parser reads back as an address.
+_ADDRESS = re.compile(rf"(?=[^@]{{1,64}}@){_ATOM}(?:\.{_ATOM})*@{_LABEL}(?:\.{_LABEL}){{1,8}}")
 _LINE = 76  # filler line length, before CRLF
 
 

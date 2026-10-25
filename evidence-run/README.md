@@ -56,7 +56,8 @@ empty comparison is unobservable. G7 compares every tracked token, and G8
 checks identity before and after the spam move plus continuity over the
 whole log of snapshot observations: within a mailbox and UIDVALIDITY a UID
 names one message, a message's UID in a mailbox never moves backwards, and a
-mailbox's UIDVALIDITY changes only in the snapshot after the re-add step. A disproved prediction stops subsequent operations
+mailbox's UIDVALIDITY changes at most once, and only in an observation made
+after the re-add step began. A disproved prediction stops subsequent operations
 immediately. G1's initial and incremental batches follow the frozen counts.
 
 The fixture addresses (`sender.example`, `mail.example`) are placeholders

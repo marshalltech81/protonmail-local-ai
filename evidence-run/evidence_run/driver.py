@@ -205,6 +205,7 @@ class Driver:
         self._recovered: Counter[str] = Counter()
         self.snapshots: list[str] = []  # the labels of snapshots taken, in order
         self._observations: list[Observation] = []  # G8's continuity log, in order
+        self._readd_at: int | None = None  # log length when the re-add step began
         self._isolation_checked, self._tls_checked = isolation_checked, tls_checked
         self._preflight_fixtures()  # refused before any account activity
 
@@ -821,6 +822,8 @@ class Driver:
             base = self._snapshot(f"g7.{step['id']}.base", tokens, ("INBOX",))
             self.budget.pace()
             self._checkpoint()
+            if step["expect"].get("uidvalidity") == "changed":
+                self._readd_at = len(self._observations)
             result = self.world.operator(step["id"])
             self._checkpoint()
             if result == "declined":
@@ -899,26 +902,25 @@ class Driver:
 
         Within one mailbox and UIDVALIDITY a UID names one message; a
         message's UID in a mailbox never moves backwards; a mailbox's
-        UIDVALIDITY changes only in the snapshot that follows the re-add
-        step (the G7 step expecting UIDVALIDITY to change). Copies of one
-        token in a snapshot (``.duplicate.``) are separate messages and do
-        not take part in the ordering rule.
+        UIDVALIDITY changes at most once, and only in an observation made
+        after the re-add step began (the G7 step expecting UIDVALIDITY to
+        change). The first observation of a mailbox after that step may come
+        from a later snapshot, when no tracked message was visible straight
+        after it. Copies of one token in a snapshot (``.duplicate.``) are
+        separate messages and do not take part in the ordering rule.
         """
-        readd = {
-            f"g7.{step['id']}.after"
-            for step in self.inputs.g7_steps
-            if step["expect"].get("uidvalidity") == "changed"
-        }
         owners: dict[tuple[str, int, int], str] = {}
         newest: dict[tuple[str, str, int], int] = {}
         validity: dict[str, int] = {}
-        for o in self._observations:
+        changed: set[str] = set()
+        for index, o in enumerate(self._observations):
             if owners.setdefault((o.folder, o.uid, o.uidvalidity), o.token) != o.token:
                 return False
             if validity.setdefault(o.folder, o.uidvalidity) != o.uidvalidity:
-                if o.label not in readd:
+                if self._readd_at is None or index < self._readd_at or o.folder in changed:
                     return False
                 validity[o.folder] = o.uidvalidity
+                changed.add(o.folder)
             if ".duplicate." in o.label:
                 continue
             key = (o.token, o.folder, o.uidvalidity)
