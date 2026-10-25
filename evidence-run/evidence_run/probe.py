@@ -75,6 +75,11 @@ class Probe:
             folder=folder, flags=frozenset(), size=len(raw), mtime_ns=None, path="probe"
         )
         self.observed += 1
+        if token is not None:
+            # A token seen again never keeps its earlier digest: a stale one
+            # would let equal() report a match the latest observation does
+            # not support (no candidate, a parse failure, a nesting error).
+            self._digests.pop(token, None)
         try:
             msg = parser.parse_email_bytes(raw, source, capture_full_body=False)
         except parser.MessageNestingError:

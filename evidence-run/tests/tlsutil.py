@@ -135,10 +135,14 @@ class ImapResponder(_Server):
     BODY.PEEK[]) over ``messages`` (UID i+1), LOGOUT. Records command names
     and whether the session selected read-only."""
 
-    def __init__(self, certs: list[Cert], messages: list[bytes]) -> None:
+    def __init__(
+        self, certs: list[Cert], messages: list[bytes], *, fail_size_fetch: bool = False
+    ) -> None:
         self.messages = messages
+        self.fail_size_fetch = fail_size_fetch
         self.commands: list[str] = []
         self.logins: list[tuple[str, str]] = []
+        self.mailboxes: list[str] = []  # the raw EXAMINE/SELECT argument
         super().__init__(certs)
 
     def handle(self, tls: ssl.SSLSocket) -> None:
@@ -162,9 +166,18 @@ class ImapResponder(_Server):
                 self.logins.append((words[1].strip('"'), words[2].strip('"')))
                 send(f"{tag} OK LOGIN completed")
             elif command in ("SELECT", "EXAMINE"):
+                argument = rest[len(command) :].strip()
+                self.mailboxes.append(argument)
+                if " " in argument and not (argument.startswith('"') and argument.endswith('"')):
+                    # A conforming server reads an unquoted name with a space
+                    # as two arguments.
+                    send(f"{tag} BAD too many arguments")
+                    continue
                 send(f"* {len(self.messages)} EXISTS")
                 send("* OK [UIDVALIDITY 1] valid")
                 send(f"{tag} OK [READ-ONLY] {command} completed")
+            elif command == "UID FETCH" and self.fail_size_fetch and "RFC822.SIZE" in rest:
+                send(f"{tag} NO transient backend failure")
             elif command == "UID FETCH":
                 wanted = words[2]
                 for index, raw in enumerate(self.messages, start=1):

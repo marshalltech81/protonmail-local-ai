@@ -110,3 +110,43 @@ def test_the_fingerprint_text_is_validated():
         tlscapture.normalize_fingerprint("not-a-fingerprint")
     assert err.value.token == "fingerprint_format"
     assert tlscapture.normalize_fingerprint("AB:" * 31 + "AB") == "ab" * 32
+
+
+def test_a_failed_size_fetch_is_not_an_empty_folder(tmp_path, secret):
+    cert = make_cert(tmp_path, "a")
+    with ImapResponder([cert], MESSAGES, fail_size_fetch=True) as server:
+        with pytest.raises(tlscapture.CaptureError) as caught:
+            _capture(server, cert, secret)
+    assert str(caught.value) == "size_fetch_failed"
+
+
+def test_an_empty_folder_is_captured_as_empty_without_a_fetch(tmp_path, secret):
+    cert = make_cert(tmp_path, "a")
+    with ImapResponder([cert], []) as server:
+        assert _capture(server, cert, secret) == {}
+    assert "UID FETCH" not in server.commands
+
+
+def test_a_folder_name_with_spaces_is_quoted(tmp_path, secret):
+    cert = make_cert(tmp_path, "a")
+    with ImapResponder([cert], MESSAGES) as server:
+        captured = _capture(server, cert, secret, folder="Recovered Messages")
+    assert [captured[uid] for uid in sorted(captured)] == MESSAGES
+    assert server.mailboxes == ['"Recovered Messages"']
+
+
+def test_quote_and_backslash_in_a_folder_name_are_escaped(tmp_path, secret):
+    cert = make_cert(tmp_path, "a")
+    with ImapResponder([cert], MESSAGES) as server:
+        _capture(server, cert, secret, folder='odd "name" \\ here')
+    assert server.mailboxes == ['"odd \\"name\\" \\\\ here"']
+
+
+@pytest.mark.parametrize("folder", ["a\r\nb", "a\nb", "a\x00b", ""])
+def test_a_folder_name_that_cannot_be_sent_is_refused_before_connecting(tmp_path, secret, folder):
+    cert = make_cert(tmp_path, "a")
+    with ImapResponder([cert], MESSAGES) as server:
+        with pytest.raises(tlscapture.CaptureError) as caught:
+            _capture(server, cert, secret, folder=folder)
+    assert str(caught.value) == "bad_folder_name"
+    assert server.commands == []

@@ -187,3 +187,40 @@ def test_a_really_nested_message_is_the_same_counted_token():
     p = probe_mod.Probe()
     seen = p.observe(raw, folder="INBOX")
     assert seen.parse_token == "parse_nesting_error"
+
+
+# A token seen again must never keep the digest of its earlier observation:
+# a stale digest would let equal() report a match the latest observation
+# does not support (Codex round 1, #1768).
+_LOST_CANDIDATE = {
+    "header_gone": lambda: _raw(message_id="a@mail.example"),
+    "header_duplicated": lambda: _raw(
+        (("X-Pm-Internal-Id", ID), ("X-Pm-Internal-Id", "SYNTHPMID1759bbbb==")),
+        message_id="a@mail.example",
+    ),
+    "header_malformed": lambda: _raw((("X-Pm-Internal-Id", ""),), message_id="a@mail.example"),
+    "no_message_id": lambda: b"From: a@mail.example\r\nSubject: no id\r\n\r\nbody\r\n",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_LOST_CANDIDATE))
+def test_a_re_observation_without_a_candidate_invalidates_the_digest(shape):
+    p = probe_mod.Probe()
+    p.observe(_raw((("X-Pm-Internal-Id", ID),), message_id="b@mail.example"), "INBOX", token="T-b")
+    p.observe(_raw((("X-Pm-Internal-Id", ID),), message_id="a@mail.example"), "INBOX", token="T-a")
+    assert p.equal("T-a", "T-b") is True
+    p.observe(_LOST_CANDIDATE[shape](), "INBOX", token="T-a")
+    assert p.equal("T-a", "T-b") is None  # not comparable, never a stale True
+
+
+def test_a_re_observation_that_is_too_deeply_nested_invalidates_the_digest(monkeypatch):
+    p = probe_mod.Probe()
+    p.observe(_raw((("X-Pm-Internal-Id", ID),), message_id="b@mail.example"), "INBOX", token="T-b")
+    p.observe(_raw((("X-Pm-Internal-Id", ID),), message_id="a@mail.example"), "INBOX", token="T-a")
+
+    def too_deep(*_a, **_k):
+        raise parser.MessageNestingError()
+
+    monkeypatch.setattr(parser, "parse_email_bytes", too_deep)
+    p.observe(_raw(message_id="a@mail.example"), "INBOX", token="T-a")
+    assert p.equal("T-a", "T-b") is None

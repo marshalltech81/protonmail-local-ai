@@ -78,6 +78,8 @@ def capture(
 ) -> dict[int, bytes]:
     """The messages of ``folder`` as served, by UID."""
     expected = normalize_fingerprint(expected_fingerprint)
+    if not folder or any(c in folder for c in "\r\n\x00"):
+        raise CaptureError("bad_folder_name")  # refused before any connection
     password = read_secret_file(password_file)  # refused before any connection
     try:
         pem = ssl.get_server_certificate((host, port), timeout=timeout)
@@ -93,10 +95,17 @@ def capture(
         raise CaptureError("tls_failed") from None
     try:
         conn.login(user, password)
-        status, _ = conn.select(folder, readonly=True)  # EXAMINE
+        status, selected = conn.select(folder, readonly=True)  # EXAMINE
         if status != "OK":
             raise CaptureError("folder_unavailable")
+        # imaplib quotes the name itself (Python 3.14's select uses _astring).
+        # An empty folder is read from EXISTS, not from a FETCH reply that a
+        # server may answer with NO or with nothing.
+        if selected and selected[0] is not None and int(selected[0]) == 0:
+            return {}
         status, data = conn.uid("FETCH", "1:*", "(UID RFC822.SIZE)")
+        if status != "OK":
+            raise CaptureError("size_fetch_failed")  # never "an empty folder"
         sizes: dict[int, int] = {}
         for item in data or []:
             line = item[0] if isinstance(item, tuple) else item
