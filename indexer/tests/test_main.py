@@ -1106,7 +1106,7 @@ class TestDrainQueueRetryAndDeadLetter:
             (str(dest),),
         ).fetchone()
         assert row["attempts"] == 0
-        assert row["last_stage"] == "embed"
+        assert row["last_stage"] == "embed_deferred"
         assert row["last_error_class"] == "retryable"
 
     def test_missing_file_routes_to_skip_not_retry(self, tmp_path):
@@ -7229,7 +7229,7 @@ class TestEmbedFailureHandling:
             row = self._row(db, p)
             assert row["status"] == "queued"
             assert row["attempts"] == 0
-            assert row["last_stage"] == "embed"
+            assert row["last_stage"] == "embed_deferred"
             assert row["last_error_class"] == "retryable"
         assert queue.stats()["dead"] == 0
 

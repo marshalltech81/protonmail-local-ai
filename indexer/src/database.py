@@ -4472,6 +4472,7 @@ class Database:
         permission_stage: str,
         permission_deferred_error: str,
         trashed_stage: str,
+        embed_deferred_stage: str,
         extract_stage: str,
         extraction_deferred_error: str,
         reparse_reason: str,
@@ -4488,6 +4489,8 @@ class Database:
                            THEN 'deferred_permission'
                        WHEN last_stage = :extract_stage AND last_error = :extract_deferred
                            THEN 'extraction_deferred'
+                       WHEN last_stage = :embed_deferred AND last_error_class IS NOT NULL
+                           THEN 'deferred_embed'
                        WHEN last_error IS NULL THEN 'pending'
                        ELSE 'retrying'
                    END AS bucket,
@@ -4500,6 +4503,7 @@ class Database:
             """,
             {
                 "trashed": trashed_stage,
+                "embed_deferred": embed_deferred_stage,
                 "perm_stage": permission_stage,
                 "perm_deferred": permission_deferred_error,
                 "extract_stage": extract_stage,
