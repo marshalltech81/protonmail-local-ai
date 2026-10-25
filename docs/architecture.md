@@ -2827,6 +2827,15 @@ catalogue of synthetic shapes through the real child, and the parser
 pin and `make baseline` are unchanged, so `html`
 keeps no version and nothing is re-extracted or re-parsed.
 
+Nested transfer-encoded emails inside an attached EML use the parser's
+existing bounded raw-transport reader before decoding (#1778). The
+secondary standard-library parse is lazy and shared by siblings; each
+decoded tree gets its own reader under the existing decoded-byte,
+part, depth and child-resource budgets. This preserves colon spacing
+across quoted-printable soft breaks instead of rebuilding transport
+text from parsed header fields. EML extractor version 8 refreshes
+cached EML text through the existing startup sweep.
+
 PDF extraction runs in the extractor child (PLAN.md decision 42,
 #1293): `pdf.py` starts `extractor_child.py pdf <OCR on> <OCR pages>
 <OCR timeout> <digital pages> <PATH>`, and `pdf_child.py` does the

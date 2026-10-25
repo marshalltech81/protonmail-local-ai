@@ -127,7 +127,7 @@ class TestDispatch:
         result = extract(content_type=content_type, filename=filename, payload=_text("x"))
         assert result.status == STATUS_SUCCESS
         assert result.extractor == f"eml@{EXTRACTOR_VERSIONS['eml']}"
-        assert EXTRACTOR_VERSIONS["eml"] == 7
+        assert EXTRACTOR_VERSIONS["eml"] == 8
 
     def test_a_version_1_row_is_stale(self):
         """#1398: the cached ``eml@1`` rows counted every
@@ -138,7 +138,8 @@ class TestDispatch:
         assert extractors.is_stale_extractor("eml@4") is True  # #1456
         assert extractors.is_stale_extractor("eml@5") is True  # #1447
         assert extractors.is_stale_extractor("eml@6") is True
-        assert extractors.is_stale_extractor("eml@7") is False
+        assert extractors.is_stale_extractor("eml@7") is True  # #1778
+        assert extractors.is_stale_extractor("eml@8") is False
 
     @pytest.mark.parametrize(
         ("content_type", "filename", "reruns"),
@@ -1218,7 +1219,9 @@ class TestNestedEmailReadOnce:
             monkeypatch.setattr(
                 eml_module,
                 "_inner_message",
-                lambda part, decodable: calls.append(decodable[0]) or real(part, decodable),
+                lambda part, decodable, *args: (
+                    calls.append(decodable[0]) or real(part, decodable, *args)
+                ),
             )
         with caplog.at_level(logging.WARNING):
             result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
@@ -1392,3 +1395,106 @@ def test_mixed_subject_is_decoded_in_attached_email_text():
     assert caps == []
     assert "café naïve" in text
     assert "=?" not in text
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        b"Subject:plain\r\nFrom:a@example.test\r\n\r\nbody words",
+        b"Subject: folded\r\n\tcontinued\r\n\r\nbody words",
+        b"Subject: \r\n\r\n",
+        b"Subject: " + b"long" * 300 + b"\r\n\r\nbody words",
+        b"Subject: raw caf\xc3\xa9\r\n\r\nbody words",
+        _multipart(_text("nested body"), headers=b"Subject: multipart\r\n", boundary=b"INNER"),
+        _multipart(
+            _attached(_text("deep body")), headers=b"Subject: nested\r\n", boundary=b"INNER"
+        ),
+        b"Subject: softbreak\r\n\r\nkey:value",
+    ],
+    ids=["plain", "folded", "empty", "long", "8bit", "multipart", "nested", "softbreak"],
+)
+@pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+def test_nested_transport_matches_identity_without_reconstructing_headers(inner, encoding):
+    identity = _multipart(_attached(inner))
+    transport = (
+        base64.encodebytes(inner)
+        if encoding == "base64"
+        else binascii.b2a_qp(inner, quotetabs=True, istext=False)
+    )
+    if inner.startswith(b"Subject: softbreak") and encoding == "quoted-printable":
+        transport = transport.replace(b"=0D=0A=0D=0A", b"=0D=0A=0D=0A=\r\n")
+        identity = _multipart(_attached(inner))
+    encoded = _multipart(
+        b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n"
+        b"Content-Transfer-Encoding: " + encoding.encode() + b"\r\n\r\n" + transport
+    )
+    assert eml.extract_text(encoded) == eml.extract_text(identity)
+
+
+def test_encoded_siblings_share_one_raw_transport_read(monkeypatch):
+    reads = []
+    original = parser._DeliveryStatusBytes._read
+
+    def count_read(self):
+        reads.append(len(self._raw))
+        return original(self)
+
+    monkeypatch.setattr(parser._DeliveryStatusBytes, "_read", count_read)
+    raw = _multipart(
+        *[_attached(_text(f"synthetic body {index}"), encoding=b"base64") for index in range(20)]
+    )
+    text, caps = eml.extract_text(raw)
+    assert not caps
+    assert reads == [len(raw)]
+    assert text.count("[Attached message, depth 2]") == 20
+
+
+def test_raw_transport_part_budget_stops_before_secondary_parse(monkeypatch):
+    monkeypatch.setattr(parser, "MAX_WALKED_PARTS", 10)
+    calls = []
+    original = parser.email.message_from_bytes
+
+    def count_parse(*args, **kwargs):
+        calls.append(len(args[0]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(parser.email, "message_from_bytes", count_parse)
+    raw = _multipart(*[_attached(_text("synthetic body"), encoding=b"base64") for _ in range(20)])
+    _text_result, caps = eml.extract_text(raw)
+    assert "eml_parts" in caps
+    assert "eml_nested_messages" in caps
+    assert calls == [len(raw)]
+
+
+@pytest.mark.serial
+def test_nested_raw_transport_work_stays_bounded_with_long_headers(monkeypatch):
+    import time
+
+    raw = _multipart(
+        *[
+            _attached(_text("synthetic body", subject="x" * 20000), encoding=b"base64")
+            for _ in range(100)
+        ]
+    )
+    reads, visits = [], []
+    original_read = parser._DeliveryStatusBytes._read
+    original_parts = parser._parts_in_order
+
+    def count_read(self):
+        reads.append(len(self._raw))
+        return original_read(self)
+
+    def count_parts(*args):
+        parts = original_parts(*args)
+        visits.append(len(parts) if parts is not None else parser.MAX_WALKED_PARTS)
+        return parts
+
+    monkeypatch.setattr(parser._DeliveryStatusBytes, "_read", count_read)
+    monkeypatch.setattr(parser, "_parts_in_order", count_parts)
+    started = time.perf_counter()
+    text, caps = eml.extract_text(raw)
+    assert time.perf_counter() - started < 2
+    assert text.count("[Attached message, depth 2]") == 100
+    assert caps == ["eml_header_chars"]
+    assert reads == [len(raw)]
+    assert sum(visits) <= 1210
