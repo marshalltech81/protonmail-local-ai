@@ -230,7 +230,6 @@ CREATE TABLE attachment_extractions (
     extractor_module   TEXT NOT NULL,
     extraction_status  TEXT NOT NULL,
     extractor          TEXT,
-    extracted_text     TEXT,
     extraction_error   TEXT,
     extracted_at       TEXT NOT NULL,
     ocr_pages_skipped  INTEGER CHECK (ocr_pages_skipped >= 0),
@@ -239,6 +238,7 @@ CREATE TABLE attachment_extractions (
     digital_pages_cap  INTEGER CHECK (digital_pages_cap >= 0),
     extracted_chars_cap INTEGER CHECK (extracted_chars_cap >= 0),
     identifier         TEXT,
+    extracted_text     TEXT,
     PRIMARY KEY (attachment_id, extractor_module)
 );
 CREATE TABLE pending_deletions (

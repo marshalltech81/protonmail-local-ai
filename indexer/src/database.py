@@ -222,7 +222,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # observations with their scan generations. Candidates are read from the
 # stored header rows, so no reparse is queued, and nothing is accepted
 # (``migrations/0021_provider_identity_assessments.sql``).
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -570,7 +570,7 @@ _PURGE_ORPHAN_EXTRACTION_SQL = (
     "AND a.extractor_module = attachment_extractions.extractor_module)"
 )
 
-# Every column of an ``attachment_extractions`` row, in table order: read
+# Stable projection order of an ``attachment_extractions`` row: read
 # whole by the cache lookup and by the purge that keeps a row to restore
 # (#1375), and written back whole by the restore.
 _EXTRACTION_COLUMN_NAMES = (
@@ -1386,7 +1386,6 @@ class Database:
                 extractor_module   TEXT NOT NULL,
                 extraction_status  TEXT NOT NULL,
                 extractor          TEXT,
-                extracted_text     TEXT,
                 extraction_error   TEXT,
                 extracted_at       TEXT NOT NULL,
                 ocr_pages_skipped  INTEGER CHECK (ocr_pages_skipped >= 0),
@@ -1395,6 +1394,7 @@ class Database:
                 digital_pages_cap  INTEGER CHECK (digital_pages_cap >= 0),
                 extracted_chars_cap INTEGER CHECK (extracted_chars_cap >= 0),
                 identifier         TEXT,
+                extracted_text     TEXT,
                 PRIMARY KEY (attachment_id, extractor_module)
             );
 

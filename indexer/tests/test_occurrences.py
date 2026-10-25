@@ -744,5 +744,5 @@ class TestMigrationV14:
         ).read_text()
         assert sql.rstrip().endswith(REPARSE_ENQUEUE_SQL)
 
-    def test_the_schema_version_is_22(self):
-        assert SCHEMA_VERSION == 22
+    def test_the_schema_version_is_23(self):
+        assert SCHEMA_VERSION == 23

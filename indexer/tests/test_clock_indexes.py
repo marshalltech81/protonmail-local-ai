@@ -106,7 +106,10 @@ def test_effective_clock_index_migrates_without_changing_evidence(tmp_path):
     migrated = Database(path, account=TEST_ACCOUNT)
     fresh = Database(tmp_path / "fresh-effective.db", account=TEST_ACCOUNT)
     try:
-        assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 22
+        assert (
+            migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+            == SCHEMA_VERSION
+        )
         for table, rows in before.items():
             assert [tuple(r) for r in migrated._conn.execute(f"SELECT * FROM {table}")] == rows
         for conn in (migrated._conn, fresh._conn):
