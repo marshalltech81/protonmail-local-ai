@@ -4,8 +4,8 @@
 catalogue of WordprocessingML shapes. It was written against the walk
 that read blocks through python-docx's ``iter_inner_content()`` and text
 through ``Paragraph.text`` (main at 787193c9), before that walk was
-replaced by direct child iteration, and must keep passing unchanged:
-the rewrite keeps the same elements in the same order.
+replaced by direct child iteration. #1224 extends the wrapper cases to
+include displayed text while preserving order and the same budgets.
 
 All text is synthetic.
 """
@@ -121,7 +121,7 @@ _HYPERLINKS = _p(
     '<w:hyperlink w:anchor="a3"/>',
 )
 
-# Paragraph children other than runs and hyperlinks are not read.
+# Visible wrappers contribute runs; deleted text stays excluded.
 _PARAGRAPH_WRAPPERS = _p(
     "kept",
     '<w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + _r(_t("inserted")) + "</w:ins>",
@@ -134,7 +134,7 @@ _PARAGRAPH_WRAPPERS = _p(
     " end",
 )
 
-# Body children other than paragraphs and tables are not read.
+# Visible block wrappers contribute paragraphs and tables.
 _BODY_WRAPPERS = (
     "<w:sdt><w:sdtContent>"
     + _p("in control")
@@ -190,7 +190,7 @@ def _deep(levels: int) -> str:
     return fragment
 
 
-# Row and cell children other than rows and cells are not read.
+# Visible wrappers also carry table rows, cells and cell blocks.
 _TABLE_WRAPPERS = _tbl(
     _tr(
         _tc(_p("cell"), "<w:sdt><w:sdtContent>" + _p("cell control") + "</w:sdtContent></w:sdt>"),
@@ -217,7 +217,13 @@ CATALOGUE: list[tuple[str, str, str | None, str | None, str]] = [
     ("run-content", _RUN_CONTENT, None, None, "a\tb\ncd\ne-f\tghil"),
     ("run-only-breaks", _p(_r("<w:br/>", "<w:tab/>")), None, None, ""),
     ("hyperlinks", _HYPERLINKS, None, None, "one link text two tab\tend"),
-    ("paragraph-wrappers", _PARAGRAPH_WRAPPERS, None, None, "kept end"),
+    (
+        "paragraph-wrappers",
+        _PARAGRAPH_WRAPPERS,
+        None,
+        None,
+        "keptinsertedsmartfieldinline controlcustom end",
+    ),
     (
         "paragraph-properties",
         '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
@@ -227,7 +233,7 @@ CATALOGUE: list[tuple[str, str, str | None, str | None, str]] = [
         None,
         "bold",
     ),
-    ("body-wrappers", _BODY_WRAPPERS, None, None, "outside\n\nafter"),
+    ("body-wrappers", _BODY_WRAPPERS, None, None, "in control\n\noutside\n\ncustom\n\nafter"),
     (
         "simple-table",
         _tbl(_tr(_tc(_p("a")), _tc(_p("b"))), _tr(_tc(_p("c")), _tc(_p("")))),
@@ -270,7 +276,13 @@ CATALOGUE: list[tuple[str, str, str | None, str | None, str]] = [
         None,
         "p0\n\nt0\n\np1\n\nt1\n\nt1b\n\np2",
     ),
-    ("table-wrappers", _TABLE_WRAPPERS, None, None, "cell last cell\n\nplain row"),
+    (
+        "table-wrappers",
+        _TABLE_WRAPPERS,
+        None,
+        None,
+        "cell cell control control cell custom cell last cell\n\ncontrol row\n\nplain row",
+    ),
     (
         "header-and-footer",
         _p("body"),
@@ -283,7 +295,7 @@ CATALOGUE: list[tuple[str, str, str | None, str | None, str]] = [
         _p("body"),
         "<w:sdt><w:sdtContent>" + _p("header control") + "</w:sdtContent></w:sdt>" + _p("head"),
         _p(_r(_t("page ")), '<w:fldSimple w:instr="PAGE">' + _r(_t("1")) + "</w:fldSimple>"),
-        "body\n\nhead\n\npage",
+        "body\n\nheader control\n\nhead\n\npage 1",
     ),
     ("empty-header", _p("body"), "", _p(""), "body"),
 ]
@@ -653,3 +665,40 @@ class TestDocxWalkBudgets:
         text, _ = docx.extract(docx_payload(body))
         assert text == expected
         assert len(_cap_lines(caplog)) == 1
+
+
+@pytest.mark.parametrize("wrapper", ["ins", "moveTo", "smartTag", "customXml", "fldSimple"])
+def test_visible_inline_wrappers_exclude_deleted_text(wrapper):
+    from src.extractors.docx import extract_text
+
+    body = _p(
+        f"<w:{wrapper}>"
+        + _r(_t("visible"))
+        + f"</w:{wrapper}>"
+        + "<w:del>"
+        + _r(_t("deleted"))
+        + "</w:del>"
+        + "<w:moveFrom>"
+        + _r(_t("old"))
+        + "</w:moveFrom>"
+    )
+    assert extract_text(docx_payload(body))[0] == "visible"
+
+
+def test_empty_wrappers_spend_the_walk_budget_before_later_text(monkeypatch):
+    from src.extractors import docx
+
+    monkeypatch.setattr(docx, "_MAX_BLOCKS", 10)
+    seen = []
+    original = docx._Budget.take
+
+    def take(self, cap, units=1):
+        seen.append(cap)
+        return original(self, cap, units)
+
+    monkeypatch.setattr(docx._Budget, "take", take)
+    text, caps = docx.extract_text(
+        docx_payload("<w:sdt><w:sdtContent/></w:sdt>" * 1000 + _p("late"))
+    )
+    assert text == "" and caps == ["docx_blocks"]
+    assert seen == ["docx_blocks"] * 11

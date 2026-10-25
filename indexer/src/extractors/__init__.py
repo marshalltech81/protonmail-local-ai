@@ -826,7 +826,7 @@ class ExtractionResult:
 # so no module's other rows are re-run (owner decision on #1416).
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 2,
-    "docx": 7,
+    "docx": 8,  # Read displayed text inside WordprocessingML wrappers (#1224).
     "eml": 6,  # Normalize lone surrogates in decoded attached-email text (#1447).
     "image": 9,  # Re-assess image-labelled HTML, including OCR-disabled rows (#1417).
     "pdf": 7,

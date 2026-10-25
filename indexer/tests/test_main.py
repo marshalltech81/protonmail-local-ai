@@ -4001,11 +4001,11 @@ class TestRequeueStaleExtractions:
         assert queue.enqueue_reparse() == 1
         self._drain(db, queue)
         assert len(calls) == 1
-        assert self._occurrence(db) == (1, "docx@7")
+        assert self._occurrence(db) == (1, "docx@8")
         assert queue.enqueue_reparse() == 1
         self._drain(db, queue)
         assert len(calls) == 1
-        assert self._occurrence(db) == (1, "docx@7")
+        assert self._occurrence(db) == (1, "docx@8")
         assert REASON_REPARSE == "reparse"
 
     @pytest.mark.parametrize("ocr_enabled, requeued", [(False, 0), (True, 1)])
@@ -4073,27 +4073,27 @@ class TestRequeueStaleExtractions:
         queue = _make_queue(db)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         self._drain(db, queue)
-        assert self._occurrence(db) == (1, "docx@7")
+        assert self._occurrence(db) == (1, "docx@8")
 
         # Nothing is stale: nothing is cleared or logged.
         assert main._clear_stale_text_completeness(db) == 0
-        assert self._occurrence(db) == (1, "docx@7")
+        assert self._occurrence(db) == (1, "docx@8")
 
         from src.extractors import EXTRACTOR_VERSIONS
 
-        monkeypatch.setitem(EXTRACTOR_VERSIONS, "docx", 8)
+        monkeypatch.setitem(EXTRACTOR_VERSIONS, "docx", 9)
         monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", extraction_enabled)
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         queue.mark_dead_terminal(str(path), stage="parse", error="x")
         caplog.clear()
         assert main._requeue_stale_extractions(db, queue) == 0
-        assert self._occurrence(db) == (None, "docx@7")
+        assert self._occurrence(db) == (None, "docx@8")
         lines = [r for r in caplog.records if "attachment text completeness" in r.getMessage()]
         assert [(r.levelname, r.getMessage()) for r in lines] == [
             (
                 "INFO",
                 "cleared attachment text completeness on 1 occurrence(s) extracted by an older "
-                "extractor version (docx@7); each is unknown until its message is processed "
+                "extractor version (docx@8); each is unknown until its message is processed "
                 "again.",
             )
         ]
@@ -4108,7 +4108,7 @@ class TestRequeueStaleExtractions:
         # new version commits its chunks and the flag with them.
         queue.enqueue(str(path), REASON_REEXTRACT)
         self._drain(db, queue)
-        assert self._occurrence(db) == (1, "docx@8")
+        assert self._occurrence(db) == (1, "docx@9")
 
     def test_old_version_rows_are_re_extracted_once(self, tmp_path, monkeypatch):
         maildir = tmp_path / "maildir"
@@ -4139,7 +4139,7 @@ class TestRequeueStaleExtractions:
 
         assert "HEADER_MARK" in self._attachment_chunk_text(db)
         row = db._conn.execute("SELECT extractor FROM attachment_extractions").fetchone()
-        assert row["extractor"] == "docx@7"
+        assert row["extractor"] == "docx@8"
         assert main._requeue_stale_extractions(db, queue) == 0
 
     @pytest.mark.parametrize(
@@ -4151,6 +4151,7 @@ class TestRequeueStaleExtractions:
             # version 6 stays taken, so the rows a build between the two
             # stamped are older than the current version too.
             ("docx@6", "success", None),
+            ("docx@7", "success", None),
         ],
     )
     def test_docx_rows_before_the_budgeted_walk_are_re_extracted_once(
@@ -4165,7 +4166,7 @@ class TestRequeueStaleExtractions:
         from src.extractors import EXTRACTOR_VERSIONS
         from src.extractors import docx as docx_extractor
 
-        assert EXTRACTOR_VERSIONS["docx"] == 7
+        assert EXTRACTOR_VERSIONS["docx"] == 8
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
@@ -4190,7 +4191,7 @@ class TestRequeueStaleExtractions:
         row = db._conn.execute(
             "SELECT extractor, extraction_status FROM attachment_extractions"
         ).fetchone()
-        assert (row["extractor"], row["extraction_status"]) == ("docx@7", "success")
+        assert (row["extractor"], row["extraction_status"]) == ("docx@8", "success")
         assert "HEADER_MARK" in self._attachment_chunk_text(db)
         assert main._requeue_stale_extractions(db, queue) == 0
 

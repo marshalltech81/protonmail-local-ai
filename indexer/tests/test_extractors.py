@@ -770,14 +770,14 @@ class TestDocxExtractor:
             filename="v.docx",
             payload=self._save(document),
         )
-        assert result.extractor == "docx@7"
+        assert result.extractor == "docx@8"
 
     def test_docx_version_2_rows_are_stale(self):
         # docx@2 missed first-page and even-page headers/footers (#299).
         from src import extractors
 
         assert extractors.stale_extractor_module("docx@2") == "docx"
-        assert extractors.stale_extractor_module("docx@7") is None
+        assert extractors.stale_extractor_module("docx@8") is None
 
     def test_versions_are_keyed_by_dispatch_module(self, monkeypatch):
         """The image module records ``image-ocr`` and the PDF module
@@ -6115,10 +6115,11 @@ class TestDocxPackageBudget:
         ``failed`` package-budget rows among them, re-extract once."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["docx"] == 7
+        assert EXTRACTOR_VERSIONS["docx"] == 8
         assert stale_extractor_module("docx@5") == "docx"
         assert stale_extractor_module("docx@6") == "docx"
-        assert stale_extractor_module("docx@7") is None
+        assert stale_extractor_module("docx@7") == "docx"
+        assert stale_extractor_module("docx@8") is None
 
     def test_long_chain_still_fails_as_a_chain_under_the_budgets(self):
         """#968's behaviour holds: a chain under the package budgets still
@@ -7135,7 +7136,7 @@ class TestPowerPointVariants:
             filename=filename.replace("a.", f"{_PPTX_MARKER}."),
             payload=_docx_bytes(_PPTX_MARKER),
         )
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "docx@7")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "docx@8")
         assert _PPTX_MARKER in (result.text or "")
         assert _PPTX_MARKER not in caplog.text
 
