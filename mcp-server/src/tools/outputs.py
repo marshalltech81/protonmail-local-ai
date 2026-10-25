@@ -23,10 +23,10 @@ get_message's included (#489).
 """
 
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..lib.inference import TruncationReason
 from ..lib.predicates import SentAtStatus
@@ -39,6 +39,7 @@ from ..lib.sqlite import (
     OccurrenceRecord,
     SourceFile,
     ThreadResult,
+    _normalize_subject,
 )
 from ..lib.sqlite import Participant as ParticipantRecord
 
@@ -71,6 +72,23 @@ class _Output(BaseModel):
     # ``from`` is a Python keyword: the field is ``from_`` in code and
     # ``from`` in the schema and the payload.
     model_config = ConfigDict(validate_by_name=True)
+
+
+class _SubjectOutput(_Output):
+    normalized_subject: str | None = Field(
+        default=None,
+        description="Returned subject with existing reply/forward prefixes removed and "
+        "whitespace collapsed, preserving case and bracketed tags. Derived from the "
+        "display-limited subject; null only when subject is null.",
+    )
+
+    @model_validator(mode="after")
+    def normalize_subject(self) -> Self:
+        subject = getattr(self, "subject")
+        self.normalized_subject = (
+            _normalize_subject(subject, preserve_case=True) if subject is not None else None
+        )
+        return self
 
 
 def tool_result(text: str, output: _Output) -> CallToolResult:
@@ -182,7 +200,7 @@ _CLAIMANT_COUNT_UNIT = (
 )
 
 
-class ThreadSummary(_Output):
+class ThreadSummary(_SubjectOutput):
     thread_id: str = Field(
         description="Opaque thread ID; pass it to get_thread, get_evidence, or summarize_thread."
     )
@@ -261,7 +279,7 @@ def passage_sent_text(sent_at: str | None, status: SentAtStatus | None) -> str:
     return sent_at[:10] if sent_at else sent_text(None, status)
 
 
-class MessageHeaders(_Output):
+class MessageHeaders(_SubjectOutput):
     message_id: str = Field(
         description="RFC 5322 Message-ID. The sender sets it, so two indexed messages "
         "can share one; get_message accepts it while only one message has it."
@@ -620,7 +638,7 @@ class EvidenceChunk(_Output):
     )
 
 
-class EvidenceThread(_Output):
+class EvidenceThread(_SubjectOutput):
     thread_id: str
     subject: str
     lane_ranks: dict[str, int] | None = Field(
@@ -680,7 +698,7 @@ class EvidenceOutput(_Output):
     )
 
 
-class AttachmentMessageHeaders(_Output):
+class AttachmentMessageHeaders(_SubjectOutput):
     subject: str = Field(
         description="Carrying message's subject, display-limited as in query_messages."
     )
@@ -1046,7 +1064,7 @@ def query_messages_output_schema() -> dict[str, Any]:
     return schema
 
 
-class QueriedThreadRow(_Output):
+class QueriedThreadRow(_SubjectOutput):
     thread_id: str
     subject: str = Field(description="Whole-thread display label; need not satisfy the filters.")
     matching_message_count: int = Field(
@@ -1125,7 +1143,7 @@ class QueryThreadsOutput(_Output):
     )
 
 
-class GroupSampleRow(_Output):
+class GroupSampleRow(_SubjectOutput):
     claimant_id: str
     thread_id: str
     at: str | None = Field(description="Selected evidence clock, null without date evidence.")

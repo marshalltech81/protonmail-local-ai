@@ -30,6 +30,13 @@ payload-identity counts deduplicate attachment bytes. Queue counts are
 Maildir-file jobs, one per queued path, so they can count copies in
 different folders separately.
 
+Thread and message result rows with a `subject` also return
+`normalized_subject`: the existing reply/forward prefix rules with
+whitespace collapsed and case preserved. Bracketed tags remain. It is
+derived from the returned, display-limited subject; it shares that
+limit and is null when the subject is null. The original `subject`
+is unchanged. This display field does not change threading or ranking.
+
 ## Response format
 
 The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
