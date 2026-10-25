@@ -43,7 +43,10 @@ def test_last_in_reply_to_id_is_the_direct_parent(value, expected):
     assert _parse("In-Reply-To: " + value).in_reply_to == expected
 
 
-def test_reference_lookup_joins_the_parent_without_subject_fallback(tmp_path):
+@pytest.mark.parametrize(
+    "identifier", ["parent@example.test", "parent@[a>b]", "parent@[a<b]", 'parent@[a"b]']
+)
+def test_reference_lookup_joins_the_parent_without_subject_fallback(tmp_path, identifier):
     from src.database import EMBEDDING_DIM, Database
     from src.threader import Threader
 
@@ -52,10 +55,10 @@ def test_reference_lookup_joins_the_parent_without_subject_fallback(tmp_path):
     db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
     try:
         threader = Threader(db)
-        parent = make_message(message_id="parent@example.test", subject="Original topic")
+        parent = make_message(message_id=identifier, subject="Original topic")
         thread = threader.assign_thread(parent)
         db.upsert_thread(thread, [1.0] + [0.0] * (EMBEDDING_DIM - 1))
-        reply = _parse("References: <missing@example.test><parent@example.test> (comment)")
+        reply = _parse(f"References: <missing@example.test><{identifier}> (comment)")
         assert threader.assign_thread(reply).thread_id == thread.thread_id
     finally:
         db.close()
@@ -70,11 +73,6 @@ def test_reply_header_work_is_linear(shape):
 
     class Counted(str):
         visits = 0
-        searches = 0
-
-        def __contains__(self, item):
-            self.searches += 1
-            return super().__contains__(item)
 
         def __iter__(self):
             for char in super().__iter__():
@@ -90,6 +88,27 @@ def test_reply_header_work_is_linear(shape):
     start = time.monotonic()
     ids = list(_reply_ids(text))
     assert time.monotonic() - start < 2
-    assert text.visits == len(text)
-    assert text.searches == 1
+    assert len(text) <= text.visits <= 2 * len(text)
     assert ids[-1] == "kept@example.test"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("parent@example.test (see <decoy@example.test>)", ["parent@example.test"]),
+        ("(see <decoy@example.test>) parent@example.test", ["parent@example.test"]),
+        (
+            "parent@example.test (nested (see <decoy@example.test>)) later@example.test",
+            ["parent@example.test", "later@example.test"],
+        ),
+        ("<parent@[a>b]>", ["parent@[a>b]"]),
+        ("<parent@[a<b]>", ["parent@[a<b]"]),
+        ('<parent@[a"b]> <later@example.test>', ['parent@[a"b]', "later@example.test"]),
+        ("parent@[a<b]", ["parent@[a<b]"]),
+        ("parent@[a(b]", ["parent@[a(b]"]),
+    ],
+)
+def test_delimiters_in_comments_and_domain_literals_are_not_syntax(value, expected):
+    msg = _parse("References: " + value + "\r\nIn-Reply-To: " + value)
+    assert msg.references == expected
+    assert msg.in_reply_to == expected[-1]

@@ -2520,19 +2520,17 @@ def _read_top_headers(
     return rows, complete
 
 
-def _reply_ids(value: str | email.header.Header) -> Iterator[str]:
-    """Read bracketed reply IDs in one pass, ignoring nested comments.
+def _reply_id_spans(value: str) -> Iterator[tuple[int, int, bool]]:
+    """Token spans, with brackets distinguished from bare compatibility IDs.
 
-    Bare whitespace-separated IDs remain supported when no bracketed form
-    is present. Each character is visited at most twice; slices are disjoint.
-    No recursive comment parser or repeated search over a suffix is used.
+    Comments, quoted strings and domain literals each protect their own
+    delimiters. Spans avoid retaining a second copy of a large header.
     """
-    if isinstance(value, email.header.Header):
-        value = _decode_header(value)
-    bracketed = "<" in value
     start: int | None = None
+    bracketed = False
     comments = 0
     quoted = False
+    literal = False
     escaped = False
     for index, char in enumerate(value):
         if comments:
@@ -2545,37 +2543,68 @@ def _reply_ids(value: str | email.header.Header) -> Iterator[str]:
             elif char == ")":
                 comments -= 1
             continue
-        if bracketed and start is not None:
-            if escaped:
-                escaped = False
-            elif char == "\\" and quoted:
-                escaped = True
-            elif char == '"':
-                quoted = not quoted
-            elif not quoted and char == ">":
-                if ref := value[start:index].strip():
-                    yield ref
-                start = None
-            elif not quoted and char == "<":
-                start = index + 1
+        if escaped:
+            escaped = False
             continue
-        if char == "(":
-            if not bracketed and start is not None:
-                yield value[start:index]
+        if char == "\\" and (quoted or literal):
+            escaped = True
+            continue
+        if literal:
+            if char == "]":
+                literal = False
+            continue
+        if char == '"':
+            if start is None:
+                start = index
+            quoted = not quoted
+            continue
+        if quoted:
+            continue
+        if char == "[" and (bracketed or (index > 0 and value[index - 1] == "@")):
+            if start is None:
+                start = index
+            literal = True
+        elif char == "(":
+            if start is not None and not bracketed:
+                yield start, index, False
                 start = None
             comments = 1
-        elif bracketed:
-            if char == "<":
-                start = index + 1
-                quoted = False
-        elif char.isspace():
+        elif char == "<":
+            if start is not None and not bracketed:
+                yield start, index, False
+            start = index + 1
+            bracketed = True
+        elif char == ">" and bracketed:
+            assert start is not None
+            yield start, index, True
+            start = None
+            bracketed = False
+        elif char.isspace() and not bracketed:
             if start is not None:
-                yield value[start:index]
+                yield start, index, False
                 start = None
         elif start is None:
             start = index
-    if not bracketed and start is not None:
-        yield value[start:]
+    if start is not None and not bracketed:
+        yield start, len(value), False
+
+
+def _reply_ids(value: str | email.header.Header) -> Iterator[str]:
+    """Read reply IDs in two linear scans, ignoring comments.
+
+    Prefer bracketed IDs when present outside comments and literals; keep
+    legacy bare IDs otherwise. Each character is visited at most twice,
+    and only the selected disjoint spans are copied. No recursive parser
+    or repeated search over a suffix is used.
+    """
+    if isinstance(value, email.header.Header):
+        value = _decode_header(value)
+    bracketed = any(angled for _, _, angled in _reply_id_spans(value))
+    for start, end, angled in _reply_id_spans(value):
+        if angled == bracketed:
+            ref = value[start:end].strip() if angled else _clean_id(value[start:end])
+            if ref:
+                yield ref
 
 
 def _clean_id(value: str | email.header.Header) -> str:
