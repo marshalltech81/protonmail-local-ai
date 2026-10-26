@@ -121,3 +121,21 @@ def test_compare_and_page_share_the_snapshot_even_if_a_writer_replaces_text(tmp_
     # The next transaction sees the replacement and refuses the old identity.
     with pytest.raises(sql.AttachmentTextIdentityError, match="text changed"):
         db.get_attachment_text(_occ(0), 20_000, 20_000, _hash(text))
+
+
+@pytest.mark.parametrize("status", ["failed", "empty", "unsupported", "too_large", "deferred"])
+def test_a_pinned_text_becoming_unavailable_does_not_promise_a_backfill(tmp_path, status):
+    text = "previous text " * 4000
+    db = _db(tmp_path, {0: ("success", text, None)})
+    with closing(sqlite3.connect(db.path)) as conn:
+        if status == "deferred":
+            conn.execute("UPDATE attachments SET extraction_deferred_at='2026-01-01T00:00:00Z'")
+        else:
+            conn.execute(
+                "UPDATE attachment_extractions SET extraction_status=?, extracted_text=NULL, text_sha256=NULL",
+                (status,),
+            )
+        conn.commit()
+    with pytest.raises(ToolError, match="text changed") as exc:
+        _call(_handler(db), offset=20_000, expected_text_sha256=_hash(text))
+    assert "backfill" not in str(exc.value)

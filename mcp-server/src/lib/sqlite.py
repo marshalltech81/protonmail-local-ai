@@ -2284,7 +2284,7 @@ class AttachmentTextIdentityError(ValueError):
     def __init__(self, reason: Literal["text_changed", "identity_unknown"]):
         self.reason = reason
         super().__init__(
-            "Attachment text changed; restart reading at offset 0."
+            "Attachment text changed or is no longer available; restart reading at offset 0."
             if reason == "text_changed"
             else "Attachment text identity is unknown; wait for the indexer backfill, then restart at offset 0."
         )
@@ -6430,7 +6430,14 @@ class Database:
             # Compare before reading text, in the same snapshot as blobopen.
             if expected_text_sha256 is not None:
                 if row["text_sha256"] is None:
-                    raise AttachmentTextIdentityError("identity_unknown")
+                    # Only readable legacy text can gain an identity through
+                    # backfill. Removal, failure or deferral invalidates the read.
+                    raise AttachmentTextIdentityError(
+                        "identity_unknown"
+                        if row["text_type"] == "text"
+                        and row["extraction_status"] in {"success", "empty"}
+                        else "text_changed"
+                    )
                 if row["text_sha256"] != expected_text_sha256:
                     raise AttachmentTextIdentityError("text_changed")
             window = total = None

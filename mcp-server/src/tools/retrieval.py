@@ -2942,8 +2942,8 @@ def register_retrieval_tools(server, db):
         more remain, the ``offset`` for the next call. Pass
         ``attachment.text_sha256`` as ``expected_text_sha256`` on every
         continuation (required for offset > 0). A changed hash refuses
-        the read: discard prior pages and restart at 0. A null hash
-        means identity is unknown until the indexer's backfill completes;
+        the read: discard prior pages and restart at 0. A null hash on
+        stored text means legacy identity is unknown until backfill completes;
         do not combine pages. Paging with each ``next_offset`` and the
         same hash returns the whole stored text. That is
         the text the indexer extracted and stored, not the original
