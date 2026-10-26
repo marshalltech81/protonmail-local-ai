@@ -85,11 +85,13 @@ RUN --mount=type=cache,id=protonmail-local-ai-maven,target=/root/.m2,sharing=loc
     -Daether.trustedChecksumsSource.summaryFile.originAware=false \
     dependency:copy-dependencies -DoutputDirectory=/opt/ppt/lib
 COPY java/PptText.java ./
+COPY java/runtime_sbom.py ./
 RUN javac --release 21 -d classes -cp '/opt/ppt/lib/*' PptText.java \
  && jar --create --file /opt/ppt/lib/ppt-text.jar -C classes . \
  && jlink --add-modules java.base,java.desktop,java.xml,java.logging,jdk.unsupported \
     --strip-java-debug-attributes --no-header-files --no-man-pages --compress=zip-6 \
-    --output /opt/ppt/jre
+    --output /opt/ppt/jre \
+ && python /build/runtime_sbom.py /opt/ppt/jre
 
 # Only /opt/ppt, so CI can export it for the indexer tests
 # (.github/workflows/tests.yml) and the runtime copies the same files.

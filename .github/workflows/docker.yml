@@ -137,8 +137,8 @@ jobs:
       # Only a pull-request run restores the stage. Every run on main
       # (a push, the weekly schedule, a manual dispatch) builds it cold,
       # so the image keeps picking up Debian's OpenJDK and Maven
-      # updates: a restored apt layer is never rerun, and Trivy cannot
-      # see the jlink runtime built from it (#1008). Those cold builds
+      # updates: a restored apt layer is never rerun. The embedded runtime
+      # inventory records the JDK version from that build (#1008). Those cold builds
       # are the only writers of the cache pull-request runs read (a
       # pull request's own export lands in its ref's cache, which runs
       # on main never see), so two of them overlapping cannot leave an
@@ -175,9 +175,9 @@ jobs:
 
       # Scan the built images (#977), not only the lockfiles security.yml
       # reads: OS packages installed with apt and the .ppt reader's jars
-      # are seen only here. Trivy finds no package records for the
-      # jlink-built Java runtime in /opt/ppt/jre, so it is not scanned
-      # (#1008). Trivy is pinned like security.yml's steps.
+      # are seen only here. The jlink runtime's embedded CycloneDX inventory
+      # supplies its build-derived Debian OpenJDK source version (#1008).
+      # Trivy is pinned like security.yml's steps.
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
@@ -231,9 +231,9 @@ jobs:
       # the scans above (Debian packages, Python packages, the .ppt
       # reader's jars), with no vulnerability data, which the reports
       # carry. Trivy reads the built image from the daemon, not the
-      # checkout, so no .env or secret file is read. The jlink-built
-      # Java runtime is missing here too (#1008). Exit code 0: an SBOM
-      # step is never a gate.
+      # checkout, so no .env or secret file is read. The embedded jlink
+      # inventory is included; the check below preserves its derivation
+      # provenance and verifies actual JDK CVE matching (#1008).
       - name: Generate indexer image SBOM
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -266,6 +266,17 @@ jobs:
           format: cyclonedx
           output: sbom-mbsync.cdx.json
           exit-code: "0"
+
+      - name: Verify Java runtime inventory and vulnerability matching
+        env:
+          # Reuse the database populated by the pinned trivy-action scans.
+          TRIVY_CACHE_DIR: ${{ github.workspace }}/.cache/trivy
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --entrypoint /bin/cat \
+            protonmail-local-ai-indexer /opt/ppt/jre/runtime.cdx.json > sbom-indexer-jlink.cdx.json
+          python3 scripts/tests/jlink_sbom_check.py sbom-indexer.cdx.json sbom-indexer-jlink.cdx.json trivy
 
       - name: Upload image SBOMs
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

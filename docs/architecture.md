@@ -2390,9 +2390,10 @@ occurrence of it now selects a module.
   (`SlideShowExtractor`: slide text, placeholders and text boxes alike,
   and speaker notes; masters and comments are left out) in a Java
   process (owner decision 2026-10-07, #957). `indexer/java/PptText.java`
-  runs on a Java runtime trimmed with `jlink` to five modules
+  runs on a Java runtime trimmed with `jlink` from five selected modules
   (`java.base`, `java.desktop`, `java.xml`, `java.logging`,
-  `jdk.unsupported`); both live under `/opt/ppt` in the image. The
+  `jdk.unsupported`) and their transitive module dependencies; both live
+  under `/opt/ppt` in the image. The
   build's `ppt-builder` stage fetches the jars pinned in
   `indexer/java/pom.xml` with Maven (strict checksums on download, into
   a BuildKit cache mount with its own id that a later rebuild reuses,
@@ -5035,8 +5036,7 @@ GitHub Actions cache (BuildKit's `gha` backend, #1070), so Maven
 Central is contacted only when `indexer/java/pom.xml`, its checksums
 file or a layer before them changed. Every run on `main` (a push, the weekly schedule, a
 manual dispatch) restores nothing: it builds the stage from the
-current Debian packages (a restored apt layer is never rerun, and
-Trivy cannot see the `jlink` runtime) and writes the cache
+current Debian packages (a restored apt layer is never rerun) and writes the cache
 pull-request runs restore, so a restored stage is never older than the
 last build on `main`. The `indexer pytest` job of
 `.github/workflows/tests.yml`, which exports the `ppt-runtime` stage
@@ -5070,9 +5070,28 @@ reads the built image from the Docker daemon, not the checkout. There
 is no local target for it; `trivy image --format cyclonedx --output
 <file> <image>` with the pinned Trivy produces the same file.
 
-Not covered: the Java runtime that `jlink` builds into `/opt/ppt/jre`
-has no package records, so Trivy neither scans it nor lists it in the
-SBOM (#1008).
+The trimmed Java runtime carries `/opt/ppt/jre/runtime.cdx.json` (#1008).
+The builder generates this inventory from its actual Debian JRE/source-package
+version, architecture and maintainer, its matching builder-JDK version, and the
+generated runtime's Java version and module list. No version string is maintained
+by hand, and no Maven or compiler package is listed as a shipped component.
+Trivy reads the embedded inventory during its normal image scan, matching the
+Debian `openjdk-21` source-package advisories. Existing image gates therefore
+cover it with the same fixed/unfixed policy as the other image components.
+
+The Docker job checks that its image SBOM contains that exact package version,
+architecture and source provenance, and retains the explicit jlink derivation
+description, vendor and module properties that Trivy's package model drops when
+it re-emits the embedded inventory. The original image components and dependency
+relationships remain. The build inventory is uploaded alongside the three image
+SBOMs as `sbom-indexer-jlink.cdx.json`.
+A synthetic obsolete package version must match a known fixed OpenJDK CVE using
+the same scanner database; presence of an inventory entry alone is not accepted
+as evidence of vulnerability matching. That control changes no shipped version.
+Coverage is conservative at the Debian source-package level: a reported CVE may
+concern a module omitted by jlink. The scan does not establish module-level
+reachability or exclude such findings. Full reports still include unfixed
+findings; only fixed HIGH/CRITICAL findings fail the image gate.
 
 `make trivy` runs the same three gates after its filesystem scans, and
 `make trivy-images` runs them alone (#1065), with the workflow's
