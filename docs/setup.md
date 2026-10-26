@@ -1478,9 +1478,9 @@ indexer, and MCP client diagnostics and recovery steps.
 
 ### Declare the Bridge address mode
 
-Set `accounts[].proton_bridge.declared_address_scope` in `config/config.toml`
-(or `PROTON_DECLARED_ADDRESS_SCOPE` with legacy `.env`) to match the account's
-address mode in the Bridge app. Select the account and inspect its **Split
+Set `PROTON_DECLARED_ADDRESS_SCOPE` in `.env` to match the account's address
+mode in the Bridge app. This is the setting Compose consumes in both
+configuration modes until #1638 wires the generated configuration in. Select the account and inspect its **Split
 addresses** switch: off means `combined`, on means `split`. When on, select
 the intended address from Bridge's dropdown before copying its IMAP details
 ([Proton's address-mode guide](https://proton.me/support/difference-combined-addresses-mode-split-addresses-mode)).
