@@ -119,3 +119,13 @@ def test_ci_check_refuses_missing_or_different_inventory(runtime_sbom, sbom_chec
         found["properties"][0]["value"] = "synthetic-wrong-source"
     with pytest.raises(ValueError):
         sbom_check.enrich(image, runtime)
+
+
+def test_ci_probe_uses_the_same_database_cache_as_the_image_scans():
+    """The CLI positive control runs offline on the action-populated database."""
+    workflow = (SCRIPT.parents[2] / ".github/workflows/docker.yml").read_text()
+    verification = workflow.split(
+        "- name: Verify Java runtime inventory and vulnerability matching", 1
+    )[1].split("- name:", 1)[0]
+    # The pinned trivy-action's cache-dir default is github.workspace/.cache/trivy.
+    assert "TRIVY_CACHE_DIR: ${{ github.workspace }}/.cache/trivy" in verification
