@@ -260,6 +260,7 @@ VALUES (1, 'unconfigured', 0,
             extracted_at      TEXT NOT NULL,
             ocr_pages_skipped INTEGER CHECK (ocr_pages_skipped >= 0),
             extracted_text    TEXT,
+            text_sha256       TEXT,
             PRIMARY KEY (attachment_id, extractor_module)
 
 );
@@ -602,8 +603,8 @@ def _insert_extraction(
         """
         INSERT INTO attachment_extractions
             (attachment_id, extractor_module, extraction_status, extractor,
-             extracted_text, extraction_error, extracted_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+             extracted_text, extraction_error, extracted_at, text_sha256)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             attachment_id,
@@ -613,6 +614,9 @@ def _insert_extraction(
             extracted_text,
             error,
             "2024-01-01T00:00:00+00:00",
+            hashlib.sha256(extracted_text.encode()).hexdigest()
+            if extracted_text is not None
+            else None,
         ),
     )
     conn.commit()

@@ -744,7 +744,10 @@ def _seed_cache(bench, conn, per_message: int) -> None:
     _occurrence, attachment_id, _size, text = bench._record(
         0, "typical", "typical", 0, 1, 40, per_message, None
     ).attachments[0]
-    conn.execute(bench._INSERT_EXTRACTION, (attachment_id, text, "2026-01-01T00:00:00+00:00"))
+    conn.execute(
+        bench._INSERT_EXTRACTION,
+        (attachment_id, text, "2026-01-01T00:00:00+00:00", bench._extracted_text_sha256(text)),
+    )
     conn.commit()
 
 

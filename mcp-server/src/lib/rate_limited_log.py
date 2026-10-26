@@ -195,6 +195,7 @@ class ArgumentRejections(RateLimitedLog):
         "text",
         "authority_class",
         "offset",
+        "expected_text_sha256",
         "filter_type",
         "query",
         "where",

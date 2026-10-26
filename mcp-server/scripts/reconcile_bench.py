@@ -247,9 +247,13 @@ CREATE TABLE attachment_extractions (
     digital_pages_cap  INTEGER CHECK (digital_pages_cap >= 0),
     extracted_chars_cap INTEGER CHECK (extracted_chars_cap >= 0),
     identifier         TEXT,
+    text_sha256        TEXT,
     extracted_text     TEXT,
     PRIMARY KEY (attachment_id, extractor_module)
 );
+CREATE INDEX idx_extractions_missing_text_sha256
+    ON attachment_extractions(attachment_id, extractor_module)
+    WHERE text_sha256 IS NULL AND extracted_text IS NOT NULL;
 CREATE TABLE pending_deletions (
     occurrence_id INTEGER PRIMARY KEY
                   REFERENCES message_occurrences(id) ON DELETE CASCADE,
@@ -818,13 +822,23 @@ _INSERT_ATTACHMENT = (
     "fts_rowid, extractor_module, text_complete, text_extractor) "
     f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{PDF_MODULE}', 1, '{PDF_EXTRACTOR}')"
 )
+
+
+def _extracted_text_sha256(text: str) -> str:
+    """The indexer writer's bounded UTF-8 hashing, including NULs (#1361)."""
+    digest = hashlib.sha256()
+    for start in range(0, len(text), 16 * 1024):
+        digest.update(text[start : start + 16 * 1024].encode("utf-8"))
+    return digest.hexdigest()
+
+
 _INSERT_EXTRACTION = (
     "INSERT INTO attachment_extractions (attachment_id, extractor_module, "
     "extraction_status, extractor, extracted_text, extracted_at, "
     "ocr_pages_skipped, text_complete, ocr_pages_cap, digital_pages_cap, "
-    "extracted_chars_cap, identifier) "
+    "extracted_chars_cap, identifier, text_sha256) "
     f"VALUES (?, '{PDF_MODULE}', 'success', '{PDF_EXTRACTOR}', ?, ?, 0, 1, 0, 0, 0, "
-    f"'{PDF_IDENTIFIER}')"
+    f"'{PDF_IDENTIFIER}', ?)"
 )
 _INSERT_CHUNK = "INSERT INTO message_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
@@ -1041,7 +1055,10 @@ def build(
                         n_att_fts,
                     ),
                 )
-                conn.execute(_INSERT_EXTRACTION, (attachment_id, extracted, now))
+                conn.execute(
+                    _INSERT_EXTRACTION,
+                    (attachment_id, extracted, now, _extracted_text_sha256(extracted)),
+                )
             for pk, attachment_id, kind, c, text, start, end in rec.chunks:
                 tokens = token_estimate(text)
                 if kind == "body":
@@ -2568,12 +2585,15 @@ def _writer_phase2c(
             )
             continue
         if action == _EXTRACTED:
-            conn.execute(_INSERT_EXTRACTION, (attachment_id, extracted, now))
+            conn.execute(
+                _INSERT_EXTRACTION,
+                (attachment_id, extracted, now, _extracted_text_sha256(extracted)),
+            )
         else:
             # Restore the phase 2a cache snapshot before certifying it, as
             # apply_attachment_writes does even when the row still exists.
             conn.execute(
-                "INSERT INTO attachment_extractions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "INSERT INTO attachment_extractions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(attachment_id, extractor_module) DO NOTHING",
                 cached_row,
             )

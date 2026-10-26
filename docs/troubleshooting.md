@@ -1557,6 +1557,7 @@ is still failing.
 | `periodic reconciliation` | `periodic reconciliation failed: <type>` (ERROR) | Every `INDEXER_DELETION_SWEEP_INTERVAL_SECS`, with deletion reconciliation on |
 | `reaped-record prune` | `reaped-record prune failed: <type>` (ERROR) | At startup and with each reconciliation interval |
 | `wal checkpoint` | `wal checkpoint failed: <type>` (ERROR) | At startup and every `INDEXER_WAL_CHECKPOINT_INTERVAL_SECS` (10 min) |
+| `extraction fingerprint backfill` | `extraction fingerprint backfill failed: <type>` (ERROR) | Each main-loop tick until legacy stored-text identities are filled (#1361); retries resume missing hashes without re-extraction |
 | `thread vector sums backfill` | `thread vector sums backfill failed: <type>` (ERROR) | Each main-loop tick until every thread's sums are filled (#1356) |
 | `thread vector sums check` | `thread vector sums check failed: <type>` (ERROR) | With each reconciliation interval (#1356) |
 

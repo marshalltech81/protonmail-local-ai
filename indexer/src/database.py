@@ -5,6 +5,7 @@ Thread-level indexing: one row per thread, updated as new messages arrive.
 """
 
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -224,7 +225,8 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # observations with their scan generations. Candidates are read from the
 # stored header rows, so no reparse is queued, and nothing is accepted
 # (``migrations/0021_provider_identity_assessments.sql``).
-SCHEMA_VERSION = 26
+# v27 (#1361): stored extracted-text SHA-256, backfilled without re-extraction.
+SCHEMA_VERSION = 27
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -602,6 +604,7 @@ _EXTRACTION_COLUMN_NAMES = (
     "digital_pages_cap",
     "extracted_chars_cap",
     "identifier",
+    "text_sha256",
 )
 _EXTRACTION_COLUMNS = ", ".join(_EXTRACTION_COLUMN_NAMES)
 
@@ -797,6 +800,19 @@ def _synchronized(fn):
             return fn(self, *args, **kwargs)
 
     return wrapper
+
+
+_FINGERPRINT_BLOCK_BYTES = 64 * 1024
+
+
+def _extracted_text_sha256(text: str | None) -> str | None:
+    """Hash the exact UTF-8 text, including NULs, without another whole-text copy."""
+    if text is None:
+        return None
+    digest = hashlib.sha256()
+    for start in range(0, len(text), _FINGERPRINT_BLOCK_BYTES // 4):
+        digest.update(text[start : start + _FINGERPRINT_BLOCK_BYTES // 4].encode("utf-8"))
+    return digest.hexdigest()
 
 
 class Database:
@@ -1427,9 +1443,13 @@ class Database:
                 digital_pages_cap  INTEGER CHECK (digital_pages_cap >= 0),
                 extracted_chars_cap INTEGER CHECK (extracted_chars_cap >= 0),
                 identifier         TEXT,
+                text_sha256        TEXT,
                 extracted_text     TEXT,
                 PRIMARY KEY (attachment_id, extractor_module)
             );
+            CREATE INDEX idx_extractions_missing_text_sha256
+                ON attachment_extractions(attachment_id, extractor_module)
+                WHERE text_sha256 IS NULL AND extracted_text IS NOT NULL;
 
             CREATE VIRTUAL TABLE attachments_fts USING fts5(
                 filename,
@@ -3043,6 +3063,57 @@ class Database:
         ).fetchone()
 
     @_synchronized
+    def backfill_extraction_fingerprints(
+        self, *, max_rows: int = 8, max_bytes: int = 4 * 1024 * 1024
+    ) -> tuple[int, int, bool]:
+        """Hash missing legacy text identities in one transaction (#1361).
+
+        Stop after either budget; always finish a selected row. Work is
+        linear in at most ``max_bytes`` plus one stored row, in 64 KiB
+        reads, and at most ``max_rows`` rows. The partial index avoids
+        rescanning completed rows. NULL text has no identity. Rollback
+        leaves the rows pending, so restart/retry needs no checkpoint.
+        """
+        if max_rows < 1 or max_bytes < 1:
+            raise ValueError("fingerprint backfill budgets must be positive")
+        cur = self._conn.cursor()
+        started = self._begin_if_needed(cur)
+        filled = read_bytes = 0
+        try:
+            while filled < max_rows and read_bytes < max_bytes:
+                row = cur.execute(
+                    "SELECT rowid FROM attachment_extractions "
+                    "WHERE text_sha256 IS NULL AND extracted_text IS NOT NULL "
+                    "ORDER BY attachment_id, extractor_module LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    break
+                digest = hashlib.sha256()
+                with self._conn.blobopen(
+                    "attachment_extractions", "extracted_text", row[0], readonly=True
+                ) as blob:
+                    while block := blob.read(_FINGERPRINT_BLOCK_BYTES):
+                        digest.update(block)
+                        read_bytes += len(block)
+                cur.execute(
+                    "UPDATE attachment_extractions SET text_sha256=? WHERE rowid=?",
+                    (digest.hexdigest(), row[0]),
+                )
+                filled += 1
+            remaining = (
+                cur.execute(
+                    "SELECT 1 FROM attachment_extractions "
+                    "WHERE text_sha256 IS NULL AND extracted_text IS NOT NULL LIMIT 1"
+                ).fetchone()
+                is not None
+            )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+        return filled, read_bytes, remaining
+
+    @_synchronized
     def store_attachment_extraction(
         self,
         *,
@@ -3098,8 +3169,8 @@ class Database:
                     (attachment_id, extractor_module, extraction_status, extractor,
                      extracted_text, extraction_error, extracted_at, ocr_pages_skipped,
                      text_complete, ocr_pages_cap, digital_pages_cap, extracted_chars_cap,
-                     identifier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     identifier, text_sha256)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attachment_id,
@@ -3115,6 +3186,7 @@ class Database:
                     digital_pages_cap,
                     extracted_chars_cap,
                     identifier,
+                    _extracted_text_sha256(extracted_text),
                 ),
             )
             self._commit_if_started(started)

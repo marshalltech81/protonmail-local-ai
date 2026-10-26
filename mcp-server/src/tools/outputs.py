@@ -1454,6 +1454,11 @@ class ListedAttachment(AttachmentMessageHeaders):
         description="The extractor, with its version, that recorded the result; null when none did."
     )
     extracted_at: str | None = Field(description="When the extraction ran; null without one.")
+    text_sha256: str | None = Field(
+        description="SHA-256 of the exact stored extracted text encoded as UTF-8, including NULs; "
+        "null means no text or legacy identity not yet backfilled. Pass it as expected_text_sha256 "
+        "to get_attachment, including every continuation. It identifies stored text, not completeness."
+    )
     attachment_rows_current: bool | None = Field(
         description="Whether the carrying message's stored attachment inventory was committed "
         "as current: true after enabled extraction commits, false with extraction disabled, "
@@ -1553,7 +1558,8 @@ class GetAttachmentOutput(_Output):
     )
     next_offset: int | None = Field(
         description="Pass as offset for the next page; null when this page reaches the end. "
-        "Paging from 0 to the end returns the whole stored text."
+        "Also pass attachment.text_sha256 as expected_text_sha256; when null, wait for backfill "
+        "and restart at 0. A changed identity requires restarting."
     )
     unavailable_reason: str | None = Field(
         description="Why text is null, in fixed words; null when text is set."

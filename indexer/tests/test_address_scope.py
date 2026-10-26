@@ -8,7 +8,7 @@ import pytest
 from src.account import AccountConfigError, account_config_from_env
 from src.database import SCHEMA_VERSION, Database
 
-from tests.conftest import TEST_ACCOUNT
+from tests.conftest import TEST_ACCOUNT, drop_extraction_fingerprint_schema
 
 
 def _scope(db):
@@ -78,12 +78,13 @@ def test_v25_migration_preserves_account_and_queues_no_reparse(tmp_path):
     path = tmp_path / "mail.db"
     db = Database(path, account=TEST_ACCOUNT)
     account_id = db.account_id
+    drop_extraction_fingerprint_schema(db._conn)
     db._conn.execute("DROP TABLE account_address_scope")
     db._conn.execute("UPDATE schema_version SET version=25")
     db._conn.commit()
     db.close()
     db = Database(path, account=replace(TEST_ACCOUNT, declared_address_scope="split"))
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 27
     assert db.account_id == account_id
     assert _scope(db)["declared"] == "split"
     assert db.queue_stats() == {"queued": 0, "dead": 0}
@@ -95,6 +96,7 @@ def test_migrated_and_fresh_scope_schemas_match(tmp_path):
 
     path = tmp_path / "old.db"
     old = Database(path, account=TEST_ACCOUNT)
+    drop_extraction_fingerprint_schema(old._conn)
     old._conn.execute("DROP TABLE account_address_scope")
     old._conn.execute("UPDATE schema_version SET version=25")
     old._conn.commit()

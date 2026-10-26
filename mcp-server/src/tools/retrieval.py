@@ -36,6 +36,7 @@ from ..lib.sqlite import (
     LIST_THREAD_FILTERS,
     AmbiguousMessageId,
     AttachmentOccurrenceRecord,
+    AttachmentTextIdentityError,
     InvalidFilterError,
     MessageBody,
     MessageRecord,
@@ -772,6 +773,7 @@ def _listed_attachment(a: AttachmentOccurrenceRecord) -> ListedAttachment:
         extraction_status=a.extraction_status,
         extractor=a.extractor,
         extracted_at=a.extracted_at,
+        text_sha256=a.text_sha256,
         ocr_pages_skipped=a.ocr_pages_skipped,
         attachments_manifest_complete=a.attachments_manifest_complete,
         attachment_rows_current=a.attachment_rows_current,
@@ -796,6 +798,7 @@ def _attachment_lines(i: int, a: AttachmentOccurrenceRecord) -> list[str]:
         "   From: " + ", ".join(p.address for p in headers["from_"]),
         f"   File: {name} ({mime}, {a.size_bytes / 1024:.1f} KB)",
         f"   Extraction: {extraction}",
+        f"   Text SHA-256: {a.text_sha256 or 'unknown'}",
         f"   Occurrence ID: {a.attachment_occurrence_id} | Attachment ID: {a.attachment_id}",
         f"   Claimant ID: {a.claimant_id} | Thread ID: {a.thread_id}",
     ]
@@ -868,6 +871,13 @@ def register_retrieval_tools(server, db):
     )
     # The same for every other rejected argument, keyed by tool and field (#1039).
     not_found = _not_found_log()
+    attachment_identity_failures = RateLimitedLog(
+        log,
+        ("text_changed", "identity_unknown"),
+        _FIELDS_REJECTION_LOG_INTERVAL_SECS,
+        first_msg="get_attachment failed: %s",
+        summary_msg="get_attachment identity failures in the last %ds: %s",
+    )
     # get_thread and get_message failures on IDs the client chose, rate-limited
     # per tool with fixed reasons (#1265).
     thread_failures = RateLimitedLog(
@@ -2662,6 +2672,10 @@ def register_retrieval_tools(server, db):
 
         Use ``attachment_id`` for exact payload identity across occurrences;
         it is conjoined with message and attachment filters, and blank is ignored.
+        Each row's ``text_sha256`` identifies its stored text, not its
+        completeness. Pass it as ``expected_text_sha256`` to get_attachment
+        to pin the first page and every continuation; null means no text
+        or legacy identity still awaiting backfill.
 
         ``date_basis`` chooses the clock for bounds, ordering and cursors:
         effective (default: delivery, else send date), sent (Date
@@ -2910,6 +2924,7 @@ def register_retrieval_tools(server, db):
     async def get_attachment(
         attachment_occurrence_id: str,
         offset: int = 0,
+        expected_text_sha256: str | None = None,
     ) -> CallToolResult:
         """
         Read one attachment's whole extracted text, one page at a time.
@@ -2924,8 +2939,13 @@ def register_retrieval_tools(server, db):
 
         The text is returned in pages of 20,000 characters: the
         response states which characters it shows of how many and, when
-        more remain, the ``offset`` for the next call. Calling with each
-        ``next_offset`` in turn returns the whole stored text. That is
+        more remain, the ``offset`` for the next call. Pass
+        ``attachment.text_sha256`` as ``expected_text_sha256`` on every
+        continuation (required for offset > 0). A changed hash refuses
+        the read: discard prior pages and restart at 0. A null hash
+        means identity is unknown until the indexer's backfill completes;
+        do not combine pages. Paging with each ``next_offset`` and the
+        same hash returns the whole stored text. That is
         the text the indexer extracted and stored, not the original
         file: an extraction cap may have cut it, which the index does
         not record yet (``truncated`` is always null), and
@@ -2944,6 +2964,8 @@ def register_retrieval_tools(server, db):
                 from query_attachments (one attachment on one message).
             offset: Text character to start the page at (default 0); pass
                 the previous response's next_offset to read on.
+            expected_text_sha256: The previous response's attachment.text_sha256,
+                required for offset > 0; optionally pin the first page to query_attachments.
 
         Returns:
             The attachment's metadata (as query_attachments lists it) and
@@ -2959,8 +2981,24 @@ def register_retrieval_tools(server, db):
             if offset < 0:
                 # Rejected before any read; past-the-end needs the count.
                 _check_offset(offset, 0, "text")
+            if expected_text_sha256 is not None and (
+                len(expected_text_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in expected_text_sha256)
+            ):
+                raise InvalidFilterError(
+                    "expected_text_sha256",
+                    "expected_text_sha256 must be a lowercase SHA-256 hex digest",
+                )
+            if offset > 0 and expected_text_sha256 is None:
+                raise InvalidFilterError(
+                    "expected_text_sha256", "expected_text_sha256 is required for offset > 0"
+                )
             found = await asyncio.to_thread(
-                db.get_attachment_text, attachment_occurrence_id, offset, _PAGE_WINDOW_CHARS
+                db.get_attachment_text,
+                attachment_occurrence_id,
+                offset,
+                _PAGE_WINDOW_CHARS,
+                expected_text_sha256,
             )
             if found is None:
                 # Fixed text: the ID is the caller's and stays out of the log.
@@ -2982,8 +3020,12 @@ def register_retrieval_tools(server, db):
                 page, next_offset = window[:cut], offset + cut
         except ToolError:
             raise
+        except AttachmentTextIdentityError as e:
+            timings.count(e.reason, 1)
+            attachment_identity_failures.record(e.reason)
+            raise ToolError(str(e)) from None
         except InvalidFilterError as e:
-            # The message quotes the offset; log only the field.
+            # Log only the field, never the argument's value.
             rejections.reject("get_attachment", e.field_name)
             raise ToolError(f"Error: {e}") from e
         except Exception as e:
@@ -2991,6 +3033,9 @@ def register_retrieval_tools(server, db):
             raise ToolError(f"Error: {type(e).__name__}") from e
 
         timings.count("attachments", 1)
+        if a.extraction_status == "success" and window is not None and a.text_sha256 is None:
+            timings.count("identity_unknown", 1)
+            attachment_identity_failures.record("identity_unknown")
         if reason is not None:
             # A read that returns no text is a degraded answer: say so
             # on the timing line, by status (a fixed value), not per file.
@@ -3033,7 +3078,8 @@ def register_retrieval_tools(server, db):
                 lines += [
                     "",
                     f"[{total - next_offset:,} more characters: "
-                    f"call get_attachment with offset={next_offset}]",
+                    f"call get_attachment with offset={next_offset} and "
+                    f"expected_text_sha256={a.text_sha256 or 'unknown (wait for backfill)'}]",
                 ]
         return tool_result("\n".join(lines), output)
 

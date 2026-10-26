@@ -2440,6 +2440,11 @@ Every occurrence includes its carrying message's `subject`, `from`,
 500-character header limits and at most ten From entries with the full
 count. `get_attachment` returns these same fields on its occurrence.
 The headers and attachment metadata come from the call's read snapshot.
+Each occurrence also includes `text_sha256`, the SHA-256 of its stored
+extracted text in UTF-8 (including NULs). This identifies the text, not
+its completeness or the original file. A null value means no stored
+text or a legacy identity still awaiting the indexer backfill. Pass a
+known hash to `get_attachment` as `expected_text_sha256` to pin the read.
 
 Enumerate stored attachment occurrences matching exact criteria, with
 a total count
@@ -2597,6 +2602,7 @@ read one named item are.
 |---|---|---|---|
 | `attachment_occurrence_id` | string | required | One attachment on one message, from `query_attachments` |
 | `offset` | int | `0` | Text character to start the page at; pass the previous response's `next_offset` |
+| `expected_text_sha256` | string or null | null | Lowercase SHA-256 hex from `attachment.text_sha256`; required for every offset greater than 0, optional to pin the first page to a listing |
 
 **Response contract.** `attachment` is the occurrence as
 `query_attachments` lists it (IDs, filename and MIME type cut at 500
@@ -2611,6 +2617,14 @@ sequence or zero-width-joined pair; both tools cut pages with one
 helper, so they end in the same places. Paging from 0 through each
 `next_offset` returns the stored text exactly, NUL characters included.
 An offset past the end is an error.
+
+For every continuation, pass the first response's `attachment.text_sha256`
+as `expected_text_sha256`. The reader compares it before reading text,
+in the same snapshot as the page. If the text changed, it refuses the
+page with a fixed error: discard previously read pages and restart at 0.
+A null identity cannot safely continue: wait for the indexer backfill
+and restart at 0. Re-extraction producing identical text keeps the same
+hash and can continue. Timestamps and row IDs are not text identities.
 
 "Whole" means the stored extraction, not the original file. The
 indexer's extraction cap (`INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`) and

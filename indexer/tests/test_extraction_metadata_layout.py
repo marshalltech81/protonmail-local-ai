@@ -78,7 +78,7 @@ def test_v22_cache_migration_preserves_every_value_and_rowid(tmp_path):
     path = tmp_path / "old.db"
     old = Database(path, account=TEST_ACCOUNT)
     _v22(old)
-    before = _rows(old._conn)
+    before = [dict(row, text_sha256=None) for row in _rows(old._conn)]
     old.close()
     migrated = Database(path, account=TEST_ACCOUNT)
     fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
