@@ -1962,6 +1962,7 @@ class AttachmentOccurrenceRecord:
     extraction_status: str | None
     extractor: str | None
     extracted_at: str | None
+    text_sha256: str | None
     ocr_pages_skipped: int | None
     attachments_manifest_complete: bool | None
     attachment_rows_current: bool | None
@@ -2233,6 +2234,7 @@ _OCCURRENCE_COLUMNS = (
     f"{_SOURCE_COLUMNS}, {OCCURRENCE_STATUS_SQL} AS extraction_status, "
     f"{_unless_deferred('extractor')} AS extractor, "
     f"{_unless_deferred('extracted_at')} AS extracted_at, "
+    f"{_unless_deferred('text_sha256')} AS text_sha256, "
     f"{_unless_deferred('ocr_pages_skipped')} AS ocr_pages_skipped"
 )
 
@@ -2274,6 +2276,18 @@ class AttachmentText:
     ocr_disabled: bool
     window: str | None
     total_chars: int | None
+
+
+class AttachmentTextIdentityError(ValueError):
+    """Fixed, content-free cause for refusing a changed/unknown text identity."""
+
+    def __init__(self, reason: Literal["text_changed", "identity_unknown"]):
+        self.reason = reason
+        super().__init__(
+            "Attachment text changed or is no longer available; restart reading at offset 0."
+            if reason == "text_changed"
+            else "Attachment text identity is unknown; wait for the indexer backfill, then restart at offset 0."
+        )
 
 
 def _read_text_window(blob, offset: int, chars: int) -> tuple[str, int]:
@@ -2355,6 +2369,7 @@ def _row_to_occurrence(r) -> AttachmentOccurrenceRecord:
         extraction_status=r["extraction_status"],
         extractor=r["extractor"],
         extracted_at=r["extracted_at"],
+        text_sha256=r["text_sha256"],
         ocr_pages_skipped=r["ocr_pages_skipped"],
         attachments_manifest_complete=(
             None
@@ -6383,7 +6398,11 @@ class Database:
         )
 
     def get_attachment_text(
-        self, attachment_occurrence_id: str, offset: int, window_chars: int
+        self,
+        attachment_occurrence_id: str,
+        offset: int,
+        window_chars: int,
+        expected_text_sha256: str | None = None,
     ) -> AttachmentText | None:
         """One attachment occurrence, whatever its message's folder, and
         ``window_chars`` code points of its stored extracted text from
@@ -6408,6 +6427,19 @@ class Database:
             ).fetchone()
             if row is None:
                 return None
+            # Compare before reading text, in the same snapshot as blobopen.
+            if expected_text_sha256 is not None:
+                if row["text_sha256"] is None:
+                    # Only readable legacy text can gain an identity through
+                    # backfill. Removal, failure or deferral invalidates the read.
+                    raise AttachmentTextIdentityError(
+                        "identity_unknown"
+                        if row["text_type"] == "text"
+                        and row["extraction_status"] in {"success", "empty"}
+                        else "text_changed"
+                    )
+                if row["text_sha256"] != expected_text_sha256:
+                    raise AttachmentTextIdentityError("text_changed")
             window = total = None
             if row["extraction_status"] == "success" and row["text_type"] == "text":
                 with conn.blobopen(

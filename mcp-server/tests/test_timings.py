@@ -9,6 +9,7 @@ nothing from the query, the mailbox or the provider reaches the log.
 
 import ast
 import asyncio
+import hashlib
 import logging
 import re
 import sqlite3
@@ -781,7 +782,13 @@ _CALLER_ERRORS = [
     ("get_attachment", {"attachment_occurrence_id": _MARKER_OCCURRENCE_ID, "offset": -1}, "offset"),
     (
         "get_attachment",
-        {"attachment_occurrence_id": _MARKER_OCCURRENCE_ID, "offset": 10**6},
+        {
+            "attachment_occurrence_id": _MARKER_OCCURRENCE_ID,
+            "offset": 10**6,
+            "expected_text_sha256": hashlib.sha256(
+                f"the {MARKER} attachment text".encode()
+            ).hexdigest(),
+        },
         "offset",
     ),
     ("get_message", {"message_id": f"missing-{MARKER}"}, "get_message failed: not_found"),

@@ -8,6 +8,7 @@ Pages are cut by the helper ``get_message`` uses. All data is synthetic.
 """
 
 import asyncio
+import hashlib
 import io
 import logging
 import sqlite3
@@ -111,7 +112,13 @@ def _handler(db):
 def _pages(handler, occurrence: str) -> list[dict]:
     pages, offset = [], 0
     while offset is not None:
-        out = asyncio.run(handler(attachment_occurrence_id=occurrence, offset=offset))
+        out = asyncio.run(
+            handler(
+                attachment_occurrence_id=occurrence,
+                offset=offset,
+                expected_text_sha256=pages[0]["attachment"]["text_sha256"] if pages else None,
+            )
+        )
         pages.append(out.structured_content | {"_prose": out.content[0].text})
         offset = out.structured_content["next_offset"]
         assert len(pages) < 1000
@@ -297,7 +304,13 @@ class TestPaging:
 
     def test_offset_at_the_end_returns_an_empty_page(self, tmp_path):
         handler = _handler(_db(tmp_path, {0: ("success", "abc", None)}))
-        out = asyncio.run(handler(attachment_occurrence_id=_occ(0), offset=3))
+        out = asyncio.run(
+            handler(
+                attachment_occurrence_id=_occ(0),
+                offset=3,
+                expected_text_sha256=hashlib.sha256(b"abc").hexdigest(),
+            )
+        )
         assert out.structured_content["text"] == ""
         assert out.structured_content["next_offset"] is None
         assert "No text past offset 3; the text has 3 characters." in out.content[0].text
@@ -306,7 +319,13 @@ class TestPaging:
     def test_invalid_offset_is_rejected_and_only_the_field_logged(self, tmp_path, caplog, offset):
         handler = _handler(_db(tmp_path, {0: ("success", "abc", None)}))
         with caplog.at_level(logging.DEBUG), pytest.raises(ToolError, match="Error: offset"):
-            asyncio.run(handler(attachment_occurrence_id=_occ(0), offset=offset))
+            asyncio.run(
+                handler(
+                    attachment_occurrence_id=_occ(0),
+                    offset=offset,
+                    expected_text_sha256=hashlib.sha256(b"abc").hexdigest(),
+                )
+            )
         rejected = [r.getMessage() for r in caplog.records if "rejected" in r.getMessage()]
         assert rejected == ["rejected invalid argument: get_attachment.offset"]
 
@@ -375,7 +394,7 @@ class TestStatuses:
         assert f"stored error {MARKER}" not in str(data) + out.content[0].text
 
     def test_no_text_rejects_a_positive_offset(self, handler):
-        with pytest.raises(ToolError, match=r"past the end of the text \(0 characters\)"):
+        with pytest.raises(ToolError, match=r"expected_text_sha256.*required"):
             asyncio.run(handler(attachment_occurrence_id=_occ(2), offset=1))
 
     def test_unavailable_text_is_counted_on_the_timing_line(self, handler, caplog):
@@ -468,7 +487,12 @@ class TestPrivacyAndErrors:
             async with Client(server) as client:
                 tool = next(t for t in await client.list_tools() if t.name == "get_attachment")
                 ok = await client.call_tool_mcp(
-                    "get_attachment", {"attachment_occurrence_id": _occ(0), "offset": 20_000}
+                    "get_attachment",
+                    {
+                        "attachment_occurrence_id": _occ(0),
+                        "offset": 20_000,
+                        "expected_text_sha256": hashlib.sha256(("x" * 25_000).encode()).hexdigest(),
+                    },
                 )
                 failed = await client.call_tool_mcp(
                     "get_attachment", {"attachment_occurrence_id": _occ(1)}

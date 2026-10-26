@@ -714,6 +714,7 @@ PERIODIC_RENAME_SWEEP = "periodic rename sweep"
 WAL_CHECKPOINT = "wal checkpoint"
 REAPED_RECORD_PRUNE = "reaped-record prune"
 VECTOR_SUMS_BACKFILL = "thread vector sums backfill"
+EXTRACTION_FINGERPRINT_BACKFILL = "extraction fingerprint backfill"
 VECTOR_SUMS_CHECK = "thread vector sums check"
 IDENTITY_ASSESSMENT = "identity assessment"
 RECOVERY_COMPONENTS = frozenset(
@@ -727,6 +728,7 @@ RECOVERY_COMPONENTS = frozenset(
         WAL_CHECKPOINT,
         REAPED_RECORD_PRUNE,
         VECTOR_SUMS_BACKFILL,
+        EXTRACTION_FINGERPRINT_BACKFILL,
         VECTOR_SUMS_CHECK,
         IDENTITY_ASSESSMENT,
     }
@@ -743,6 +745,7 @@ VECTOR_SUMS_BATCH_THREADS = 50
 VECTOR_SUMS_BATCH_ROWS = 2000
 # Whether the backfill found every thread filled; set once per process.
 _vector_sums_backfill_done = False
+_extraction_fingerprint_backfill_done = False
 # Where the check resumes: the last thread it checked (None: the start).
 _vector_sums_check_cursor: str | None = None
 
@@ -3862,6 +3865,31 @@ def _run_wal_maintenance(db: Database) -> None:
     _log_storage(db)
 
 
+def _run_extraction_fingerprint_backfill(db: Database) -> None:
+    """One resumable legacy-text batch per tick; log counts, never text or hashes."""
+    global _extraction_fingerprint_backfill_done
+    if _extraction_fingerprint_backfill_done:
+        return
+    started = _monotonic()
+    try:
+        filled, read_bytes, remaining = db.backfill_extraction_fingerprints()
+    except Exception as e:
+        _streaks[EXTRACTION_FINGERPRINT_BACKFILL].failed()
+        log.error("extraction fingerprint backfill failed: %s", type(e).__name__)
+        return
+    _streaks[EXTRACTION_FINGERPRINT_BACKFILL].succeeded()
+    if filled:
+        log.info(
+            "extraction fingerprint backfill: filled=%d bytes_read=%d ms=%d",
+            filled,
+            read_bytes,
+            (_monotonic() - started) * 1000,
+        )
+    if not remaining:
+        _extraction_fingerprint_backfill_done = True
+        log.info("extraction fingerprint backfill: every stored text has an identity")
+
+
 def _run_vector_sums_backfill(db: Database) -> None:
     """One bounded batch of the thread vector sums backfill (#1356), an
     INFO count per batch that filled something, and one line once every
@@ -4414,6 +4442,7 @@ def main():
                 _run_watch_refresh(folder_watches, db, queue, skip_trashed=reconciler is not None)
 
             _run_vector_sums_backfill(db)
+            _run_extraction_fingerprint_backfill(db)
             _run_identity_assessment(db)
 
             now = time.monotonic()

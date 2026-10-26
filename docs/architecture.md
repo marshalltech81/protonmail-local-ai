@@ -2151,6 +2151,40 @@ the tables from SQLite and gets no `/config` mount.
 
 ## Attachment Indexing
 
+### Extracted-text identity
+
+Schema v27 adds `attachment_extractions.text_sha256` (#1361), the
+SHA-256 of the exact stored text encoded as UTF-8, including NULs.
+The writer computes it while the text is in memory and commits it
+with the text; NULL means no stored text or legacy identity unknown.
+No extractor version changes, reparse or re-embedding are needed.
+The atomic migration rebuilds the cache table to keep every metadata
+column ahead of the large text (#1381), preserving rowids and all
+existing values. It copies the cached text once and needs temporary
+disk/WAL space for that copy; hashing is deferred to the backfill.
+
+The indexer backfills legacy text once, after queue work on each main-loop
+tick. Each transaction processes at most eight rows, stopping after
+4 MiB of text bytes; a selected row is always finished. Thus work is
+linear in at most 4 MiB plus one stored row, with 64 KiB blob reads
+(the SQLite row update can also copy the row). A partial index selects
+only rows still missing an identity. Progress commits with the hashes;
+a failed transaction rolls back and a restart resumes missing rows.
+Batch and completion logs contain counts and elapsed time, never text,
+identifiers or hashes. Failure logs contain only the exception type,
+and recovery is logged. The pass runs even when extraction is disabled.
+
+`query_attachments` and `get_attachment` return the hash. Every
+`get_attachment` continuation requires it as `expected_text_sha256`;
+the reader compares it in the page's snapshot before opening the text
+blob. Changed or unknown identities refuse the page with a fixed error.
+Clients discard earlier pages and restart at 0 when text changes, or
+wait for backfill when identity is unknown. This identifies stored text;
+it does not establish extraction completeness or original-file identity.
+
+
+### Extraction cache
+
 Email attachments flow through the same chunker and embedder pipeline
 as message bodies. Three extra tables sit alongside `message_chunks`: `attachments_fts`
 (contentless FTS5 over filename and MIME type, joined by
@@ -3673,6 +3707,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 
 | Version | Migration | Change |
 |---|---|---|
+| 27 | `0027_extraction_text_sha256.sql` | Stored extracted-text identity (#1361): nullable `attachment_extractions.text_sha256` and a partial pending-backfill index. Existing text is hashed by the bounded main-loop pass; no reparse or re-extraction. |
 | 26 | `0026_declared_address_scope.sql` | Mutable per-account Bridge address-mode declaration, its previous value and latest change time (#1593). No identity change, reparse or re-embedding. |
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
 | 23 | `0023_extraction_metadata_layout.sql` | Rebuilds `attachment_extractions` with all metadata before `extracted_text`, preserving cache keys, rowids and every stored value (#1381). Metadata reads no longer walk overflow pages proportional to the extracted text. No reparse or re-extraction is queued. |

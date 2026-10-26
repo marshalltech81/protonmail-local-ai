@@ -417,8 +417,18 @@ def reply_work(monkeypatch):
     return lengths
 
 
+def drop_extraction_fingerprint_schema(conn):
+    """Undo v27 for historical migration fixtures."""
+    conn.execute("DROP INDEX IF EXISTS idx_extractions_missing_text_sha256")
+    if any(
+        r[1] == "text_sha256" for r in conn.execute("PRAGMA table_info(attachment_extractions)")
+    ):
+        conn.execute("ALTER TABLE attachment_extractions DROP COLUMN text_sha256")
+
+
 def drop_literal_schema(conn):
-    """Undo v26 and v25 for historical migration fixtures, before rebuilding parents."""
+    """Undo v27, v26 and v25 for historical migration fixtures, before rebuilding parents."""
+    drop_extraction_fingerprint_schema(conn)
     conn.execute("DROP TABLE IF EXISTS account_address_scope")
     conn.execute("DROP TRIGGER IF EXISTS literal_window_delete")
     for table in (
