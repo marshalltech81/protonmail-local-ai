@@ -4313,7 +4313,7 @@ _CAP_SHAPES = {
             quopri.encodestring(_INNER_EMAIL) + b"cut =\rtail",
         ),
         False,
-        "leaf_transport_lossy=1",
+        "leaf_transport_lossy=1,eml_expansion=1",
         _only_attachment_is_kept,
     ),
     "decoded_bytes": (
@@ -4561,6 +4561,17 @@ _CAP_SHAPES = {
 }
 
 
+_CAP_SHAPES["eml_expansion"] = (
+    _with_attachment(
+        b"Content-Type: application/eml\r\n",
+        b"Content-Type: multipart/mixed; boundary=missing\r\n\r\nsynthetic",
+    ),
+    False,
+    "eml_expansion=1",
+    _only_attachment_is_kept,
+)
+
+
 _CAP_SHAPES["body_structure"] = (
     _CAP_HEAD + b"Content-Type: multipart/mixed\r\n\r\nSYNTHETIC_TEXT_MARKER",
     False,
@@ -4626,6 +4637,7 @@ _CAP_SHAPES["body_decode"] = (
     lambda msg: msg.body_text == "c2VjcmV0A",
 )
 _CAP_COMPLETENESS: dict[str, set[str]] = {
+    "eml_expansion": _MANIFEST,
     "body_decode": {"body_complete"},
     "headers_budget": set(),
     "headers_parse": set(),
@@ -4641,7 +4653,7 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     # for attachments, so only its own text is partial.
     "transport_lossy_base64": _MANIFEST,
     "transport_lossy_quoted_printable": _MANIFEST,
-    "leaf_transport_lossy": set(),
+    "leaf_transport_lossy": _MANIFEST,
     "decoded_bytes": _MANIFEST,
     "container_serialize": _MANIFEST,
     "container_serialize_decoded": _MANIFEST,
@@ -6134,8 +6146,15 @@ def test_a_lossy_base64_leaf_an_extractor_reads_is_counted(tmp_path, caplog, hea
     assert msg is not None
     [attachment] = msg.attachments
     assert attachment.payload_complete is False
-    assert msg.parse_caps == ({"leaf_transport_lossy": 1} if counted else {})
-    assert msg.attachments_manifest_complete is True
+    assert msg.parse_caps == (
+        {
+            "leaf_transport_lossy": 1,
+            **({"eml_expansion": 1} if b"application/eml" in headers else {}),
+        }
+        if counted
+        else {}
+    )
+    assert msg.attachments_manifest_complete == (b"application/eml" not in headers)
     assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
 
 
@@ -6251,8 +6270,8 @@ class TestLeafEmlTransportEncodings:
         )
         assert attachment.payload != b""
         assert attachment.payload_complete is False
-        assert msg.parse_caps == {"leaf_transport_lossy": 1}
-        assert msg.attachments_manifest_complete is True
+        assert msg.parse_caps == {"leaf_transport_lossy": 1, "eml_expansion": 1}
+        assert msg.attachments_manifest_complete is not True
 
     @pytest.mark.parametrize(
         ("content_type", "encoding", "body"),
@@ -6477,7 +6496,7 @@ class TestTransferDecodeLossDetection:
         msg = parse_email(self._write(tmp_path, cut))
         assert msg is not None
         assert msg.attachments[0].payload_complete is False
-        assert msg.parse_caps == {"leaf_transport_lossy": 1}
+        assert msg.parse_caps == {"leaf_transport_lossy": 1, "eml_expansion": 1}
         part = email.message_from_bytes(
             b"Content-Type: text/plain\r\nContent-Transfer-Encoding: x-uuencode\r\n\r\n" + cut
         )

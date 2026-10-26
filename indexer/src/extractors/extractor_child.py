@@ -74,6 +74,7 @@ MODULES = {
     "xlsx": "xlsx",
     "xls": "xls_child",
     "eml": "eml",
+    "eml-expand": "eml_descendants",
     "image": "image_child",
     "html": "html_child",
     "html_full_body": "html_full_body",
@@ -122,6 +123,14 @@ def run(
         if module in package.OOXML_MODULES and package._validate_zip_payload(payload) is not None:
             raise ZipUncompressedSizeError
         extractor = importlib.import_module(f"{_PACKAGE}.{MODULES[module]}")
+        if module == "eml-expand":
+            occurrences, caps, counts = extractor.expand_payload(payload, *options)
+            reported, recovered = package.child_reports()
+            return (
+                report_frames([*reported, *caps], counts | package.child_degradation(), recovered)
+                + occurrences
+                + b"T 0\n"
+            )
         text, caps, *name = extractor.extract_text(payload, *options, **kwargs)
     except Exception as exc:  # noqa: BLE001 — reported by type name only
         reported, recovered = package.child_reports()

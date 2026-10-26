@@ -420,6 +420,7 @@ class TestChildSide:
         assert set(extractor_child.MODULES) == OOXML_MODULES | {
             "xls",
             "eml",
+            "eml-expand",
             "image",
             "html",
             "html_full_body",
@@ -427,7 +428,8 @@ class TestChildSide:
             "container",
         }
         for name in extractor_child.MODULES.values():
-            assert callable(_module(name).extract_text)
+            entry = "expand_payload" if name == "eml_descendants" else "extract_text"
+            assert callable(getattr(_module(name), entry))
 
     @pytest.mark.parametrize("module", _MODULES)
     def test_frames_round_trip_through_the_parser(self, module, monkeypatch):

@@ -1045,3 +1045,43 @@ class TestReparseCompletionAndRenames:
         assert _jobs(db)[paths[0]]["last_error"] == main.RENAME_DEFERRED_ERROR
         assert "reason=file_missing" not in caplog.text
         db.close()
+
+
+def test_eml_descendant_upgrade_embeds_new_text_and_keeps_unchanged_chunks(tmp_path, monkeypatch):
+    """The real v29 migration discovers missing occurrences, not an extractor bump."""
+    from src.extractors import eml_descendants
+
+    from tests.test_eml_descendants import _attached
+
+    path = tmp_path / "INBOX" / "cur" / "synthetic:2,S"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(_attached().as_bytes())
+    db_path = tmp_path / "mail.db"
+    db = Database(db_path, account=TEST_ACCOUNT)
+    queue = IndexingQueue(db)
+    with monkeypatch.context() as old:
+        old.setattr(
+            eml_descendants, "expand_attachments", lambda attachments, work: (attachments, False)
+        )
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        assert _drain(db, queue, make_mock_embedder(_VECTOR)) == 1
+    assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 1
+    before = {r[0] for r in db._conn.execute("SELECT chunk_id FROM message_chunks")}
+    db._conn.execute("UPDATE schema_version SET version = 28")
+    db._conn.commit()
+    db.close()
+
+    db = Database(db_path, account=TEST_ACCOUNT)
+    queue = IndexingQueue(db)
+    assert _jobs(db)[str(path)]["reason"] == REASON_REPARSE
+    embedder = make_mock_embedder(_VECTOR)
+    assert _drain(db, queue, embedder) == 1
+    assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 2
+    after = {r[0] for r in db._conn.execute("SELECT chunk_id FROM message_chunks")}
+    assert before < after
+    # Only the absent descendant gets new chunks; body/eml text stays identical.
+    embedded = [text for call in embedder.embed_batch.call_args_list for text in call.args[0]]
+    assert any("Synthetic descendant text" in text for text in embedded)
+    assert not any("Synthetic outer body" in text for text in embedded)
+    assert _jobs(db) == {}
+    db.close()

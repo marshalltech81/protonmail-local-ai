@@ -216,11 +216,11 @@ class TestText:
             f"\n> quoted line\ninner body {MARKER}"
         )
         # Its own attachment is not extracted here. Inside a
-        # ``message/rfc822`` part the parser records it as an occurrence of
-        # its own; inside an ``.eml`` leaf it is not walked at all.
+        # ``message/rfc822`` part the parser records it directly; for a
+        # leaf the child expansion records it before extraction (#1310).
         assert "SYNTHETIC_NESTED_FILE" not in result.text
         walked = any(a.filename == "n.txt" for a in msg.attachments)
-        assert walked == (content_type == "message/rfc822")
+        assert walked
         assert MARKER not in caplog.text
 
     def test_nested_attached_emails_render_depth_first_with_labels(self):

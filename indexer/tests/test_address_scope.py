@@ -84,7 +84,7 @@ def test_v25_migration_preserves_account_and_queues_no_reparse(tmp_path):
     db._conn.commit()
     db.close()
     db = Database(path, account=replace(TEST_ACCOUNT, declared_address_scope="split"))
-    assert SCHEMA_VERSION == 28
+    assert SCHEMA_VERSION == 29
     assert db.account_id == account_id
     assert _scope(db)["declared"] == "split"
     assert db.queue_stats() == {"queued": 0, "dead": 0}
