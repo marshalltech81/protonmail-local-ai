@@ -3707,6 +3707,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 
 | Version | Migration | Change |
 |---|---|---|
+| 28 | `0028_ingestion_walks.sql` | Counts-only completed Maildir walk history (#1363), account and root, times and the observed sync identity. Existing indexes start with no walk evidence; no reparse or re-embedding. |
 | 27 | `0027_extraction_text_sha256.sql` | Stored extracted-text identity (#1361): nullable `attachment_extractions.text_sha256` and a partial pending-backfill index. Existing text is hashed by the bounded main-loop pass; no reparse or re-extraction. |
 | 26 | `0026_declared_address_scope.sql` | Mutable per-account Bridge address-mode declaration, its previous value and latest change time (#1593). No identity change, reparse or re-embedding. |
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
@@ -4635,6 +4636,38 @@ container unhealthy (dead jobs are a data issue, not a liveness
 issue).
 
 ### Index currency
+
+#### Completed Maildir walks
+
+Schema v28 records every finished startup, recovery and periodic enumeration in
+`ingestion_walks` (#1363). Each record belongs to an account and stores the
+configured root, start and finish times, the sync stamp read before enumeration
+(completion time, interval, attempt ID and durable generation), files seen,
+unreadable-directory count and files enqueued. It is written only after all
+queue writes succeed. An interrupted or failed pass leaves no completed record;
+a pass that skips unreadable directories records that count. A missing root
+counts as unreadable, rather than an empty corpus. Folder and message names are
+never stored in this history or its logs. No walk is inferred for an existing
+index during migration, and no mail is reparsed or re-embedded.
+
+The history retains each walk for later evidence certificates. Status reads only
+the latest record, with counts and times, never its root or folder names. Its
+`maildir_walk.enumerated_latest_sync` is true only when the walk had no
+unreadable directories and its generation-bearing stamp names the latest
+recorded collection success. A different attempt makes it false, even if the
+timestamps coincide or move backwards. Missing sync identity makes it unknown.
+A sync published during a walk is not covered by that walk: only the stamp
+read before enumeration is recorded. Watcher acknowledgements do not create
+walk records.
+
+This is enumeration evidence, independent of `current` and
+`ingestion_caught_up`. It does not certify successful indexing, absence of
+dead-lettered jobs, later filesystem changes or mail not received from Bridge.
+Those remain separate completeness checks. Startup after an upgrade and later
+rescans populate the history through the normal queue path, including deliveries
+whose watchdog events were missed.
+
+#### Sync acknowledgements
 
 `get_mailbox_status` answers "is the index current?" from SQLite
 alone, because mcp-server mounts neither Maildir nor Bridge. After

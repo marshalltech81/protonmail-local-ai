@@ -9,6 +9,8 @@ from tests.test_tool_annotations import _server, _wire_tools
 
 # Positions, dimensions and echoed arguments are not population counts.
 _EXCLUDED = {
+    "id": "record identifier, not a population count",
+    "sync_generation": "durable sync generation identifier",
     "item": "zero-based item index",
     "record": "zero-based record index",
     "statement": "zero-based statement index",

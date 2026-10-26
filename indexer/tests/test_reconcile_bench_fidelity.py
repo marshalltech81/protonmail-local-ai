@@ -390,9 +390,12 @@ def _plain_tables(conn) -> set[str]:
 
 
 def _indexer_commits(bench, tmp_path, monkeypatch, n: int, batch: int):
-    """The indexer's own commits for a first index of ``n`` benchmark
-    messages at batch size ``batch``: its walk enqueues each, then its
-    drain indexes them a batch at a time."""
+    """The indexer's watcher-arrival commits for ``n`` benchmark messages.
+
+    Match the writer's arrival lifecycle: watcher events enqueue each file,
+    then the normal batched drain indexes them. A startup walk additionally
+    records an ingestion barrier (#1363); watcher arrivals do not.
+    """
     maildir = tmp_path / "maildir"
     # The writer starts after its eight-message seed. Compare those exact
     # files: header counts vary with the folder and reply position.
@@ -421,13 +424,22 @@ def _indexer_commits(bench, tmp_path, monkeypatch, n: int, batch: int):
     pragmas = [s for s in statements if s.upper().startswith("PRAGMA")]
     assert any("secure_delete" in p for p in pragmas)
     monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-    monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", batch)
     statements.clear()
-    main.initial_index(
+    queue = IndexingQueue(db, max_attempts=3)
+    handler = main.MaildirHandler(db, queue)
+    from watchdog.events import FileCreatedEvent
+
+    for i in range(8, 8 + n):
+        handler.on_created(
+            FileCreatedEvent(bench.maildir_path(i, "typical", "typical", str(maildir)))
+        )
+    main._drain_queue_batched(
         db,
         make_mock_embedder([0.0] * EMBEDDING_DIM),
         Threader(db),
-        IndexingQueue(db, max_attempts=3),
+        queue,
+        batch_size=batch,
+        timing_aggregator=main.TimingAggregator(window=200),
     )
     tables = _plain_tables(db._conn)
     db.close()
@@ -494,7 +506,7 @@ def _writer_commits(bench, tmp_path, monkeypatch, batch: int, tables: set[str], 
 
 @pytest.mark.parametrize("batch", [1, 4])
 def test_wal_writer_commits_what_the_indexer_commits_per_batch(bench, tmp_path, monkeypatch, batch):
-    # One batch of a first index: a lone message (a thread root) at
+    # One watcher-arrival batch: a lone message (a thread root) at
     # batch size 1, and a thread root with its three replies at 4, so
     # both the lone survivor's charge and the several survivors' mark,
     # and both a new thread and a reply, are compared. The expected

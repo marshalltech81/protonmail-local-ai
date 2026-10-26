@@ -5328,6 +5328,14 @@ class Database:
                 "JOIN accounts a ON a.id = c.account_id ORDER BY a.id LIMIT 1"
             ).fetchone()
             stats["collection"] = dict(collection) if collection is not None else None
+            walk = conn.execute(
+                "SELECT w.id, w.started_at, w.completed_at, w.sync_completed_at, "
+                "w.sync_interval_secs, w.sync_attempt_id, w.sync_generation, "
+                "w.files_seen, w.unreadable_directories, w.enqueued "
+                "FROM ingestion_walks w JOIN accounts a ON a.id=w.account_id "
+                "ORDER BY w.id DESC LIMIT 1"
+            ).fetchone()
+            stats["maildir_walk"] = dict(walk) if walk is not None else None
             address_scope = conn.execute(
                 "SELECT s.declared, s.previous_declared, s.changed_at "
                 "FROM account_address_scope s JOIN accounts a ON a.id=s.account_id "

@@ -61,6 +61,7 @@ def test_v26_migration_leaves_identity_unknown_and_queues_nothing(tmp_path):
     path = tmp_path / "mail.db"
     db = Database(path, account=TEST_ACCOUNT)
     _store(db, "synthetic", "keep me")
+    db._conn.execute("DROP TABLE ingestion_walks")
     db._conn.execute("DROP INDEX idx_extractions_missing_text_sha256")
     db._conn.execute("ALTER TABLE attachment_extractions DROP COLUMN text_sha256")
     db._conn.execute("UPDATE schema_version SET version=26")

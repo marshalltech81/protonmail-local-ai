@@ -106,7 +106,7 @@ def require_ocr_binaries() -> None:
             )
 
 
-def _sorted_walk(root: Path):
+def _sorted_walk(root: Path, **kwargs):
     # Production walks in filesystem order (creation order on APFS, hash
     # order on ext4). Sorting by the corpus's zero-padded ``<seq>.eml``
     # file name, not the full path, keeps roots ahead of replies across

@@ -2468,7 +2468,7 @@ class TestBatchedInitialIndex:
         monkeypatch.setattr(
             main,
             "_iter_maildir_messages",
-            lambda root: iter(sorted(_REAL_ITER_MAILDIR_MESSAGES(root))),
+            lambda root, **kwargs: iter(sorted(_REAL_ITER_MAILDIR_MESSAGES(root, **kwargs))),
         )
         main.initial_index(db, embedder, threader, queue)
 

@@ -1702,7 +1702,7 @@ def _steady_state_summary_due(
     return seconds_since_summary >= SUMMARY_MAX_INTERVAL_SECS
 
 
-def _iter_maildir_messages(root: Path):
+def _iter_maildir_messages(root: Path, *, counts: dict[str, int] | None = None):
     """Yield every message file under ``root`` whose parent is ``cur`` or
     ``new``, at any nesting depth. mbsync ``SubFolders Legacy`` writes
     ``Folders/.Clients/cur/msg`` — a flat ``iterdir`` over ``root`` would
@@ -1710,12 +1710,13 @@ def _iter_maildir_messages(root: Path):
     directories and, unlike ``rglob``, reports a directory it cannot
     read, so the walk ends with a WARNING counting them (#870): their
     mail stays unindexed until a later walk finds them readable. A
-    directory that vanished mid-walk is gone, not unreadable."""
+    directory that vanished mid-walk is gone, not unreadable; a missing
+    root cannot establish an empty corpus and counts as unreadable."""
     unreadable = 0
 
     def _on_error(exc: OSError) -> None:
         nonlocal unreadable
-        if not isinstance(exc, FileNotFoundError):
+        if not isinstance(exc, FileNotFoundError) or exc.filename == str(root):
             unreadable += 1
 
     for dirpath, _dirnames, filenames in os.walk(root, onerror=_on_error):
@@ -1725,6 +1726,8 @@ def _iter_maildir_messages(root: Path):
             filepath = Path(dirpath, name)
             if filepath.is_file():
                 yield filepath
+    if counts is not None:
+        counts["unreadable_directories"] = unreadable
     if unreadable:
         log.warning(
             "Maildir walk: skipped %d director(ies) it could not read; "
@@ -3519,8 +3522,15 @@ def _enqueue_unindexed_messages(
     skipped_dead = 0
     candidates: list[Path] = []
     already_queued: list[Path] = []
+    # Read before the walk: a sync published during enumeration is not covered.
+    try:
+        stamp = read_sync_stamp(root)
+    except (OSError, ValueError) as exc:
+        log.warning("Maildir walk: sync stamp unavailable: %s", type(exc).__name__)
+        stamp = None
     walk_started = datetime.now(UTC)
-    for filepath in _iter_maildir_messages(root):
+    counts: dict[str, int] = {}
+    for filepath in _iter_maildir_messages(root, counts=counts):
         seen += 1
         path_str = str(filepath)
         if db.is_indexed_and_fresh(path_str):
@@ -3548,6 +3558,21 @@ def _enqueue_unindexed_messages(
     for filepath in candidates:
         queue.enqueue(str(filepath), reason, due_at=due.get(filepath))
     enqueued = len(candidates)
+    db.record_ingestion_walk(
+        root=str(root),
+        started_at=walk_started.isoformat(),
+        completed_at=datetime.now(UTC).isoformat(),
+        stamp=stamp,
+        files_seen=seen,
+        unreadable_directories=counts.get("unreadable_directories", 0),
+        enqueued=enqueued,
+    )
+    log.info(
+        "Maildir walk recorded: seen=%d queued=%d unreadable_directories=%d",
+        seen,
+        enqueued,
+        counts.get("unreadable_directories", 0),
+    )
     if enqueued or skipped_dead:
         log.info(
             "Maildir walk (%s): enqueued %d message(s), skipped %d dead-lettered.",

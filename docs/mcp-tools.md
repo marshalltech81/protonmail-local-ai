@@ -3903,6 +3903,19 @@ and what it holds. Call this when asked which version or build is running.
 | `conflicting_message_ids` | How many Message-IDs more than one indexed file claims (see "Message-ID and claimant ID" above); 0 when none |
 | `extra_claimant_files` | Files beyond the first claimant of each conflicting Message-ID (two Message-IDs with 2 and 3 claimants give 3) |
 
+`maildir_walk` is the latest completed Maildir enumeration, or null before the
+first recorded walk (including just after migration to schema v28). It reports
+its stable record ID, start and finish times, observed sync completion time,
+interval and generation, `files_seen`, `enqueued` and `unreadable_directories`.
+It contains no root, folder names or message identifiers.
+`enumerated_latest_sync` is true only if the walk's generation-bearing stamp
+identifies the latest recorded collection success and no directory was
+unreadable. It is false for a different sync or unreadable directories, and
+null when sync identity is unknown. A sync arriving during the walk is not
+covered. Times do not establish sync identity. This records enumeration only:
+it leaves `current` and `ingestion_caught_up` unchanged and does not certify
+indexed completeness, terminal failures or Bridge's upstream coverage.
+
 `query_capabilities` has one entry per registered predicate leaf, derived from
 that leaf's coverage rule, matching dependencies, and the schema fields and
 evidence actually stored.
