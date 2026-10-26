@@ -259,8 +259,8 @@ VALUES (1, 'unconfigured', 0,
             extraction_error  TEXT,
             extracted_at      TEXT NOT NULL,
             ocr_pages_skipped INTEGER CHECK (ocr_pages_skipped >= 0),
-            extracted_text    TEXT,
             text_sha256       TEXT,
+            extracted_text    TEXT,
             PRIMARY KEY (attachment_id, extractor_module)
 
 );
