@@ -1839,10 +1839,14 @@ class MaildirWalkStatus(_Output):
     completed_at: datetime
     sync_completed_at: datetime | None
     sync_interval_secs: int | None
-    sync_generation: int | None = Field(ge=1)
-    files_seen: int = Field(ge=0)
-    unreadable_directories: int = Field(ge=0)
-    enqueued: int = Field(ge=0)
+    sync_generation: int | None = Field(
+        ge=1, description="Durable sync generation identifier; null on an absent or legacy stamp."
+    )
+    files_seen: int = Field(ge=0, description="Unit: Maildir message files seen by this walk.")
+    unreadable_directories: int = Field(
+        ge=0, description="Unit: directories this walk could not read, including a missing root."
+    )
+    enqueued: int = Field(ge=0, description="Unit: message files newly queued by this walk.")
     enumerated_latest_sync: bool | None = Field(
         description="True only when this finished walk saw no unreadable directories and "
         "its generation-bearing stamp names the latest recorded collection success. "

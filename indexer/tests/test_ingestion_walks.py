@@ -106,6 +106,16 @@ def test_missing_stamp_does_not_invent_sync(db, tmp_path):
     assert row["sync_attempt_id"] is None
 
 
+def test_watcher_arrival_does_not_invent_a_completed_walk(db, tmp_path):
+    from watchdog.events import FileCreatedEvent
+
+    filepath = tmp_path / "cur" / "synthetic"
+    queue = IndexingQueue(db)
+    main.MaildirHandler(db, queue).on_created(FileCreatedEvent(str(filepath)))
+    assert queue.has_pending_row(str(filepath))
+    assert _walks(db) == []
+
+
 def test_missing_root_is_not_a_successfully_empty_walk(db, tmp_path):
     root = tmp_path / "missing"
     main._enqueue_unindexed_messages(db, IndexingQueue(db), root, main.REASON_RESCAN)

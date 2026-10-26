@@ -3707,6 +3707,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 
 | Version | Migration | Change |
 |---|---|---|
+| 28 | `0028_ingestion_walks.sql` | Counts-only completed Maildir walk history (#1363), account and root, times and the observed sync identity. Existing indexes start with no walk evidence; no reparse or re-embedding. |
 | 27 | `0027_extraction_text_sha256.sql` | Stored extracted-text identity (#1361): nullable `attachment_extractions.text_sha256` and a partial pending-backfill index. Existing text is hashed by the bounded main-loop pass; no reparse or re-extraction. |
 | 26 | `0026_declared_address_scope.sql` | Mutable per-account Bridge address-mode declaration, its previous value and latest change time (#1593). No identity change, reparse or re-embedding. |
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
