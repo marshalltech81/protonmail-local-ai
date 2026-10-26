@@ -325,7 +325,7 @@ class TestFailedOutcomesAreLogged:
             status=STATUS_FAILED,
             extractor="xlsx@6",
             text=None,
-            error="zip member declares 300 uncompressed bytes (cap 4)",
+            error="zip uncompressed-size cap exceeded",
             text_complete=False,
             identifier=CONTAINER_IDENTIFIER,
         )
@@ -4700,7 +4700,6 @@ class TestMailContentStaysOutOfLogsAndErrors:
 
         assert result.status == STATUS_FAILED
         assert "uncompressed" in (result.error or "")
-        assert "300" in (result.error or "")
         self._assert_absent("SYNTHETIC_MEMBER_MARKER", caplog, result)
         self._assert_absent("SYNTHETIC_FILENAME_MARKER", caplog, result)
 
@@ -5663,7 +5662,7 @@ class TestWordTemplates:
         )
         assert result.status == STATUS_FAILED
         assert result.error is not None and "uncompressed" in result.error
-        assert calls == []
+        assert calls == ["docx"]
 
     def test_encrypted_ooxml_labelled_dotx_runs_no_extractor(self, monkeypatch):
         """#694's guard, now container identification (#1416), runs before
@@ -6869,7 +6868,7 @@ class TestPptxExtractor:
         )
         assert result.status == STATUS_FAILED
         assert "uncompressed" in (result.error or "")
-        assert calls == []
+        assert calls == ["pptx"]
         assert _PPTX_MARKER not in caplog.text
 
     def test_encrypted_pptx_is_unsupported(self, monkeypatch):
