@@ -23,8 +23,8 @@ The inner From is a claim inside a claim (#1235): it is searchable
 attachment text only, never a participant, an authority input or a
 direction. Attachments of these emails are not extracted here: inside
 a ``message/rfc822`` part the enclosing message's parse records each as
-an occurrence of its own (inside an ``.eml`` file, which the parser does
-not walk, they are not indexed at all). That includes a nested ``.eml``
+an occurrence of its own; inside an ``.eml`` file, the child-only
+``eml_descendants`` walk records them before text extraction (#1310). That includes a nested ``.eml``
 or ``application/eml`` file, which is a leaf attachment, not a
 ``message/rfc822`` part; only the latter is rendered as a nested
 message. ``message/delivery-status`` is not routed here

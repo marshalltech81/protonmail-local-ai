@@ -94,7 +94,9 @@ def test_v24_migration_queues_reparse_and_preserves_retrieval_evidence(tmp_path)
 
     old = Database(tmp_path / "old.db", account=TEST_ACCOUNT)
     store(old, "migration synthetic source")
-    before = [tuple(r) for r in old._conn.execute("SELECT * FROM messages")]
+    before = [dict(r) for r in old._conn.execute("SELECT * FROM messages")]
+    for row in before:
+        row["attachments_manifest_complete"] = None  # v29 requires reassessment.
     drop_literal_schema(old._conn)
     old._conn.execute("UPDATE schema_version SET version=24")
     old._conn.commit()
@@ -102,9 +104,9 @@ def test_v24_migration_queues_reparse_and_preserves_retrieval_evidence(tmp_path)
     migrated = Database(tmp_path / "old.db", account=TEST_ACCOUNT)
     fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
     try:
-        assert SCHEMA_VERSION == 28
+        assert SCHEMA_VERSION == 29
         assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
-        assert [tuple(r) for r in migrated._conn.execute("SELECT * FROM messages")] == before
+        assert [dict(r) for r in migrated._conn.execute("SELECT * FROM messages")] == before
         assert migrated._conn.execute("SELECT COUNT(*) FROM literal_state").fetchone()[0] == 0
         assert (
             migrated._conn.execute(

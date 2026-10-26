@@ -104,7 +104,7 @@ def test_effective_clock_index_migrates_without_changing_evidence(tmp_path):
     db._conn.commit()
     tables = ("messages", "message_thread_map", "threads", "threads_vec", "indexing_jobs")
     before = {
-        table: [tuple(r) for r in db._conn.execute(f"SELECT * FROM {table}")] for table in tables
+        table: [dict(r) for r in db._conn.execute(f"SELECT * FROM {table}")] for table in tables
     }
     from src.migrations.runner import apply_pending
 
@@ -115,7 +115,7 @@ def test_effective_clock_index_migrates_without_changing_evidence(tmp_path):
         migration_dir=Path(__file__).parents[1] / "src/migrations",
     )
     for table, rows in before.items():
-        assert [tuple(r) for r in db._conn.execute(f"SELECT * FROM {table}")] == rows
+        assert [dict(r) for r in db._conn.execute(f"SELECT * FROM {table}")] == rows
     db.close()
     migrated = Database(path, account=TEST_ACCOUNT)
     fresh = Database(tmp_path / "fresh-effective.db", account=TEST_ACCOUNT)
@@ -126,7 +126,14 @@ def test_effective_clock_index_migrates_without_changing_evidence(tmp_path):
         )
         for table, rows in before.items():
             if table != "indexing_jobs":
-                assert [tuple(r) for r in migrated._conn.execute(f"SELECT * FROM {table}")] == rows
+                expected = (
+                    [dict(row, attachments_manifest_complete=None) for row in rows]
+                    if table == "messages"
+                    else rows
+                )
+                assert [
+                    dict(r) for r in migrated._conn.execute(f"SELECT * FROM {table}")
+                ] == expected
         assert (
             migrated._conn.execute("SELECT reason FROM indexing_jobs").fetchall()[0][0] == "reparse"
         )  # v25 literal backfill.

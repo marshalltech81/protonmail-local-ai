@@ -7980,6 +7980,17 @@ _UNREPORTED_CAPS = {
     ),
 }
 
+_UNREPORTED_CAPS.update(
+    {
+        "src.extractors._runner:MAX_ATTACHMENT_METADATA": "Protocol rejection is ChildOutputError; expansion clears manifest, not text.",
+        "src.extractors._runner:MAX_ATTACHMENT_NAME": "Protocol rejection is ChildOutputError; expansion clears manifest, not text.",
+        "src.extractors._runner:MAX_ATTACHMENT_TYPE": "Protocol rejection is ChildOutputError; expansion clears manifest, not text.",
+        "src.extractors.eml_descendants:MAX_CHILDREN": "Parser manifest cap eml_expansion, pinned by test_eml_descendants.",
+        "src.extractors.eml_descendants:MAX_DEPTH": "Parser manifest cap eml_expansion, pinned by test_eml_descendants.",
+    }
+)
+
+
 _EXTRACTOR_MODULES = (
     "src.extractors",
     "src.extractors._launcher",
@@ -7989,6 +8000,7 @@ _EXTRACTOR_MODULES = (
     "src.extractors.doc",
     "src.extractors.docx",
     "src.extractors.eml",
+    "src.extractors.eml_descendants",
     "src.extractors.html",
     "src.extractors.html_child",
     "src.extractors.html_full_body",

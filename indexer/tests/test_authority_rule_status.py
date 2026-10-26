@@ -88,7 +88,9 @@ def test_v23_migration_keeps_existing_evidence_and_unknown_rules(tmp_path):
     path = tmp_path / "old.db"
     old = Database(path, account=TEST_ACCOUNT)
     old.upsert_thread(make_thread(messages=[make_message()]), [0.0] * 4096)
-    before = [tuple(row) for row in old._conn.execute("SELECT * FROM messages")]
+    before = [dict(row) for row in old._conn.execute("SELECT * FROM messages")]
+    for row in before:
+        row["attachments_manifest_complete"] = None  # v29 requires reassessment.
     from tests.conftest import drop_literal_schema
 
     drop_literal_schema(old._conn)
@@ -103,7 +105,7 @@ def test_v23_migration_keeps_existing_evidence_and_unknown_rules(tmp_path):
             migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
             == SCHEMA_VERSION
         )
-        assert [tuple(row) for row in migrated._conn.execute("SELECT * FROM messages")] == before
+        assert [dict(row) for row in migrated._conn.execute("SELECT * FROM messages")] == before
         assert (
             migrated._conn.execute("SELECT COUNT(*) FROM authority_rule_state").fetchone()[0] == 0
         )

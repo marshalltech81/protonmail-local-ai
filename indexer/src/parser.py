@@ -67,7 +67,7 @@ type DateStatus = Literal["parsed", "missing", "invalid"]
 #   base64, quoted-printable or uuencode decode lost bytes (#1288), or an
 #   email carried as a leaf for the ``eml`` extractor in an encoding
 #   nothing here decodes: its
-#   text is partial, but the parser never walks a leaf for attachments;
+#   text is partial; an email file's expansion also clears the manifest;
 # * ``decoded_bytes``: one past ``MAX_DECODED_ATTACHMENT_BYTES``;
 # * ``container_serialize``: a container the generator refuses;
 # * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
@@ -130,6 +130,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "transport_decode",
     "transport_lossy",
     "leaf_transport_lossy",
+    "eml_expansion",
     "decoded_bytes",
     "container_serialize",
     "body_parts",
@@ -173,6 +174,7 @@ BODY_LOSS_CAPS: tuple[str, ...] = (
     "mime_parts",
 )
 ATTACHMENT_LOSS_CAPS: tuple[str, ...] = (
+    "eml_expansion",
     "attached_depth",
     "attached_fields",
     "transport_decode",
@@ -528,6 +530,9 @@ class Attachment:
     payload: bytes = b""
     content_hash: str = ""
     payload_complete: bool = True
+    # Structural context only; never stored as a participant or authority claim.
+    eml_depth: int = 0
+    eml_leaf: bool = False
 
 
 # Hex digits of the file hash in a claimant ID (see ``claimant_id``).
@@ -946,24 +951,20 @@ def parse_email_bytes(
         )
     occurred_at = _parse_received_date(msg)
 
+    from .extractors.eml_descendants import ExpansionBudget, expand_attachments
+
+    expansion = ExpansionBudget()
+    expansion.observe("parse_bytes", len(raw))
+    expansion.observe("decode_bytes", len(raw))
     sources: list[full_body.Part] | None = [] if capture_full_body else None
     body_text, attachments = _extract_body_and_attachments(
-        msg, caps=caps, raw=raw, full_parts=sources, capture_deadline=capture_deadline
+        msg,
+        caps=caps,
+        raw=raw,
+        full_parts=sources,
+        capture_deadline=capture_deadline,
+        expansion_work=expansion,
     )
-    lost = [name for name in PARSE_CAPS if caps[name] and name not in PARSE_REPEATS]
-    if lost:
-        # Fixed names and counts only, with the Maildir path: the
-        # message is indexed with this content missing (#872), so
-        # WARNING. Rate limited with the extractors' per-item lines, and
-        # every such message counted for the attachments aggregate
-        # (#884).
-        note_parser_caps_message()
-        warn_rate_limited(
-            log,
-            "parser work caps dropped content from %s: %s",
-            path,
-            ",".join(f"{name}={caps[name]}" for name in lost),
-        )
     if caps["address_repeated"] or addresses.sender_ambiguous:
         note_parser_address_repeats(
             merged=bool(caps["address_repeated"]), ambiguous=addresses.sender_ambiguous
@@ -1013,6 +1014,31 @@ def parse_email_bytes(
             len(captured.parts),
             captured.source_bytes,
             sum(bool(part.losses) for part in captured.parts),
+        )
+
+    expansion.observe("occurrences", len(attachments))
+    attachments, expansion_lost = expand_attachments(attachments, expansion)
+    if expansion_lost:
+        caps["eml_expansion"] += 1
+        warn_rate_limited(
+            log,
+            "attached email expansion incomplete; manifest incomplete: occurrences=%d",
+            len(attachments),
+        )
+
+    lost = [name for name in PARSE_CAPS if caps[name] and name not in PARSE_REPEATS]
+    if lost:
+        # Fixed names and counts only, with the Maildir path: the
+        # message is indexed with this content missing (#872), so
+        # WARNING. Rate limited with the extractors' per-item lines, and
+        # every such message counted for the attachments aggregate
+        # (#884).
+        note_parser_caps_message()
+        warn_rate_limited(
+            log,
+            "parser work caps dropped content from %s: %s",
+            path,
+            ",".join(f"{name}={caps[name]}" for name in lost),
         )
 
     return Message(
@@ -1248,6 +1274,7 @@ class _SerializationBudget:
 
     remaining: int = MAX_ATTACHED_MESSAGE_FIELDS
     decodable: int = MAX_DECODED_ATTACHMENT_BYTES
+    expansion_work: Any = None
 
 
 def _nesting_exceeds(root: email.message.Message, limit: int, budget: _SerializationBudget) -> bool:
@@ -1266,6 +1293,11 @@ def _nesting_exceeds(root: email.message.Message, limit: int, budget: _Serializa
         if part is None:
             stack.pop()
             continue
+        if budget.expansion_work is not None and not budget.expansion_work.visit(
+            part, enforce=True, assess_structure=False
+        ):
+            budget.remaining = -1
+            return True
         headers = part.items()
         header_bytes = sum(len(name) + len(str(value)) for name, value in headers)
         budget.remaining -= 1 + len(headers) + header_bytes // _HEADER_BYTES_PER_UNIT
@@ -1296,6 +1328,7 @@ def _attachment_payload(
     transport_lost: list[bool] | None = None,
     delivery_status: _DeliveryStatusBytes | None = None,
     decoded_status: list[_DeliveryStatusBytes] | None = None,
+    expansion_work: Any = None,
 ) -> tuple[bytes, email.message.Message | None, bool]:
     """The bytes an attachment carries, for a transfer-encoded attached
     email its decoded tree to traverse (else ``None``), and whether the
@@ -1383,11 +1416,19 @@ def _attachment_payload(
         except email.errors.MessageError, UnicodeError:
             caps["transport_decode"] += 1
             return b"", None, False
+        content_type = str(part.get("Content-Type", "message/rfc822"))
+        if expansion_work is not None and not (
+            expansion_work.take("decode_bytes", len(transport))
+            and expansion_work.take(
+                "parse_bytes", len(transport) + len(content_type) + len("Content-Type: \r\n\r\n")
+            )
+        ):
+            caps["eml_expansion"] += 1
+            return b"", None, False
         budget.decodable -= len(transport)
         if budget.decodable < 0:
             caps["decoded_bytes"] += 1
             return b"", None, False
-        content_type = str(part.get("Content-Type", "message/rfc822"))
         raw = _decode_transport_bytes(transport, encoding)
         if raw is None:
             caps["transport_decode"] += 1
@@ -1412,7 +1453,9 @@ def _attachment_payload(
             # A delivery report inside the decoded tree is recovered from
             # the bytes that tree was parsed from (#1444).
             decoded_status.append(
-                _DeliveryStatusBytes(_transport_form_bytes(raw, content_type), decoded, caps)
+                _DeliveryStatusBytes(
+                    _transport_form_bytes(raw, content_type), decoded, caps, expansion_work
+                )
             )
         # From here the decoded container is the part: the same depth
         # check, serialization and traversal as an identity-encoded one.
@@ -1433,11 +1476,12 @@ def _attachment_payload(
         # An attached email in a transfer encoding not decoded here
         # (uuencode and its aliases, or any other): its parsed form is the
         # transport text, so no payload is kept and none of it is ever
-        # extracted (#1311). The caller still walks it.
-        if serialize_containers and payload_read:
-            caps["transport_decode"] += 1
+        # extracted (#1311). The walk sees only the transport's pseudo-
+        # message, not its descendants: absence is unknown even for an
+        # unserialized container or one with no text extractor (#1310).
+        caps["transport_decode"] += 1
         return b"", None, False
-    contained = _identity_container_bytes(part, delivery_status)
+    contained = _identity_container_bytes(part, delivery_status, expansion_work)
     if contained is not None:
         # An OLE2 or ZIP container the parser read as an email: its bytes,
         # recovered exactly, never walked (#1416).
@@ -1585,7 +1629,9 @@ def _separator_missing(part: email.message.Message) -> bool:
 
 
 def _identity_container_bytes(
-    part: email.message.Message, delivery_status: _DeliveryStatusBytes | None
+    part: email.message.Message,
+    delivery_status: _DeliveryStatusBytes | None,
+    expansion_work: Any = None,
 ) -> bytes | None:
     """The bytes of an identity-encoded ``message/*`` part when they are
     an OLE2 or ZIP container, recovered exactly from the parse, else
@@ -1611,6 +1657,14 @@ def _identity_container_bytes(
     if content_type == _DELIVERY_STATUS:
         data = delivery_status.get(part) if delivery_status is not None else None
     elif content_type.startswith("message/") and len(children) == 1 and not first.keys():
+        value = first.get_payload()
+        if (
+            expansion_work is not None
+            and isinstance(value, str)
+            and not expansion_work.take("decode_bytes", len(value))
+        ):
+            expansion_work.incomplete = True
+            return None
         data = _decoded_payload(first)
     if data and has_container_prefix(data):
         return data
@@ -1654,7 +1708,10 @@ class _DeliveryStatusBytes:
     no bytes for any part, without the second parse, counted as
     ``delivery_status_parts`` in ``caps``."""
 
-    def __init__(self, raw: bytes, msg: email.message.Message, caps: Counter[str]) -> None:
+    def __init__(
+        self, raw: bytes, msg: email.message.Message, caps: Counter[str], expansion_work: Any = None
+    ) -> None:
+        self._expansion_work = expansion_work
         self._raw = raw
         self._msg = msg
         self._caps = caps
@@ -1666,7 +1723,11 @@ class _DeliveryStatusBytes:
         return self._by_part.get(id(part))
 
     def _read(self) -> dict[int, bytes]:
-        first_parts = _parts_in_order(self._msg, MAX_WALKED_PARTS)
+        work = self._expansion_work
+        if work is not None and not work.take("parse_bytes", len(self._raw)):
+            self._caps["eml_expansion"] += 1
+            return {}
+        first_parts = _parts_in_order(self._msg, MAX_WALKED_PARTS, work)
         if first_parts is None:
             caps = self._caps
             caps["delivery_status_parts"] += 1
@@ -1675,7 +1736,7 @@ class _DeliveryStatusBytes:
             second = email.message_from_bytes(self._raw, policy=_DELIVERY_STATUS_AS_LEAF)
         except RecursionError:
             return {}
-        second_parts = _parts_in_order(second, MAX_WALKED_PARTS)
+        second_parts = _parts_in_order(second, MAX_WALKED_PARTS, work)
         if second_parts is None or len(first_parts) != len(second_parts):
             return {}
         found: dict[int, bytes] = {}
@@ -1688,11 +1749,21 @@ class _DeliveryStatusBytes:
                 # here so get_payload(decode=True) recovers the original bytes,
                 # including raw 8-bit bytes, rather than replacing them in str.
                 del theirs["Content-Transfer-Encoding"]
+                value = theirs.get_payload()
+                if (
+                    work is not None
+                    and isinstance(value, str)
+                    and not work.take("decode_bytes", len(value))
+                ):
+                    self._caps["eml_expansion"] += 1
+                    continue
                 found[id(ours)] = _decoded_payload(theirs)
         return found
 
 
-def _parts_in_order(msg: email.message.Message, limit: int) -> list[email.message.Message] | None:
+def _parts_in_order(
+    msg: email.message.Message, limit: int, expansion_work: Any = None
+) -> list[email.message.Message] | None:
     """Every part of ``msg`` in document order, not descending into a
     delivery report or transfer-encoded ``message/*`` part, or ``None``
     once there are more than ``limit``. Iterative, and a container's children are taken one
@@ -1705,6 +1776,10 @@ def _parts_in_order(msg: email.message.Message, limit: int) -> list[email.messag
             frames.pop()
             continue
         if len(found) >= limit:
+            return None
+        if expansion_work is not None and not expansion_work.visit(
+            part, enforce=True, assess_structure=False
+        ):
             return None
         found.append(part)
         if _opaque_container_payload(part):
@@ -1941,6 +2016,9 @@ def _extract_body_and_attachments(
     raw: bytes | None = None,
     full_parts: list[full_body.Part] | None = None,
     capture_deadline: float | None = None,
+    expansion_work: Any = None,
+    expand_leaves: bool = False,
+    eml_depth: int = 0,
 ) -> tuple[str, list[Attachment]]:
     """The message's body text and attachments. ``caps`` (when given)
     counts the content a work cap dropped, by ``PARSE_CAPS`` name. With
@@ -1996,6 +2074,8 @@ def _extract_body_and_attachments(
     # parser exposes such an email as its encoded transport text, not
     # its content, so none of it is body text.
     budget = _SerializationBudget()
+    if expand_leaves:
+        budget.expansion_work = expansion_work
     related_remaining = [MAX_ATTACHED_MESSAGE_FIELDS if walk is None else walk.related_header_units]
     # One frame per open container: its children, taken one at a time as
     # they are visited (#1020), so the walk keeps the
@@ -2004,33 +2084,50 @@ def _extract_body_and_attachments(
     # reports' bytes of the parsed tree its children belong to: the
     # message's, or a decoded attached email's (#1444).
     frames: list[
-        tuple[Iterator[email.message.Message], bool, int, int, bool, _DeliveryStatusBytes | None]
+        tuple[
+            Iterator[email.message.Message], bool, int, int, bool, _DeliveryStatusBytes | None, int
+        ]
     ] = [
         (
             iter((msg,)),
-            False,
+            expand_leaves,
             0,
             -1,
             False,
-            None if raw is None else _DeliveryStatusBytes(raw, msg, caps),
+            None
+            if raw is None
+            else _DeliveryStatusBytes(raw, msg, caps, expansion_work if expand_leaves else None),
+            eml_depth,
         )
     ]
     walked = 0
     while frames:
-        siblings, in_attachment, decode_depth, parent, no_body, delivery_status = frames[-1]
+        siblings, in_attachment, decode_depth, parent, no_body, delivery_status, email_depth = (
+            frames[-1]
+        )
         part = next(siblings, None)
         if part is None:
             frames.pop()
             continue
+        if expand_leaves and email_depth > expansion_work.max_depth:
+            caps["eml_expansion"] += 1
+            break
         if walked >= max_parts:
             caps["mime_parts"] += 1
-            for _siblings, _inside, _depth, ancestor, _skip, _reader in frames:
+            for _siblings, _inside, _depth, ancestor, _skip, _reader, _email_depth in frames:
                 if ancestor >= 0 and nodes[ancestor].related_start is not None:
                     nodes[ancestor].related_start = ""
             break
         walked += 1
+        if expansion_work is not None:
+            if not expansion_work.visit(part, enforce=expand_leaves):
+                caps["eml_expansion"] += 1
+                break
         ct = part.get_content_type()
-        filename = _part_filename(part, None if walk is None else walk.degraded)
+        filename = _part_filename(
+            part,
+            expansion_work.degraded if expand_leaves else None if walk is None else walk.degraded,
+        )
         is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None
         decoded_status: list[_DeliveryStatusBytes] = []
@@ -2058,6 +2155,9 @@ def _extract_body_and_attachments(
         elif is_attachment and walk is not None:
             pass
         elif is_attachment:
+            if expand_leaves and not expansion_work.admit_payload(part):
+                caps["eml_expansion"] += 1
+                break
             transport_lost: list[bool] = []
             module = resolved_extractor_module(ct, filename or "unnamed")
             payload, decoded, leaf = _attachment_payload(
@@ -2070,6 +2170,7 @@ def _extract_body_and_attachments(
                 transport_lost=transport_lost,
                 delivery_status=delivery_status,
                 decoded_status=decoded_status,
+                expansion_work=expansion_work if expand_leaves else None,
             )
             # Read once: it scans the payload (#1288).
             leaf_lost = not part.is_multipart() and _decode_lost_bytes(part, payload)
@@ -2085,8 +2186,8 @@ def _extract_body_and_attachments(
                 # or an email carried as a leaf (``application/eml``, or
                 # named ``.eml``) in an encoding nothing here decodes
                 # (#1311): its decode is kept, never complete, and
-                # counted. A leaf is never walked for attachments, so the
-                # manifest stays whole (#1311).
+                # counted. Email-file expansion also clears the manifest
+                # when its transport is incomplete (#1310).
                 transport_lost.append(True)
                 caps["leaf_transport_lossy"] += 1
             attachments.append(
@@ -2104,6 +2205,10 @@ def _extract_body_and_attachments(
                     # (#1242); an OLE2 or ZIP container kept from a
                     # ``message/*`` part is complete unless its transport
                     # decode lost bytes (#1416).
+                    eml_depth=email_depth,
+                    eml_leaf=module == "eml"
+                    and not part.is_multipart()
+                    and not has_container_prefix(payload),
                     payload_complete=(
                         not transport_lost
                         if leaf
@@ -2113,6 +2218,35 @@ def _extract_body_and_attachments(
                     ),
                 )
             )
+            if expand_leaves:
+                attachment = attachments[-1]
+                if not expansion_work.keep(attachment):
+                    attachments.pop()
+                    caps["eml_expansion"] += 1
+                    break
+                if (
+                    module == "eml"
+                    and not part.is_multipart()
+                    and not has_container_prefix(payload)
+                ):
+                    if not attachment.payload_complete:
+                        caps["eml_expansion"] += 1
+                    if not expansion_work.admit_parse(payload, email_depth + 1):
+                        caps["eml_expansion"] += 1
+                        break
+                    inner = email.message_from_bytes(payload)
+                    frames.append(
+                        (
+                            iter((inner,)),
+                            True,
+                            decode_depth,
+                            -1,
+                            True,
+                            _DeliveryStatusBytes(payload, inner, caps, expansion_work),
+                            email_depth + 1,
+                        )
+                    )
+                    continue
         inside = in_attachment or is_attachment
         root_child = (
             parent >= 0 and nodes[parent].related and nodes[parent].related_start is not None
@@ -2173,7 +2307,9 @@ def _extract_body_and_attachments(
                 # and headers are this node's text if the body keeps it.
                 in_place.append((index, inner, node_depth))
                 inline_roots.add(id(inner))
-                frames.append((iter((inner,)), False, decode_depth, index, False, None))
+                frames.append(
+                    (iter((inner,)), False, decode_depth, index, False, None, email_depth + 1)
+                )
                 continue
             if part.get_content_maintype() == "multipart" and not part.is_multipart():
                 # A declared container the parse left as one undecomposed
@@ -2215,6 +2351,7 @@ def _extract_body_and_attachments(
                         index,
                         skip,
                         tree_status,
+                        email_depth + (part.get_content_maintype() == "message"),
                     )
                 )
             continue

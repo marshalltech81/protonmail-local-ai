@@ -445,6 +445,7 @@ class TestEveryToolRunsUnderLimits:
             "extractors/doc.py",
             "extractors/docx.py",
             "extractors/eml.py",
+            "extractors/eml_descendants.py",
             "extractors/html.py",
             "full_body.py",
             "extractors/image.py",

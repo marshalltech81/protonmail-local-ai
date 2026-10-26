@@ -126,7 +126,7 @@ class TestSchema:
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
         the current version (v27), skipping the migration files."""
-        assert SCHEMA_VERSION == 28
+        assert SCHEMA_VERSION == 29
         assert (
             db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         )

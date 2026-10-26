@@ -1270,7 +1270,7 @@ writes the occurrence's chunks, so they roll back with them.
   break (#1288), and one in any other
   transfer encoding that is not identity or base64 (uuencode and its
   aliases, or an unknown value) keeps the empty payload, counted as the
-  `transport_decode` parse cap when an extractor reads the attachment:
+  `transport_decode` parse cap regardless of serialization or text-extractor support:
   none of its transport text is extracted, its result is the `empty`
   one an unserialized container gets, and the message's
   `attachments_manifest_complete` is cleared (review round 4 on #1311).
@@ -1281,8 +1281,9 @@ writes the occurrence's chunks, so they roll back with them.
   base64, quoted-printable or uuencode decode lost bytes is `0` too;
   each is counted as `leaf_transport_lossy` (review round 8 on #1311,
   #1288), which leaves the
-  attachment list complete, since a leaf is never walked for
-  attachments. An attached email's `transport_lossy` clears it: a
+  attachment list complete for ordinary files. For an email file,
+  lossy transport also clears the manifest through `eml_expansion`
+  (#1310): a descendant boundary may be missing. An attached email's `transport_lossy` clears it: a
   nested attachment whose boundary was lost is missing (round 13).
 - For a `success` or `empty` result, the result's own
   `text_complete`, which the dispatcher sets: `0` when the attempt lost
@@ -2443,9 +2444,12 @@ in an encoding no decoder reads, or not decodable) counts as
 round 12 on #1311).
 The email's own attachments are not extracted here: inside a
 `message/rfc822` part the parser records each as an occurrence of its
-own. A nested `.eml` or `application/eml` file is such a leaf
-attachment; the attachments inside an `.eml` file are not walked by
-the parser at all. Every message of one payload shares one budget: 10,000 parts
+own. An `.eml` / `application/eml` leaf is expanded separately in the
+limited `eml-expand` child before occurrence extraction (#1310), never
+by another parent-side MIME parse. Descendants follow it immediately
+in depth-first document order, before the next outer attachment. Nested
+email files expand in the same child. Inner attribution stays text-only.
+The text extractor is unchanged. Every message of one text payload shares one budget: 10,000 parts
 walked and 200 text parts decoded (the parser's per-message caps), 20
 levels of nesting, 64 MB of transfer-encoded nested emails decoded, 2,000
 characters per header and 10,000,000 characters of text; a budget
@@ -2495,6 +2499,43 @@ took 3 to 5 s in the image, and html2text on 32 MB of HTML took 18 to
 24 s; a 27 MB email with ten attachments took 0.3 s and 226 MB. A
 payload nested past Python's recursion limit (about 1,000 levels) is
 recorded `failed` as `RecursionError`.
+
+Occurrence expansion shares one ledger across the outer walk and all email-file
+children: 64 MB each of parsed input, decoded transport and binary occurrence
+output; 10,000 each of parts, header fields and occurrences; 1 MB of header text;
+and 20 email levels including native `message/*` ancestors. Original raw
+bytes reserve their size from both byte allowances; root parts, headers and
+occurrences consume the ledger without changing the legacy root walk's guards.
+Child serialization preflight and secondary MIME parses consume the remaining
+allowance too. Each child gets one file payload, 1 GiB address space and 60 s CPU.
+At most 64 children start, sharing 75 s wall time. Failure stops further expansion
+because unreported work cannot be credited back. Known outer occurrences and
+validated descendant prefixes survive; `eml_expansion` clears manifest completeness
+on failure, structural loss or a cap. Descendant text completeness is independent.
+The expansion converts no body text or HTML.
+
+The opt-in protocol is `A <metadata bytes> <payload bytes>` followed by bounded
+JSON metadata and exactly the binary payload. The parent validates fixed keys,
+types, lengths, SHA-256, depth, occurrence count, output and reported work before
+recording anything. Ordinary extractor callers reject these frames. Metadata is
+capped at 64 KiB before JSON parsing, filenames at 8,192 characters and content
+types at 256. Logs carry only fixed cap names, counts and exception types.
+
+Schema v29 clears the old manifest claim to NULL and queues indexed files for
+normal reparse; the migration does no parsing. Dead-lettered sources stay unknown
+until the operator requeues them.
+No text-extractor cache bump is needed. Unchanged chunks keep vectors; new text
+is embedded. Later siblings' ordinal-based occurrence IDs shift once, while
+their content-hash-based chunks and cached extraction remain stable. Listings, counts, evidence and rankings
+may change; payload bytes never enter SQLite. A synthetic upgrade test verifies
+new discovery and preservation of unchanged chunks.
+
+Plain hardened-Linux measurements: about 0.09 s for a small file, 0.31 s for a
+32 MB body, 0.27 s for a 16 MB attachment and 5 s for 64 small siblings.
+Synthetic 100,000-header and 20,000-part inputs were capped in 0.17–0.23 s;
+peak reaped-child RSS across these runs was about 450 MiB, including launcher
+fork accounting. Mail without email-file attachments starts no expansion child.
+This cost is additional to normal text extraction during queue reprocessing.
 
 All three, and the extractor child below (OOXML, `.xls`, images,
 PDFs, attached emails, HTML and container identification), run through one subprocess runner (`extractors/_runner.py`).
@@ -3708,6 +3749,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 
 | Version | Migration | Change |
 |---|---|---|
+| 29 | `0029_eml_descendants.sql` | Reparse for child-side email-file descendants (#1310). Unchanged chunks keep vectors; new descendant text is embedded. |
 | 28 | `0028_ingestion_walks.sql` | Counts-only completed Maildir walk history (#1363), account and root, times and the observed sync identity. Existing indexes start with no walk evidence; no reparse or re-embedding. |
 | 27 | `0027_extraction_text_sha256.sql` | Stored extracted-text identity (#1361): nullable `attachment_extractions.text_sha256` and a partial pending-backfill index. Existing text is hashed by the bounded main-loop pass; no reparse or re-extraction. |
 | 26 | `0026_declared_address_scope.sql` | Mutable per-account Bridge address-mode declaration, its previous value and latest change time (#1593). No identity change, reparse or re-embedding. |

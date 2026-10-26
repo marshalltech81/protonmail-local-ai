@@ -227,7 +227,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # (``migrations/0021_provider_identity_assessments.sql``).
 # v27 (#1361): stored extracted-text SHA-256, backfilled without re-extraction.
 # v28 (#1363): counts-only history of completed Maildir walks.
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the

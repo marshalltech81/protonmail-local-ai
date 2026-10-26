@@ -77,6 +77,8 @@ lost (#1293).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import selectors
@@ -210,6 +212,50 @@ class ToolOutput:
 
 
 @dataclass(frozen=True)
+class ChildAttachment:
+    """Validated occurrence data; no inner headers become message metadata."""
+
+    filename: str
+    content_type: str
+    payload: bytes
+    content_hash: str
+    payload_complete: bool
+    depth: int
+
+
+# Metadata is bounded before JSON parsing, independently of the wire byte cap.
+MAX_ATTACHMENT_METADATA = 64 * 1024
+MAX_ATTACHMENT_NAME = 8192
+MAX_ATTACHMENT_TYPE = 256
+
+
+def attachment_frame(attachment: ChildAttachment) -> bytes:
+    if (
+        len(attachment.filename) > MAX_ATTACHMENT_NAME
+        or len(attachment.content_type) > MAX_ATTACHMENT_TYPE
+    ):
+        raise ChildOutputError
+    metadata = json.dumps(
+        {
+            "filename": attachment.filename,
+            "content_type": attachment.content_type,
+            "content_hash": attachment.content_hash,
+            "payload_complete": attachment.payload_complete,
+            "depth": attachment.depth,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    if len(metadata) > MAX_ATTACHMENT_METADATA:
+        raise ChildOutputError
+    return (
+        f"A {len(metadata)} {len(attachment.payload)}\n".encode("ascii")
+        + metadata
+        + attachment.payload
+    )
+
+
+@dataclass(frozen=True)
 class ChildResult:
     """The extractor child's text, the budgets that cut it (each once,
     in the order reported) and its counts; the extractor name when the
@@ -221,6 +267,7 @@ class ChildResult:
     counts: dict[str, int]
     name: str | None = None
     recovered: list[str] = field(default_factory=list)
+    attachments: list[ChildAttachment] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -418,6 +465,7 @@ def run_child(
     on_progress: Callable[[], None] | None = None,
     on_report: Callable[[ChildReport], None] | None = None,
     options: Sequence[str] = (),
+    attachment_limit: int = 0,
 ) -> ChildResult:
     """Run ``module``'s extraction of ``payload`` in the extractor child
     under the caller's limits, and parse its frames (module docstring).
@@ -433,7 +481,7 @@ def run_child(
     the CPU limit, so a CPU-bound child may end as ``ToolTimeoutError``
     rather than ``ToolCrashError`` (both are ``failed``)."""
     global _launches
-    frames = _Frames(caps, counts | {CHILD_LAUNCHES}, on_progress, names)
+    frames = _Frames(caps, counts | {CHILD_LAUNCHES}, on_progress, names, attachment_limit)
     try:
         output = run_tool(
             [sys.executable, "-I", str(_CHILD), module, *options],
@@ -473,7 +521,12 @@ class _Frames:
         counts: frozenset[str],
         on_progress: Callable[[], None] | None,
         names: frozenset[str] = frozenset(),
+        attachment_limit: int = 0,
     ) -> None:
+        self._attachment_limit = attachment_limit
+        self._attachments: list[ChildAttachment] = []
+        self._attachment_sizes: tuple[int, int] | None = None
+        self._attachment_data = bytearray()
         self._caps_allowed = caps
         self._counts_allowed = counts
         self._names_allowed = names
@@ -490,32 +543,82 @@ class _Frames:
     def feed(self, data: bytes) -> None:
         """Take the next bytes of output; raises ``ChildOutputError`` as
         soon as they break the protocol, which ends the run."""
-        if self._error is not None:
-            # Nothing may follow an error frame.
-            raise ChildOutputError
-        if self._text_length is not None:
-            self._take_text(data)
-            return
-        self._line += data
-        while self._error is None and self._text_length is None:
-            end = self._line.find(b"\n")
-            if end < 0:
-                if len(self._line) > _MAX_FRAME_LINE:
-                    raise ChildOutputError
-                return
-            if end > _MAX_FRAME_LINE:
+        # Consume binary frames directly from each read chunk. Never append a
+        # whole payload to the line buffer or repeatedly copy its prefix.
+        offset = 0
+        while offset < len(data):
+            if self._error is not None:
                 raise ChildOutputError
-            line = bytes(self._line[:end])
-            rest = bytes(self._line[end + 1 :])
+            if self._attachment_sizes is not None:
+                total = sum(self._attachment_sizes)
+                taken = min(total - len(self._attachment_data), len(data) - offset)
+                self._attachment_data.extend(memoryview(data)[offset : offset + taken])
+                offset += taken
+                if len(self._attachment_data) == total:
+                    self._finish_attachment()
+                continue
+            if self._text_length is not None:
+                self._take_text(data[offset:])
+                return
+            end = data.find(b"\n", offset)
+            stop = len(data) if end < 0 else end
+            if len(self._line) + stop - offset > _MAX_FRAME_LINE:
+                raise ChildOutputError
+            self._line.extend(memoryview(data)[offset:stop])
+            offset = stop if end < 0 else stop + 1
+            if end < 0:
+                return
+            line = bytes(self._line)
             self._line.clear()
             self._frame(line)
-            if self._text_length is not None:
-                self._take_text(rest)
-            elif self._error is not None:
-                if rest:
-                    raise ChildOutputError
-            else:
-                self._line += rest
+
+    def _finish_attachment(self) -> None:
+        assert self._attachment_sizes is not None
+        metadata_length, _ = self._attachment_sizes
+        try:
+            values = json.loads(self._attachment_data[:metadata_length])
+        except ValueError, UnicodeError, RecursionError:
+            raise ChildOutputError from None
+        if not isinstance(values, dict) or set(values) != {
+            "filename",
+            "content_type",
+            "content_hash",
+            "payload_complete",
+            "depth",
+        }:
+            raise ChildOutputError
+        filename, content_type = values["filename"], values["content_type"]
+        digest, complete, depth = (
+            values["content_hash"],
+            values["payload_complete"],
+            values["depth"],
+        )
+        if (
+            not isinstance(filename, str)
+            or len(filename) > MAX_ATTACHMENT_NAME
+            or not isinstance(content_type, str)
+            or len(content_type) > MAX_ATTACHMENT_TYPE
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or type(complete) is not bool
+            or type(depth) is not int
+            or not 0 <= depth <= 20
+        ):
+            raise ChildOutputError
+        # Reject lone surrogates before these values reach storage or logging.
+        try:
+            filename.encode("utf-8")
+            content_type.encode("utf-8")
+        except UnicodeError:
+            raise ChildOutputError from None
+        payload = bytes(self._attachment_data[metadata_length:])
+        if hashlib.sha256(payload).hexdigest() != digest:
+            raise ChildOutputError
+        self._attachments.append(
+            ChildAttachment(filename, content_type, payload, digest, complete, depth)
+        )
+        self._attachment_data.clear()
+        self._attachment_sizes = None
 
     def _frame(self, line: bytes) -> None:
         try:
@@ -538,6 +641,16 @@ class _Frames:
                 self._recovered.append(value)
         elif kind == "E" and _TYPE_NAME.fullmatch(value):
             self._error = value
+        elif kind == "A":
+            metadata, _, payload = value.partition(" ")
+            if (
+                len(self._attachments) >= self._attachment_limit
+                or not _COUNT.fullmatch(metadata)
+                or not _COUNT.fullmatch(payload)
+                or not 0 < int(metadata) <= MAX_ATTACHMENT_METADATA
+            ):
+                raise ChildOutputError
+            self._attachment_sizes = (int(metadata), int(payload))
         elif kind == "T":
             length, _, name = value.partition(" ")
             if not _COUNT.fullmatch(length):
@@ -570,14 +683,23 @@ class _Frames:
     def result(self) -> ChildResult:
         """The text frame's result; raises ``ChildOutputError`` when the
         output ended without a whole one."""
-        if self._text_length is None or len(self._text) != self._text_length:
+        if (
+            self._text_length is None
+            or len(self._text) != self._text_length
+            or self._attachment_sizes is not None
+        ):
             raise ChildOutputError
         try:
             text = self._text.decode("utf-8")
         except UnicodeDecodeError:
             raise ChildOutputError from None
         return ChildResult(
-            text, list(self._caps), dict(self._counts), self._name, list(self._recovered)
+            text,
+            list(self._caps),
+            dict(self._counts),
+            self._name,
+            list(self._recovered),
+            list(self._attachments),
         )
 
     def report(self) -> ChildReport:
