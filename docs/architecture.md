@@ -2502,7 +2502,7 @@ recorded `failed` as `RecursionError`.
 Occurrence expansion shares one ledger across the outer walk and all email-file
 children: 64 MB each of parsed input, decoded transport and binary occurrence
 output; 10,000 each of parts, header fields and occurrences; 1 MB of header text;
-and 20 email levels including native `message/rfc822` ancestors. Original raw
+and 20 email levels including native `message/*` ancestors. Original raw
 bytes reserve their size from both byte allowances; root parts, headers and
 occurrences consume the ledger without changing the legacy root walk's guards.
 Child serialization preflight and secondary MIME parses consume the remaining

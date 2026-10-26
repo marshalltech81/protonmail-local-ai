@@ -260,16 +260,25 @@ def test_malformed_structure_is_unknown_not_a_complete_empty_manifest():
     assert not parsed.attachments_manifest_complete
 
 
-def test_depth_cap_is_shared_with_native_ancestors(monkeypatch):
+@pytest.mark.parametrize(
+    "content_type", ["message/rfc822", "message/global", "message/news", "message/x-synthetic"]
+)
+def test_depth_cap_is_shared_with_native_ancestors(monkeypatch, content_type):
     from src.extractors import eml_descendants as expansion
 
     outer = _attached()
     for _ in range(20):
         parent = _message()
         parent.add_attachment(outer, filename="native.eml")
+        parent.get_payload()[-1].set_type(content_type)
         outer = parent
     called = []
-    monkeypatch.setattr(expansion._runner, "run_child", lambda *a, **kw: called.append(a))
+
+    def must_not_launch(*args, **kwargs):
+        called.append(args)
+        raise AssertionError("depth-capped expansion must not launch a child")
+
+    monkeypatch.setattr(expansion._runner, "run_child", must_not_launch)
     parsed = _parse(outer)
     assert not called
     assert not parsed.attachments_manifest_complete

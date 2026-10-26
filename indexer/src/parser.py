@@ -2350,7 +2350,7 @@ def _extract_body_and_attachments(
                         index,
                         skip,
                         tree_status,
-                        email_depth + (ct == "message/rfc822"),
+                        email_depth + (part.get_content_maintype() == "message"),
                     )
                 )
             continue
