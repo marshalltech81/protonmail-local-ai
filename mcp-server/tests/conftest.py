@@ -264,6 +264,9 @@ VALUES (1, 'unconfigured', 0,
             PRIMARY KEY (attachment_id, extractor_module)
 
 );
+        CREATE INDEX idx_extractions_missing_text_sha256
+            ON attachment_extractions(attachment_id, extractor_module)
+            WHERE text_sha256 IS NULL AND extracted_text IS NOT NULL;
         CREATE TABLE indexing_jobs (
             filepath        TEXT PRIMARY KEY,
             reason          TEXT NOT NULL,
