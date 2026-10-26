@@ -1833,7 +1833,29 @@ class DeclaredAddressScopeStatus(_Output):
     )
 
 
+class MaildirWalkStatus(_Output):
+    id: int = Field(ge=1, description="Stable completed-walk record ID in this index.")
+    started_at: datetime
+    completed_at: datetime
+    sync_completed_at: datetime | None
+    sync_interval_secs: int | None
+    sync_generation: int | None = Field(ge=1)
+    files_seen: int = Field(ge=0)
+    unreadable_directories: int = Field(ge=0)
+    enqueued: int = Field(ge=0)
+    enumerated_latest_sync: bool | None = Field(
+        description="True only when this finished walk saw no unreadable directories and "
+        "its generation-bearing stamp names the latest recorded collection success. "
+        "Null when sync identity is unknown. Enumeration only, never indexed completeness."
+    )
+
+
 class MailboxStatusOutput(_Output):
+    maildir_walk: MaildirWalkStatus | None = Field(
+        default=None,
+        description="Latest completed Maildir walk; null before the first recorded walk. "
+        "Counts only, no root or folder names. Independent of current and ingestion_caught_up.",
+    )
     address_scope: DeclaredAddressScopeStatus = Field(default_factory=DeclaredAddressScopeStatus)
     authority_rules: AuthorityRulesStatus = Field(default_factory=AuthorityRulesStatus)
     rerank_mode: Literal["none", "cohere"] = Field(

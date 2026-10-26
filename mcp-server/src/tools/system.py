@@ -20,6 +20,7 @@ from .outputs import (
     CollectionStatus,
     DeclaredAddressScopeStatus,
     MailboxStatusOutput,
+    MaildirWalkStatus,
     QueueCounts,
     read_only,
     tool_result,
@@ -246,7 +247,19 @@ def _mailbox_status(
     ingestion_caught_up = (
         not (freshness_failures or collection_failures) and waiting == queue.reparse
     )
+    walk_data = stats.get("maildir_walk")
+    walk = None
+    if walk_data is not None:
+        walk_data = dict(walk_data)
+        attempt = walk_data.pop("sync_attempt_id")
+        recorded = stats["collection"] or {}
+        latest = recorded.get("success_attempt_id") if recorded.get("status") == "known" else None
+        enumerated = None
+        if attempt is not None and walk_data["sync_generation"] is not None and latest is not None:
+            enumerated = attempt == latest and walk_data["unreadable_directories"] == 0
+        walk = MaildirWalkStatus(**walk_data, enumerated_latest_sync=enumerated)
     return MailboxStatusOutput(
+        maildir_walk=walk,
         rerank_mode=rerank_mode,
         rerank_candidates=rerank_candidates,
         server_version=git_commit(),
@@ -297,6 +310,17 @@ def _render(out: MailboxStatusOutput) -> str:
     lines.append(
         f"Ingestion caught up: {'yes' if out.ingestion_caught_up else 'no'} (excludes reparses and terminal failures)"
     )
+    walk = out.maildir_walk
+    if walk is None:
+        lines.append("Maildir walk: unknown (no completed walk recorded)")
+    else:
+        enumerated = {True: "yes", False: "no", None: "unknown"}[walk.enumerated_latest_sync]
+        lines.append(
+            f"Maildir walk: id={walk.id}, completed={walk.completed_at.isoformat()}, "
+            f"seen={walk.files_seen}, queued={walk.enqueued}, "
+            f"unreadable_directories={walk.unreadable_directories}; "
+            f"enumerated latest recorded sync={enumerated} (enumeration only)"
+        )
     rules = out.authority_rules
     lines.append(
         "Authority rules: unknown"
@@ -491,6 +515,11 @@ def register_system_tools(server, db, *, reranker: RerankerBackend | None = None
         never observed coverage. A changed declaration is reported with its
         previous value and recording time; it does not change current or
         ingestion_caught_up.
+
+        maildir_walk reports the latest completed enumeration with counts only.
+        enumerated_latest_sync requires a walk after the latest recorded sync
+        and no unreadable directories; null means sync identity is unknown.
+        It does not certify indexing, upstream coverage, or terminal failures.
 
         collection reports mbsync's
         latest collection from the Bridge app: succeeded, succeeded with

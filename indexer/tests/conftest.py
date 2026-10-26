@@ -418,7 +418,8 @@ def reply_work(monkeypatch):
 
 
 def drop_extraction_fingerprint_schema(conn):
-    """Undo v27 for historical migration fixtures."""
+    """Undo v28 and v27 for historical migration fixtures."""
+    conn.execute("DROP TABLE IF EXISTS ingestion_walks")
     conn.execute("DROP INDEX IF EXISTS idx_extractions_missing_text_sha256")
     if any(
         r[1] == "text_sha256" for r in conn.execute("PRAGMA table_info(attachment_extractions)")

@@ -48,7 +48,7 @@ from .extractors import (
 )
 from .file_evidence import FileIdentity, FolderInventory, read_digest
 from .file_evidence import file_identity as current_identity
-from .maildir import is_trashed, message_state
+from .maildir import SyncStamp, is_trashed, message_state
 from .occurrences import OccurrenceLocatorError, SeedFunctions, locate
 from .parser import PARSE_CAPS, participant_names
 from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL, STALE_ENQUEUE_SQL
@@ -226,7 +226,8 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # stored header rows, so no reparse is queued, and nothing is accepted
 # (``migrations/0021_provider_identity_assessments.sql``).
 # v27 (#1361): stored extracted-text SHA-256, backfilled without re-extraction.
-SCHEMA_VERSION = 27
+# v28 (#1363): counts-only history of completed Maildir walks.
+SCHEMA_VERSION = 28
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The account registry's DDL (#1596), shared by the initial schema; the
@@ -566,6 +567,29 @@ COLLECTION_STATE_COLUMNS = (
     "success_completed_at",
     "success_delivered",
     "unrecovered_failure_attempt_id",
+)
+
+# Counts-only history; no folder names or message identifiers (#1363).
+INGESTION_WALK_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE ingestion_walks (
+        id INTEGER PRIMARY KEY,
+        account_id INTEGER NOT NULL REFERENCES accounts(id),
+        root TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT NOT NULL,
+        sync_completed_at TEXT,
+        sync_interval_secs INTEGER,
+        sync_attempt_id TEXT,
+        sync_generation INTEGER CHECK (sync_generation >= 1),
+        files_seen INTEGER NOT NULL CHECK (files_seen >= 0),
+        unreadable_directories INTEGER NOT NULL CHECK (unreadable_directories >= 0),
+        enqueued INTEGER NOT NULL CHECK (enqueued >= 0 AND enqueued <= files_seen)
+    )
+    """,
+    """
+    CREATE INDEX idx_ingestion_walks_account ON ingestion_walks(account_id, id)
+    """,
 )
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -1860,6 +1884,7 @@ class Database:
             + OCCURRENCE_SCHEMA_STATEMENTS
             + PENDING_SCHEMA_STATEMENTS
             + COLLECTION_STATE_SCHEMA_STATEMENTS
+            + INGESTION_WALK_SCHEMA_STATEMENTS
         ):
             cur.execute(statement)
         # After the per-message tables the identity triggers watch.
@@ -4313,6 +4338,44 @@ class Database:
         except BaseException:
             self._conn.rollback()
             raise
+
+    @_synchronized
+    def record_ingestion_walk(
+        self,
+        *,
+        root: str,
+        started_at: str,
+        completed_at: str,
+        stamp: SyncStamp | None,
+        files_seen: int,
+        unreadable_directories: int,
+        enqueued: int,
+    ) -> None:
+        """Record a finished enumeration after every queue write succeeded.
+
+        History is retained for later certificates; migration invents no walks.
+        Only the configured root is stored, never names below it.
+        """
+        with self.transaction():
+            self._conn.execute(
+                "INSERT INTO ingestion_walks "
+                "(account_id, root, started_at, completed_at, sync_completed_at, "
+                "sync_interval_secs, sync_attempt_id, sync_generation, files_seen, "
+                "unreadable_directories, enqueued) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self.account_id,
+                    root,
+                    started_at,
+                    completed_at,
+                    stamp.completed_at if stamp else None,
+                    stamp.sync_interval_secs if stamp else None,
+                    stamp.attempt_id if stamp else None,
+                    stamp.generation if stamp else None,
+                    files_seen,
+                    unreadable_directories,
+                    enqueued,
+                ),
+            )
 
     # -------------------------------------------------------------------------
     # Provider identities and label observations (#1598)
