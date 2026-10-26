@@ -390,3 +390,66 @@ def test_native_container_named_eml_is_not_expanded_twice(content_type):
     parsed = _parse(outer)
     assert [a.filename for a in parsed.attachments] == ["container.eml", "child.txt"]
     assert parsed.attachments_manifest_complete
+
+
+@pytest.mark.parametrize("content_type", ["message/rfc822", "message/delivery-status"])
+def test_binary_native_recovery_is_charged_to_decode_budget(content_type, monkeypatch):
+    from src.extractors.eml_descendants import LIMITS, expand_payload
+
+    from tests.conftest import make_zip
+
+    payload = make_zip("synthetic.txt", contents=b"Synthetic recovered bytes")
+    raw = (
+        f'Content-Type: {content_type}\nContent-Disposition: attachment; filename="recovered.zip"\n\n'.encode()
+        + payload
+    )
+    wire, caps, counts = expand_payload(raw, "1", *(str(n) for n in LIMITS.values()))
+    assert counts["decode_bytes"] >= len(payload)
+    assert counts["output_bytes"] == len(wire)
+
+    # Refuse before constructing a decoded bytes copy, not after the fact.
+    calls = []
+    real_decode = parser._decoded_payload
+
+    def decode(part):
+        calls.append(part)
+        return real_decode(part)
+
+    monkeypatch.setattr(parser, "_decoded_payload", decode)
+    limits = dict(LIMITS, decode_bytes=0)
+    wire, caps, counts = expand_payload(raw, "1", *(str(n) for n in limits.values()))
+    assert caps == ["eml_expansion"]
+    assert counts["decode_bytes"] == 0
+    assert not calls
+    assert payload not in wire
+
+
+def test_native_reparse_charges_the_synthetic_content_type_header(monkeypatch):
+    import base64
+
+    from src import parser
+    from src.extractors.eml_descendants import LIMITS, expand_payload
+
+    inner = b"From: synthetic@test.example\n\nbody"
+    transport = base64.encodebytes(inner)
+    raw = (
+        b"Content-Type: message/rfc822\nContent-Transfer-Encoding: base64\nContent-Disposition: attachment\n\n"
+        + transport
+    )
+    _, _, counts = expand_payload(raw, "1", *(str(n) for n in LIMITS.values()))
+    assert counts["parse_bytes"] >= len(raw) * 2 + len(
+        parser._transport_form_bytes(inner, "message/rfc822")
+    )
+
+    calls = []
+    real_parse = parser._parse_transport_form
+
+    def parse(*args):
+        calls.append(args)
+        return real_parse(*args)
+
+    monkeypatch.setattr(parser, "_parse_transport_form", parse)
+    limits = dict(LIMITS, parse_bytes=len(raw) * 2 + len(transport))
+    _, caps, _ = expand_payload(raw, "1", *(str(n) for n in limits.values()))
+    assert caps == ["eml_expansion"]
+    assert not calls

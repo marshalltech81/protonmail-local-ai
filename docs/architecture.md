@@ -2520,10 +2520,12 @@ recording anything. Ordinary extractor callers reject these frames. Metadata is
 capped at 64 KiB before JSON parsing, filenames at 8,192 characters and content
 types at 256. Logs carry only fixed cap names, counts and exception types.
 
-Schema v29 queues indexed files for normal reparse; the migration does no parsing.
+Schema v29 clears the old manifest claim to NULL and queues indexed files for
+normal reparse; the migration does no parsing. Dead-lettered sources stay unknown
+until the operator requeues them.
 No text-extractor cache bump is needed. Unchanged chunks keep vectors; new text
-is embedded. Later siblings' ordinal-based occurrence IDs shift once, so their
-changed chunk IDs are embedded again. Listings, counts, evidence and rankings
+is embedded. Later siblings' ordinal-based occurrence IDs shift once, while
+their content-hash-based chunks and cached extraction remain stable. Listings, counts, evidence and rankings
 may change; payload bytes never enter SQLite. A synthetic upgrade test verifies
 new discovery and preservation of unchanged chunks.
 
@@ -3746,7 +3748,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 
 | Version | Migration | Change |
 |---|---|---|
-| 29 | `0029_eml_descendants.sql` | Reparse for child-side email-file descendants (#1310). Unchanged chunks keep vectors; new and shifted occurrence chunks are embedded. |
+| 29 | `0029_eml_descendants.sql` | Reparse for child-side email-file descendants (#1310). Unchanged chunks keep vectors; new descendant text is embedded. |
 | 28 | `0028_ingestion_walks.sql` | Counts-only completed Maildir walk history (#1363), account and root, times and the observed sync identity. Existing indexes start with no walk evidence; no reparse or re-embedding. |
 | 27 | `0027_extraction_text_sha256.sql` | Stored extracted-text identity (#1361): nullable `attachment_extractions.text_sha256` and a partial pending-backfill index. Existing text is hashed by the bounded main-loop pass; no reparse or re-extraction. |
 | 26 | `0026_declared_address_scope.sql` | Mutable per-account Bridge address-mode declaration, its previous value and latest change time (#1593). No identity change, reparse or re-embedding. |

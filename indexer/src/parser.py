@@ -1416,9 +1416,12 @@ def _attachment_payload(
         except email.errors.MessageError, UnicodeError:
             caps["transport_decode"] += 1
             return b"", None, False
+        content_type = str(part.get("Content-Type", "message/rfc822"))
         if expansion_work is not None and not (
             expansion_work.take("decode_bytes", len(transport))
-            and expansion_work.take("parse_bytes", len(transport))
+            and expansion_work.take(
+                "parse_bytes", len(transport) + len(content_type) + len("Content-Type: \r\n\r\n")
+            )
         ):
             caps["eml_expansion"] += 1
             return b"", None, False
@@ -1426,7 +1429,6 @@ def _attachment_payload(
         if budget.decodable < 0:
             caps["decoded_bytes"] += 1
             return b"", None, False
-        content_type = str(part.get("Content-Type", "message/rfc822"))
         raw = _decode_transport_bytes(transport, encoding)
         if raw is None:
             caps["transport_decode"] += 1
@@ -1478,7 +1480,7 @@ def _attachment_payload(
         if serialize_containers and payload_read:
             caps["transport_decode"] += 1
         return b"", None, False
-    contained = _identity_container_bytes(part, delivery_status)
+    contained = _identity_container_bytes(part, delivery_status, expansion_work)
     if contained is not None:
         # An OLE2 or ZIP container the parser read as an email: its bytes,
         # recovered exactly, never walked (#1416).
@@ -1626,7 +1628,9 @@ def _separator_missing(part: email.message.Message) -> bool:
 
 
 def _identity_container_bytes(
-    part: email.message.Message, delivery_status: _DeliveryStatusBytes | None
+    part: email.message.Message,
+    delivery_status: _DeliveryStatusBytes | None,
+    expansion_work: Any = None,
 ) -> bytes | None:
     """The bytes of an identity-encoded ``message/*`` part when they are
     an OLE2 or ZIP container, recovered exactly from the parse, else
@@ -1652,6 +1656,14 @@ def _identity_container_bytes(
     if content_type == _DELIVERY_STATUS:
         data = delivery_status.get(part) if delivery_status is not None else None
     elif content_type.startswith("message/") and len(children) == 1 and not first.keys():
+        value = first.get_payload()
+        if (
+            expansion_work is not None
+            and isinstance(value, str)
+            and not expansion_work.take("decode_bytes", len(value))
+        ):
+            expansion_work.incomplete = True
+            return None
         data = _decoded_payload(first)
     if data and has_container_prefix(data):
         return data
@@ -1736,6 +1748,14 @@ class _DeliveryStatusBytes:
                 # here so get_payload(decode=True) recovers the original bytes,
                 # including raw 8-bit bytes, rather than replacing them in str.
                 del theirs["Content-Transfer-Encoding"]
+                value = theirs.get_payload()
+                if (
+                    work is not None
+                    and isinstance(value, str)
+                    and not work.take("decode_bytes", len(value))
+                ):
+                    self._caps["eml_expansion"] += 1
+                    continue
                 found[id(ours)] = _decoded_payload(theirs)
         return found
 

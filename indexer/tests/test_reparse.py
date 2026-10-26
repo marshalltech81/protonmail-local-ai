@@ -1055,7 +1055,11 @@ def test_eml_descendant_upgrade_embeds_new_text_and_keeps_unchanged_chunks(tmp_p
 
     path = tmp_path / "INBOX" / "cur" / "synthetic:2,S"
     path.parent.mkdir(parents=True)
-    path.write_bytes(_attached().as_bytes())
+    outer = _attached()
+    outer.add_attachment(
+        b"Synthetic later sibling", maintype="text", subtype="plain", filename="later.txt"
+    )
+    path.write_bytes(outer.as_bytes())
     db_path = tmp_path / "mail.db"
     db = Database(db_path, account=TEST_ACCOUNT)
     queue = IndexingQueue(db)
@@ -1065,7 +1069,20 @@ def test_eml_descendant_upgrade_embeds_new_text_and_keeps_unchanged_chunks(tmp_p
         )
         queue.enqueue(str(path), REASON_INITIAL_SCAN)
         assert _drain(db, queue, make_mock_embedder(_VECTOR)) == 1
-    assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 1
+    assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 2
+    old_later = db._conn.execute(
+        "SELECT attachment_occurrence_id FROM attachments WHERE filename = 'later.txt'"
+    ).fetchone()[0]
+    later_hash = db._conn.execute(
+        "SELECT attachment_id FROM attachments WHERE filename = 'later.txt'"
+    ).fetchone()[0]
+    old_later_chunks = {
+        r[0]
+        for r in db._conn.execute(
+            "SELECT chunk_id FROM message_chunks WHERE attachment_id = ?", (later_hash,)
+        )
+    }
+    assert old_later_chunks
     before = {r[0] for r in db._conn.execute("SELECT chunk_id FROM message_chunks")}
     db._conn.execute("UPDATE schema_version SET version = 28")
     db._conn.commit()
@@ -1074,14 +1091,51 @@ def test_eml_descendant_upgrade_embeds_new_text_and_keeps_unchanged_chunks(tmp_p
     db = Database(db_path, account=TEST_ACCOUNT)
     queue = IndexingQueue(db)
     assert _jobs(db)[str(path)]["reason"] == REASON_REPARSE
+    assert (
+        db._conn.execute("SELECT attachments_manifest_complete FROM messages").fetchone()[0] is None
+    )
     embedder = make_mock_embedder(_VECTOR)
     assert _drain(db, queue, embedder) == 1
-    assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 2
+    assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 3
+    new_later = db._conn.execute(
+        "SELECT attachment_occurrence_id FROM attachments WHERE filename = 'later.txt'"
+    ).fetchone()[0]
+    assert new_later != old_later
     after = {r[0] for r in db._conn.execute("SELECT chunk_id FROM message_chunks")}
     assert before < after
-    # Only the absent descendant gets new chunks; body/eml text stays identical.
+    assert old_later_chunks <= after
+    # Only new descendant text needs embedding: sibling occurrence IDs change,
+    # but its content-hash chunk namespace and cached extraction stay stable.
     embedded = [text for call in embedder.embed_batch.call_args_list for text in call.args[0]]
     assert any("Synthetic descendant text" in text for text in embedded)
+    assert not any("Synthetic later sibling" in text for text in embedded)
     assert not any("Synthetic outer body" in text for text in embedded)
     assert _jobs(db) == {}
+    assert db._conn.execute("SELECT attachments_manifest_complete FROM messages").fetchone()[0] == 1
+    queue.enqueue_reparse()
+    repeat = make_mock_embedder(_VECTOR)
+    assert _drain(db, queue, repeat) == 1
+    assert repeat.embed_batch.call_count == repeat.embed.call_count == 0
+    assert (
+        db._conn.execute(
+            "SELECT attachment_occurrence_id FROM attachments WHERE filename = 'later.txt'"
+        ).fetchone()[0]
+        == new_later
+    )
+    db.close()
+
+
+def test_eml_upgrade_withholds_old_manifests_even_for_dead_sources(tmp_path):
+    db, queue, paths = _index(tmp_path, ["one", "two"])
+    queue.enqueue(paths[1], REASON_INITIAL_SCAN)
+    queue.mark_dead_terminal(paths[1], stage="parse", error="synthetic fixed error")
+    db._conn.execute("UPDATE schema_version SET version = 28")
+    db._conn.commit()
+    db.close()
+    db = Database(tmp_path / "mail.db", account=TEST_ACCOUNT)
+    assert [
+        r[0] for r in db._conn.execute("SELECT attachments_manifest_complete FROM messages")
+    ] == [None, None]
+    assert _jobs(db)[paths[1]]["status"] == "dead"
+    assert _jobs(db)[paths[0]]["reason"] == REASON_REPARSE
     db.close()

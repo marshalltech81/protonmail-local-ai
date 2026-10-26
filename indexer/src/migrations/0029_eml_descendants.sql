@@ -1,5 +1,9 @@
 -- v28 -> v29 (#1310): discover attached-email file descendants in the child.
 -- Existing chunks remain until normal reparse diff-writes the expanded occurrences.
+-- The old manifest never assessed email-file descendants. Unknown until reparse,
+-- including dead-lettered sources, which retain their existing queue state.
+UPDATE messages SET attachments_manifest_complete = NULL;
+
 INSERT INTO indexing_jobs
     (filepath, reason, status, attempts, created_at, updated_at, next_attempt_at)
 SELECT filepath, 'reparse', 'queued', 0,
