@@ -1270,7 +1270,7 @@ writes the occurrence's chunks, so they roll back with them.
   break (#1288), and one in any other
   transfer encoding that is not identity or base64 (uuencode and its
   aliases, or an unknown value) keeps the empty payload, counted as the
-  `transport_decode` parse cap when an extractor reads the attachment:
+  `transport_decode` parse cap regardless of serialization or text-extractor support:
   none of its transport text is extracted, its result is the `empty`
   one an unserialized container gets, and the message's
   `attachments_manifest_complete` is cleared (review round 4 on #1311).

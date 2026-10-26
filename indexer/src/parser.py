@@ -1476,9 +1476,10 @@ def _attachment_payload(
         # An attached email in a transfer encoding not decoded here
         # (uuencode and its aliases, or any other): its parsed form is the
         # transport text, so no payload is kept and none of it is ever
-        # extracted (#1311). The caller still walks it.
-        if serialize_containers and payload_read:
-            caps["transport_decode"] += 1
+        # extracted (#1311). The walk sees only the transport's pseudo-
+        # message, not its descendants: absence is unknown even for an
+        # unserialized container or one with no text extractor (#1310).
+        caps["transport_decode"] += 1
         return b"", None, False
     contained = _identity_container_bytes(part, delivery_status, expansion_work)
     if contained is not None:

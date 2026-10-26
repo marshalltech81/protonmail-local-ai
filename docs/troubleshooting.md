@@ -2338,8 +2338,9 @@ value exactly at its cap is kept whole and not counted.
 An attached email (or another container part) counts only when
 something searchable is lost:
 
-- The attachments inside a base64 or quoted-printable attached email
-  are not read.
+- The descendants of a native message in an unsupported transfer encoding
+  are unknown, even when the container is not serialized or has no text
+  extractor. A failed base64 or quoted-printable decode also loses them.
 - A base64 or quoted-printable attached email is decoded with bytes
   lost (`transport_lossy`).
 - The container's own payload is emptied while an extractor would have

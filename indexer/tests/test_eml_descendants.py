@@ -462,3 +462,52 @@ def test_native_reparse_charges_the_synthetic_content_type_header(monkeypatch):
     _, caps, _ = expand_payload(raw, "1", *(str(n) for n in limits.values()))
     assert caps == ["eml_expansion"]
     assert not calls
+
+
+@pytest.mark.parametrize(
+    "content_type", ["message/rfc822", "message/global", "message/news", "message/x-synthetic"]
+)
+@pytest.mark.parametrize(
+    "encoding", ["uuencode", "x-uuencode", "uue", "x-uue", "x-synthetic-unknown"]
+)
+@pytest.mark.parametrize("context", ["file", "native-nested", "native-unread"])
+def test_unsupported_native_transport_never_certifies_descendant_absence(
+    content_type, encoding, context, caplog
+):
+    import binascii
+
+    inner = _message()
+    inner.add_attachment(
+        b"SYNTHETIC_HIDDEN_ATTACHMENT", maintype="text", subtype="plain", filename="hidden.txt"
+    )
+    raw = inner.as_bytes()
+    encoded = b"".join(binascii.b2a_uu(raw[i : i + 45]) for i in range(0, len(raw), 45))
+    # A pseudo-header before the uuencode block keeps this a defect-free
+    # stdlib parse, so a parser-defect fallback cannot stand in for the cap.
+    transport = (
+        b"X-Synthetic-Preamble: present\r\n\r\nbegin 644 synthetic\n" + encoded + b"`\nend\n"
+    )
+    header = (
+        f"Content-Type: {content_type}\r\nContent-Transfer-Encoding: {encoding}\r\n"
+        "Content-Disposition: attachment\r\n\r\n"
+    ).encode()
+    part = email.message_from_bytes(header + transport)
+    assert not part.defects and not part.get_payload()[0].defects
+    outer = _message()
+    if context == "file":
+        outer.add_attachment(
+            (header + transport), maintype="application", subtype="eml", filename="mail.eml"
+        )
+    else:
+        outer.make_mixed()
+        outer.attach(part)
+        if context == "native-nested":
+            parent = _message()
+            parent.add_attachment(outer, filename="parent.eml")
+            outer = parent
+    parsed = _parse(outer)
+    assert not parsed.attachments_manifest_complete
+    assert parsed.parse_caps["eml_expansion" if context == "file" else "transport_decode"] > 0
+    assert "hidden.txt" not in [a.filename for a in parsed.attachments]
+    assert "parser work caps dropped content" in caplog.text
+    assert "SYNTHETIC_HIDDEN_ATTACHMENT" not in caplog.text
