@@ -102,7 +102,7 @@ def test_v24_migration_queues_reparse_and_preserves_retrieval_evidence(tmp_path)
     migrated = Database(tmp_path / "old.db", account=TEST_ACCOUNT)
     fresh = Database(tmp_path / "fresh.db", account=TEST_ACCOUNT)
     try:
-        assert SCHEMA_VERSION == 25
+        assert SCHEMA_VERSION == 26
         assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
         assert [tuple(r) for r in migrated._conn.execute("SELECT * FROM messages")] == before
         assert migrated._conn.execute("SELECT COUNT(*) FROM literal_state").fetchone()[0] == 0

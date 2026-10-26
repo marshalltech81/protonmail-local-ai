@@ -136,6 +136,7 @@ def test_config_hash_covers_only_the_named_non_secret_settings():
     assert names == {
         "ACCOUNT_SCOPE",
         "SOURCE_MODE",
+        "PROTON_DECLARED_ADDRESS_SCOPE",
         "MAILDIR_PATH",
         "SQLITE_PATH",
         "INDEXER_HEALTH_FILE",

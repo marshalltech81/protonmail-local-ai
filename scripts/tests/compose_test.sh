@@ -1899,6 +1899,8 @@ readonly PROTON_SETTINGS=(SOURCE_MODE BRIDGE_HOST BRIDGE_CERT_HOST PROTON_FOLDER
 mbsync_points_at_the_host_app() {
     local name
     render "$BASE"
+    expect '.services.mbsync.environment.PROTON_DECLARED_ADDRESS_SCOPE == "unverified"' || return 1
+    expect '.services.indexer.environment.PROTON_DECLARED_ADDRESS_SCOPE == "unverified"' || return 1
     for name in "${PROTON_SETTINGS[@]}"; do
         expect ".services.mbsync.environment.${name} == \"\"" || return 1
         if grep -F "\"${name}\" variable is not set" "$WORK/compose.err"; then
@@ -1919,11 +1921,13 @@ mbsync_takes_the_expected_fingerprint_from_the_environment() {
 }
 
 mbsync_takes_the_proton_settings_from_the_environment() {
-    local name RENDER_ENV=()
+    local name RENDER_ENV=("PROTON_DECLARED_ADDRESS_SCOPE=split")
     for name in "${PROTON_SETTINGS[@]}"; do
         RENDER_ENV+=("${name}=synthetic-${name}")
     done
     render "$BASE"
+    expect '.services.mbsync.environment.PROTON_DECLARED_ADDRESS_SCOPE == "split"' || return 1
+    expect '.services.indexer.environment.PROTON_DECLARED_ADDRESS_SCOPE == "split"' || return 1
     for name in "${PROTON_SETTINGS[@]}"; do
         expect ".services.mbsync.environment.${name} == \"synthetic-${name}\"" || return 1
     done

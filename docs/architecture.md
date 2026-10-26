@@ -3639,6 +3639,18 @@ DELETE FROM attachment_extractions WHERE NOT EXISTS (
 
 ## Schema versions
 
+The corpus is what one configured Bridge login sees: combined mode serves all
+account addresses, while split mode serves only the selected address. Nothing in
+the project observes that setting; the operator declares it.
+
+Schema v26 adds `account_address_scope`, keyed by account ID, for the operator's
+Bridge address-mode declaration (#1593). It is mutable metadata separate from
+the immutable account registry. The indexer records the current declaration,
+previous declaration and UTC recording time of its latest change; first recording
+has no previous value or change time. Unchanged restarts preserve the time.
+The migration neither reparses mail nor changes account identity. Status labels
+the value declared, never observed; it changes no readiness criterion.
+
 The indexer stamps the schema version in `schema_version`, and a fixed
 `PRAGMA application_id` (`SCHEMA_APPLICATION_ID`) that marks the
 schema after the v0 renumbering. A fresh install creates the current schema
@@ -3661,6 +3673,7 @@ already indexed without re-embedding unchanged chunks (see *Reparse in place*).
 
 | Version | Migration | Change |
 |---|---|---|
+| 26 | `0026_declared_address_scope.sql` | Mutable per-account Bridge address-mode declaration, its previous value and latest change time (#1593). No identity change, reparse or re-embedding. |
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
 | 23 | `0023_extraction_metadata_layout.sql` | Rebuilds `attachment_extractions` with all metadata before `extracted_text`, preserving cache keys, rowids and every stored value (#1381). Metadata reads no longer walk overflow pages proportional to the extracted text. No reparse or re-extraction is queued. |
 | 22 | `0022_effective_clock_index.sql` | Replaces the effective-clock index with `(effective_at, claimant_id)` for listing cursors through timestamp ties (#1635). No evidence rows, reparses or embeddings change. |

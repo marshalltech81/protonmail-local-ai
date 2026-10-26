@@ -1813,7 +1813,22 @@ class AuthorityRulesStatus(_Output):
     )
 
 
+class DeclaredAddressScopeStatus(_Output):
+    declared: Literal["combined", "split", "unverified"] = Field(
+        default="unverified",
+        description="Operator's declaration of Bridge address mode; never observed coverage.",
+    )
+    previous_declared: Literal["combined", "split", "unverified"] | None = Field(
+        default=None,
+        description="The declaration before its latest recorded change; null initially.",
+    )
+    changed_at: datetime | None = Field(
+        default=None, description="UTC time the indexer recorded the latest declaration change."
+    )
+
+
 class MailboxStatusOutput(_Output):
+    address_scope: DeclaredAddressScopeStatus = Field(default_factory=DeclaredAddressScopeStatus)
     authority_rules: AuthorityRulesStatus = Field(default_factory=AuthorityRulesStatus)
     rerank_mode: Literal["none", "cohere"] = Field(
         description="Whether this server reranks search candidates; no provider URL or credential."

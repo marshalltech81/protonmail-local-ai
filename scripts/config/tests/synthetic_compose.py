@@ -79,6 +79,7 @@ def declared_environment(account: dict[str, Any]) -> dict[str, str]:
     bridge = account["proton_bridge"]
     return {
         "SOURCE_MODE": account["provider"],
+        "PROTON_DECLARED_ADDRESS_SCOPE": bridge["declared_address_scope"],
         "ACCOUNT_SCOPE": account["scope_uuid"],
         "BRIDGE_USER": connection["username"],
         "BRIDGE_IMAP_PORT": str(connection["port"]),

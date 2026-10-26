@@ -3135,6 +3135,8 @@ def register_retrieval_tools(server, db):
     async def list_folders() -> CallToolResult:
         """
         List the folders that hold indexed mail, with their thread counts.
+        This is indexed-folder coverage, never evidence of Bridge address
+        scope or complete collection from Proton.
 
         Use this when the user asks structural questions about the
         mailbox — "what folders do I have?", "is the Archive folder

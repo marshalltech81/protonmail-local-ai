@@ -101,6 +101,7 @@ class AccountConfig:
     scope_uuid: str
     provider: str
     maildir_root: Path
+    declared_address_scope: str = "unverified"
 
 
 def normalize_source_mode(raw: str) -> str:
@@ -131,13 +132,31 @@ def validate_account_scope(raw: str) -> str:
     return raw
 
 
+def validate_declared_address_scope(raw: str) -> str:
+    """The operator's declaration, never evidence of Bridge's actual mode."""
+    value = raw.strip(_C_SPACE).translate(_ASCII_UPPER_TO_LOWER) or "unverified"
+    if value not in ("combined", "split", "unverified"):
+        raise AccountConfigError(
+            "PROTON_DECLARED_ADDRESS_SCOPE must be combined, split or unverified "
+            "(empty means unverified)."
+        )
+    return value
+
+
 def account_config_from_env(environ: Mapping[str, str], *, maildir_root: Path) -> AccountConfig:
     """The configured account, validated: ``SOURCE_MODE`` first (as at
     every other site), then ``ACCOUNT_SCOPE``. ``maildir_root`` is the
     Maildir root the caller reads (``MAILDIR_PATH``)."""
     provider = validate_source_mode(environ.get("SOURCE_MODE", ""))
     scope = validate_account_scope(environ.get("ACCOUNT_SCOPE", ""))
-    return AccountConfig(scope_uuid=scope, provider=provider, maildir_root=maildir_root)
+    return AccountConfig(
+        scope_uuid=scope,
+        provider=provider,
+        maildir_root=maildir_root,
+        declared_address_scope=validate_declared_address_scope(
+            environ.get("PROTON_DECLARED_ADDRESS_SCOPE", "")
+        ),
+    )
 
 
 def maildir_root_from_env(environ: Mapping[str, str]) -> Path:

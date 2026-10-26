@@ -5313,6 +5313,12 @@ class Database:
                 "JOIN accounts a ON a.id = c.account_id ORDER BY a.id LIMIT 1"
             ).fetchone()
             stats["collection"] = dict(collection) if collection is not None else None
+            address_scope = conn.execute(
+                "SELECT s.declared, s.previous_declared, s.changed_at "
+                "FROM account_address_scope s JOIN accounts a ON a.id=s.account_id "
+                "ORDER BY a.id LIMIT 1"
+            ).fetchone()
+            stats["address_scope"] = dict(address_scope) if address_scope is not None else {}
             conflicts = conn.execute(MESSAGE_ID_CONFLICTS_SQL).fetchone()
             stats["conflicting_message_ids"] = conflicts[0]
             stats["extra_claimant_files"] = conflicts[1]

@@ -181,7 +181,7 @@ proton_name_allowed() {
 # is checked first. Arguments: SOURCE_MODE, BRIDGE_HOST,
 # BRIDGE_IMAP_PORT, BRIDGE_CERT_HOST, PROTON_FOLDER_EXCLUSIONS,
 # PROTON_IMAP_ACCOUNT_NAME, PROTON_REMOTE_STORE_NAME,
-# PROTON_LOCAL_STORE_NAME, PROTON_CHANNEL_NAME.
+# PROTON_LOCAL_STORE_NAME, PROTON_CHANNEL_NAME, PROTON_DECLARED_ADDRESS_SCOPE (optional).
 proton_settings_problem() {
     local i
     local names=(PROTON_IMAP_ACCOUNT_NAME PROTON_REMOTE_STORE_NAME PROTON_LOCAL_STORE_NAME
@@ -222,6 +222,15 @@ proton_settings_problem() {
             return 1
         fi
     done
+    local scope
+    scope="$(proton_normalize_source_mode "${10-}")"
+    case "$scope" in
+        "" | combined | split | unverified) ;;
+        *)
+            printf 'PROTON_DECLARED_ADDRESS_SCOPE must be combined, split or unverified (empty means unverified).\n'
+            return 1
+            ;;
+    esac
     if [[ "$7" == "$8" ]]; then
         printf 'PROTON_REMOTE_STORE_NAME and PROTON_LOCAL_STORE_NAME must differ.\n'
         return 1

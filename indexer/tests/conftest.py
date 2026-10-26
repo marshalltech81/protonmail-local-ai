@@ -418,7 +418,8 @@ def reply_work(monkeypatch):
 
 
 def drop_literal_schema(conn):
-    """Undo v25 for historical migration fixtures, before rebuilding parents."""
+    """Undo v26 and v25 for historical migration fixtures, before rebuilding parents."""
+    conn.execute("DROP TABLE IF EXISTS account_address_scope")
     conn.execute("DROP TRIGGER IF EXISTS literal_window_delete")
     for table in (
         "literal_long_fts",

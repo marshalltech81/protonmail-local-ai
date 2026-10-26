@@ -18,6 +18,7 @@ from ..lib.reranker import RerankerBackend
 from .outputs import (
     CollectionAttempt,
     CollectionStatus,
+    DeclaredAddressScopeStatus,
     MailboxStatusOutput,
     QueueCounts,
     read_only,
@@ -253,6 +254,7 @@ def _mailbox_status(
         ingestion_caught_up=ingestion_caught_up,
         not_current_reasons=reasons,
         collection=collection,
+        address_scope=DeclaredAddressScopeStatus(**stats.get("address_scope", {})),
         last_sync_at=last_sync_at,
         sync_interval_secs=state.get("sync_interval_secs"),
         indexer_last_seen_at=indexer_seen,
@@ -325,6 +327,15 @@ def _render(out: MailboxStatusOutput) -> str:
     lines += [
         f"Last mail sync: {_when(out.last_sync_at, out.checked_at)}",
         *_collection_lines(out),
+        f"Bridge address scope (declared, not observed): {out.address_scope.declared}",
+        *(
+            [
+                f"  Changed from {out.address_scope.previous_declared} at "
+                f"{out.address_scope.changed_at.isoformat()}"
+            ]
+            if out.address_scope.changed_at is not None
+            else []
+        ),
         f"Indexer seen:   {_when(out.indexer_last_seen_at, out.checked_at)}",
         f"Queue:          {q.pending:,} pending, {q.retrying:,} retrying, "
         f"{q.deferred:,} deferred, {q.extraction_deferred:,} extraction deferred, "
@@ -476,6 +487,11 @@ def register_system_tools(server, db, *, reranker: RerankerBackend | None = None
         both flags exclude terminal failures. Fields added by a reparse
         stay unknown until it succeeds; dead-lettered reparses need
         make requeue-dead and a successful retry even when queue.reparse is zero.
+        address_scope is the operator's declaration of Bridge address mode,
+        never observed coverage. A changed declaration is reported with its
+        previous value and recording time; it does not change current or
+        ingestion_caught_up.
+
         collection reports mbsync's
         latest collection from the Bridge app: succeeded, succeeded with
         a count of far-side folders it could not open, failed (with a

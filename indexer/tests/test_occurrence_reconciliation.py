@@ -822,7 +822,7 @@ class TestMigrationV19:
         db = Database(path, account=account)
         fresh = Database(tmp_path / "fresh.db", account=account)
         try:
-            assert SCHEMA_VERSION == 25
+            assert SCHEMA_VERSION == 26
             assert _schema_shape(db._conn) == _schema_shape(fresh._conn)
             claimants = ids[:3]
             tombs = {

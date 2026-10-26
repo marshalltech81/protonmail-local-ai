@@ -1481,6 +1481,9 @@ here. The structured output echoes `filter_type`.
 | `offset` | int | `0` | Pagination offset; clamped to `[0, 1000000]` |
 
 ### `list_folders`
+
+Folder coverage here is indexed-folder coverage only. It never establishes
+Bridge address scope or complete collection from Proton.
 List every folder holding a current copy of at least one indexed
 message, with its thread count: the number of distinct threads with a
 message with a copy in that folder, the same threads `list_threads(folder=...)` pages through. A
@@ -3877,6 +3880,7 @@ and what it holds. Call this when asked which version or build is running.
 | `ingestion_caught_up` | The same sync/heartbeat freshness and collection checks as `current`, but waiting reparse jobs do not block it. Non-reparse pending, retrying, deferred and extraction-deferred jobs still block it. Both flags exclude terminal failures; neither certifies completeness |
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |
 | `collection` | mbsync's last recorded collection outcome from the Bridge app (#1592): `outcome` (`succeeded`, `succeeded_with_withheld_folders`, `failed`, or `unknown` with `unknown_reason`: `not_recorded`, `missing`, `legacy`, `malformed`, `unsupported`, `account_mismatch`, `unreadable` or `no_completed_attempt`), `outcome_at`, `withheld_far_side_folders` (how many far-side folders it could not open; null when unknown; never their names), `failure_class` (`deadline`, `killed`, `error`, `permission_repair`, `interrupted`), `latest_attempt` (`outcome`, possibly `in_progress`, and `started_at`), `last_success_at`, `failure_unrecovered`, `success_undelivered` (a success `outcome` whose delivery to the index is not yet confirmed; not evidence of a problem on its own — it clears within the watcher's own event-processing latency) and `observed_at` (when the indexer last read it). `in_progress` only means an attempt started with no recorded end, not that mbsync is running. A success that withheld folders does not change `current`. A later delivered sync can clear `failure_unrecovered` even if publication of its outcome failed: the tool still labels the retained failure as the last recorded outcome and explains the recovery |
+| `address_scope` | Operator-declared Bridge mode (`combined`, `split`, `unverified`), never observed coverage. `previous_declared` and `changed_at` report the latest recorded change; initially null. Changing it does not alter readiness |
 | `upstream_currency` | Always `unknown`: whether Bridge itself has synchronized with Proton and serves current content is not observed |
 | `last_sync_at` / `sync_interval_secs` | mbsync's last successful sync from Bridge, and how often it syncs |
 | `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
