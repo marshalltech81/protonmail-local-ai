@@ -5,7 +5,7 @@ requires-python = ">=3.14"
 dependencies = [
     "html2text==2025.4.15",
     "sqlite-vec==0.1.9",
-    "watchdog==6.0.0",
+    "watchdog==7.1.0",
     "tenacity==9.2.1",
     # Official OpenAI SDK for the operator-supplied OpenAI-compatible
     # ``/v1/embeddings`` endpoint. Operator-supplied compat servers
