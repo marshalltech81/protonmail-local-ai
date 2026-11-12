@@ -114,12 +114,12 @@ elif [[ "$review_status" == "completed" && "$reviewed_sha" == "$head_sha" ]]; th
   if [[ "$sec_status" != "completed" || "$sec_sha" != "$head_sha" ]]; then
     state=running; waiting_on_security=true
   fi
-elif [[ "$review_status" == "completed" ]]; then
-  state=stale # reviewed an earlier commit; the review of the head has not started yet
-elif [[ -n "$marker" ]]; then
-  state=running
+elif [[ "$review_status" == "completed" || ( -n "$reviewed_sha" && "$reviewed_sha" != "$head_sha" ) ]]; then
+  state=stale # a review of an earlier commit, finished or not; the review of the head has not started yet
+elif [[ -n "$marker" && -n "$reviewed_sha" ]]; then
+  state=running # an unfinished code review of the head itself
 else
-  state=pending
+  state=pending # no summary, or one with no code review started (for example only the security review)
 fi
 
 if [[ "$mode" == "--query" ]]; then echo "$state"; exit 0; fi
@@ -155,7 +155,7 @@ case "$state" in
     elif [[ "$state" == "stale" ]]; then
       status=in_progress; conclusion=""
       title="Codex review of $(short "$head_sha") pending"
-      summary="Codex reviewed $(short "$reviewed_sha"); the head is now $(short "$head_sha"). Codex reviews every push, so this check completes when that review lands. If it does not, comment \`@codex review\`. ${rerun}"
+      summary="Codex's latest review was of $(short "$reviewed_sha"); the head is now $(short "$head_sha"). Codex reviews every push, so this check completes when that review lands. If it does not, comment \`@codex review\`. ${rerun}"
     else
       status=in_progress; conclusion=""
       title="Waiting for Codex review"
