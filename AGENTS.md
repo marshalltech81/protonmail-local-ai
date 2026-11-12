@@ -907,6 +907,7 @@ All Dockerfiles in this repository must follow these rules:
 - copy dependency manifests before source files for layer caching
 - use `apt-get install --no-install-recommends`
 - do not pin apt package versions; Debian/Ubuntu point releases drop old versions from the archive, so pinned `apt-get install pkg=x.y.z` lines break unpredictably when the base image refreshes. Rely on the pinned base image digest plus `apt-get update` for reproducibility instead.
+- the runtime stage of each image runs `apt-get update && apt-get upgrade -y` before it installs packages (owner, 2026-11-12), so a security fix Debian has published is not waiting on an upstream base-image rebuild; mark the line `# hadolint ignore=DL3005`. The cost is that a build is no longer reproducible from the base digest alone
 - remove `/var/lib/apt/lists/*` in the same layer as install
 - use `pip --no-cache-dir`
 - prefer `COPY --chmod=755` over separate `RUN chmod`
