@@ -6,7 +6,14 @@ FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d
 # socat relays the IMAP connection to the Bridge app on the host through
 # mbsync's Tunnel to BRIDGE_HOST; Host names BRIDGE_CERT_HOST for the
 # certificate check (bridge_imap_connect in entrypoint.sh).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# `apt-get upgrade` brings in the security fixes Debian has published since
+# the pinned base image was built (HIGH CVEs in apt and zlib1g, 2026-11-12),
+# so the image scan does not wait on an upstream rebuild. DL3005 warns about
+# exactly this; the trade-off is that a build is no longer byte-for-byte
+# reproducible from the base digest alone.
+# hadolint ignore=DL3005
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     isync \
     ca-certificates \
     netcat-openbsd \
