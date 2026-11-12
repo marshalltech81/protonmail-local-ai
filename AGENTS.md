@@ -845,9 +845,11 @@ under about 80 characters.
   found stays only in a thread, a PR body or a commit message.
 - Merge (squash) only on the owner's explicit go-ahead. GitHub enforces
   the mechanics on `main` (2026-10-11): squash is the only merge method,
-  history must be linear, the CI checks listed as required in the
-  repository rulesets must pass, and line review threads must be
-  resolved. Repository admins can bypass both rulesets. `codex-review`
+  history must be linear, the CI checks listed as required in `main`'s
+  branch protection must pass, and review conversations must be
+  resolved. Since 2026-11-12 this is classic branch protection with
+  administrators included, so nobody can bypass it, the owner
+  included; the rulesets it replaced allowed admin bypass. `codex-review`
   (written by `codex-gate.yml`, below) is one of the required checks since
   2026-11-12: it passes once Codex has completed its code and security review
   of the PR's head commit, so a push waits for the Codex review of that push.
