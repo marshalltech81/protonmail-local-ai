@@ -22,6 +22,9 @@
 #   --query     print one word (completed | running | stale | pending | skipped | draft) and write nothing.
 #   --proceed   like the default, but a pull request whose head Codex has not reviewed gets `success` with a
 #               title that says so. Used by automerge.yml after its grace period (dependency-update policy).
+#               If EXPECT_HEAD_SHA is set and the pull request's head is a different commit, nothing is
+#               written: the grace period was granted to the commit that was eligible then, not to a later
+#               one that someone pushed while it ran.
 #   --dry-run   evaluate and print the check run payload without writing it.
 #
 # Needs GITHUB_TOKEN with `checks: write` (plus read on pull requests and issues) and GITHUB_REPOSITORY.
@@ -70,6 +73,11 @@ head_sha="$(jq -r '.head.sha' <<<"$pr_json")"
 author="$(jq -r '.user.login' <<<"$pr_json")"
 draft="$(jq -r '.draft' <<<"$pr_json")"
 has_skip_label="$(jq -r --arg l "$skip_label" '[.labels[].name] | index($l) != null' <<<"$pr_json")"
+
+if [[ "$mode" == "--proceed" && -n "${EXPECT_HEAD_SHA:-}" && "$EXPECT_HEAD_SHA" != "$head_sha" ]]; then
+  echo "PR #${pr}: the head is ${head_sha:0:7}, not ${EXPECT_HEAD_SHA:0:7}, which the grace period was granted to; not applying the policy."
+  exit 0
+fi
 
 # --- Codex's summary comment -----------------------------------------------------------------------
 # One issue comment per pull request, edited in place as the review progresses. The marker is JSON.
