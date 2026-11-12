@@ -1169,34 +1169,35 @@ class _IngestionStateRecorder:
 _ingestion_state: _IngestionStateRecorder | None = None
 
 
-# inotify(7): the record the kernel queues, with watch descriptor -1,
-# when an instance's queue (``fs.inotify.max_queued_events``) is full
-# and the events after it are dropped.
-_IN_Q_OVERFLOW = 0x4000
+# When an inotify instance's queue (``fs.inotify.max_queued_events``) is
+# full the kernel drops the events after it and queues one record with
+# watch descriptor -1 (inotify(7)); watchdog reports it as an event whose
+# ``is_queue_overflow`` is true.
 _overflow_hook_installed = False
 
 
-def _overflow_aware(parse):
-    """Wrap watchdog's inotify buffer parser so each overflow record is
-    reported to the ingestion state. Every record passes through
-    unchanged; watchdog itself skips the overflow record without a word."""
+def _overflow_aware(handle_event):
+    """Wrap watchdog's ``InotifyFD.handle_event`` so each overflow event is
+    reported to the ingestion state before watchdog handles it. The event
+    still goes to watchdog unchanged: it logs its own warning and
+    reconciles its recursive watches."""
 
-    def parse_event_buffer(event_buffer: bytes):
-        for wd, mask, cookie, name in parse(event_buffer):
-            if (wd == -1 or mask & _IN_Q_OVERFLOW) and _ingestion_state is not None:
-                _ingestion_state.overflow_seen()
-            yield wd, mask, cookie, name
+    def handle(self, event):
+        if event.is_queue_overflow and _ingestion_state is not None:
+            _ingestion_state.overflow_seen()
+        return handle_event(self, event)
 
-    return parse_event_buffer
+    return handle
 
 
 def _install_inotify_overflow_hook() -> None:
     """Report inotify queue overflows (#1108), Linux only.
 
-    watchdog 6.0.0's ``Inotify.read_events`` parses each buffer through
-    the static ``Inotify._parse_event_buffer``; wrapping it is the one
-    place an overflow record is visible. Other backends (macOS FSEvents)
-    have no inotify queue. Call before the observer starts.
+    watchdog 7.1.0's ``InotifyFD`` passes every event it reads, the
+    overflow record included, through ``InotifyFD.handle_event``; wrapping
+    it is the one place the indexer sees an overflow. Other backends
+    (macOS FSEvents) have no inotify queue. Call before the observer
+    starts.
     """
     global _overflow_hook_installed
     if _overflow_hook_installed:
@@ -1205,14 +1206,15 @@ def _install_inotify_overflow_hook() -> None:
         inotify_c = importlib.import_module("watchdog.observers.inotify_c")
     except ImportError, UnsupportedLibcError:
         return
-    parse = inotify_c.Inotify.__dict__.get("_parse_event_buffer")
-    if not isinstance(parse, staticmethod):
+    inotify_fd = getattr(inotify_c, "InotifyFD", None)
+    handle_event = getattr(inotify_fd, "__dict__", {}).get("handle_event")
+    if not callable(handle_event):
         log.warning(
             "Maildir watcher: inotify overflow detection unavailable in this watchdog "
             "version; mail whose events an overflow drops is queued by the periodic rescan"
         )
         return
-    setattr(inotify_c.Inotify, "_parse_event_buffer", staticmethod(_overflow_aware(parse.__func__)))
+    setattr(inotify_fd, "handle_event", _overflow_aware(handle_event))
     _overflow_hook_installed = True
 
 
