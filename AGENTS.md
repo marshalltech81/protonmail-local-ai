@@ -847,7 +847,10 @@ under about 80 characters.
   the mechanics on `main` (2026-10-11): squash is the only merge method,
   history must be linear, the CI checks listed as required in the
   repository rulesets must pass, and line review threads must be
-  resolved. Repository admins can bypass both rulesets.
+  resolved. Repository admins can bypass both rulesets. `codex-review`
+  (written by `codex-gate.yml`, below) is one of the required checks since
+  2026-11-12: it passes once Codex has completed its code and security review
+  of the PR's head commit, so a push waits for the Codex review of that push.
 - Dependabot is the one exception to the go-ahead (owner, 2026-11-12): a
   Dependabot pull request that updates only patch or minor versions, with
   Dependabot's own head commit, turns on GitHub's auto-merge by itself and
