@@ -31,7 +31,11 @@ FROM python:3.14-slim-trixie@sha256:0514bc76712d64f8bb48adcb95b1ab0d88c69fee95d6
 
 # The service runs from the uv-built virtualenv, which has no pip, so the
 # base image's pip (and the packages it vendors) is removed (#1007).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# `apt-get upgrade` brings in the Debian security fixes published since the
+# pinned base image was built (see mbsync/Dockerfile for why).
+# hadolint ignore=DL3005
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && python -m pip uninstall --yes --no-cache-dir pip
