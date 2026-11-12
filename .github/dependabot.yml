@@ -139,4 +139,5 @@ updates:
       github-actions:
         applies-to: version-updates
         patterns: ["*"]
+        update-types: [minor, patch]
     labels: [dependencies, area/ci]
