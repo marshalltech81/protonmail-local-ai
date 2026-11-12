@@ -848,6 +848,27 @@ under about 80 characters.
   history must be linear, the CI checks listed as required in the
   repository rulesets must pass, and line review threads must be
   resolved. Repository admins can bypass both rulesets.
+- Dependabot is the one exception to the go-ahead (owner, 2026-11-12): a
+  Dependabot pull request that updates only patch or minor versions, with
+  Dependabot's own head commit, turns on GitHub's auto-merge by itself and
+  squash-merges once the required checks pass, `codex-review` included, and
+  every thread is resolved. A major, a Docker digest bump (it carries no update
+  type), or a Dependabot PR with another author's commit on top waits for the
+  owner. A person's pull request is never auto-merged; the `no-automerge`
+  label turns an auto-merge already on off, on any PR.
+- Automation (`.github/workflows/`, started by the `Lint` workflow, which runs
+  on every pull request push): `automerge.yml` with `scripts/automerge.sh`
+  enables that auto-merge; `codex-gate.yml` with `scripts/codex-gate.sh` writes
+  the `codex-review` check from Codex's summary comment, and the repository
+  variable `CODEX_GATE_DEPENDABOT_POLICY` (default `proceed`) decides whether a
+  Dependabot PR that Codex has not reviewed after `CODEX_GATE_GRACE_MINUTES`
+  (default 20) passes it or waits (`require`); `conflicts.yml` with
+  `scripts/flag-conflicts.sh` labels a PR `has-conflicts` and comments once,
+  because GitHub starts no checks on a PR that conflicts. To let a PR through
+  when Codex's review never arrives, add the label `codex-gate:skip` and run
+  `codex-gate` by hand (Actions, "Run workflow" on `main`, with the PR number):
+  the label alone does not re-run it. The workflows run from `main`, never from
+  the PR.
 
 ## Review guidelines
 
