@@ -24,8 +24,8 @@
 #
 # Codex policy. A person's pull request waits for codex-review like any other required check; nothing
 # more is needed because Codex reviews every push here. Codex has reviewed some Dependabot pull requests in this
-# repository but not all, so for those the job waits up to CODEX_GATE_GRACE_MINUTES and then applies the
-# repository variable CODEX_GATE_DEPENDABOT_POLICY:
+# repository but not all, so for those the `grace` job waits up to CODEX_GATE_GRACE_MINUTES and then applies the
+# repository variable CODEX_GATE_DEPENDABOT_POLICY (it is a job of its own so the wait never delays `relabel`):
 #   proceed (default)  codex-review passes with a title saying Codex did not review; the CI checks still gate.
 #   require            codex-review stays "in progress" until Codex reviews, or an admin bypasses it.
 name: automerge
@@ -52,30 +52,99 @@ jobs:
       group: automerge-${{ github.event.workflow_run.pull_requests[0].number }}
       cancel-in-progress: true
     runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
-    timeout-minutes: 35
+    timeout-minutes: 5
+    outputs:
+      grace: ${{ steps.enable.outputs.grace }}
     env:
       GITHUB_TOKEN: ${{ github.token }}
       PR: ${{ github.event.workflow_run.pull_requests[0].number }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # `grace=true` asks the `grace` job below to apply the Codex policy; this job itself never waits, so the
+      # group it holds is free again at once for `relabel`.
       - name: Enable auto-merge if the pull request is eligible
         id: enable
         run: |
           out="$(scripts/automerge.sh "$PR")" && rc=0 || rc=$?
           printf '%s\n' "$out"
           kind="$(sed -n 's/^kind=//p' <<<"$out" | head -1)"
-          echo "kind=${kind:-unknown}" >> "$GITHUB_OUTPUT"
           case "$rc" in
-            0) echo "eligible=true" >> "$GITHUB_OUTPUT" ;;
-            3) echo "eligible=false" >> "$GITHUB_OUTPUT" ;;
+            0) [ "$kind" = dependabot ] && echo "grace=true" >> "$GITHUB_OUTPUT" || true ;;
+            3) ;;
             *) exit "$rc" ;;
           esac
 
-      - name: Wait for Codex, then apply the dependency-update policy (Dependabot only)
-        if: >-
-          steps.enable.outputs.eligible == 'true' && steps.enable.outputs.kind == 'dependabot'
-            && vars.CODEX_GATE_DEPENDABOT_POLICY != 'require'
+  # Re-evaluate one pull request when the opt-out label is added or removed (see the header). Runs on the
+  # default branch's code only.
+  relabel:
+    if: github.event_name == 'pull_request_target' && github.event.label.name == 'no-automerge'
+    # The same group as the job above, so the two never run at once: a label change that arrives while that job
+    # is reading the pull request waits for it, then reads the result and corrects it. That job is short (the
+    # Codex wait is the separate `grace` job), so the wait is brief. It never cancels a running evaluation; a
+    # newer label change replaces one still waiting, which is fine because each reads the pull request afresh.
+    concurrency:
+      group: automerge-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
+    timeout-minutes: 5
+    outputs:
+      grace: ${{ steps.sync.outputs.grace }}
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      # No `ref:`: on pull_request_target this is the default branch, which is what must run here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Removing the label enables auto-merge for a Dependabot PR that was held when Lint started, so no Codex
+      # timer is running for it: `grace=true` starts one in the `grace` job below.
+      - name: Disable or enable auto-merge to match the label
+        id: sync
+        run: |
+          rc=0
+          out="$(scripts/automerge.sh "$PR")" || rc=$?
+          printf '%s\n' "$out"
+          kind="$(sed -n 's/^kind=//p' <<<"$out" | head -1)"
+          # 3 means not eligible (for example the label is now set): that is the expected outcome.
+          case "$rc" in
+            0) [ "$kind" = dependabot ] && echo "grace=true" >> "$GITHUB_OUTPUT" || true ;;
+            3) ;;
+            *) exit "$rc" ;;
+          esac
+
+  # The Codex wait for a Dependabot pull request that auto-merge was enabled for. It is its own job, in its own
+  # concurrency group, so it never holds up `relabel`: an opt-out label added during the wait is applied at once.
+  # A newer push or label change replaces a wait still running, which restarts the timer for the new head. It
+  # checks the opt-out label again before it applies the policy, so a PR held in the meantime stays held.
+  grace:
+    needs: [automerge, relabel]
+    if: >-
+      ${{ !cancelled() && vars.CODEX_GATE_DEPENDABOT_POLICY != 'require'
+        && (needs.automerge.outputs.grace == 'true' || needs.relabel.outputs.grace == 'true') }}
+    concurrency:
+      group: automerge-grace-${{ github.event.workflow_run.pull_requests[0].number || github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      checks: write
+      contents: read
+      issues: read
+      pull-requests: read
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
+    timeout-minutes: 35
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.workflow_run.pull_requests[0].number || github.event.pull_request.number }}
+      GRACE_MINUTES: ${{ vars.CODEX_GATE_GRACE_MINUTES || '20' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Wait for Codex, then apply the dependency-update policy
         run: |
           deadline=$(( $(date +%s) + 60 * GRACE_MINUTES ))
           while :; do
@@ -87,36 +156,8 @@ jobs:
             if [ "$(date +%s)" -ge "$deadline" ]; then break; fi
             sleep 60
           done
+          if [ "$(gh pr view "$PR" --json labels --jq '[.labels[].name] | index("no-automerge") != null')" = true ]; then
+            echo "PR #${PR} has the no-automerge label; leaving codex-review as it is."
+            exit 0
+          fi
           scripts/codex-gate.sh "$PR" --proceed
-        env:
-          GRACE_MINUTES: ${{ vars.CODEX_GATE_GRACE_MINUTES || '20' }}
-
-  # Re-evaluate one pull request when the opt-out label is added or removed (see the header). Runs on the
-  # default branch's code only.
-  relabel:
-    if: github.event_name == 'pull_request_target' && github.event.label.name == 'no-automerge'
-    # The same group as the job above, so the two never run at once: a label change that arrives while that job
-    # is reading the pull request waits for it, then reads the result and corrects it. It never cancels a
-    # running evaluation; a newer label change replaces one still waiting, which is fine because each reads the
-    # pull request afresh.
-    concurrency:
-      group: automerge-${{ github.event.pull_request.number }}
-      cancel-in-progress: false
-    permissions:
-      contents: write
-      pull-requests: write
-    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
-    timeout-minutes: 5
-    env:
-      GITHUB_TOKEN: ${{ github.token }}
-      PR: ${{ github.event.pull_request.number }}
-    steps:
-      # No `ref:`: on pull_request_target this is the default branch, which is what must run here.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Disable or enable auto-merge to match the label
-        run: |
-          rc=0
-          scripts/automerge.sh "$PR" || rc=$?
-          # 3 means not eligible (for example the label is now set): that is the expected outcome.
-          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then exit "$rc"; fi

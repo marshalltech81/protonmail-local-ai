@@ -148,11 +148,18 @@ case "$errors" in
     # review check, and every check it requires has passed on this head. Anything else: refuse, fail the run.
     review_check="${REVIEW_CHECK:-codex-review}"
     base_ref="$(jq -r '.base.ref' <<<"$pr_json")"
-    required="$(get "/branches/${base_ref}" | jq -c '[.protection.required_status_checks.contexts // [] | .[]]')"
+    # Required checks come from classic branch protection and from repository rulesets (this repository uses
+    # rulesets), which the branch endpoint does not list.
+    classic="$(get "/branches/${base_ref}" | jq -c '[.protection.required_status_checks.contexts // [] | .[]]')"
+    from_rules="$(get "/rules/branches/${base_ref}" | jq -c '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]')"
+    required="$(jq -cn --argjson a "$classic" --argjson b "$from_rules" '$a + $b | unique')"
+    # GitHub counts a skipped or neutral conclusion as a pass for a required check (the Docker and security jobs
+    # are skipped when a pull request does not touch their inputs); the Codex review check must be a success.
     unmet="$(get "/commits/${head_sha}/check-runs?per_page=100" | jq -r --argjson req "$required" --arg review "$review_check" --arg base "$base_ref" '
       . as $all
       | if ($req | index($review)) == null then "\($review) is not a required check of \($base)"
-        else [$req[] | select(. as $c | any($all.check_runs[]; .name == $c and .status == "completed" and .conclusion == "success") | not)]
+        else [$req[] | select(. as $c | any($all.check_runs[]; .name == $c and .status == "completed"
+              and (.conclusion == "success" or ($c != $review and (.conclusion == "skipped" or .conclusion == "neutral")))) | not)]
           | if length == 0 then "" else "required check(s) not passed on the head: " + join(", ") end
         end')"
     if [[ -n "$unmet" ]]; then
