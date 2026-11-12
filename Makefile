@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead reparse rotate-bridge-pin force-deletion clean sync sync-indexer sync-mcp verify test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-image-pins test-trivy-flags test-maven-checksums test-evidence-run ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets init-config migrate-config validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead reparse rotate-bridge-pin force-deletion clean sync sync-indexer sync-mcp verify test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-image-pins test-trivy-flags test-codex-gate test-maven-checksums test-evidence-run ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline baseline-real-embedder eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets init-config migrate-config validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -322,7 +322,7 @@ verify:
 	$(MAKE) --jobs=1 test baseline typecheck test-mbsync-tls test-mbsync-layout test-mbsync-host-aliases trivy UPDATE=0
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-index-backup test-image-pins test-trivy-flags test-maven-checksums test-evidence-run
+test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-config test-config-mode test-make-status test-maintenance-commands test-index-backup test-image-pins test-trivy-flags test-codex-gate test-maven-checksums test-evidence-run
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -373,6 +373,9 @@ test-image-pins:
 
 test-trivy-flags:
 	bash scripts/tests/trivy_flags_test.sh
+
+test-codex-gate:
+	bash scripts/tests/codex_gate_test.sh
 
 test-maven-checksums:
 	bash scripts/tests/maven_checksums_test.sh

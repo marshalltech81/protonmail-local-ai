@@ -1,0 +1,63 @@
+# Report Codex's review of a pull request as the required check `codex-review` (ci-infrastructure runbook, "Codex review gate").
+#
+# Codex does not post a GitHub check, so this workflow writes one from the summary comment Codex leaves on
+# each pull request. The logic lives in scripts/codex-gate.sh so that shellcheck covers it and it can be run
+# locally. The job's own result is never the gate: the check run is written through the Checks API, so a
+# skipped or failed job leaves the previous state in place instead of counting as a pass.
+#
+# Every trigger here runs the workflow and the script from the default branch, never from the pull request:
+# `workflow_run` (fired when `Lint` starts on a pull request push, so the check appears as "in progress"
+# right away), `issue_comment` (Codex creating or editing its summary, which completes the check) and
+# `workflow_dispatch`. A `pull_request` trigger would run pull-request code with `checks: write`, and
+# `pull_request_target` is not used here. Label changes therefore do not
+# re-evaluate on their own: after adding or removing `codex-gate:skip`, run the manual dispatch.
+#
+# A dispatch runs the workflow file at the ref it is given, so the job refuses to run off the default branch.
+# That guard stops accidental branch dispatches; it is not a security boundary, because anyone who can push a
+# branch can also push a workflow with `checks: write` to it (ci-infrastructure ADR-0004, section 5).
+name: codex-gate
+
+on:
+  workflow_run:
+    workflows: [Lint]
+    types: [requested]
+  issue_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to re-evaluate
+        required: true
+        type: string
+
+permissions:
+  checks: write
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  gate:
+    # A CI run on a pull request push; a comment by Codex on a pull request; or a manual run.
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request'
+        && github.event.workflow_run.pull_requests[0] != null) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request
+        && github.event.comment.user.login == 'chatgpt-codex-connector[bot]') ||
+      (github.event_name == 'workflow_dispatch'
+        && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    # On the job, not the workflow: a workflow-level group is entered by every `issue_comment` run, including
+    # the ones this `if` skips (any comment by anyone on any pull request or issue), and GitHub keeps only one
+    # run pending per group, so such a run could replace the pending run that carries Codex's completed summary.
+    concurrency:
+      group: codex-gate-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr }}
+      cancel-in-progress: false
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Evaluate the Codex review and write the check
+        run: scripts/codex-gate.sh "$PR"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr }}

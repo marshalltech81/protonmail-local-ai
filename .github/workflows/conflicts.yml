@@ -1,0 +1,46 @@
+# Flag open pull requests that now conflict with main (ci-infrastructure runbook, "Pull requests with merge conflicts").
+#
+# GitHub does not start a pull request's workflows while it has merge conflicts, so its required checks never
+# appear and auto-merge waits silently. This labels such pull requests `has-conflicts` and comments once;
+# scripts/flag-conflicts.sh does the work and resolves nothing itself. It runs:
+#   - on a push to main, when a pull request can start to conflict;
+#   - when the `Lint` workflow starts on a pull request, which only happens once a pull request
+#     merges cleanly again: that is what clears the label after the author resolves the conflict;
+#   - every 6 hours, because GitHub starts no checks for a pull request whose update introduces a conflict, so
+#     nothing else would notice it;
+#   - by hand.
+#
+# It runs from the default branch and never runs a pull request's code, so the write token is safe here
+# (`pull_request_target` would also see these cases, but it is not used here).
+name: conflicts
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [Lint]
+    types: [requested]
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: conflicts
+  cancel-in-progress: false
+
+jobs:
+  flag:
+    # A checks run on a push to main is covered by the push trigger above.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request'
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: scripts/flag-conflicts.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

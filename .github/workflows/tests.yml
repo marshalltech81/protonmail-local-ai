@@ -109,6 +109,9 @@ jobs:
       - name: Run the Trivy flag checks
         run: bash scripts/tests/trivy_flags_test.sh
 
+      - name: Run the Codex gate state tests
+        run: bash scripts/tests/codex_gate_test.sh
+
       - name: Run the Maven trusted-checksum checks
         run: bash scripts/tests/maven_checksums_test.sh
 
