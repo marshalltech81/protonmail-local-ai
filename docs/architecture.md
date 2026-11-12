@@ -4539,10 +4539,11 @@ container restart.
 An inotify queue overflow is the one miss the indexer can see (#1108).
 When a burst fills the kernel's per-instance event queue
 (`fs.inotify.max_queued_events`), Linux drops the events after it and
-queues one `IN_Q_OVERFLOW` record, which watchdog 6.0.0 skips without
-a word. At startup the indexer wraps watchdog's inotify buffer parser
-(`Inotify._parse_event_buffer`, `_install_inotify_overflow_hook`) so
-each overflow record logs a fixed-text WARNING (shared line budget)
+queues one `IN_Q_OVERFLOW` record. watchdog 7.1.0 logs its own warning
+and reconciles its recursive watches, but tells the indexer nothing. At
+startup the indexer wraps watchdog's `InotifyFD.handle_event`
+(`_install_inotify_overflow_hook`), which every event passes through, so
+each overflow event logs a fixed-text WARNING (shared line budget)
 and adds one to an overflow count in `_IngestionStateRecorder`. The
 main loop then forces a re-schedule of the folder watch (a dropped
 directory-create event leaves that directory unwatched, and a

@@ -3513,6 +3513,14 @@ def _overflow_lines(caplog) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.getMessage() == _OVERFLOW_WARNING]
 
 
+class _FakeInotifyEvent:
+    """The part of watchdog's ``InotifyEvent`` the overflow wrapper reads."""
+
+    def __init__(self, *, overflow: bool, name: str = ""):
+        self.is_queue_overflow = overflow
+        self.name = name
+
+
 def _stamp_moved_event(
     root: Path,
     completed_at: str = "2026-09-28T12:00:00Z",
@@ -3554,29 +3562,30 @@ class TestInotifyOverflow:
     ):
         caplog.set_level(logging.INFO)
         _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
-        records = [
-            (1, 0x100, 0, _OVERFLOW_MARKER.encode()),
-            (-1, main._IN_Q_OVERFLOW, 0, b""),
-            (2, 0x80, 7, b"x"),
+        events = [
+            _FakeInotifyEvent(overflow=False, name=_OVERFLOW_MARKER),
+            _FakeInotifyEvent(overflow=True),
+            _FakeInotifyEvent(overflow=False),
         ]
-        calls: list[bytes] = []
+        handled: list[tuple[object, object]] = []
 
-        def parse(buffer):
-            calls.append(buffer)
-            yield from records
+        def handle_event(self, event):
+            handled.append((self, event))
+            return "handled"
 
-        wrapped = main._overflow_aware(parse)
-        assert list(wrapped(b"buf")) == records
-        assert calls == [b"buf"]
+        wrapped = main._overflow_aware(handle_event)
+        watcher = object()
+        assert [wrapped(watcher, event) for event in events] == ["handled"] * 3
+        assert handled == [(watcher, event) for event in events]
         assert recorder.recovery_pending
         lines = _overflow_lines(caplog)
         assert len(lines) == 1 and lines[0].levelno == logging.WARNING
         assert _OVERFLOW_MARKER not in caplog.text
 
-    def test_no_overflow_record_leaves_nothing_pending(self, tmp_path, db, monkeypatch, caplog):
+    def test_no_overflow_event_leaves_nothing_pending(self, tmp_path, db, monkeypatch, caplog):
         _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
-        wrapped = main._overflow_aware(lambda _b: iter([(1, 0x100, 0, b"a")]))
-        assert list(wrapped(b"")) == [(1, 0x100, 0, b"a")]
+        wrapped = main._overflow_aware(lambda self, event: None)
+        wrapped(object(), _FakeInotifyEvent(overflow=False))
         assert not recorder.recovery_pending
         assert not _overflow_lines(caplog)
 
@@ -3598,27 +3607,39 @@ class TestInotifyOverflow:
 
         module = types.ModuleType("watchdog.observers.inotify_c")
 
-        class Inotify:
-            @staticmethod
-            def _parse_event_buffer(buffer):
-                yield (-1, main._IN_Q_OVERFLOW, 0, b"")
+        class InotifyFD:
+            def handle_event(self, event):
+                pass
 
-        module.Inotify = Inotify  # type: ignore[attr-defined]
+        module.InotifyFD = InotifyFD  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "watchdog.observers.inotify_c", module)
         monkeypatch.setattr(main, "_overflow_hook_installed", False)
-        return Inotify
+        return InotifyFD
 
-    def test_install_wraps_the_parser_once(self, tmp_path, db, monkeypatch):
-        inotify = self._fake_inotify_c(monkeypatch)
+    def test_install_wraps_handle_event_once(self, tmp_path, db, monkeypatch):
+        inotify_fd = self._fake_inotify_c(monkeypatch)
         _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
         main._install_inotify_overflow_hook()
         main._install_inotify_overflow_hook()
-        list(inotify._parse_event_buffer(b""))
+        inotify_fd().handle_event(_FakeInotifyEvent(overflow=True))
         assert recorder.walk_started() == 1
 
-    def test_install_warns_when_watchdog_has_no_parser_to_wrap(self, monkeypatch, caplog):
-        inotify = self._fake_inotify_c(monkeypatch)
-        monkeypatch.delattr(inotify, "_parse_event_buffer")
+    def test_install_warns_when_watchdog_has_no_handler_to_wrap(self, monkeypatch, caplog):
+        inotify_fd = self._fake_inotify_c(monkeypatch)
+        monkeypatch.delattr(inotify_fd, "handle_event")
+        main._install_inotify_overflow_hook()
+        assert "inotify overflow detection unavailable" in caplog.text
+        assert not main._overflow_hook_installed
+
+    def test_install_warns_when_watchdog_has_no_inotify_class(self, monkeypatch, caplog):
+        """watchdog 7.1.0 replaced ``Inotify`` with ``InotifyFD``; a module
+        that has neither must not stop the indexer from starting."""
+        import types
+
+        monkeypatch.setitem(
+            sys.modules, "watchdog.observers.inotify_c", types.ModuleType("inotify_c")
+        )
+        monkeypatch.setattr(main, "_overflow_hook_installed", False)
         main._install_inotify_overflow_hook()
         assert "inotify overflow detection unavailable" in caplog.text
         assert not main._overflow_hook_installed
@@ -3638,9 +3659,9 @@ class TestInotifyOverflow:
     @pytest.mark.skipif(sys.platform != "linux", reason="inotify is Linux only")
     def test_real_inotify_overflow_is_detected(self, tmp_path, db, monkeypatch, caplog):
         """The real read path: fill an inotify instance's kernel queue
-        past ``max_queued_events`` without reading, then read it through
-        watchdog's ``read_events``."""
-        import select
+        past ``max_queued_events`` before its reader thread starts, then
+        let watchdog's ``InotifyFD`` read and dispatch it."""
+        import time
 
         from watchdog.observers import inotify_c
 
@@ -3648,28 +3669,39 @@ class TestInotifyOverflow:
         if limit > 65536:
             pytest.skip("max_queued_events too large to fill quickly")
         _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
-        saved = inotify_c.Inotify.__dict__["_parse_event_buffer"]
+        saved = inotify_c.InotifyFD.__dict__["handle_event"]
         monkeypatch.setattr(main, "_overflow_hook_installed", False)
         watched = tmp_path / "watched"
         watched.mkdir()
+
+        class _Callback:
+            def on_event(self, event):
+                pass
+
+            def on_watch_deleted(self, wd):
+                pass
+
+            def on_queue_overflow(self):
+                pass
+
         try:
             main._install_inotify_overflow_hook()
-            ino = inotify_c.Inotify(
-                str(watched).encode(), event_mask=inotify_c.InotifyConstants.IN_CREATE
-            )
+            fd = inotify_c.InotifyFD()
             try:
+                fd.add_callback(
+                    str(watched).encode(), inotify_c.InotifyConstants.IN_CREATE, _Callback(), 1
+                )
                 for i in range(limit + 64):
                     (watched / f"f{i}").touch()
-                reads = 0
-                while not recorder.recovery_pending and reads < limit:
-                    if not select.select([ino.fd], [], [], 5)[0]:
-                        break
-                    ino.read_events()
-                    reads += 1
+                fd.start()
+                deadline = time.monotonic() + 30
+                while not recorder.recovery_pending and time.monotonic() < deadline:
+                    time.sleep(0.05)
             finally:
-                ino.close()
+                fd.stop()
+                fd.join(timeout=10)
         finally:
-            setattr(inotify_c.Inotify, "_parse_event_buffer", saved)
+            setattr(inotify_c.InotifyFD, "handle_event", saved)
         assert recorder.walk_started() == 1
         assert len(_overflow_lines(caplog)) == 1
 
@@ -6810,7 +6842,7 @@ class TestMainStartupAndLoop:
     # The thread's traceback is the failure under test, not a stray one.
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
     def test_a_handler_exception_ends_the_observer_thread(self, tmp_path):
-        """Pins the watchdog 6.0.0 behaviour the loop check relies on:
+        """Pins the watchdog 7.1.0 behaviour the loop check relies on:
         an exception from ``on_created`` (here, the queue's enqueue
         failing) is not caught by the dispatcher and ends its thread."""
         from threading import Event
