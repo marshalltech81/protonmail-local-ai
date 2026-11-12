@@ -4,6 +4,19 @@ version: 2
 # `dependencies` is the type, the second label is the area the update
 # lands in. The ecosystem labels (python, docker, java, pre-commit,
 # github-actions) were retired on 2026-10-07.
+#
+# Version updates are grouped where the files they touch are the same, so a
+# week brings one pull request per group instead of one per dependency.
+# Only minor and patch updates are grouped: a major upgrade arrives on its
+# own pull request, so a breaking change cannot hide inside a grouped one.
+# Docker updates stay one per image, because each base-image digest moves
+# with the other two (scripts/tests/image_pin_test.sh) and a group cannot
+# span directories.
+#
+# Every ecosystem waits 7 days after a release before proposing it
+# (`cooldown`): a compromised or yanked release is usually caught inside
+# that window. Security updates ignore the cooldown and the grouping, and
+# open on their own pull request as soon as an advisory is published.
 
 updates:
   # Repo-level tooling
@@ -12,6 +25,14 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+    groups:
+      pre-commit-hooks:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
     labels: [dependencies, area/ci]
 
   - package-ecosystem: docker-compose
@@ -19,6 +40,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
     labels: [dependencies, area/docker]
 
   # indexer Python dependencies
@@ -27,6 +51,14 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+    groups:
+      indexer-python:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
     labels: [dependencies, area/indexer]
 
   # mcp-server Python dependencies
@@ -35,6 +67,14 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+    groups:
+      mcp-server-python:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
     labels: [dependencies, area/mcp-server]
 
   # indexer Java libraries for the legacy .ppt reader (#957). POI's two
@@ -47,6 +87,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
     labels: [dependencies, area/extractors]
     groups:
       apache-poi:
@@ -58,6 +101,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
     labels: [dependencies, area/docker]
 
   - package-ecosystem: docker
@@ -65,6 +111,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
     labels: [dependencies, area/docker]
 
   - package-ecosystem: docker
@@ -72,6 +121,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
     labels: [dependencies, area/docker]
 
   # GitHub Actions
@@ -80,4 +132,11 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        applies-to: version-updates
+        patterns: ["*"]
     labels: [dependencies, area/ci]
