@@ -5,13 +5,13 @@ requires-python = ">=3.14"
 dependencies = [
     # Standalone FastMCP (jlowin/Prefect): the server framework and its
     # Streamable HTTP app.
-    "fastmcp==4.1.3",
+    "fastmcp==4.1.6",
     # ``fastmcp`` accepts any ``mcp`` 2.x. The tool code imports
     # ``mcp.types`` and ``main.py`` the SDK's Host/Origin validator
     # directly, so pin the version fastmcp 4.1.0 resolves.
     "mcp==2.3.0",
     "uvicorn==0.54.0",
-    "starlette==1.9.0",
+    "starlette==1.10.0",
     "sqlite-vec==0.1.9",
     # Inference, embed, and rerank SDKs. ``openai`` covers both
     # ``INFERENCE_MODE=openai`` (chat completions) and ``EMBED_MODE=openai``
@@ -20,13 +20,13 @@ dependencies = [
     # OpenRouter — already speaks). The embed client is a thin wrapper
     # around ``AsyncOpenAI`` so the project does not maintain its own
     # HTTP/retry plumbing for a wire format the SDK already handles.
-    "openai==3.37.0",
-    "anthropic==2.3.0",
-    "cohere==7.3.0",
+    "openai==3.46.0",
+    "anthropic==2.5.0",
+    "cohere==7.3.1",
     # Output models for structured tool results (``src/tools/outputs.py``).
     # Pinned to a version ``fastmcp`` and ``mcp`` accept; declared
     # because the tool code imports it directly.
-    "pydantic==2.14.1",
+    "pydantic==2.14.3",
     # The HTTP client fastmcp's Streamable HTTP transport uses; already
     # locked through ``fastmcp``. Declared at that version because
     # ``src/stdio_adapter.py`` builds its client directly.
@@ -38,8 +38,8 @@ package = false
 
 [dependency-groups]
 dev = [
-    "mypy==2.4.0",
-    "pytest==9.1.1",
+    "mypy==2.4.1",
+    "pytest==9.2.0",
     "pytest-cov==7.1.0",
     "pytest-xdist==3.8.0",
 ]
