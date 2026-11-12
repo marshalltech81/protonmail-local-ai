@@ -123,7 +123,10 @@ COPY --from=ppt-checksums-record /out/checksums.sha256 /
 # -----------------------------------------------------------------------------
 FROM python:3.14-slim-trixie@sha256:0514bc76712d64f8bb48adcb95b1ab0d88c69fee95d62fe4c18ee948bee9b1e1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# `apt-get upgrade` brings in the Debian security fixes published since the
+# pinned base image was built (see mbsync/Dockerfile for why).
+# hadolint ignore=DL3005
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     # Attachment text extraction. Tesseract supplies the OCR
     # path used by image attachments and the scanned-PDF fallback in
     # src/extractors/{image,pdf}.py; Poppler's pdftoppm is what pdf2image
